@@ -78,15 +78,19 @@ const isPermanent = (err: unknown): boolean =>
 const sleep = (ms: number, signal?: AbortSignal): Promise<void> =>
   new Promise((resolve, reject) => {
     if (signal?.aborted) return reject(signal.reason);
-    const t = setTimeout(resolve, ms);
-    signal?.addEventListener(
-      'abort',
-      () => {
-        clearTimeout(t);
-        reject(signal.reason);
-      },
-      { once: true },
-    );
+    const onAbort = () => {
+      clearTimeout(t);
+      reject(signal?.reason);
+    };
+    // The listener comes off on the ordinary path too, not only on abort. Left
+    // in place, a fifteen-minute wait adds one listener per poll to the
+    // caller's single signal — memory held for the signal's lifetime, and a
+    // MaxListenersExceededWarning about the leak Node correctly suspects.
+    const t = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
   });
 
 export type WaitOptions = {
@@ -300,11 +304,23 @@ export class Computer {
 
   /** The API response verbatim, including any fields this SDK predates. */
   get raw(): Record<string, unknown> {
-    return { ...this.#data };
+    // A deep copy. A shallow one shares every nested object, and
+    // `raw.vnc.token = ...` silently rewriting this handle's own state is not
+    // a copy of anything.
+    return structuredClone(this.#data);
   }
 
+  /**
+   * {@link raw}, minus the desktop credentials.
+   *
+   * `JSON.stringify(computer)` is what a casual log line does, and a
+   * credential in a log line is exactly what the platform strips them from
+   * listings to prevent — see {@link vnc}. Read them deliberately, off
+   * {@link vnc} or {@link raw}, not as a side effect of serializing.
+   */
   toJSON(): Record<string, unknown> {
-    return this.raw;
+    const { vnc: _vnc, ...rest } = this.raw;
+    return rest;
   }
 
   // --- lifecycle ------------------------------------------------------
@@ -483,7 +499,14 @@ export class Computer {
         );
       }
       await sleep(pollMs, signal);
-      await this.refresh();
+      try {
+        await this.refresh();
+      } catch (err) {
+        // A 503 from a host busy doing exactly the disk copy being waited on
+        // is the ordinary weather of a build, not a verdict on it — the same
+        // rule waitUntilRunning applies. Anything else is not weather.
+        if (!isTransient(err)) throw err;
+      }
     }
   }
 
@@ -501,9 +524,15 @@ export class Computer {
   async waitUntilRunning(opts: WaitOptions = {}): Promise<this> {
     const { timeoutMs = 120_000, pollMs = 2_000, signal } = opts;
     const deadline = Date.now() + timeoutMs;
+    // No verdict is reached on state observed before this call: when the first
+    // refresh fails transiently, the handle may be holding data from an old
+    // list(), and "running" concluded from that — while the host answers 503 —
+    // is a claim about a machine nobody has actually looked at.
+    let observed = false;
     for (;;) {
       try {
         await this.refresh();
+        observed = true;
       } catch (err) {
         // A host that cannot be reached answers 503, which is the ordinary
         // weather of a machine still coming up. Letting it out would abort the
@@ -511,21 +540,23 @@ export class Computer {
         // revoked key, a computer that is gone — is not weather.
         if (!isTransient(err)) throw err;
       }
-      if (this.status === 'running') return this;
-      // A computer with no disk will never start on its own, and waiting out
-      // the full timeout to say so helps nobody.
-      if (this.buildFailed) {
-        throw new MandalaError(
-          `${this.id} could not be built: ${this.buildError || 'the disk copy failed'}`,
-        );
-      }
-      // Nor will a suspended one. Left to spin it reports a machine that is one
-      // call from running as a timeout — the least informative answer available
-      // about the one case the caller can fix in a line.
-      if (this.isSuspended) {
-        throw new MandalaError(
-          `${this.id} is suspended and will not start on its own: call start() to resume it`,
-        );
+      if (observed) {
+        if (this.status === 'running') return this;
+        // A computer with no disk will never start on its own, and waiting out
+        // the full timeout to say so helps nobody.
+        if (this.buildFailed) {
+          throw new MandalaError(
+            `${this.id} could not be built: ${this.buildError || 'the disk copy failed'}`,
+          );
+        }
+        // Nor will a suspended one. Left to spin it reports a machine that is
+        // one call from running as a timeout — the least informative answer
+        // available about the one case the caller can fix in a line.
+        if (this.isSuspended) {
+          throw new MandalaError(
+            `${this.id} is suspended and will not start on its own: call start() to resume it`,
+          );
+        }
       }
       if (Date.now() >= deadline) {
         throw new TimeoutError(
@@ -818,7 +849,14 @@ export class Computer {
     const data = await this.#t.json<Record<string, unknown>>(
       'POST',
       P.computerAction(this.id, 'exec'),
-      { body: P.execBody({ command, timeoutS, desktop, cwd }) },
+      {
+        body: P.execBody({ command, timeoutS, desktop, cwd }),
+        // The guest was just granted timeoutS to finish, so the HTTP request
+        // has to outlive that. Under the fixed client deadline alone, any
+        // timeoutS past it was guaranteed to be aborted client-side while the
+        // command ran on in the guest with its output unreachable.
+        minTimeoutMs: (timeoutS + 30) * 1_000,
+      },
     );
     return toExecResult(data ?? {});
   }
@@ -882,8 +920,18 @@ export class Computer {
    * started the browser, not that the URL resolved. On a cold browser the window
    * has taken as long as ten seconds to draw, so screenshot until the screen
    * changes rather than concluding from one frame that nothing launched.
+   *
+   * Linux only, and refused rather than attempted on a Windows guest: the
+   * command it sends is a POSIX one, and cmd.exe answering "'nohup' is not
+   * recognized" through an ExecResult reads as anything but what went wrong.
    */
   async open(url: string, opts: { timeoutS?: number } = {}): Promise<ExecResult> {
+    if (this.os === 'windows') {
+      throw new MandalaError(
+        `open() is Linux-only for now: ${this.id} runs Windows. ` +
+          'Use exec() with a Windows launch command instead.',
+      );
+    }
     return this.exec(P.openUrlCommand(url), { timeoutS: opts.timeoutS ?? 30, desktop: true });
   }
 
@@ -896,17 +944,22 @@ export class Computer {
    * directory behind this, so a relative path is refused before the request is
    * made. Works while the computer is running or suspended (a transfer resumes a
    * suspended computer, like any other use).
+   *
+   * `timeoutMs` extends the client's per-request deadline for this one
+   * transfer — a large file can legitimately outlive the default 60 seconds,
+   * and the exec docs send large output through this very path.
    */
-  async readFile(path: string): Promise<Uint8Array> {
+  async readFile(path: string, opts: { timeoutMs?: number } = {}): Promise<Uint8Array> {
     const res = await this.#t.bytes('GET', P.computerAction(this.id, 'files'), {
       query: P.filesQuery(path),
+      minTimeoutMs: opts.timeoutMs,
     });
     return res.bytes;
   }
 
   /** {@link readFile}, decoded as UTF-8. */
-  async readTextFile(path: string): Promise<string> {
-    return new TextDecoder().decode(await this.readFile(path));
+  async readTextFile(path: string, opts: { timeoutMs?: number } = {}): Promise<string> {
+    return new TextDecoder().decode(await this.readFile(path, opts));
   }
 
   /**
@@ -916,14 +969,21 @@ export class Computer {
    * bytes land exactly as given — this is how a credential reaches a guest
    * `.env` without echoing it through a shell command line.
    *
+   * `timeoutMs` extends the client's per-request deadline for this one
+   * transfer, as on {@link readFile}.
+   *
    * @returns how many bytes the platform says it wrote.
    */
-  async writeFile(path: string, data: Uint8Array | string): Promise<number> {
+  async writeFile(
+    path: string,
+    data: Uint8Array | string,
+    opts: { timeoutMs?: number } = {},
+  ): Promise<number> {
     const bytes = typeof data === 'string' ? new TextEncoder().encode(data) : data;
     const res = await this.#t.json<{ bytes?: number } | undefined>(
       'PUT',
       P.computerAction(this.id, 'files'),
-      { query: P.filesQuery(path), raw: bytes },
+      { query: P.filesQuery(path), raw: bytes, minTimeoutMs: opts.timeoutMs },
     );
     return res?.bytes ?? bytes.length;
   }
@@ -1116,6 +1176,11 @@ export class Computer {
         }),
         headers: { [MODEL_KEY_HEADER]: args.modelKey },
         signal: args.signal,
+        // One held request for a run that is minutes of clicking — the same
+        // exemption the streaming route gets, for the same reason. The
+        // ordinary deadline would end every run over a minute at exactly the
+        // same place. A caller's own signal is what stops one early.
+        noTimeout: true,
       },
     );
     return toAgentResult(data ?? {});
@@ -1132,6 +1197,18 @@ export class Computer {
  */
 export class EphemeralComputer extends Computer {
   async [Symbol.asyncDispose](): Promise<void> {
-    await this.delete();
+    try {
+      await this.delete();
+    } catch (err) {
+      // Loud, and with the id: a machine that outlives its block is billable
+      // until somebody finds it, and a swallowed failure here mentions it to
+      // no one. When the block itself also threw, the runtime keeps that error
+      // too — it arrives as SuppressedError.suppressed rather than being
+      // replaced by this one.
+      throw new MandalaError(
+        `${this.id} was not deleted at the end of its block and is still billable: ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 }

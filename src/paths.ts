@@ -72,8 +72,11 @@ export function computerPayload(data: unknown): Record<string, unknown> {
   // start_error kept alongside the fields rather than in a parallel return, so
   // it survives into `raw` and cannot be dropped by a caller that only wanted
   // the computer. A refresh replaces the record and clears it, which is right:
-  // it describes one start attempt, not the machine.
-  return { ...inner, start_error: data.start_error };
+  // it describes one start attempt, not the machine. Only carried over when the
+  // envelope actually had one — `raw` claims to be the response verbatim, and a
+  // `start_error: undefined` key the platform never sent would not be.
+  if ('start_error' in data) return { ...inner, start_error: data.start_error };
+  return { ...inner };
 }
 
 export function isRecord(v: unknown): v is Record<string, unknown> {
@@ -261,10 +264,12 @@ export function shellQuote(s: string): string {
  * The query naming which guest file, checked before the round trip.
  *
  * The path must be absolute: nothing about a transfer runs in a shell, so a
- * relative path has no working directory to be relative to.
+ * relative path has no working directory to be relative to. Absolute has two
+ * spellings because there are two guest OSes — a `/`-rooted POSIX path, or a
+ * drive-letter path (`C:\...`, `C:/...`) on a Windows guest.
  */
 export function filesQuery(path: string): Query {
-  if (!path.startsWith('/')) {
+  if (!path.startsWith('/') && !/^[A-Za-z]:[\\/]/.test(path)) {
     throw new TypeError(`guest path must be absolute: ${JSON.stringify(path)}`);
   }
   return { path };
@@ -421,8 +426,17 @@ export function waitBody(seconds: number): Json {
 
 export const cursorBody = (): Json => ({ action: 'cursor_position' });
 
-export const screenshotQuery = (width?: number): Query | undefined =>
-  width ? { w: width } : undefined;
+export function screenshotQuery(width?: number): Query | undefined {
+  if (width === undefined) return undefined;
+  // 0 is refused rather than read as "no width": truthiness would silently
+  // convert screenshot(0) — the natural result of a miscomputed thumbnail
+  // scale — into a request for the full-resolution PNG, a different and more
+  // expensive call, with nothing saying so.
+  if (!Number.isFinite(width) || width <= 0) {
+    throw new TypeError(`width must be a positive number: ${width}`);
+  }
+  return { w: width };
+}
 
 // --- windows --------------------------------------------------------------
 
