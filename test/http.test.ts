@@ -331,6 +331,41 @@ describe('server-sent events', () => {
     expect(result.steps).toBe(2);
   });
 
+  it('yields a CR-framed event as soon as its chunk arrives, not one chunk late', async () => {
+    // Holding a trailing '\r' back deferred the frame boundary until the NEXT
+    // chunk — which for a progress stream may be minutes of clicking away. The
+    // '\r' contributes exactly one '\n' whether it is a lone terminator or the
+    // front half of a CRLF, so it is framed immediately; the failure mode here
+    // is this test hanging on an event that was already complete on the wire.
+    let ctrl!: ReadableStreamDefaultController<Uint8Array>;
+    const body = new ReadableStream<Uint8Array>({
+      start(c) {
+        ctrl = c;
+      },
+    });
+    const rec = recorder((call) =>
+      call.path.endsWith('/agent')
+        ? new Response(body, {
+            status: 200,
+            headers: { 'content-type': 'text/event-stream' },
+          })
+        : anyRoute(call),
+    );
+    const c = await client(rec).computers.get('vm-1');
+    ctrl.enqueue(
+      new TextEncoder().encode(
+        'event: step\rdata: {"n":1,"tool":"computer","action":"left_click"}\r\r',
+      ),
+    );
+    const events = c.agentStream({ prompt: 'go', modelKey: 'sk' });
+    // Nothing has closed the stream and no second chunk is coming yet: the
+    // event must already be here.
+    const first = await events.next();
+    expect(first.value?.type).toBe('step');
+    ctrl.close();
+    await events.return(undefined);
+  });
+
   it('yields a final event with no trailing blank line', async () => {
     const rec = recorder(streaming('event: done\ndata: {"stop":"end_turn"}\n'));
     const c = await client(rec).computers.get('vm-1');
@@ -413,6 +448,15 @@ describe('filenameFrom', () => {
     expect(filenameFrom('attachment; filename="a;b.txt"')).toBe('a;b.txt');
     expect(filenameFrom('attachment; filename=plain.txt')).toBe('plain.txt');
     expect(filenameFrom(null)).toBeUndefined();
+  });
+
+  it('reports no name rather than garbage for a malformed disposition', async () => {
+    const { filenameFrom } = await import('../src/transport.js');
+    // A well-formed empty name is no name — not the literal string '""' that
+    // falling through to the unquoted regex handed back.
+    expect(filenameFrom('attachment; filename=""')).toBeUndefined();
+    // An unterminated quote yields the bare name, not '"abc'.
+    expect(filenameFrom('attachment; filename="abc')).toBe('abc');
   });
 });
 

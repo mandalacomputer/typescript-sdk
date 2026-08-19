@@ -264,12 +264,14 @@ export function shellQuote(s: string): string {
  * The query naming which guest file, checked before the round trip.
  *
  * The path must be absolute: nothing about a transfer runs in a shell, so a
- * relative path has no working directory to be relative to. Absolute has two
- * spellings because there are two guest OSes — a `/`-rooted POSIX path, or a
- * drive-letter path (`C:\...`, `C:/...`) on a Windows guest.
+ * relative path has no working directory to be relative to. Absolute has three
+ * spellings because there are two guest OSes — a `/`-rooted POSIX path, or on
+ * a Windows guest a drive-letter path (`C:\...`, `C:/...`) or a `\\`-prefixed
+ * one (a UNC share like `\\server\share\f.txt`, or the `\\?\` form). What
+ * stays refused is the drive-relative `C:notes.txt` and anything rootless.
  */
 export function filesQuery(path: string): Query {
-  if (!path.startsWith('/') && !/^[A-Za-z]:[\\/]/.test(path)) {
+  if (!path.startsWith('/') && !path.startsWith('\\\\') && !/^[A-Za-z]:[\\/]/.test(path)) {
     throw new TypeError(`guest path must be absolute: ${JSON.stringify(path)}`);
   }
   return { path };
