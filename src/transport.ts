@@ -48,6 +48,15 @@ export type RequestOptions = {
    * stream was still killed at 60 seconds.
    */
   noTimeout?: boolean;
+  /**
+   * Raise this request's deadline to at least this many milliseconds.
+   *
+   * For the calls whose legitimate duration the caller knows better than the
+   * client-wide default — an exec that granted the guest a long timeout, a
+   * large file transfer. It only ever extends: the client's own setting still
+   * applies when larger, and a client that disabled the deadline stays exempt.
+   */
+  minTimeoutMs?: number;
 };
 
 /** A non-JSON response body, with what the platform said it was. */
@@ -131,20 +140,27 @@ export class Transport {
     return url.toString();
   }
 
+  /** This request's deadline in milliseconds, or 0 for none. */
+  #deadlineMs(opts: RequestOptions): number {
+    if (opts.noTimeout || !this.#timeoutMs) return 0;
+    return Math.max(this.#timeoutMs, opts.minTimeoutMs ?? 0);
+  }
+
   /**
-   * The caller's signal and this client's timeout, as one.
+   * The caller's signal and this request's timeout, as one.
    *
    * `AbortSignal.any` rather than replacing the caller's: a request that both
    * has a deadline and belongs to a cancellable operation must honour both, and
    * whichever fires first is the one that matters.
    */
-  #signal(caller?: AbortSignal, noTimeout?: boolean): AbortSignal | undefined {
-    if (!this.#timeoutMs || noTimeout) return caller;
-    const timeout = AbortSignal.timeout(this.#timeoutMs);
+  #signal(caller: AbortSignal | undefined, timeoutMs: number): AbortSignal | undefined {
+    if (!timeoutMs) return caller;
+    const timeout = AbortSignal.timeout(timeoutMs);
     return caller ? AbortSignal.any([caller, timeout]) : timeout;
   }
 
   async #fetchRaw(method: string, path: string, opts: RequestOptions = {}): Promise<Response> {
+    const timeoutMs = this.#deadlineMs(opts);
     const headers: Record<string, string> = { ...this.#headers, ...opts.headers };
     let body: string | Uint8Array | undefined;
     if (opts.raw !== undefined) {
@@ -167,14 +183,18 @@ export class Transport {
         // Cast because @types/node does not put Uint8Array in BodyInit even
         // though undici accepts it.
         body: body as RequestInit['body'],
-        signal: this.#signal(opts.signal, opts.noTimeout),
+        signal: this.#signal(opts.signal, timeoutMs),
       });
     } catch (cause) {
+      // A caller's own signal firing is a cancellation whatever its reason is
+      // named. Judged first, so a custom reason — `ac.abort(new Error(...))` —
+      // is not rewritten below into a claim that the platform was unreachable.
+      if (opts.signal?.aborted) throw cause;
       // A timeout is reported as what it is. Left as the raw TimeoutError from
       // AbortSignal.timeout it says only "the operation was aborted", which is
       // indistinguishable from a caller cancelling on purpose.
       if (cause instanceof Error && cause.name === 'TimeoutError') {
-        throw new MandalaError(`${method} ${path} timed out after ${this.#timeoutMs}ms`);
+        throw new MandalaError(`${method} ${path} timed out after ${timeoutMs}ms`);
       }
       if (cause instanceof Error && cause.name === 'AbortError') throw cause;
       // Rewritten, because the raw message names a DNS or TLS failure and the
@@ -283,6 +303,12 @@ export class Transport {
     const reader = resp.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
+    // A CRLF can arrive split across two network chunks. Normalising the lone
+    // '\r' at a chunk's end would fabricate a '\n' that pairs with the next
+    // chunk's real one into a spurious frame boundary — splitting one event in
+    // two and losing its type. So a trailing '\r' is held back and judged
+    // against the chunk that follows it.
+    let held = '';
     try {
       for (;;) {
         const { done, value } = await reader.read();
@@ -292,7 +318,10 @@ export class Transport {
         // use them; splitting on "\n\n" alone would then never find a boundary,
         // collapse the whole run into one unparseable event, and lose the
         // result of a run that had in fact succeeded.
-        buffer += decoder.decode(value, { stream: true }).replace(/\r\n?/g, '\n');
+        let text = held + decoder.decode(value, { stream: true });
+        held = text.endsWith('\r') ? '\r' : '';
+        if (held) text = text.slice(0, -1);
+        buffer += text.replace(/\r\n?/g, '\n');
         for (;;) {
           const sep = buffer.indexOf('\n\n');
           if (sep === -1) break;
@@ -301,6 +330,7 @@ export class Transport {
           if (parsed) yield parsed;
         }
       }
+      if (held) buffer += '\n';
       const tail = parseEvent(buffer);
       if (tail) yield tail;
     } finally {
@@ -339,6 +369,11 @@ export function filenameFrom(disposition: string | null): string | undefined {
       return star[1];
     }
   }
-  const plain = /filename="?([^";]+)"?/i.exec(disposition);
+  // The quoted form first, matched to its closing quote: a semicolon is legal
+  // inside a quoted filename, and a character class that stopped at one would
+  // hand back half the name.
+  const quoted = /filename="([^"]*)"/i.exec(disposition);
+  if (quoted?.[1]) return quoted[1];
+  const plain = /filename=([^;\s]+)/i.exec(disposition);
   return plain?.[1];
 }

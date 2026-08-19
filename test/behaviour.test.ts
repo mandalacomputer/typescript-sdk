@@ -73,6 +73,24 @@ describe('the computer record', () => {
     const { client: c } = client(() => json({ ...COMPUTER, invented_next_week: 7 }));
     expect((await c.computers.get('vm-1')).raw.invented_next_week).toBe(7);
   });
+
+  it('keeps the desktop credentials out of JSON.stringify', async () => {
+    // Serializing a handle is what a casual log line does, and a credential in
+    // a log line is exactly what the platform strips them from listings to
+    // prevent. They are read deliberately, off vnc or raw.
+    const { client: c } = client(anyRoute);
+    const computer = await c.computers.get('vm-1');
+    expect(computer.vnc?.token).toBe('t');
+    expect(JSON.stringify(computer)).not.toContain('vnc');
+    expect(computer.raw.vnc).toBeDefined();
+  });
+
+  it('hands out raw as a copy deep enough that nothing writes back through it', async () => {
+    const { client: c } = client(anyRoute);
+    const computer = await c.computers.get('vm-1');
+    (computer.raw.vnc as Record<string, unknown>).token = 'overwritten';
+    expect(computer.vnc?.token).toBe('t');
+  });
 });
 
 describe('waiting', () => {
@@ -107,6 +125,41 @@ describe('waiting', () => {
     const err = await computer.waitUntilBuilt({ timeoutMs: 5, pollMs: 1 }).catch((e) => e);
     expect(err).toBeInstanceOf(TimeoutError);
     expect(err.message).toMatch(/it has not stopped; only this wait has/);
+  });
+
+  it('rides out a transient error from the host busy doing the copy being waited on', async () => {
+    // A 503 during a minutes-long disk copy is the ordinary weather of a
+    // build; one of them must not abort the whole wait.
+    let polls = 0;
+    const { client: c } = client((call) => {
+      if (call.method === 'GET' && call.path === '/computers/vm-1') {
+        polls += 1;
+        if (polls === 1) return json({ ...COMPUTER, status: 'building' });
+        if (polls === 2) return errorJson(503, 'host could not be reached');
+        return json(COMPUTER);
+      }
+      return anyRoute(call);
+    });
+    const computer = await c.computers.get('vm-1');
+    await expect(computer.waitUntilBuilt({ timeoutMs: 5_000, pollMs: 1 })).resolves.toBe(computer);
+    expect(polls).toBe(3);
+  });
+
+  it('does not call a machine running on data it never observed', async () => {
+    // A handle that last saw "running" must not return success while every
+    // refresh inside the wait is failing with a 503 — that is a verdict on a
+    // machine nobody has actually looked at.
+    let gets = 0;
+    const { client: c } = client((call) => {
+      if (call.method === 'GET' && call.path === '/computers/vm-1') {
+        gets += 1;
+        return gets === 1 ? json(COMPUTER) : errorJson(503, 'host could not be reached');
+      }
+      return anyRoute(call);
+    });
+    const computer = await c.computers.get('vm-1'); // last saw "running"
+    const err = await computer.waitUntilRunning({ timeoutMs: 10, pollMs: 1 }).catch((e) => e);
+    expect(err).toBeInstanceOf(TimeoutError);
   });
 
   it('rides out the 409 that means the guest agent is still coming up', async () => {
@@ -209,6 +262,24 @@ describe('exec', () => {
     expect(body.session).toBe('desktop');
     expect(body.command).toMatch(/^nohup firefox .* >\/dev\/null 2>&1 &$/);
   });
+
+  it('does not report ok for an exec answer that named no exit code', async () => {
+    // An empty or malformed response is not evidence the command succeeded,
+    // and ok must not affirm what the platform never said.
+    const { client: c } = client((call) =>
+      call.path.endsWith('/exec') ? json({}) : anyRoute(call),
+    );
+    const res = await (await c.computers.get('vm-1')).exec('true');
+    expect(res.ok).toBe(false);
+  });
+
+  it('refuses to open a URL on a Windows guest rather than sending a POSIX command', async () => {
+    // cmd.exe answering "'nohup' is not recognized" through an ExecResult
+    // reads as anything but what actually went wrong.
+    const { client: c } = client(() => json({ ...COMPUTER, os: 'windows' }));
+    const computer = await c.computers.get('vm-1');
+    await expect(computer.open('https://example.com')).rejects.toThrow(/Linux-only/);
+  });
 });
 
 describe('files', () => {
@@ -300,6 +371,29 @@ describe('ephemeral', () => {
         throw new Error('the work failed');
       }),
     ).rejects.toThrow('the work failed');
+  });
+
+  it('reports a delete that failed after the block succeeded, naming the machine', async () => {
+    // Swallowed, this is a billable machine leaking with nothing ever going to
+    // mention it — the opposite of the failing-block case above, where the
+    // block's own error is the one that must survive.
+    const { client: c } = client((call) =>
+      call.method === 'DELETE' ? errorJson(409, 'a snapshot is in flight') : anyRoute(call),
+    );
+    await expect(c.computers.ephemeral({ template: 'base' }, async () => 'done')).rejects.toThrow(
+      /vm-1.*still billable/,
+    );
+  });
+
+  it('says which machine an `await using` block failed to delete', async () => {
+    const { client: c } = client((call) =>
+      call.method === 'DELETE' ? errorJson(409, 'a snapshot is in flight') : anyRoute(call),
+    );
+    const attempt = async () => {
+      await using computer = await c.computers.ephemeral({ template: 'base' });
+      expect(computer.id).toBe('vm-1');
+    };
+    await expect(attempt()).rejects.toThrow(/vm-1.*still billable/);
   });
 
   it('destroys itself at the end of an `await using` block', async () => {

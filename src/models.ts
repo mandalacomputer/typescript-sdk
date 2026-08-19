@@ -263,7 +263,10 @@ export type ExecResult = {
 };
 
 export function toExecResult(d: Record<string, unknown>): ExecResult {
-  const exitCode = num(d.exit_code);
+  // -1 when the platform did not send one, not 0: a response with no exit code
+  // is not evidence the command succeeded, and `ok` must not affirm what
+  // nobody said. Same reasoning as delete()'s undefined snapshot count.
+  const exitCode = num(d.exit_code, -1);
   const timedOut = bool(d.timed_out);
   const outTruncated = bool(d.out_truncated);
   const errTruncated = bool(d.err_truncated);

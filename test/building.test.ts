@@ -145,6 +145,27 @@ describe('filesQuery', () => {
     expect(() => P.filesQuery('notes.txt')).toThrow(/must be absolute/);
     expect(P.filesQuery('/home/user/notes.txt')).toEqual({ path: '/home/user/notes.txt' });
   });
+
+  it('accepts a Windows drive-letter path as the absolute path it is', () => {
+    // Absolute has two spellings because there are two guest OSes. Requiring a
+    // leading '/' made every file on a Windows guest unrepresentable.
+    expect(P.filesQuery('C:\\Users\\dev\\out.txt')).toEqual({ path: 'C:\\Users\\dev\\out.txt' });
+    expect(P.filesQuery('c:/temp/a.txt')).toEqual({ path: 'c:/temp/a.txt' });
+    // C:relative.txt is cmd.exe's "relative to C:'s current directory" — which
+    // is exactly the working directory a transfer does not have.
+    expect(() => P.filesQuery('C:notes.txt')).toThrow(/must be absolute/);
+  });
+});
+
+describe('screenshotQuery', () => {
+  it('distinguishes no width from a zero one', () => {
+    // Truthiness silently converted screenshot(0) — the natural result of a
+    // miscomputed thumbnail scale — into the full-resolution call.
+    expect(P.screenshotQuery()).toBeUndefined();
+    expect(P.screenshotQuery(320)).toEqual({ w: 320 });
+    expect(() => P.screenshotQuery(0)).toThrow(/positive/);
+    expect(() => P.screenshotQuery(-5)).toThrow(/positive/);
+  });
 });
 
 describe('deleteQuery', () => {
@@ -204,6 +225,12 @@ describe('computerPayload', () => {
 
   it('leaves a plain computer alone', () => {
     expect(P.computerPayload({ id: 'vm-1' })).toEqual({ id: 'vm-1' });
+  });
+
+  it('does not invent a start_error key the platform never sent', () => {
+    // raw claims to be the response verbatim; a `start_error: undefined` key
+    // showing up in Object.keys() would not be.
+    expect(P.computerPayload({ computer: { id: 'vm-1' } })).toEqual({ id: 'vm-1' });
   });
 
   it('answers with an empty record for a body that is not one', () => {

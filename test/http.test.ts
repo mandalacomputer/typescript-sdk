@@ -158,6 +158,38 @@ describe('decoding', () => {
     expect(String(err)).toMatch(/caller went away/);
   });
 
+  it("reports a caller's custom abort reason as the cancellation it is", async () => {
+    // Judged by the signal, not the reason's name: a custom reason used to
+    // fall through to the "could not reach" rewrite — a deliberate stop
+    // reported as platform unreachability, to any retry logic keyed on
+    // MandalaError.
+    const ac = new AbortController();
+    const rec = recorder(async () => {
+      await new Promise((r) => setTimeout(r, 200));
+      return json([]);
+    });
+    setTimeout(() => ac.abort(new Error('caller went away')), 5);
+    const err = await client(rec)
+      .computers.get('vm-1', { signal: ac.signal })
+      .catch((e) => e);
+    expect(err).not.toBeInstanceOf(MandalaError);
+    expect(err.message).toBe('caller went away');
+  });
+
+  it('lets an exec outlive the client deadline it explicitly granted the guest', async () => {
+    // exec(cmd, { timeoutS }) gives the guest that long to finish, so the HTTP
+    // request has to outlive it — under the fixed client deadline alone, any
+    // longer timeoutS was aborted client-side while the command ran on with
+    // its output unreachable.
+    const rec = recorder(async (call) => {
+      if (!call.path.endsWith('/exec')) return anyRoute(call);
+      await new Promise((r) => setTimeout(r, 50));
+      return json({ exit_code: 0, stdout: '', stderr: '', timed_out: false });
+    });
+    const c = await client(rec, { timeoutMs: 10 }).computers.get('vm-1');
+    await expect(c.exec('sleep 1', { timeoutS: 1 })).resolves.toMatchObject({ ok: true });
+  });
+
   it('still applies the deadline when a caller passes a signal that never fires', async () => {
     const rec = recorder(async () => {
       await new Promise((r) => setTimeout(r, 200));
@@ -272,6 +304,22 @@ describe('server-sent events', () => {
     expect(result.steps).toBe(2);
   });
 
+  it('does not split an event whose CRLF straddles two chunks', async () => {
+    // A chunk ending in a lone '\r' must not be normalised to a '\n' that then
+    // pairs with the next chunk's real one into a spurious frame boundary —
+    // that split one event in two, dropped its type, and lost the done result
+    // of a run that had succeeded. Chunk size 12 puts the boundary exactly
+    // inside the first CRLF: 'event: done\r' | '\ndata: ...'.
+    const text = 'event: done\r\ndata: {"steps":2,"stop":"end_turn","text":"ok"}\r\n\r\n';
+    const rec = recorder((call) =>
+      call.path.endsWith('/agent') ? stream(text, 12) : anyRoute(call),
+    );
+    const c = await client(rec).computers.get('vm-1');
+    const result = await c.agent({ prompt: 'go', modelKey: 'sk' });
+    expect(result.finished).toBe(true);
+    expect(result.steps).toBe(2);
+  });
+
   it('yields a final event with no trailing blank line', async () => {
     const rec = recorder(streaming('event: done\ndata: {"stop":"end_turn"}\n'));
     const c = await client(rec).computers.get('vm-1');
@@ -319,6 +367,19 @@ describe('server-sent events', () => {
     );
   });
 
+  it('holds an agentOnce request open past the ordinary deadline', async () => {
+    // One held request for a run that is minutes of clicking — the same
+    // exemption the streaming route gets, for the same reason.
+    const rec = recorder(async (call) => {
+      if (!call.path.endsWith('/agent')) return anyRoute(call);
+      await new Promise((r) => setTimeout(r, 60));
+      return json({ steps: 1, stop: 'end_turn', text: 'done' });
+    });
+    const c = await client(rec, { timeoutMs: 20 }).computers.get('vm-1');
+    const res = await c.agentOnce({ prompt: 'go', modelKey: 'sk' });
+    expect(res.finished).toBe(true);
+  });
+
   it('forwards the model key on the one route that runs a model', async () => {
     const rec = recorder(streaming('event: done\ndata: {"stop":"end_turn"}\n\n'));
     const c = await client(rec).computers.get('vm-1');
@@ -330,6 +391,17 @@ describe('server-sent events', () => {
     const rec = recorder(anyRoute);
     const c = await client(rec).computers.get('vm-1');
     await expect(c.agent({ prompt: 'go', modelKey: '' })).rejects.toThrow(/does not store one/);
+  });
+});
+
+describe('filenameFrom', () => {
+  it('reads a quoted filename through its semicolons', async () => {
+    // `[^";]+` stopped at the semicolon inside the quotes and handed back half
+    // the name. Guest filenames are arbitrary; a semicolon in one is legal.
+    const { filenameFrom } = await import('../src/transport.js');
+    expect(filenameFrom('attachment; filename="a;b.txt"')).toBe('a;b.txt');
+    expect(filenameFrom('attachment; filename=plain.txt')).toBe('plain.txt');
+    expect(filenameFrom(null)).toBeUndefined();
   });
 });
 

@@ -1,6 +1,7 @@
 /** Resource collections hanging off the client. */
 
 import { Computer, EphemeralComputer } from './computer.js';
+import { MandalaError } from './errors.js';
 import type { Size, Snapshot, Template } from './models.js';
 import { toSize, toSnapshot, toTemplate } from './models.js';
 import * as P from './paths.js';
@@ -142,16 +143,29 @@ export class Computers {
     const data = await this.#t.json('POST', P.COMPUTERS, { body: P.createBody(args) });
     const computer = new EphemeralComputer(this.#t, P.computerPayload(data));
     if (!fn) return computer;
+    let result: T;
     try {
-      return await fn(computer);
-    } finally {
-      // Swallowed, and only here. A cleanup failure must not replace the error
-      // the block was already throwing — that hides the actual fault behind a
-      // secondary one — and on the success path there is nothing left to do
-      // with it but leak a rejected promise. The id is in the message so a
-      // stranded machine can still be found.
+      result = await fn(computer);
+    } catch (err) {
+      // Swallowed, and only on this path. A cleanup failure must not replace
+      // the error the block was already throwing — that hides the actual
+      // fault behind a secondary one.
       await computer.delete().catch(() => {});
+      throw err;
     }
+    // On the success path there is no error to protect, and a swallowed
+    // failure here is a billable machine leaking with nothing ever going to
+    // mention it. Loud, and with the id, so a stranded machine can still be
+    // found.
+    try {
+      await computer.delete();
+    } catch (err) {
+      throw new MandalaError(
+        `the block succeeded but ${computer.id} was not deleted and is still billable: ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    return result;
   }
 }
 
