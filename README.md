@@ -1,0 +1,527 @@
+# mandala-computer
+
+TypeScript SDK for [Mandala Computer](https://mandala.computer) — cloud desktops
+for AI agents.
+
+A real Linux desktop your code can **see and drive**: screenshots come back as
+bytes, clicks go in as coordinates, and a shell in the guest is one call away.
+
+> **Status: alpha, unpublished.** The surface is settling; expect breaking
+> changes before 1.0. Tracks the platform's `/api/v1`, which is itself still
+> moving.
+
+Zero runtime dependencies. Node 22+, and anywhere else with `fetch` — Bun, Deno,
+workers, the edge. (The `mandala` CLI is Node-only; the library is not.)
+
+## Install
+
+```sh
+npm install mandala-computer
+```
+
+You need an API key from the dashboard — **Settings → API keys**, a `com_…`
+string. It is scoped to your account and it *is* every computer on it, so treat
+it the way you would treat a password. Never ship it to a browser.
+
+```sh
+export MANDALA_API_KEY=com_…
+```
+
+## Use
+
+```ts
+import { Client } from 'mandala-computer';
+
+const client = new Client();                  // reads MANDALA_API_KEY
+
+await client.computers.ephemeral({ template: 'base' }, async (c) => {
+  await c.waitForGuest();                     // the desktop answers, not just the VM
+  await c.open('https://example.com');        // on the screen, not as root
+  const png = await c.screenshot();
+  await c.click(640, 400);
+  await c.type('hello');
+});                                           // destroyed here, even if the block threw
+```
+
+`create()` deliberately does not destroy anything. Deleting a computer destroys
+its disk, so tying that to a scope is only safe when the scope is unambiguously
+the machine's whole lifetime — which is what `ephemeral()` declares:
+
+```ts
+const c = await client.computers.create({ size: 'large' });
+await c.waitForGuest();
+// ... it outlives this function. Delete it when you mean to.
+```
+
+On a runtime with explicit resource management, `ephemeral` also works as a
+disposable:
+
+```ts
+await using c = await client.computers.ephemeral({ template: 'base' });
+await c.waitForGuest();
+```
+
+### Sizes
+
+`size` names a template and a CPU/RAM/disk shape together, and these are the
+shapes the platform keeps pre-booted — so naming one is the likeliest way to get
+a computer in about a second rather than a cold boot.
+
+```ts
+for (const s of await client.sizes.list()) {
+  console.log(s.id, s.label, s.cpu, s.ramMb, s.allowed ? '' : `needs ${s.cheapestPlan}`);
+}
+
+const c = await client.computers.create({ size: 'large' });
+```
+
+`allowed` is about your plan's per-computer ceilings only — what the account
+already holds is not counted, so a create at an allowed size can still be refused
+against the plan's pools.
+
+It cannot be combined with `template`, `cpu`, `ramMb` or `diskGb`. Sending both
+throws before any request is made.
+
+### Resolution
+
+Create-time, and **only** create-time: the screen is part of the machine QEMU
+builds, so changing it needs a new computer.
+
+```ts
+const c = await client.computers.create({ template: 'base', resolution: '1920x1080' });
+const { width, height } = c.screen;           // what every coordinate is in
+```
+
+Read `c.screen` rather than assuming 1280x800. Computer-use accuracy is
+resolution-sensitive, and a model told the wrong numbers clicks proportionally
+short of everything it aims at:
+
+```ts
+const tool = {
+  type: 'computer_20250124',
+  name: 'computer',
+  display_width_px: c.screen.width,
+  display_height_px: c.screen.height,
+};
+```
+
+### Driving the desktop
+
+The verb set is Anthropic's computer tool, in full — so whatever a computer-use
+model emits, there is a method for it:
+
+```ts
+await c.move(100, 200);
+await c.click(100, 200);
+await c.click();                              // where the pointer already is
+await c.click(100, 200, ['shift']);           // held for the click
+await c.rightClick(100, 200);
+await c.doubleClick(100, 200);
+await c.tripleClick(100, 200);                // selects a line in most editors
+await c.drag(400, 300, { x: 100, y: 200 });   // one gesture, not two clicks
+await c.mouseDown(100, 200);
+await c.mouseUp(400, 300);
+await c.scroll(640, 400, { direction: 'down', amount: 3 });
+await c.type('hello');
+await c.key('ctrl', 'c');                     // X11 keysyms work too: Page_Down, BackSpace
+await c.holdKey(['shift'], 1.5);
+await c.wait(2);
+const at = await c.cursorPosition();          // undefined if nothing has placed it
+```
+
+No coordinate means "where the pointer already is", which is a real and different
+request from clicking (0, 0). Half a coordinate — `click(5)` — is refused rather
+than completed with a zero: it would succeed, at the wrong place, and nothing
+would say so.
+
+### Windows
+
+A screenshot says what the desktop *looks like*; this says what any of it **is**,
+which is how you tell a browser that failed to open from one that has not painted
+yet. Linux only.
+
+```ts
+for (const w of await c.windows()) {
+  console.log(w.id, w.windowClass, w.title, w.focused);
+}
+await c.windowAction('0x2600003', 'focus');
+await c.windowAction('0x2600003', 'move', { x: 100, y: 100 });
+```
+
+Match on `windowClass`, not `title`: the class is the application, the title is
+whatever page it is showing. Prefer `focus` over `raise` — raising without
+focusing gives a window that is visibly in front and silently not receiving
+keystrokes. The reply is the window *afterwards*, not an acknowledgement: window
+managers snap to their own grid, so a move to 300,200 routinely lands at 305,229.
+
+### Running commands
+
+```ts
+const res = await c.exec('ls /home/user');
+if (!res.ok) console.error(res.stderr);
+if (res.truncated) { /* the guest agent capped output at 16 MiB */ }
+```
+
+A non-zero exit is returned, not thrown. By default the command runs as `root`
+with no display; anything with a window needs the desktop session:
+
+```ts
+await c.exec('nohup firefox https://example.com >/dev/null 2>&1 &', { desktop: true });
+```
+
+Or call `open()` and let the SDK write that line — it names a browser that
+actually works on the image, quotes the URL, and detaches the launch:
+
+```ts
+await c.open('https://example.com');
+```
+
+> `xdg-open`, `exo-open`, `sensible-browser` and `x-www-browser` are all on the
+> base image and all exit 0 while launching nothing, because the image's
+> default-browser association points at a desktop entry it does not ship. Exit 0
+> and an unchanged screen is the worst shape a failure can take.
+
+### Long-running commands
+
+For builds, installs, test suites and servers. Strictly better than
+backgrounding with `&`, which throws away the exit code and the output:
+
+```ts
+const job = await c.execBackground('apt-get install -y build-essential');
+
+for (;;) {
+  const s = await c.execPoll(job.pid);
+  process.stdout.write(s.stdout);             // only the NEW bytes
+  if (!s.running) break;
+  if (!s.more) await new Promise((r) => setTimeout(r, 1000));
+}
+
+await c.execKill(job.pid);                    // if you change your mind
+```
+
+The output is a **cursor, not a buffer**: each poll gives you only what has been
+printed since the last one, so two readers on one pid split the output between
+them rather than each seeing all of it.
+
+### Files
+
+```ts
+await c.writeFile('/home/user/.env', 'TOKEN=secret');   // never echoed through a shell
+const bytes = await c.readFile('/home/user/out.bin');
+const text = await c.readTextFile('/home/user/out.txt');
+```
+
+Paths are absolute, inside the guest. There is no shell and no working directory
+behind a transfer, so a relative path is refused before the request is made.
+Works while the computer is running or suspended.
+
+### The agent loop
+
+One call that drives the computer until the task is done — screenshot, decide,
+click, type, repeat — **inside the platform**, on your own Anthropic key, which
+the platform never stores.
+
+```ts
+const result = await c.agent({
+  prompt: 'Open the settings and turn on dark mode.',
+  modelKey: process.env.ANTHROPIC_API_KEY!,
+  maxSteps: 20,
+});
+
+if (!result.finished) console.warn(`did not finish: ${result.stop}`);
+console.log(result.text, result.usage);
+```
+
+Ten clicks stop being ten images in *your* context. Each step is a model call
+plus a screenshot billed to your key, so `maxSteps` is a spending cap as much as
+a loop bound.
+
+Stream it when the run is long enough that silence looks like a hang:
+
+```ts
+const ac = new AbortController();
+for await (const ev of c.agentStream({ prompt, modelKey, signal: ac.signal })) {
+  if (ev.type === 'step') console.log(`${ev.step.n}. ${ev.step.detail}`);
+  if (ev.type === 'done') console.log(ev.result.text);
+}
+```
+
+Pass a `signal` on anything long. Without one an abandoned run keeps spending:
+the model request nobody is waiting for still completes on your key, and the
+desktop action it asks for is still performed.
+
+`finished` is true only for `stop === 'end_turn'`. A run that hit `max_steps`,
+ran out of API budget (`rate_limited`), or was declined (`refusal`) is **not**
+raised as an error — the steps already taken are real and what they did to the
+desktop stands. They say the run did not finish, which is a different thing from
+the run having gone wrong.
+
+### Suspending
+
+A pause, not a stop. The session is written to disk, the host gets its memory
+back, and `start()` resumes the same processes and the same open windows in about
+a second rather than booting:
+
+```ts
+await c.suspend();
+console.log(c.isSuspended, c.suspendedAt);
+await c.start();                              // same desktop, ~1s
+```
+
+A computer can arrive here without anyone asking: its host suspends anything
+nobody has used for the host's idle window — 30 minutes by default. Input, exec
+and file transfers resume it automatically. **Screenshots deliberately do not
+count as use and do not resume it**, so a loop that only polls the screen can be
+suspended out from under itself.
+
+```ts
+await c.update({ idleSuspendMin: 120 });      // or null to follow the host
+```
+
+### Showing somebody the desktop
+
+Every response that *is* one computer carries the connect surface, so putting a
+live desktop in your own page is not a second call:
+
+```ts
+const c = await client.computers.get(id);
+const vnc = c.vnc;
+if (vnc) {
+  res.send(`<iframe src="${vnc.embedUrl}" width="1280" height="800"></iframe>`);
+}
+```
+
+Two credentials, and the difference is enforced by the platform rather than by
+the client asking politely:
+
+| | what it grants |
+|---|---|
+| `vnc.url` / `vnc.token` | full control — keyboard, pointer, clipboard. Root-equivalent on that machine. |
+| `vnc.viewUrl` / `vnc.viewToken` | watch only. The platform *drops input* on this socket, so a patched client still cannot type. |
+| `vnc.embedUrl` | the hosted viewer, watch-only, for an `<iframe>`. The credential is in the URL fragment, which browsers never send to a server — so it stays out of access logs and out of `Referer`. |
+| `vnc.terminalUrl` | an interactive PTY in the guest, on the *controlling* credential. `''` on Windows. |
+
+Neither is your API key, which is every computer on the account, forever. Both
+end when the computer restarts.
+
+`vnc` is `undefined` on a computer that came from `list()` — a desktop credential
+in every list response is a credential in every log line that ever captured one.
+`(await c.refresh()).vnc` is how a listed computer gets one. It is also
+`undefined` when the platform could not reach the host, because a URL built over
+a missing credential is indistinguishable from a working one and answers 401
+forever.
+
+### Readiness
+
+```ts
+await c.waitUntilBuilt();      // a clone's disk has finished copying
+await c.waitUntilRunning();    // the VM is up — the guest OS is still booting
+await c.waitForGuest();        // something inside the guest answers
+```
+
+`waitForGuest` is the one you usually want before `exec`, files, windows, or
+expecting a screenshot to show a desktop rather than a boot screen. It probes
+with `exit 0`, a builtin of both bash and cmd.exe, so it works on either OS.
+
+These throw rather than waiting out the timeout for states that will not resolve
+on their own — a failed build, and a suspended session nobody has resumed.
+
+### Computers that are still being built
+
+A clone returns before its disk exists, because copying one can run for minutes:
+
+```ts
+const copy = await c.clone('experiment');
+console.log(copy.isBuilding);                 // true
+await copy.waitUntilBuilt();                  // default timeout is 15 minutes
+await copy.start();
+```
+
+Until the disk lands there is nothing to boot, and starting, stopping,
+snapshotting or cloning it throws `ConflictError`. If the copy dies,
+`buildFailed` is true and `buildError` says why — nothing will fix it on its own.
+
+### Snapshots
+
+```ts
+const snap = await c.snapshot();                    // disk
+const live = await c.snapshot({ memory: true });    // + RAM and device state
+
+const forked = await client.snapshots.clone(live.id, 'twin');
+await forked.waitUntilBuilt();                      // resumes, does not boot
+```
+
+A memory snapshot forks into a live twin — same processes, same open windows,
+same network identity until it is re-identified.
+
+```ts
+await client.snapshots.restore(snap.id);            // back onto its source
+await client.snapshots.delete(snap.id);
+await c.setSchedule({ enabled: true, hour: 4, tz: 'America/New_York' });
+```
+
+`restore` is refused on an orphaned snapshot — one whose computer is gone. Clone
+is what works there, because a restore puts the disk back on a source that no
+longer exists.
+
+### Deleting, and the purge interlock
+
+```ts
+await c.delete();                                   // snapshots survive, as orphans
+```
+
+To destroy them too, read the holdings first and pass the fingerprint back:
+
+```ts
+const held = await c.holdings();
+console.log(`${held.count} snapshots, ${(held.sizeBytes / 1e9).toFixed(2)} GB`);
+
+await c.delete({ deleteSnapshots: true, expect: held.fingerprint });
+```
+
+The fingerprint names that exact set, and the purge is refused unless it still
+does — so a capture that finished between your decision and the call cannot be
+swept up in a decision that was never about it. The SDK will not let you purge
+without one, and deliberately does **not** fetch it for you: a fingerprint read a
+millisecond before the delete binds the purge to whatever the set is *now*, which
+is precisely the race the interlock exists for.
+
+### Partial listings
+
+`list()` on computers and snapshots fans out across every hypervisor holding
+something of yours. One that cannot be reached makes the answer incomplete, and
+the platform **fails closed** about it — you get `UnavailableError`, not a short
+list. A short list is not a smaller truth: it reads exactly like the missing rows
+were deleted, and the obvious next thing a script does with a computer that has
+disappeared is tidy up after it.
+
+Take the short answer knowingly when you want it:
+
+```ts
+const { items, incomplete } = await client.computers.listWithStatus({ allowPartial: true });
+if (incomplete !== null) {
+  console.warn(`fleet read was short — do NOT treat anything absent as deleted`);
+}
+```
+
+`incomplete` is `null` exactly when the answer was whole. When it is not, it is
+how many rows the placement cache could account for — legitimately `0`, because a
+computer created during the outage was never cached against the host now holding
+it. So branch on `incomplete !== null`, never on the number.
+
+### Errors
+
+```ts
+import {
+  MandalaError,        // base of everything this SDK throws
+  APIError,            //   any unsuccessful response
+  AuthenticationError, //     401 — key missing, malformed, revoked
+  PlanLimitError,      //     402 — your plan will not allow this. Not a retry.
+  PermissionDeniedError,//    403 — the key's role is too low
+  NotFoundError,       //     404 — no such computer, snapshot, or route
+  ConflictError,       //     409 — right request, wrong moment. Retry this one.
+  UnavailableError,    //     503 — a listing would have been short
+  TimeoutError,        //   a wait helper gave up
+  isTransient,
+} from 'mandala-computer';
+
+try {
+  await c.snapshot();
+} catch (err) {
+  if (isTransient(err)) { /* wait and try again */ }
+  else if (err instanceof PlanLimitError) { /* a person has to fix this */ }
+  else throw err;
+}
+```
+
+`ConflictError` is the one that clears itself: a guest still booting, a disk still
+being copied, another operation holding the guest agent. The platform's own
+message survives onto `err.message` — these are written to be acted on.
+
+## The `mandala` CLI
+
+```sh
+npx mandala ssh my-computer                 # an interactive shell in the guest
+npx mandala ssh my-computer -s build        # a second, named session
+npx mandala scp ./setup.sh my-computer:/tmp/setup.sh
+npx mandala scp my-computer:/var/log/app.log ./app.log
+```
+
+`ssh` rides the platform's terminal websocket — a PTY kept alive server-side.
+Disconnecting **detaches** rather than ending it; running the same command
+reattaches and replays recent output.
+
+`scp` rides the files API, so it needs no shell in the guest at all. The side
+spelled `<computer>:/path` is the guest, by scp's own rule: a colon marks the
+remote side unless a `/` comes before it, so `./odd:name` stays a local file.
+
+Both take a computer's name or its id, and authenticate with `MANDALA_API_KEY`.
+
+## Design notes
+
+**One place for every route and every body.** `src/paths.ts` builds all of them.
+A URL assembled at a call site is a URL the surface test cannot see — and
+anything absent from the platform's allowlist is a 404 in a user's hands rather
+than a failure in CI.
+
+**Pinned to the platform's surface.** The platform allowlists routes server-side
+and 404s everything else. `test/allowlist.ts` mirrors that table in full,
+`test/surface.test.ts` asserts every request this SDK can issue lands inside it,
+and `scripts/check-surface.mjs` diffs the mirror against `web/lib/surface.ts`
+whenever both repos are checked out. A mirror nobody compares is just a comment:
+that is exactly how three routes reached the platform without the Python SDK's
+surface test noticing, because "every call lands on an allowlisted route" stays
+true when the allowlist is the stale one.
+
+**The gap is a number, not a vibe.** Routes the platform exposes that this SDK
+cannot call live in `UNIMPLEMENTED`. Closing one means deleting its line, which
+is the point.
+
+**Validation that saves a round trip, and no more.** Everything refused locally
+— a relative guest path, half a coordinate, a `size` next to a `cpu`, a purge
+with no fingerprint — is refused by the platform too. It is checked here because
+the mistake is knowable without the round trip, not because the platform is
+trusted less.
+
+**Permissive about responses.** Unknown fields are preserved in `.raw` rather
+than rejected, and unknown SSE event types are skipped rather than thrown on. A
+platform that starts returning more must not break older clients.
+
+**No dependencies.** `fetch` and `WebSocket` are both global on Node 22. A
+websocket library would have been this package's only runtime dependency, carried
+by every user of the library for the sake of one CLI command.
+
+**Only `/api/v1`.** Never the hypervisor daemon's own routes. Its ops endpoints
+(`/host`, `/fleet`, `/audit`) and the plan-owned retention writes are not
+owner-scoped inside the daemon, because nothing user-facing was ever meant to
+reach them. `test/surface.test.ts` asserts the mirror stays clear of them, so
+widening it later is a deliberate act rather than a quiet one.
+
+## Relationship to the other clients
+
+| | |
+|---|---|
+| [`mandala-computer-python`](https://github.com/mandalacomputer/python-sdk) | the Python SDK, sync and async |
+| [`mandala-computer-mcp`](https://github.com/mandalacomputer/mcp) | an MCP server, for Claude Code / Claude Desktop |
+
+All three bind to the same `/api/v1` and share the same status-to-error mapping,
+deliberately: three clients disagreeing about what a 402 is means the same
+failure reads differently depending which one you reached for.
+
+## Development
+
+```sh
+npm install
+npm test           # vitest, then the surface diff against the platform repo
+npm run typecheck
+npm run lint
+npm run build
+```
+
+`npm test` looks for the platform repo next door (or at `MANDALA_PLATFORM_REPO`)
+and skips the diff, loudly, when it is not there — failing over its absence would
+make the check something people learn to ignore.
+
+## License
+
+MIT
