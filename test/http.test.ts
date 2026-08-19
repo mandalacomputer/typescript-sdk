@@ -290,6 +290,35 @@ describe('server-sent events', () => {
     expect(seen).toEqual(['done']);
   });
 
+  it("is not cut short by the client's per-request deadline", async () => {
+    // A stream is meant to stay open — an agent run is minutes of clicking — and
+    // the ordinary deadline would kill every one of them at the same place.
+    // Passing a dummy signal did NOT achieve this: the composition folds the
+    // timeout in whenever there is one, so the stream needs an explicit exemption.
+    const rec = recorder(async (call) => {
+      if (!call.path.endsWith('/agent')) return anyRoute(call);
+      await new Promise((r) => setTimeout(r, 60));
+      return stream('event: done\ndata: {"stop":"end_turn"}\n\n');
+    });
+    const c = await client(rec, { timeoutMs: 20 }).computers.get('vm-1');
+    const res = await c.agent({ prompt: 'go', modelKey: 'sk' });
+    expect(res.finished).toBe(true);
+  });
+
+  it('still stops a stream when the caller says so', async () => {
+    const ac = new AbortController();
+    const rec = recorder(async (call) => {
+      if (!call.path.endsWith('/agent')) return anyRoute(call);
+      await new Promise((r) => setTimeout(r, 200));
+      return stream('event: done\ndata: {"stop":"end_turn"}\n\n');
+    });
+    const c = await client(rec).computers.get('vm-1');
+    setTimeout(() => ac.abort(new Error('caller went away')), 5);
+    await expect(c.agent({ prompt: 'go', modelKey: 'sk', signal: ac.signal })).rejects.toThrow(
+      /caller went away/,
+    );
+  });
+
   it('forwards the model key on the one route that runs a model', async () => {
     const rec = recorder(streaming('event: done\ndata: {"stop":"end_turn"}\n\n'));
     const c = await client(rec).computers.get('vm-1');

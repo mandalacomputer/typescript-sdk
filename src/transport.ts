@@ -35,6 +35,19 @@ export type RequestOptions = {
   /** Extra headers for this call only. */
   headers?: Record<string, string>;
   signal?: AbortSignal;
+  /**
+   * Exempt this request from the client's per-request deadline.
+   *
+   * For the streaming routes, and only those. A stream is meant to stay open —
+   * an agent run is minutes of clicking — and the ordinary 60-second deadline
+   * would cut every one of them short at exactly the same place.
+   *
+   * A flag rather than "pass a signal and skip the timeout", which is what this
+   * was at first and did not work: the composition below folds the timeout in
+   * whenever there is one, so handing it a dummy signal changed nothing and the
+   * stream was still killed at 60 seconds.
+   */
+  noTimeout?: boolean;
 };
 
 /** A non-JSON response body, with what the platform said it was. */
@@ -125,8 +138,8 @@ export class Transport {
    * has a deadline and belongs to a cancellable operation must honour both, and
    * whichever fires first is the one that matters.
    */
-  #signal(caller?: AbortSignal): AbortSignal | undefined {
-    if (!this.#timeoutMs) return caller;
+  #signal(caller?: AbortSignal, noTimeout?: boolean): AbortSignal | undefined {
+    if (!this.#timeoutMs || noTimeout) return caller;
     const timeout = AbortSignal.timeout(this.#timeoutMs);
     return caller ? AbortSignal.any([caller, timeout]) : timeout;
   }
@@ -154,7 +167,7 @@ export class Transport {
         // Cast because @types/node does not put Uint8Array in BodyInit even
         // though undici accepts it.
         body: body as RequestInit['body'],
-        signal: this.#signal(opts.signal),
+        signal: this.#signal(opts.signal, opts.noTimeout),
       });
     } catch (cause) {
       // A timeout is reported as what it is. Left as the raw TimeoutError from
@@ -255,18 +268,15 @@ export class Transport {
    * is going. An agent run is minutes of clicking; something that says nothing
    * until it is over cannot be told from a hang.
    *
-   * The per-request timeout is deliberately not applied — a stream is meant to
-   * stay open, and a 60-second deadline would cut every run short. Pass a
-   * `signal` to bound it.
+   * The per-request deadline is deliberately not applied — a stream is meant to
+   * stay open, and a 60-second deadline would cut every run short at the same
+   * place. A caller's own `signal` is the only thing that stops one early.
    */
   async *sse(method: string, path: string, opts: RequestOptions = {}): AsyncGenerator<SSEEvent> {
     const resp = await this.#fetchRaw(method, path, {
       ...opts,
       headers: { ...opts.headers, Accept: 'text/event-stream' },
-      // Explicitly undefined rather than absent: #signal composes the timeout
-      // in unless there is no timeout, and a caller's own signal must still be
-      // the one thing that can stop this.
-      signal: opts.signal ?? new AbortController().signal,
+      noTimeout: true,
     });
     if (!resp.body) throw new MandalaError(`${method} ${path} answered with no body`);
 
