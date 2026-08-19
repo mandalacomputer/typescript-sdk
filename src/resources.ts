@@ -1,7 +1,7 @@
 /** Resource collections hanging off the client. */
 
 import { Computer, EphemeralComputer } from './computer.js';
-import { MandalaError } from './errors.js';
+import { MandalaError, NotFoundError } from './errors.js';
 import type { Size, Snapshot, Template } from './models.js';
 import { toSize, toSnapshot, toTemplate } from './models.js';
 import * as P from './paths.js';
@@ -160,10 +160,17 @@ export class Computers {
     try {
       await computer.delete();
     } catch (err) {
-      throw new MandalaError(
-        `the block succeeded but ${computer.id} was not deleted and is still billable: ` +
-          `${err instanceof Error ? err.message : String(err)}`,
-      );
+      // Except a 404, which is the goal state already reached: the block
+      // deleted the machine itself — delete({ deleteSnapshots: true }) inside
+      // the block is the documented way to purge snapshots — and a claim that
+      // a provably-gone machine is still billable would be false, and would
+      // replace the block's result with it.
+      if (!(err instanceof NotFoundError)) {
+        throw new MandalaError(
+          `the block succeeded but ${computer.id} was not deleted and is still billable: ` +
+            `${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
     }
     return result;
   }

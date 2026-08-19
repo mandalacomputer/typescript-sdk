@@ -524,10 +524,15 @@ export class Computer {
   async waitUntilRunning(opts: WaitOptions = {}): Promise<this> {
     const { timeoutMs = 120_000, pollMs = 2_000, signal } = opts;
     const deadline = Date.now() + timeoutMs;
-    // No verdict is reached on state observed before this call: when the first
-    // refresh fails transiently, the handle may be holding data from an old
-    // list(), and "running" concluded from that — while the host answers 503 —
-    // is a claim about a machine nobody has actually looked at.
+    // Success is a verdict, and no verdict is reached on state observed before
+    // this call: when every refresh fails transiently, the handle may be
+    // holding data from an old list(), and "running" concluded from that —
+    // while the host answers 503 — is a claim about a machine nobody has
+    // actually looked at. The fail-fast throws below are NOT gated the same
+    // way: neither a failed build nor a suspended session becomes "running" on
+    // its own, so acting on the last data anyone has beats spinning out the
+    // full timeout to learn the same thing — and the data may be fresh from a
+    // get() one line before this call.
     let observed = false;
     for (;;) {
       try {
@@ -540,27 +545,29 @@ export class Computer {
         // revoked key, a computer that is gone — is not weather.
         if (!isTransient(err)) throw err;
       }
-      if (observed) {
-        if (this.status === 'running') return this;
-        // A computer with no disk will never start on its own, and waiting out
-        // the full timeout to say so helps nobody.
-        if (this.buildFailed) {
-          throw new MandalaError(
-            `${this.id} could not be built: ${this.buildError || 'the disk copy failed'}`,
-          );
-        }
-        // Nor will a suspended one. Left to spin it reports a machine that is
-        // one call from running as a timeout — the least informative answer
-        // available about the one case the caller can fix in a line.
-        if (this.isSuspended) {
-          throw new MandalaError(
-            `${this.id} is suspended and will not start on its own: call start() to resume it`,
-          );
-        }
+      if (observed && this.status === 'running') return this;
+      // A computer with no disk will never start on its own, and waiting out
+      // the full timeout to say so helps nobody.
+      if (this.buildFailed) {
+        throw new MandalaError(
+          `${this.id} could not be built: ${this.buildError || 'the disk copy failed'}`,
+        );
+      }
+      // Nor will a suspended one. Left to spin it reports a machine that is
+      // one call from running as a timeout — the least informative answer
+      // available about the one case the caller can fix in a line.
+      if (this.isSuspended) {
+        throw new MandalaError(
+          `${this.id} is suspended and will not start on its own: call start() to resume it`,
+        );
       }
       if (Date.now() >= deadline) {
+        // "was still X" is only claimed about a status this wait actually saw;
+        // a handle nobody could refresh reports the refreshes, not the status.
         throw new TimeoutError(
-          `${this.id} was still ${JSON.stringify(this.status)} after ${timeoutMs}ms`,
+          observed
+            ? `${this.id} was still ${JSON.stringify(this.status)} after ${timeoutMs}ms`
+            : `${this.id} could not be observed within ${timeoutMs}ms: every refresh failed`,
         );
       }
       await sleep(pollMs, signal);
@@ -1200,6 +1207,10 @@ export class EphemeralComputer extends Computer {
     try {
       await this.delete();
     } catch (err) {
+      // A 404 is the goal state already reached: the block deleted the
+      // machine itself (the documented way to purge snapshots), and nothing
+      // is billable or worth reporting.
+      if (err instanceof NotFoundError) return;
       // Loud, and with the id: a machine that outlives its block is billable
       // until somebody finds it, and a swallowed failure here mentions it to
       // no one. When the block itself also threw, the runtime keeps that error

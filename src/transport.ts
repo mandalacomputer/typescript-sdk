@@ -143,7 +143,16 @@ export class Transport {
   /** This request's deadline in milliseconds, or 0 for none. */
   #deadlineMs(opts: RequestOptions): number {
     if (opts.noTimeout || !this.#timeoutMs) return 0;
-    return Math.max(this.#timeoutMs, opts.minTimeoutMs ?? 0);
+    const min = opts.minTimeoutMs ?? 0;
+    // Refused rather than absorbed: a NaN — timeoutS: Number(unsetEnvVar) is
+    // the usual spelling — poisons Math.max, reads as "no timeout" below, and
+    // silently removes the one guard against a request hanging forever; an
+    // Infinity surfaces later as a baffling "could not reach <baseUrl>" out
+    // of AbortSignal.timeout. Both are caller mistakes, named as such here.
+    if (!Number.isFinite(min)) {
+      throw new TypeError(`the timeout for this request is not a finite number (got ${min})`);
+    }
+    return Math.max(this.#timeoutMs, min);
   }
 
   /**
