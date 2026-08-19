@@ -184,10 +184,18 @@ async function interact(url: string): Promise<number> {
             if (control?.type === 'exit') {
               // A code the frame did not carry as an integer must not read as
               // exit 0 — that is the difference between success and a shrug.
-              exitCode =
-                typeof control.code === 'number' && Number.isInteger(control.code)
+              // An integer or the string spelling of one both count: nothing
+              // in-repo pins which the terminal server sends, and reading its
+              // "0" as exit 1 would break `mandala ssh vm cmd && next`. What
+              // stays refused is everything Number() shrugs into 0 — null,
+              // '', booleans — and anything not an integer at all.
+              const code =
+                typeof control.code === 'number'
                   ? control.code
-                  : 1;
+                  : typeof control.code === 'string' && /^-?\d+$/.test(control.code)
+                    ? Number(control.code)
+                    : Number.NaN;
+              exitCode = Number.isInteger(code) ? code : 1;
               // The shell has ended, but the output's tail may still be in
               // flight behind this frame — resolving now would drop it. Close
               // instead and let `close` resolve once the queue has drained;
@@ -236,13 +244,19 @@ async function interact(url: string): Promise<number> {
  * `<computer>:<path>` split apart, or `undefined` for a local path.
  *
  * scp's own rule: a colon marks the remote side unless a `/` comes before it,
- * so `./odd:name` stays a local file.
+ * so `./odd:name` stays a local file. Two Windows amendments, also scp's own:
+ * a `\` before the colon reads as the path separator it is there, and a
+ * single-letter head is a drive, not a computer — without that, an absolute
+ * local path could not be spelled on either side of a copy from a Windows
+ * host. (A computer actually named with one letter is unreachable from here;
+ * every Windows local file would be, otherwise.)
  */
 export function remoteSide(arg: string): { target: string; path: string } | undefined {
   const i = arg.indexOf(':');
   if (i <= 0) return undefined;
   const head = arg.slice(0, i);
-  if (head.includes('/')) return undefined;
+  if (head.includes('/') || head.includes('\\')) return undefined;
+  if (/^[A-Za-z]$/.test(head)) return undefined;
   return { target: head, path: arg.slice(i + 1) };
 }
 

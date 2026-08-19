@@ -312,12 +312,14 @@ export class Transport {
     const reader = resp.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
-    // A CRLF can arrive split across two network chunks. Normalising the lone
-    // '\r' at a chunk's end would fabricate a '\n' that pairs with the next
-    // chunk's real one into a spurious frame boundary — splitting one event in
-    // two and losing its type. So a trailing '\r' is held back and judged
-    // against the chunk that follows it.
-    let held = '';
+    // A CRLF can arrive split across two network chunks. Whether the '\r' at a
+    // chunk's end is a lone terminator or the front half of a CRLF, it
+    // contributes exactly one '\n' — so it is normalised and framed NOW, which
+    // keeps an event whose stream is CR-framed from arriving one chunk late.
+    // What must not happen is the next chunk's leading '\n' then counting as a
+    // second terminator: that would fabricate a frame boundary, splitting one
+    // event in two and losing its type. So that one byte is swallowed instead.
+    let swallowLf = false;
     try {
       for (;;) {
         const { done, value } = await reader.read();
@@ -327,9 +329,15 @@ export class Transport {
         // use them; splitting on "\n\n" alone would then never find a boundary,
         // collapse the whole run into one unparseable event, and lose the
         // result of a run that had in fact succeeded.
-        let text = held + decoder.decode(value, { stream: true });
-        held = text.endsWith('\r') ? '\r' : '';
-        if (held) text = text.slice(0, -1);
+        let text = decoder.decode(value, { stream: true });
+        // A partial multibyte character decodes to '' and must not clear the
+        // pending swallow — the '\n' it protects against is still to come.
+        if (!text) continue;
+        if (swallowLf) {
+          if (text.startsWith('\n')) text = text.slice(1);
+          swallowLf = false;
+        }
+        if (text.endsWith('\r')) swallowLf = true;
         buffer += text.replace(/\r\n?/g, '\n');
         for (;;) {
           const sep = buffer.indexOf('\n\n');
@@ -339,7 +347,6 @@ export class Transport {
           if (parsed) yield parsed;
         }
       }
-      if (held) buffer += '\n';
       const tail = parseEvent(buffer);
       if (tail) yield tail;
     } finally {
@@ -380,9 +387,13 @@ export function filenameFrom(disposition: string | null): string | undefined {
   }
   // The quoted form first, matched to its closing quote: a semicolon is legal
   // inside a quoted filename, and a character class that stopped at one would
-  // hand back half the name.
+  // hand back half the name. A well-formed empty name is no name — reported as
+  // undefined rather than falling through to re-read its own quote marks.
   const quoted = /filename="([^"]*)"/i.exec(disposition);
-  if (quoted?.[1]) return quoted[1];
-  const plain = /filename=([^;\s]+)/i.exec(disposition);
+  if (quoted) return quoted[1] || undefined;
+  // Unquoted, or a quoted form left unterminated. The optional leading quote
+  // is consumed and quotes are excluded from the name, so a malformed
+  // 'filename="abc' comes back as the bare name rather than '"abc'.
+  const plain = /filename="?([^";\s]+)/i.exec(disposition);
   return plain?.[1];
 }
