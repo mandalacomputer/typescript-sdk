@@ -7,7 +7,15 @@ import {
   toAgentEvent,
   toAgentResult,
 } from './agent.js';
-import { isTransient, MandalaError, TimeoutError } from './errors.js';
+import {
+  AuthenticationError,
+  isTransient,
+  MandalaError,
+  NotFoundError,
+  PermissionDeniedError,
+  PlanLimitError,
+  TimeoutError,
+} from './errors.js';
 import type {
   BackgroundExec,
   ExecResult,
@@ -52,6 +60,20 @@ export const DEFAULT_RESOLUTION = `${SCREEN_WIDTH}x${SCREEN_HEIGHT}x24`;
  * has no such command, so on Windows it could only spin until it timed out.
  */
 export const GUEST_PROBE = 'exit 0';
+
+/**
+ * A failure no amount of waiting will clear.
+ *
+ * The wait helpers poll through anything that might resolve on its own — a 409
+ * while the guest agent comes up, a 503 from a host that cannot be reached — and
+ * stop at these. A revoked key is not going to become valid three minutes from
+ * now, and reporting it as a timeout names the wrong problem.
+ */
+const isPermanent = (err: unknown): boolean =>
+  err instanceof AuthenticationError ||
+  err instanceof PermissionDeniedError ||
+  err instanceof NotFoundError ||
+  err instanceof PlanLimitError;
 
 const sleep = (ms: number, signal?: AbortSignal): Promise<void> =>
   new Promise((resolve, reject) => {
@@ -485,7 +507,8 @@ export class Computer {
       } catch (err) {
         // A host that cannot be reached answers 503, which is the ordinary
         // weather of a machine still coming up. Letting it out would abort the
-        // one method whose whole job is to keep asking.
+        // one method whose whole job is to keep asking. Anything else — a
+        // revoked key, a computer that is gone — is not weather.
         if (!isTransient(err)) throw err;
       }
       if (this.status === 'running') return this;
@@ -533,13 +556,11 @@ export class Computer {
         const res = await this.exec(GUEST_PROBE, { timeoutS: 5 });
         if (res.ok) return this;
       } catch (err) {
-        if (!isTransient(err)) {
-          // A guest agent that stays silent past its boot window stops being a
-          // conflict and becomes a 502. Rethrowing anything else is what makes
-          // this loop terminate rather than spin on a real fault until the
-          // deadline — an auth failure should not take three minutes to report.
-          if (Date.now() >= deadline) throw err;
-        }
+        // Everything else is polled through: a 409 means the agent is not up
+        // yet, a 503 means its host could not be reached, and a guest agent that
+        // is merely slow answers 502 for the first seconds of a boot. Those are
+        // what this loop is for. A revoked key is not.
+        if (isPermanent(err)) throw err;
       }
       if (Date.now() >= deadline) {
         throw new TimeoutError(`${this.id} guest did not respond within ${timeoutMs}ms`);

@@ -126,15 +126,35 @@ describe('waiting', () => {
     expect(attempts).toBe(3);
   });
 
-  it('gives up on a fault rather than spinning out the deadline on it', async () => {
-    // An auth failure should not take three minutes to report.
-    const { client: c } = client((call) =>
+  it('gives up at once on a failure no amount of waiting will clear', async () => {
+    // A revoked key is not going to become valid three minutes from now, and
+    // reporting it as a timeout names the wrong problem. The long timeout here
+    // is the test: it must not be reached.
+    const { rec, client: c } = client((call) =>
       call.path.endsWith('/exec') ? errorJson(401, 'that key has been revoked') : anyRoute(call),
     );
     const computer = await c.computers.get('vm-1');
-    await expect(computer.waitForGuest({ timeoutMs: 5, pollMs: 1 })).rejects.toThrow(
-      /revoked|did not respond/,
+    const started = Date.now();
+    await expect(computer.waitForGuest({ timeoutMs: 60_000, pollMs: 1_000 })).rejects.toThrow(
+      /that key has been revoked/,
     );
+    expect(Date.now() - started).toBeLessThan(1_000);
+    // One probe, not a loop's worth.
+    expect(rec.routes().filter(([, p]) => p.endsWith('/exec'))).toHaveLength(1);
+  });
+
+  it('keeps polling through a 502 from a guest agent that is merely slow', async () => {
+    let attempts = 0;
+    const { client: c } = client((call) => {
+      if (call.path.endsWith('/exec')) {
+        attempts += 1;
+        return attempts < 3 ? errorJson(502, 'the guest agent did not answer') : json(EXEC_OK);
+      }
+      return anyRoute(call);
+    });
+    const computer = await c.computers.get('vm-1');
+    await expect(computer.waitForGuest({ timeoutMs: 5_000, pollMs: 1 })).resolves.toBe(computer);
+    expect(attempts).toBe(3);
   });
 });
 
