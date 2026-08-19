@@ -102,10 +102,13 @@ describe('surface', () => {
     expect(unreached).toEqual([...UNIMPLEMENTED].sort());
   });
 
-  it('reaches everything the Python SDK does, and the five routes it does not', async () => {
-    // The reason this SDK exists ahead of a Python catch-up. Each of these is a
-    // route mandala-computer-python cannot call today; three of them are not
-    // even in its mirrored allowlist, so its own surface test cannot see them.
+  it('reaches the routes that a v1-era client does not know exist', async () => {
+    // Named individually rather than left to the count above, because these are
+    // the ones a client written against the original surface silently lacks —
+    // three of them were added to the platform without any client's mirror
+    // learning about them, which is what scripts/check-surface.mjs now catches.
+    // Asserted here so a refactor cannot quietly drop the harder half of the
+    // surface while the two tests above stay green.
     const called = await exercised();
     for (const route of [
       'GET computers/:id/exec/:pid',
