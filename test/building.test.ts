@@ -155,6 +155,20 @@ describe('filesQuery', () => {
     // is exactly the working directory a transfer does not have.
     expect(() => P.filesQuery('C:notes.txt')).toThrow(/must be absolute/);
   });
+
+  it('accepts the other absolute Windows spellings: a UNC share and the \\\\?\\ form', () => {
+    // A network-share file on a domain-joined guest is absolute with no drive
+    // letter in sight; refusing it re-opened the unrepresentable-file class
+    // the drive-letter fix closed.
+    expect(P.filesQuery('\\\\fileserver\\share\\out.txt')).toEqual({
+      path: '\\\\fileserver\\share\\out.txt',
+    });
+    expect(P.filesQuery('\\\\?\\C:\\very\\long\\path.txt')).toEqual({
+      path: '\\\\?\\C:\\very\\long\\path.txt',
+    });
+    // A single backslash is still Windows drive-relative, not absolute.
+    expect(() => P.filesQuery('\\notes.txt')).toThrow(/must be absolute/);
+  });
 });
 
 describe('screenshotQuery', () => {

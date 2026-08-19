@@ -37,6 +37,25 @@ describe('remoteSide', () => {
   it('reads a computer with no path, so the caller can be told to give one', () => {
     expect(remoteSide('demo:')).toEqual({ target: 'demo', path: '' });
   });
+
+  it('reads a Windows drive letter as the local side, not a computer named C', () => {
+    // Without this, an absolute local path could not be spelled on either side
+    // of a copy from a Windows host: C:\out.txt has no '/' before its colon.
+    expect(remoteSide('C:\\out.txt')).toBeUndefined();
+    expect(remoteSide('c:/temp/out.txt')).toBeUndefined();
+  });
+
+  it('reads a backslash before the colon as the path separator it is', () => {
+    // The Windows spelling of ./odd:name must stay a local file too.
+    expect(remoteSide('.\\odd:name')).toBeUndefined();
+    expect(remoteSide('C:\\dir\\odd:name')).toBeUndefined();
+  });
+
+  it('still reads a Windows guest path on a named computer as remote', () => {
+    // The exemption is for the local side only; vm-1:C:\out.txt names a file
+    // on a Windows guest and must keep working.
+    expect(remoteSide('vm-1:C:\\out.txt')).toEqual({ target: 'vm-1', path: 'C:\\out.txt' });
+  });
 });
 
 describe('argument handling', () => {
