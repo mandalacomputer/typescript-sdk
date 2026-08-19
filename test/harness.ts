@@ -161,7 +161,9 @@ export const anyRoute: Responder = (call) => {
     return json(get ? [SNAPSHOT] : SNAPSHOT);
   }
   if (path === '/computers') return json(get ? [COMPUTER] : COMPUTER);
-  if (path === '/input') return json({});
+  // endsWith, because the recorder's paths keep the computer id: the real
+  // route is /computers/:id/input, and an exact '/input' match never fired.
+  if (path.endsWith('/input')) return json({});
   return json(COMPUTER);
 };
 
