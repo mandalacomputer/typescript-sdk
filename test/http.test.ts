@@ -200,6 +200,17 @@ describe('decoding', () => {
       client(rec, { timeoutMs: 10 }).computers.list({ signal: never.signal }),
     ).rejects.toThrow(/timed out/);
   });
+
+  it('refuses a timeout that is not a finite number, rather than absorbing it', async () => {
+    // timeoutS: Number(unsetEnvVar) is the usual spelling of this mistake.
+    // Absorbed, the NaN poisons Math.max, reads as "no deadline", and a hung
+    // request hangs forever exactly where the client deadline used to fire;
+    // an Infinity surfaces as a bogus "could not reach" out of fetch instead.
+    const rec = recorder(anyRoute);
+    const c = await client(rec).computers.get('vm-1');
+    await expect(c.exec('true', { timeoutS: Number(undefined) })).rejects.toThrow(/finite/);
+    await expect(c.exec('true', { timeoutS: Infinity })).rejects.toThrow(/finite/);
+  });
 });
 
 describe('listings', () => {
