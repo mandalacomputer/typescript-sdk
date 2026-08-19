@@ -160,6 +160,30 @@ describe('waiting', () => {
     const computer = await c.computers.get('vm-1'); // last saw "running"
     const err = await computer.waitUntilRunning({ timeoutMs: 10, pollMs: 1 }).catch((e) => e);
     expect(err).toBeInstanceOf(TimeoutError);
+    // Nor may the timeout message: 'was still "running"' would be the same
+    // unobserved claim, one line lower.
+    expect(err.message).toMatch(/could not be observed/);
+    expect(err.message).not.toMatch(/was still/);
+  });
+
+  it('fails fast on a suspended machine even while every refresh is failing', async () => {
+    // The handle's data may be fresh from the get() one line before the wait,
+    // and suspended does not become "running" on its own — spinning out the
+    // full 120s to repeat what was already known helps nobody.
+    let gets = 0;
+    const { client: c } = client((call) => {
+      if (call.method === 'GET' && call.path === '/computers/vm-1') {
+        gets += 1;
+        return gets === 1
+          ? json({ ...COMPUTER, status: 'suspended' })
+          : errorJson(503, 'host could not be reached');
+      }
+      return anyRoute(call);
+    });
+    const computer = await c.computers.get('vm-1'); // fresh: suspended
+    await expect(computer.waitUntilRunning({ timeoutMs: 60_000, pollMs: 1 })).rejects.toThrow(
+      /call start\(\) to resume it/,
+    );
   });
 
   it('rides out the 409 that means the guest agent is still coming up', async () => {
@@ -273,6 +297,21 @@ describe('exec', () => {
     expect(res.ok).toBe(false);
   });
 
+  it('does not read a null or empty exit code as success either', async () => {
+    // An API that always emits every key spells "no exit code" as null, and
+    // Number(null) is exactly the 0 that ok must not invent.
+    for (const spelling of [null, '']) {
+      const { client: c } = client((call) =>
+        call.path.endsWith('/exec')
+          ? json({ exit_code: spelling, stdout: '', stderr: '', timed_out: false })
+          : anyRoute(call),
+      );
+      const res = await (await c.computers.get('vm-1')).exec('true');
+      expect(res.exitCode).toBe(-1);
+      expect(res.ok).toBe(false);
+    }
+  });
+
   it('refuses to open a URL on a Windows guest rather than sending a POSIX command', async () => {
     // cmd.exe answering "'nohup' is not recognized" through an ExecResult
     // reads as anything but what actually went wrong.
@@ -383,6 +422,30 @@ describe('ephemeral', () => {
     await expect(c.computers.ephemeral({ template: 'base' }, async () => 'done')).rejects.toThrow(
       /vm-1.*still billable/,
     );
+  });
+
+  it('does not call a machine the block already deleted itself "still billable"', async () => {
+    // delete({ deleteSnapshots: true, expect }) inside the block is the
+    // documented way to purge snapshots; the wrapper's own delete then answers
+    // 404, which is the goal state already reached — and the block's result
+    // must survive it, not be replaced by a false claim.
+    const { client: c } = client((call) =>
+      call.method === 'DELETE' ? errorJson(404, 'no such computer') : anyRoute(call),
+    );
+    await expect(
+      c.computers.ephemeral({ template: 'base' }, async () => 'an hour of work'),
+    ).resolves.toBe('an hour of work');
+  });
+
+  it('treats an already-gone machine as cleaned up at the end of `await using` too', async () => {
+    const { client: c } = client((call) =>
+      call.method === 'DELETE' ? errorJson(404, 'no such computer') : anyRoute(call),
+    );
+    const attempt = async () => {
+      await using computer = await c.computers.ephemeral({ template: 'base' });
+      return computer.id;
+    };
+    await expect(attempt()).resolves.toBe('vm-1');
   });
 
   it('says which machine an `await using` block failed to delete', async () => {

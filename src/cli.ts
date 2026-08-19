@@ -40,6 +40,15 @@ import { Client } from './index.js';
  */
 const MAX_FRAME = 1 << 22;
 
+/**
+ * How long after the exit announcement a session waits for the socket to close.
+ *
+ * Long enough for the output frames queued behind the exit to arrive on any
+ * plausible link; short enough that a server which lingers indefinitely after
+ * announcing the exit cannot hold the local terminal open with it.
+ */
+const EXIT_DRAIN_MS = 3_000;
+
 const USAGE = `mandala — your own terminal, against a Mandala computer.
 
   mandala ssh <computer> [--session NAME]   an interactive shell in the guest
@@ -179,10 +188,17 @@ async function interact(url: string): Promise<number> {
                 typeof control.code === 'number' && Number.isInteger(control.code)
                   ? control.code
                   : 1;
-              // The shell has ended; resolving here rather than waiting on
-              // `close` keeps a server that lingers after announcing the exit
-              // from holding the local terminal open with it.
-              resolve();
+              // The shell has ended, but the output's tail may still be in
+              // flight behind this frame — resolving now would drop it. Close
+              // instead and let `close` resolve once the queue has drained;
+              // the timer is what keeps a server that lingers indefinitely
+              // after announcing the exit from holding the terminal with it.
+              try {
+                ws.close();
+              } catch {
+                // Already closing; `close` still fires.
+              }
+              setTimeout(resolve, EXIT_DRAIN_MS).unref();
             }
           } catch {
             // Not control we understand. The stream is the news, not this frame.
@@ -321,11 +337,17 @@ const invokedDirectly = ((): boolean => {
   }
 })();
 if (invokedDirectly) {
-  main().then(
-    (code) => process.exit(code),
-    (err) => {
-      process.stderr.write(`mandala: ${err instanceof Error ? err.message : String(err)}\n`);
-      process.exit(1);
-    },
-  );
+  // process.exit() discards whatever is still buffered in a piped stdout — the
+  // tail of a session's output, silently. Writes are FIFO, so exiting from the
+  // flush callback of an empty write means everything queued before it reached
+  // the OS first. (Exiting via process.exitCode instead would flush too, but
+  // waits on every open handle — undici's keep-alive sockets among them.)
+  const exit = (code: number): void => {
+    process.stdout.write('', () => process.exit(code));
+  };
+  main().then(exit, (err) => {
+    process.stderr.write(`mandala: ${err instanceof Error ? err.message : String(err)}\n`, () =>
+      exit(1),
+    );
+  });
 }
