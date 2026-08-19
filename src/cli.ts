@@ -24,9 +24,11 @@
  * there can run.
  */
 
+import { realpathSync } from 'node:fs';
 import { readFile, stat, writeFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import process from 'node:process';
+import { pathToFileURL } from 'node:url';
 
 import type { Computer } from './computer.js';
 import { MandalaError } from './errors.js';
@@ -170,7 +172,18 @@ async function interact(url: string): Promise<number> {
         if (typeof ev.data === 'string') {
           try {
             const control = JSON.parse(ev.data);
-            if (control?.type === 'exit') exitCode = Number(control.code) || 0;
+            if (control?.type === 'exit') {
+              // A code the frame did not carry as an integer must not read as
+              // exit 0 — that is the difference between success and a shrug.
+              exitCode =
+                typeof control.code === 'number' && Number.isInteger(control.code)
+                  ? control.code
+                  : 1;
+              // The shell has ended; resolving here rather than waiting on
+              // `close` keeps a server that lingers after announcing the exit
+              // from holding the local terminal open with it.
+              resolve();
+            }
           } catch {
             // Not control we understand. The stream is the news, not this frame.
           }
@@ -292,8 +305,22 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
 }
 
 // Guarded so importing this module — which the tests do, for remoteSide — does
-// not start a session.
-if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {
+// not start a session. Compared through realpath and pathToFileURL rather than
+// a hand-built `file://${argv[1]}`: Node resolves the main module through
+// symlinks and the npm .bin shim is one, so the naive comparison made the
+// installed command silently do nothing — and it also broke on any install
+// path with characters a URL escapes.
+const invokedDirectly = ((): boolean => {
+  if (!process.argv[1]) return false;
+  try {
+    return import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href;
+  } catch {
+    // argv[1] that does not resolve on disk (an embedded runner, a deleted
+    // file) is at any rate not this module being run directly.
+    return false;
+  }
+})();
+if (invokedDirectly) {
   main().then(
     (code) => process.exit(code),
     (err) => {
