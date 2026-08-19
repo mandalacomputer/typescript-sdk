@@ -1,0 +1,57 @@
+{
+  "name": "mandala-computer",
+  "version": "0.1.0",
+  "description": "TypeScript SDK for Mandala Computer — cloud desktops for AI agents",
+  "keywords": [
+    "mandala",
+    "cloud-desktop",
+    "ai-agents",
+    "computer-use",
+    "vm",
+    "vnc"
+  ],
+  "license": "MIT",
+  "homepage": "https://mandala.computer",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mandalacomputer/typescript-sdk.git"
+  },
+  "bugs": "https://github.com/mandalacomputer/typescript-sdk/issues",
+  "type": "module",
+  "bin": {
+    "mandala": "dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "dev": "tsc -p tsconfig.build.json --watch",
+    "test": "vitest run && node scripts/check-surface.mjs",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check .",
+    "format": "biome check --write .",
+    "check:surface": "node scripts/check-surface.mjs",
+    "prepublishOnly": "npm run build"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.3.0",
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.2.0"
+  }
+}
