@@ -515,10 +515,14 @@ being copied, another operation holding the guest agent. The platform's own
 message survives onto `err.message` — these are written to be acted on.
 
 `GatewayTimeoutError` is the one that does not clear and is not the platform's
-answer at all. The request reached it and is very likely still running; what
-ended was one hop's willingness to hold a connection open with nothing crossing
-it, which is why retrying unchanged reproduces it exactly. See
-[Long-running commands](#long-running-commands).
+answer at all. The request reached it, and any work it had already started
+carries on; what ended was one hop's willingness to hold a connection open with
+nothing crossing it, which is why retrying unchanged reproduces it exactly.
+After one on an `exec()` the next call may report the guest agent busy; after
+one on a read there is nothing left behind. `err.message` carries the response's
+own message where it sent a structured one, and this SDK's explanation where the
+hop sent an empty or HTML body — which is the usual case, since a 524 is
+generated at the edge. See [Long-running commands](#long-running-commands).
 
 ## The `mandala` CLI
 
