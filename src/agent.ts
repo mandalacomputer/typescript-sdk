@@ -12,6 +12,7 @@
  * `maxSteps` is a spending cap as much as a loop bound.
  */
 
+import { MandalaError } from './errors.js';
 import { isRecord } from './paths.js';
 
 /** What the caller learns about one step. */
@@ -161,13 +162,16 @@ export function toAgentEvent(
     case 'text':
       return { type: 'text', text: isRecord(data) ? String(data.text ?? '') : String(data) };
     case 'done':
+      if (!isRecord(data) || data.stop == null) {
+        throw new MandalaError('the agent stream ended with a done event that had no stop reason');
+      }
       return { type: 'done', result: toAgentResult(data) };
     case 'error': {
-      const e = isRecord(data) ? data : {};
+      const e = isRecord(data) ? data : undefined;
       return {
         type: 'error',
-        error: e.error == null ? 'the run failed' : String(e.error),
-        status: num(e.status),
+        error: e ? (e.error == null ? 'the run failed' : String(e.error)) : String(data),
+        status: num(e?.status),
       };
     }
     default:

@@ -33,4 +33,22 @@ describe('the surface source scanner', () => {
     expect(clean).toContain('"// still text"');
     expect(clean).not.toContain('remove this');
   });
+
+  it('does not treat the escaped delimiter at the end of a regex as a comment', () => {
+    const source = String.raw`
+      const route = /https:\/\//; // remove this
+      const divided = total / count; // and this
+    `;
+    const clean = stripComments(source);
+    expect(clean).toHaveLength(source.length);
+    expect(clean).toContain(String.raw`/https:\/\//`);
+    expect(clean).toContain('total / count');
+    expect(clean).not.toContain('remove this');
+    expect(clean).not.toContain('and this');
+  });
+
+  it('ignores brackets inside regex literals while balancing source', () => {
+    const source = String.raw`[{ route: /[}\]]+/, nested: [1, 2] }] after`;
+    expect(balanced(source, 0, '[', ']')).toContain('nested: [1, 2]');
+  });
 });
