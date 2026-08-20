@@ -124,6 +124,7 @@ await c.mouseUp(400, 300);
 await c.scroll(640, 400, { direction: 'down', amount: 3 });
 await c.type('hello');
 await c.key('ctrl', 'c');                     // X11 keysyms work too: Page_Down, BackSpace
+await c.key(['ctrl', 'c'], { signal });       // the same chord, cancellable
 await c.holdKey(['shift'], 1.5);
 await c.wait(2);
 const at = await c.cursorPosition();          // undefined if nothing has placed it
@@ -369,8 +370,11 @@ await c.waitForGuest();        // something inside the guest answers
 expecting a screenshot to show a desktop rather than a boot screen. It probes
 with `exit 0`, a builtin of both bash and cmd.exe, so it works on either OS.
 
-These throw rather than waiting out the timeout for states that will not resolve
-on their own — a failed build, and a suspended session nobody has resumed.
+These throw rather than waiting out the timeout for a state that will not
+resolve on its own. A failed build stops all three. A suspended session stops
+`waitUntilRunning`, which is the wait it will never resolve for — `waitForGuest`
+runs a command in the guest, and a command *resumes* a suspended computer, so it
+waits through the resume and returns when the guest answers.
 
 ### Computers that are still being built
 

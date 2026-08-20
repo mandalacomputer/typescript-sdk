@@ -42,6 +42,48 @@ describe('updateBody', () => {
   });
 });
 
+describe('numbers that would go out as null', () => {
+  // JSON.stringify writes a NaN as `null`, and the platform reads that as the
+  // field's zero value — or, on the idle window, as "follow the host". The
+  // request succeeds, configured as nobody asked, and nothing says so.
+  it('refuses a non-finite shape on create', () => {
+    expect(() => P.createBody({ cpu: Number.NaN })).toThrow(/cpu must be a finite number/);
+    expect(() => P.createBody({ ramMb: Number.POSITIVE_INFINITY })).toThrow(/ramMb/);
+    expect(() => P.createBody({ diskGb: Number.NaN })).toThrow(/diskGb/);
+  });
+
+  it('refuses a non-finite shape or idle window on update', () => {
+    expect(() => P.updateBody({ cpu: Number.NaN })).toThrow(/cpu must be a finite number/);
+    expect(() => P.updateBody({ idleSuspendMin: Number.NaN })).toThrow(/idleSuspendMin/);
+    // Null stays a real value on that field: it is how a caller says "follow
+    // the host's own window", and is the reason a NaN is worth catching.
+    expect(() => P.updateBody({ idleSuspendMin: null })).not.toThrow();
+  });
+
+  it('refuses a negative exec timeout, and keeps zero', () => {
+    expect(() => P.execBody({ command: 'ls', timeoutS: -1 })).toThrow(/must not be negative/);
+    expect(() => P.execBody({ command: 'ls', timeoutS: Number.NaN })).toThrow(/finite/);
+    expect(P.execBody({ command: 'ls', timeoutS: 0 })).toEqual({ command: 'ls', timeout_s: 0 });
+  });
+
+  it('refuses a pid that is not one, rather than pathing to it', () => {
+    // `computers/vm-1/exec/NaN` is a 404 about a route, not a sentence about
+    // the pid that was wrong.
+    expect(() => P.execHandle('vm-1', Number.NaN)).toThrow(/pid must be a positive integer/);
+    expect(() => P.execHandle('vm-1', 0)).toThrow(/pid/);
+    expect(() => P.execHandle('vm-1', 12.5)).toThrow(/pid/);
+    expect(P.execHandle('vm-1', 42)).toBe('computers/vm-1/exec/42');
+  });
+
+  it('refuses an all-whitespace name on the routes that take an optional one', () => {
+    // updateBody and snapshotBody both refuse one; a clone should not be the
+    // way to get a computer called "  ".
+    expect(() => P.nameBody('  ')).toThrow(/must not be empty/);
+    expect(P.nameBody()).toEqual({});
+    expect(P.nameBody('fork')).toEqual({ name: 'fork' });
+  });
+});
+
 describe('input bodies', () => {
   it('omits the coordinate when there is none, rather than sending 0,0', () => {
     // "Where the pointer is" and "the corner of the screen" are different
