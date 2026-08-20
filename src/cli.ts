@@ -337,6 +337,14 @@ export function guestDestination(remotePath: string, source: string): string {
   return directory ? remotePath + basename(source) : remotePath;
 }
 
+/** Format a successful upload count, refusing a short write reported as success. */
+export function uploadSize(sent: number, written?: number): string {
+  if (written !== undefined && written !== sent) {
+    die(`upload was incomplete: sent ${sent} bytes but the guest reported ${written}`);
+  }
+  return written === undefined ? `${sent} bytes sent` : `${written} bytes`;
+}
+
 async function cmdScp(srcArg: string, dstArg: string): Promise<number> {
   const src = remoteSide(srcArg);
   const dst = remoteSide(dstArg);
@@ -366,7 +374,7 @@ async function cmdScp(srcArg: string, dstArg: string): Promise<number> {
   // What the platform said, or what was sent — labelled as which, since a
   // platform that does not report a count is not evidence that everything
   // landed.
-  const size = written === undefined ? `${data.length} bytes sent` : `${written} bytes`;
+  const size = uploadSize(data.length, written);
   process.stderr.write(`${srcArg} -> ${remote.target}:${path} (${size})\n`);
   return 0;
 }
@@ -401,7 +409,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     }
     if (command === 'scp') {
       const [src, dst] = rest;
-      if (!src || !dst) die('mandala scp <src> <dst>');
+      if (!src || !dst || rest.length !== 2) die('mandala scp <src> <dst>');
       return await cmdScp(src, dst);
     }
     die(`unknown command ${command}\n\n${USAGE}`);
