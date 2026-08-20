@@ -241,9 +241,8 @@ describe('snapshotBody', () => {
 
 describe('openUrlCommand', () => {
   it('names a browser rather than asking for one', () => {
-    // xdg-open and friends are all on the base image and all exit 0 while
-    // launching nothing, because the image's default-browser association points
-    // at a desktop entry it does not ship.
+    // Firefox by name, so the choice of browser lives in this one function
+    // rather than in whatever the guest's default handler resolves to.
     expect(P.openUrlCommand('https://example.com')).toBe(
       "nohup firefox 'https://example.com' >/dev/null 2>&1 &",
     );
