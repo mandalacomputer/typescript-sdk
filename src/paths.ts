@@ -36,6 +36,12 @@ export const SNAPSHOTS = 'snapshots';
  */
 function pathId(id: string, what: string): string {
   if (!id) throw new ValidationError(`${what} must not be empty`);
+  // URL parsers normalise both raw and percent-encoded dot segments before a
+  // request is sent. Letting either through can therefore turn, for example,
+  // `computers/..` into the API root instead of a computer route.
+  if (id === '.' || id === '..') {
+    throw new ValidationError(`${what} must not be ${JSON.stringify(id)}`);
+  }
   return encodeURIComponent(id);
 }
 
