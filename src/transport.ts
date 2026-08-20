@@ -143,6 +143,27 @@ export type TransportOptions = {
  */
 type Sent = { resp: Response; timeoutMs: number };
 
+/**
+ * A message out of a parsed error body, from whichever hop wrote it.
+ *
+ * `error` is this platform's shape. `detail` and `title` are RFC 9457, which is
+ * what Cloudflare answers a request carrying `Accept: application/json` — every
+ * request from this client — for the 5xx statuses it generates itself: 500, 502,
+ * 504 and the whole 520-526 range. Unrecognised, that body reached `err.message`
+ * as 500 characters of raw JSON with the one readable sentence buried in it.
+ *
+ * Reading it is not the same as deferring to it — see `namedTheFailure`, which
+ * still counts only `error`. On a status this SDK has wording for, its own
+ * sentence says what a caller can do about it and Cloudflare's does not; this
+ * matters for the statuses left over, where the alternative is the raw body.
+ */
+const messageFromBody = (body: unknown): string | undefined => {
+  if (!body || typeof body !== 'object') return undefined;
+  const said = (v: unknown) => (typeof v === 'string' && v.trim() ? v : undefined);
+  const b = body as { error?: unknown; detail?: unknown; title?: unknown };
+  return said(b.error) ?? said(b.detail) ?? said(b.title);
+};
+
 /** The incomplete-header count, or 0 for anything that is not a number. */
 const incompleteCount = (header: string): number => {
   const n = Number(header);
@@ -286,7 +307,7 @@ export class Transport {
         `could not reach ${this.baseUrl}: ${cause instanceof Error ? cause.message : String(cause)}`,
       );
     }
-    if (!resp.ok) throw await this.#error(resp);
+    if (!resp.ok) throw await this.#error(resp, method, path, timeoutMs, opts.signal);
     return { resp, timeoutMs };
   }
 
@@ -328,17 +349,47 @@ export class Transport {
    * predates window actions" — and replacing them with a status line throws
    * away the only part of the response anybody can do anything with.
    */
-  async #error(resp: Response): Promise<APIError> {
+  async #error(
+    resp: Response,
+    method: string,
+    path: string,
+    timeoutMs: number,
+    caller?: AbortSignal,
+  ): Promise<APIError> {
     let body: unknown;
     let message = `HTTP ${resp.status}`;
-    const text = await resp.text().catch(() => '');
+    // Read through #readBody, not `.catch(() => '')`. The composed signal
+    // governs this body like any other, so a caller cancelling here, or a
+    // deadline firing here, used to be swallowed and answered with the status
+    // instead — a caller that abandoned a request on purpose was told
+    // `ConflictError`, which this SDK documents as the one worth retrying.
+    // #fetchRaw's rule, applied to the one body that was outside it.
+    const text = await this.#readBody(
+      () => resp.text(),
+      method,
+      path,
+      { resp, timeoutMs },
+      caller,
+    ).catch((cause) => {
+      // Anything else is a body that would not come, which says nothing the
+      // status does not. Answer with the status, as before.
+      if (caller?.aborted || cause instanceof ConnectionError) throw cause;
+      return '';
+    });
     if (text) {
       try {
         body = JSON.parse(text);
-        const err = (body as { error?: unknown })?.error;
-        message = typeof err === 'string' && err ? err : text.slice(0, 500);
+        message = messageFromBody(body) ?? text.slice(0, 500);
       } catch {
         message = text.slice(0, 500);
+        // Kept whole, not just read. errorForStatus replaces the message on
+        // every edge status with wording of its own, and this is the only copy
+        // of what the edge actually said — a Cloudflare Ray ID lives in that
+        // HTML and nowhere else, and it is the first thing support asks for.
+        // Untruncated because the Ray ID sits in the page's footer, well past
+        // the 500 characters the message is cut to. Shown to nobody; available
+        // to whoever needs it.
+        body = text;
       }
     }
     return errorForStatus(
