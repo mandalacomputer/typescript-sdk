@@ -912,12 +912,15 @@ export class Computer {
     geometry: { x?: number; y?: number; width?: number; height?: number } = {},
     opts: CallOptions = {},
   ): Promise<GuestWindow> {
-    const data = await this.#t.json<Record<string, unknown>>(
-      'POST',
-      P.windowPath(this.id, windowId),
-      { body: P.windowBody({ action, ...geometry }), signal: opts.signal },
-    );
-    return toGuestWindow(data ?? {});
+    const path = P.windowPath(this.id, windowId);
+    const data = await this.#t.json<Record<string, unknown>>('POST', path, {
+      body: P.windowBody({ action, ...geometry }),
+      signal: opts.signal,
+    });
+    if (!P.isRecord(data) || !data.id) {
+      throw new MandalaError(`expected a window from POST ${path}`);
+    }
+    return toGuestWindow(data);
   }
 
   // --- controlling ----------------------------------------------------
@@ -1280,7 +1283,8 @@ export class Computer {
    *
    * `timeoutMs` extends the client's per-request deadline for this one
    * transfer — a large file can legitimately outlive the default 60 seconds,
-   * and the exec docs send large output through this very path.
+   * and the exec docs send large output through this very path. Pass `0` to
+   * disable the deadline for this transfer; a caller `signal` still cancels it.
    */
   async readFile(
     path: string,
@@ -1288,6 +1292,7 @@ export class Computer {
   ): Promise<Uint8Array> {
     const res = await this.#t.bytes('GET', P.computerAction(this.id, 'files'), {
       query: P.filesQuery(path),
+      noTimeout: opts.timeoutMs === 0,
       minTimeoutMs: opts.timeoutMs,
       signal: opts.signal,
     });
@@ -1310,7 +1315,7 @@ export class Computer {
    * `.env` without echoing it through a shell command line.
    *
    * `timeoutMs` extends the client's per-request deadline for this one
-   * transfer, as on {@link readFile}.
+   * transfer, as on {@link readFile}; `0` disables it.
    *
    * @returns how many bytes the platform says it wrote, or `undefined` if it
    * did not say. Not defaulted to what was sent: that would turn "it did not
@@ -1330,6 +1335,7 @@ export class Computer {
       {
         query: P.filesQuery(path),
         raw: bytes,
+        noTimeout: opts.timeoutMs === 0,
         minTimeoutMs: opts.timeoutMs,
         signal: opts.signal,
       },
@@ -1530,6 +1536,10 @@ export class Computer {
       if (!ev) continue;
       if (ev.type === 'step') steps += 1;
       yield ev;
+      // Both frames are terminal. Do not wait for a proxy or platform that
+      // leaves the response open for heartbeats after announcing the outcome.
+      // Returning also closes Transport.sse and cancels its response reader.
+      if (ev.type === 'done' || ev.type === 'error') return;
     }
   }
 
