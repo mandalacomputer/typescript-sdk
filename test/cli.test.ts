@@ -16,6 +16,7 @@ import {
   queueTerminalWrite,
   remoteSide,
   terminalFrameByteLength,
+  unexpectedErrorText,
   uploadSize,
   waitForWebSocketOpen,
 } from '../src/cli.js';
@@ -96,6 +97,25 @@ describe('terminal lifecycle', () => {
     expect(exits).toBe(0);
     callbacks[1]!();
     expect(exits).toBe(1);
+  });
+
+  it('still finishes flushing when a broken stream throws from write', () => {
+    const broken = {
+      write() {
+        throw new Error('EPIPE');
+      },
+    } as unknown as NodeJS.WritableStream;
+    let exits = 0;
+    flushOutput(broken, broken, () => {
+      exits += 1;
+    });
+    expect(exits).toBe(1);
+  });
+
+  it('keeps the stack for an unexpected top-level failure', () => {
+    const err = new Error('unexpected');
+    expect(unexpectedErrorText(err)).toBe(err.stack);
+    expect(unexpectedErrorText('unexpected')).toBe('unexpected');
   });
 });
 
@@ -219,6 +239,8 @@ describe('argument handling', () => {
     expect((await run(['--help'])).code).toBe(0);
     expect((await run(['ssh', '--help'])).code).toBe(0);
     expect((await run(['ssh', '-h'])).code).toBe(0);
+    expect((await run(['scp', '--help'])).code).toBe(0);
+    expect((await run(['scp', '-h'])).code).toBe(0);
   });
 
   it('names an unknown command rather than guessing', async () => {
@@ -258,6 +280,12 @@ describe('argument handling', () => {
 
   it('refuses --session with nothing after it', async () => {
     const { code, out } = await run(['ssh', 'demo', '--session']);
+    expect(code).toBe(1);
+    expect(out).toContain('--session needs a name');
+  });
+
+  it('refuses an empty equals-form session name', async () => {
+    const { code, out } = await run(['ssh', 'demo', '--session=']);
     expect(code).toBe(1);
     expect(out).toContain('--session needs a name');
   });
