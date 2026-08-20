@@ -23,7 +23,43 @@ export const SIZES = 'sizes';
 export const COMPUTERS = 'computers';
 export const SNAPSHOTS = 'snapshots';
 
-export const computer = (id: string): string => `computers/${encodeURIComponent(id)}`;
+/**
+ * One id, in a path, refused when it is empty.
+ *
+ * The one empty string this file has to catch, because it is the one that does
+ * not merely fail: `encodeURIComponent('')` is `''`, so an empty id does not
+ * produce a path that 404s, it produces `computers/` — the *collection* route.
+ * A get then decodes a list of computers as one computer and finds nothing in
+ * it, and every other verb is aimed at a route that was never asked to answer
+ * it. Nothing in either case says the id was missing.
+ */
+function pathId(id: string, what: string): string {
+  if (!id) throw new TypeError(`${what} must not be empty`);
+  return encodeURIComponent(id);
+}
+
+/**
+ * One number, refused when it is not finite.
+ *
+ * A NaN passes every range check written as a comparison — `NaN <= 0` and
+ * `NaN > 30` are both false — and then `JSON.stringify` writes it as `null`,
+ * which the platform reads as the field's zero value. The call succeeds, at the
+ * wrong coordinate or for the wrong duration, and nothing says so: the failure
+ * {@link wholePoint} exists to prevent, arriving through a different door.
+ */
+function finite(v: number, what: string): number {
+  if (!Number.isFinite(v)) {
+    throw new TypeError(`${what} must be a finite number (got ${v})`);
+  }
+  return v;
+}
+
+/** {@link finite}, for the coordinates and sizes a caller may legitimately omit. */
+function finiteIf(v: number | undefined, what: string): void {
+  if (v !== undefined) finite(v, what);
+}
+
+export const computer = (id: string): string => `computers/${pathId(id, 'computer id')}`;
 
 /**
  * start | stop | suspend | restart | clone | screenshot | input | exec |
@@ -36,9 +72,9 @@ export const execHandle = (id: string, pid: number): string => `${computer(id)}/
 
 /** One window on the desktop (OPL-3583). The id is `0x2600003`-shaped. */
 export const windowPath = (id: string, windowId: string): string =>
-  `${computer(id)}/windows/${encodeURIComponent(windowId)}`;
+  `${computer(id)}/windows/${pathId(windowId, 'window id')}`;
 
-export const snapshot = (id: string): string => `snapshots/${encodeURIComponent(id)}`;
+export const snapshot = (id: string): string => `snapshots/${pathId(id, 'snapshot id')}`;
 
 /** restore | clone */
 export const snapshotAction = (id: string, action: string): string => `${snapshot(id)}/${action}`;
@@ -220,7 +256,11 @@ export type ExecArgs = {
  */
 export function execBody(args: ExecArgs): Json {
   const body: Json = { command: args.command };
-  if (args.timeoutS !== undefined) body.timeout_s = args.timeoutS;
+  // Checked here rather than left to the transport's own finiteness guard: that
+  // one is on the request deadline, and a client whose deadline is disabled
+  // never reaches it — so on exactly that client a NaN timeout would sail
+  // through as a `null` the guest reads as no timeout at all.
+  if (args.timeoutS !== undefined) body.timeout_s = finite(args.timeoutS, 'timeoutS');
   if (args.desktop) body.session = 'desktop';
   if (args.background) body.background = true;
   if (args.cwd) body.cwd = args.cwd;
@@ -288,7 +328,11 @@ export function filesQuery(path: string): Query {
 
 export const MODIFIER_JOIN = '+';
 
-export const pointerBody = (action: string, x: number, y: number): Json => ({ action, x, y });
+export const pointerBody = (action: string, x: number, y: number): Json => ({
+  action,
+  x: finite(x, 'x'),
+  y: finite(y, 'y'),
+});
 
 /**
  * Half a coordinate, refused rather than completed with a zero.
@@ -301,6 +345,11 @@ function wholePoint(x?: number, y?: number): void {
   if ((x === undefined) !== (y === undefined)) {
     throw new TypeError('give both x and y, or neither — half a coordinate is not a point');
   }
+  // For the same reason, one line down: a NaN coordinate is serialized as
+  // `null` and read as 0, which is the same click at the corner of the screen
+  // that half a point would have produced.
+  finiteIf(x, 'x');
+  finiteIf(y, 'y');
 }
 
 /**
@@ -348,7 +397,12 @@ export function dragBody(toX: number, toY: number, fromX?: number, fromY?: numbe
   if ((fromX === undefined) !== (fromY === undefined)) {
     throw new TypeError('give both fromX and fromY, or neither');
   }
-  const body: Json = { action: 'left_click_drag', coordinate: [toX, toY] };
+  finiteIf(fromX, 'fromX');
+  finiteIf(fromY, 'fromY');
+  const body: Json = {
+    action: 'left_click_drag',
+    coordinate: [finite(toX, 'toX'), finite(toY, 'toY')],
+  };
   if (fromX !== undefined && fromY !== undefined) body.start_coordinate = [fromX, fromY];
   return body;
 }
@@ -391,7 +445,7 @@ export function scrollBody(args: {
   const body: Json = {
     action: 'scroll',
     scroll_direction: args.direction,
-    amount: args.amount,
+    amount: finite(args.amount, 'amount'),
   };
   if (args.x !== undefined && args.y !== undefined) body.coordinate = [args.x, args.y];
   if (args.modifiers?.length) body.text = args.modifiers.join(MODIFIER_JOIN);
@@ -407,6 +461,7 @@ export function keyBody(keys: readonly string[]): Json {
 
 export function holdKeyBody(keys: readonly string[], seconds: number): Json {
   if (!keys.length) throw new TypeError('holdKey() needs at least one key');
+  finite(seconds, 'seconds');
   if (seconds <= 0) throw new TypeError('seconds must be positive');
   return { action: 'hold_key', keys: [...keys], duration: seconds };
 }
@@ -419,6 +474,10 @@ export function holdKeyBody(keys: readonly string[], seconds: number): Json {
  * and 100 seconds would not return, it would fail.
  */
 export function waitBody(seconds: number): Json {
+  // Before the range checks, which a NaN passes: both `<= 0` and `> 30` are
+  // false for it, and the wait would go out as `duration: null` and be taken
+  // for the platform's default.
+  finite(seconds, 'seconds');
   if (seconds <= 0) throw new TypeError('seconds must be positive');
   if (seconds > 30) {
     throw new TypeError('the platform caps a wait at 30 seconds; call wait() again for longer');
@@ -464,6 +523,10 @@ export function windowBody(args: {
   if (!WINDOW_ACTIONS.includes(args.action)) {
     throw new TypeError(`action must be one of ${WINDOW_ACTIONS.join(', ')}`);
   }
+  finiteIf(args.x, 'x');
+  finiteIf(args.y, 'y');
+  finiteIf(args.width, 'width');
+  finiteIf(args.height, 'height');
   return omitUndefined({ ...args });
 }
 
@@ -522,6 +585,7 @@ export function agentBody(args: {
   stream: boolean;
 }): Json {
   if (!args.prompt.trim()) throw new TypeError('prompt must not be empty');
+  finiteIf(args.maxSteps, 'maxSteps');
   return omitUndefined({
     prompt: args.prompt,
     max_steps: args.maxSteps,

@@ -367,7 +367,12 @@ describe('snapshots', () => {
   });
 
   it('sends the interlock when it has one', async () => {
-    const { rec, client: c } = client(() => json({ snapshots_deleted: 3 }));
+    // Only the DELETE answers with the count. Answering the get with it too
+    // left the handle holding a payload with no id, which is a computer this
+    // SDK now refuses to build a path for at all.
+    const { rec, client: c } = client((call) =>
+      call.method === 'DELETE' ? json({ snapshots_deleted: 3 }) : anyRoute(call),
+    );
     const computer = await c.computers.get('vm-1');
     const purged = await computer.delete({ deleteSnapshots: true, expect: 'abc123' });
     expect(rec.last().query).toEqual({ snapshots: 'delete', expect: 'abc123' });
@@ -532,5 +537,137 @@ describe('power', () => {
       ['POST', 'computers/vm-1/start'],
       ['GET', 'computers/vm-1'],
     ]);
+  });
+});
+
+describe('answers that would leave a handle worse off', () => {
+  it('refuses a refresh that answered with no computer, rather than emptying itself', async () => {
+    // Assigned unguarded, a 204 flattens to `{}` and the handle loses its id
+    // along with every other field — every call after it then aims at
+    // `computers/`, the collection. #power has guarded this since it was
+    // written; refresh had not, and #power's own fallback is a refresh.
+    let gets = 0;
+    const { client: c } = client((call) => {
+      if (call.method === 'GET' && call.path === '/computers/vm-1') {
+        gets += 1;
+        return gets === 1 ? json(COMPUTER) : new Response(null, { status: 204 });
+      }
+      return anyRoute(call);
+    });
+    const computer = await c.computers.get('vm-1');
+    await expect(computer.refresh()).rejects.toThrow(
+      /expected a computer from GET computers\/vm-1/,
+    );
+    // And the handle still knows which machine it is.
+    expect(computer.id).toBe('vm-1');
+    expect(computer.status).toBe('running');
+  });
+
+  it('re-reads rather than emptying itself when an update answered with nothing', async () => {
+    const { rec, client: c } = client((call) =>
+      call.method === 'PATCH' ? new Response(null, { status: 204 }) : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    rec.calls.length = 0;
+    await computer.update({ cpu: 4 });
+    expect(rec.routes()).toEqual([
+      ['PATCH', 'computers/vm-1'],
+      ['GET', 'computers/vm-1'],
+    ]);
+    expect(computer.id).toBe('vm-1');
+  });
+
+  it('does not offer the snapshot a disk is copied from as the reason it failed', async () => {
+    // build.source names what is being copied FROM and is present throughout a
+    // healthy build. Read as a fallback reason it answers "why did this fail"
+    // with a snapshot id, about a computer that may still be building.
+    const { client: c } = client(() =>
+      json({ ...COMPUTER, status: 'building', build: { source: 'snap-42' } }),
+    );
+    const computer = await c.computers.get('vm-1');
+    expect(computer.buildError).toBe('');
+    // And the wait's message falls back to its own words rather than the id.
+    const { client: d } = client(() =>
+      json({ ...COMPUTER, status: 'build-failed', build: { source: 'snap-42' } }),
+    );
+    const failed = await d.computers.get('vm-1');
+    const err = await failed.waitUntilRunning({ timeoutMs: 10, pollMs: 1 }).catch((e) => e);
+    expect(err.message).toMatch(/the disk copy failed/);
+    expect(err.message).not.toContain('snap-42');
+  });
+
+  it('does not claim bytes landed that the platform never counted', async () => {
+    // The docstring promises what the platform said it wrote, and `?? sent`
+    // affirms what nobody said — the same false statement `delete()` refuses to
+    // make about an irreversible act.
+    const { client: c } = client((call) => (call.method === 'PUT' ? json({}) : anyRoute(call)));
+    const computer = await c.computers.get('vm-1');
+    expect(await computer.writeFile('/tmp/a.txt', 'hello')).toBeUndefined();
+  });
+
+  it('does not read a background command with no exit code as having succeeded', async () => {
+    // Number('') is 0, and a command still running reported as having exited
+    // successfully is the one wrong answer here that reads as fine. The same
+    // guard toExecResult carries on the same field.
+    const { client: c } = client((call) =>
+      /\/exec$/.test(call.path) ? json({ pid: 42, running: true, exit_code: '' }) : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    const started = await computer.execBackground('sleep 60');
+    expect(started.exitCode).toBeUndefined();
+    expect(started.running).toBe(true);
+  });
+
+  it('does not read a background exit code it cannot parse as success', async () => {
+    // num()'s implicit fallback is 0, so `"killed"` decoded to "exited
+    // successfully" — the same wrong-answer-that-reads-as-fine the empty-string
+    // guard above exists for. toExecResult passes -1 on the same field.
+    for (const spelling of ['killed', 'signal:9', {}]) {
+      const { client: c } = client((call) =>
+        /\/exec$/.test(call.path)
+          ? json({ pid: 42, running: false, exit_code: spelling })
+          : anyRoute(call),
+      );
+      const started = await (await c.computers.get('vm-1')).execBackground('sleep 60');
+      expect(started.exitCode).toBe(-1);
+    }
+  });
+
+  it('does not read a stringified "false" as true, in either spelling', async () => {
+    // Boolean('false') is true — the one coercion in the decoders that inverts
+    // a field's meaning rather than blurring it. 'False' is the spelling most
+    // likely to arrive: the platform's own SDK is Python's, and str(False)
+    // capitalises.
+    for (const no of ['false', 'False', 'FALSE']) {
+      const { client: c } = client((call) =>
+        /\/exec$/.test(call.path)
+          ? json({ ...EXEC_OK, timed_out: no, out_truncated: no })
+          : anyRoute(call),
+      );
+      const res = await (await c.computers.get('vm-1')).exec('true');
+      expect(res.timedOut).toBe(false);
+      expect(res.truncated).toBe(false);
+      expect(res.ok).toBe(true);
+    }
+  });
+
+  it('lets a caller abort a guest wait during the probe, not only between them', async () => {
+    // The signal used to reach only the sleep between polls, so an abort waited
+    // out whatever probe was already in flight — under the client's own
+    // per-request deadline, not the wait's.
+    const ac = new AbortController();
+    const { client: c } = client((call) => {
+      if (/\/exec$/.test(call.path)) {
+        // After the transport is already waiting on it, which is the case that
+        // used to be uninterruptible.
+        setTimeout(() => ac.abort(new Error('caller changed their mind')), 5);
+        return new Promise<Response>(() => {}); // never answers
+      }
+      return anyRoute(call);
+    });
+    const computer = await c.computers.get('vm-1');
+    await expect(
+      computer.waitForGuest({ timeoutMs: 60_000, pollMs: 1, signal: ac.signal }),
+    ).rejects.toThrow(/changed their mind/);
   });
 });

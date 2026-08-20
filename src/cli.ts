@@ -140,8 +140,22 @@ async function interact(url: string): Promise<number> {
     if (ws.readyState === WebSocket.OPEN) ws.send(chunk);
   };
 
+  /**
+   * Piped input ran out — tell the remote shell so, rather than nothing.
+   *
+   * `mandala ssh vm < script` otherwise hangs forever after the last line: the
+   * PTY is still waiting for input nobody will ever type, and the only thing
+   * that ends this session is the socket closing. Ctrl-D is what a terminal
+   * sends at that point, and it is what makes the guest's shell exit and report
+   * a code back through the exit frame.
+   */
+  const onStdinEnd = () => {
+    if (ws.readyState === WebSocket.OPEN) ws.send(new Uint8Array([0x04]));
+  };
+
   const cleanup = () => {
     stdin.off('data', onStdin);
+    stdin.off('end', onStdinEnd);
     stdout.off('resize', sendSize);
     // Restoring the terminal is the one thing that MUST happen. Skipping it
     // leaves the user's shell in raw mode with no echo, which reads as a hung
@@ -173,6 +187,7 @@ async function interact(url: string): Promise<number> {
     }
     stdin.resume();
     stdin.on('data', onStdin);
+    stdin.on('end', onStdinEnd);
     stdout.on('resize', sendSize);
     sendSize();
 
@@ -214,7 +229,17 @@ async function interact(url: string): Promise<number> {
           return;
         }
         const bytes = new Uint8Array(ev.data as ArrayBuffer);
-        if (bytes.byteLength > MAX_FRAME) return;
+        if (bytes.byteLength > MAX_FRAME) {
+          // Still dropped — a frame this size is not the terminal protocol and
+          // writing it would be worse. But said out loud: spliced silently out
+          // of the middle of a byte stream it reads as a working shell
+          // producing corrupted output, which is the one shape of failure this
+          // repo refuses everywhere else.
+          process.stderr.write(
+            `mandala: dropped a ${bytes.byteLength}-byte frame — not the terminal protocol\n`,
+          );
+          return;
+        }
         stdout.write(bytes);
       });
       ws.addEventListener('close', () => resolve(), { once: true });
@@ -289,7 +314,11 @@ async function cmdScp(srcArg: string, dstArg: string): Promise<number> {
   const path = remote.path.endsWith('/') ? remote.path + basename(srcArg) : remote.path;
   const data = await readFile(srcArg);
   const written = await (await resolve(client, remote.target)).writeFile(path, data);
-  process.stderr.write(`${srcArg} -> ${remote.target}:${path} (${written} bytes)\n`);
+  // What the platform said, or what was sent — labelled as which, since a
+  // platform that does not report a count is not evidence that everything
+  // landed.
+  const size = written === undefined ? `${data.length} bytes sent` : `${written} bytes`;
+  process.stderr.write(`${srcArg} -> ${remote.target}:${path} (${size})\n`);
   return 0;
 }
 
@@ -313,6 +342,12 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
         else positional.push(arg);
       }
       const target = positional[0] ?? die('mandala ssh <computer>');
+      if (positional.length > 1) {
+        // `mandala ssh vm ls -la` is the ubiquitous ssh idiom, and this command
+        // does not have it. Ignoring the tail would open an interactive shell
+        // instead and look like it worked.
+        die(`mandala ssh takes one computer and runs no command (got ${positional.length} args)`);
+      }
       return await cmdSsh(target, session);
     }
     if (command === 'scp') {
