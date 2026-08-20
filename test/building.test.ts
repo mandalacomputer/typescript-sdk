@@ -141,6 +141,19 @@ describe('execBody', () => {
     expect(() => P.execBody({ command: 'x', env: { '': 'c' } })).toThrow(/empty name/);
   });
 
+  it('names the key when a value is not a string', () => {
+    // `{ TOKEN: process.env.TOKEN }` with the variable unset is the shape this
+    // catches. Cast rather than checked, it reached .includes() and threw
+    // "Cannot read properties of undefined", naming neither the parameter nor
+    // the entry — the one refusal here that did not say what was wrong.
+    const unset = { TOKEN: undefined } as unknown as Record<string, string>;
+    expect(() => P.execBody({ command: 'x', env: unset })).toThrow(/"TOKEN" must be a string/);
+    const numeric = { PORT: 8080 } as unknown as Record<string, string>;
+    expect(() => P.execBody({ command: 'x', env: numeric })).toThrow(
+      /must be a string, not number/,
+    );
+  });
+
   it('refuses more than the platform accepts, before the round trip', () => {
     const many = Object.fromEntries(
       Array.from({ length: P.MAX_ENV_ENTRIES + 1 }, (_, i) => [`K${i}`, 'v']),
@@ -242,7 +255,15 @@ describe('screenshotQuery', () => {
     // object here would put a '?' on every screenshot the SDK has ever taken.
     expect(P.screenshotQuery(undefined, false)).toBeUndefined();
     expect(P.screenshotQuery(undefined, true)).toEqual({ fresh: 1 });
-    expect(P.screenshotQuery(320, true)).toEqual({ w: 320, fresh: 1 });
+    expect(P.screenshotQuery(320, false)).toEqual({ w: 320 });
+  });
+
+  it('refuses fresh alongside a width, which the platform would ignore', () => {
+    // The platform's handler branches on `w` and returns the thumbnail before
+    // it reads `fresh` — and builds that thumbnail off the cached frame. So
+    // this combination promised an uncached frame and delivered a doubly-cached
+    // one, silently, on the call the docs tell a drive loop to make.
+    expect(() => P.screenshotQuery(320, true)).toThrow(/cannot be combined with a width/);
   });
 
   it('checks the width even alongside fresh', () => {

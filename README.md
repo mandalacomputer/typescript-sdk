@@ -149,6 +149,10 @@ screen as it was *before* its own last click. A model handed that frame conclude
 the click missed and clicks again, and the second click lands on whatever the
 first one revealed. A thumbnail can have the cached frame; a decision cannot.
 
+`fresh` and a width cannot be combined — `screenshot(320, { fresh: true })` is
+refused, not half-honoured. The platform serves every downscaled screenshot from
+its cache, so the flag alongside a width is one it would take and ignore.
+
 ### Windows
 
 A screenshot says what the desktop *looks like*; this says what any of it **is**,
@@ -184,14 +188,18 @@ with no display; anything with a window needs the desktop session:
 await c.exec('nohup firefox https://example.com >/dev/null 2>&1 &', { desktop: true });
 ```
 
-`env` adds variables on top of the guest's profile — `PATH` and the rest survive,
-because the command runs through a login shell. It is the right way to hand a
-build a token, since the alternative is interpolating one into the command line
-where the guest's shell history and process list can both read it:
+`env` is the right way to hand a build a token, since the alternative is
+interpolating one into the command line where the guest's shell history and
+process list can both read it:
 
 ```ts
 await c.exec('./deploy.sh', { cwd: '/src', env: { CI: '1', TOKEN: token } });
 ```
+
+On Linux those variables go *on top of* the guest's profile — `PATH` and the rest
+survive, because the command runs through `bash -lc`. On Windows they **replace**
+it: `cmd.exe /c` sources no profile, so the command sees exactly what you passed
+and nothing else, `PATH` and `SystemRoot` included. Pass what it needs there.
 
 Or call `open()` and let the SDK write that line — it names a browser that
 actually works on the image, quotes the URL, and detaches the launch:

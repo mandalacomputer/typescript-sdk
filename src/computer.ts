@@ -694,6 +694,11 @@ export class Computer {
    * whatever the first one revealed. A thumbnail can have the cached frame; a
    * decision cannot.
    *
+   * `fresh` and `width` cannot be combined, and asking for both is refused
+   * rather than half-honoured: the platform serves every downscaled screenshot
+   * from its cache, so a `fresh` alongside a width is a flag it would accept
+   * and ignore. Anything deciding on the image wants the full frame anyway.
+   *
    * A screenshot is not *use* as far as the platform's idle sweep is concerned,
    * and does not resume a suspended computer. A loop that only polls the screen
    * can therefore watch its own machine be suspended out from under it after the
@@ -961,11 +966,14 @@ export class Computer {
    * than a longer timeout: a command that outlives `timeoutS` keeps running
    * inside the guest, and its output is then unreachable.
    *
-   * `env` adds variables for this command. It goes on top of the guest's
-   * profile rather than replacing it — the command runs through a login shell,
-   * so `PATH` and the rest survive — and it is the right way to hand a build a
-   * token, because the alternative is interpolating it into `command` where the
-   * guest's shell history and process list can both read it.
+   * `env` adds variables for this command, and is the right way to hand a build
+   * a token — the alternative is interpolating it into `command`, where the
+   * guest's shell history and process list can both read it. On Linux it goes
+   * on top of the guest's profile rather than replacing it: the command runs
+   * through `bash -lc`, so `PATH` and the rest survive. On **Windows it
+   * replaces** — `cmd.exe /c` sources no profile, so the command sees these
+   * variables and nothing else, `PATH` and `SystemRoot` included. Pass what
+   * that command needs, or set it inside `command`.
    */
   async exec(
     command: string,

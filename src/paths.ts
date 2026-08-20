@@ -248,10 +248,16 @@ export type ExecArgs = {
   /**
    * Environment variables for the command.
    *
-   * Added on top of the guest's profile rather than replacing it. The guest
-   * agent does replace the environment of the process it spawns, but every exec
-   * here runs through a login shell, which sources the profile and puts `PATH`
-   * and the rest back before the command sees it.
+   * On Linux, added on top of the guest's profile rather than replacing it. The
+   * guest agent does replace the environment of the process it spawns, but a
+   * Linux exec runs through `/bin/bash -lc`, which sources the profile and puts
+   * `PATH` and the rest back before the command sees it.
+   *
+   * On Windows it *replaces*. The shell there is `cmd.exe /c`, which sources no
+   * profile, so the command runs with these variables and nothing else — no
+   * `PATH`, no `SystemRoot`, which is most of what `cmd.exe` needs to invoke
+   * anything. Pass the variables that command depends on, or set them inside
+   * `command` itself.
    */
   env?: Readonly<Record<string, string>>;
 };
@@ -297,7 +303,18 @@ function envObject(env: Readonly<Record<string, string>>): Json {
     if (name.includes('=') || name.includes('\0')) {
       throw new TypeError(`env name ${JSON.stringify(name)} must not contain '=' or a NUL`);
     }
-    const value = env[name] as string;
+    // Checked rather than cast, because the cast is a lie on the one input the
+    // comment above anticipates: `{ TOKEN: process.env.TOKEN }` with the
+    // variable unset hands this an `undefined`, and every JS caller can hand it
+    // anything at all. Without this the next line throws a bare "Cannot read
+    // properties of undefined", which names neither the parameter nor the key —
+    // the only refusal on this surface that would not say what was wrong.
+    const value: unknown = env[name];
+    if (typeof value !== 'string') {
+      throw new TypeError(
+        `env value for ${JSON.stringify(name)} must be a string, not ${value === null ? 'null' : typeof value}`,
+      );
+    }
     if (value.includes('\0')) {
       throw new TypeError(`env value for ${JSON.stringify(name)} must not contain a NUL`);
     }
@@ -557,7 +574,7 @@ export function waitBody(seconds: number): Json {
 export const cursorBody = (): Json => ({ action: 'cursor_position' });
 
 /**
- * `w` downscales, `fresh` skips the cache.
+ * `w` downscales, `fresh` skips the cache — and never both.
  *
  * A bare screenshot may be served from a cache up to 1.5 seconds old, which is
  * what makes N dashboard watchers cost one screendump — and what makes a drive
@@ -582,7 +599,25 @@ export function screenshotQuery(width?: number, fresh?: boolean): Query | undefi
     }
     query.w = width;
   }
-  if (fresh) query.fresh = 1;
+  if (fresh) {
+    // Refused rather than sent, because the platform takes it and ignores it.
+    // Its handler branches on `w` first and returns the thumbnail before it
+    // ever reads `fresh` — and that thumbnail is built off the *cached* frame
+    // and then cached a second time itself. So `{ w: 320, fresh: 1 }` is a
+    // request the wire carries happily and the platform cannot honour, which
+    // makes `screenshot(320, { fresh: true })` — the natural spelling, given
+    // the signature — the one call that promises an uncached frame in capitals
+    // and returns a doubly-cached one. That is exactly the shape this file
+    // exists to refuse, so it is refused here rather than documented away.
+    if (width !== undefined) {
+      throw new TypeError(
+        'fresh cannot be combined with a width: the platform serves every downscaled ' +
+          'screenshot from its cache, so the flag would be silently ignored. Drop the ' +
+          'width to get an uncached frame.',
+      );
+    }
+    query.fresh = 1;
+  }
   // Undefined rather than an empty object for the bare call, so the URL this
   // builds is byte-for-byte the one it built before `fresh` existed.
   return Object.keys(query).length ? query : undefined;
