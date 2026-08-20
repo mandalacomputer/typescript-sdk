@@ -216,8 +216,27 @@ await c.open('https://example.com');
 
 ### Long-running commands
 
-For builds, installs, test suites and servers. Strictly better than
-backgrounding with `&`, which throws away the exit code and the output:
+**`exec` cannot wait longer than about two minutes**, whatever `timeoutS` says.
+The HTTP budget is derived from it and the platform stretches its own deadline
+to match, but a proxy in front of the platform abandons a request that has
+produced no response for roughly that long and answers 524, which arrives as
+`GatewayTimeoutError`. Measured against `app.mandala.computer`:
+
+| command | `timeoutS` | result | wall clock |
+|---|---|---|---|
+| `sleep 110` | 230 | ok | 110.6s |
+| `sleep 130` | 300 | `GatewayTimeoutError` | 125.2s |
+| `sleep 130` | 3600 | `GatewayTimeoutError` | 125.3s |
+
+The last two rows are the point: a twelvefold difference in what was asked for,
+a tenth of a second in where it ended, because the hop that gives up never saw
+the argument. The command also survives the request that abandoned it, so the
+call after one of these often raises `ConflictError` — the guest agent still
+busy with it, which is the first failure continuing rather than a second one.
+
+So `execBackground` is not merely the tidier option past a few seconds; past two
+minutes it is the only one that works. Strictly better than backgrounding with
+`&`, which throws away the exit code and the output:
 
 ```ts
 const job = await c.execBackground('apt-get install -y build-essential');
@@ -476,6 +495,10 @@ import {
   ConflictError,       //     409 — right request, wrong moment. Retry this one.
   RateLimitError,      //     429 — retry after retryAfterMs when present
   UnavailableError,    //     503 — a listing would have been short
+  GatewayTimeoutError, //     504/524 — a proxy gave up; the work carries on
+  OriginResponseError, //     520 — it answered, unreadably; work may have happened
+  OriginUnreachableError,//   521-523 — a proxy could not reach it; retry
+  OriginTLSError,      //     525/526 — a certificate they cannot agree on
   ConnectionError,     //   the platform could not be reached. Retryable.
   TimeoutError,        //   a wait helper gave up
   isTransient,
@@ -493,6 +516,31 @@ try {
 `ConflictError` is the one that clears itself: a guest still booting, a disk still
 being copied, another operation holding the guest agent. The platform's own
 message survives onto `err.message` — these are written to be acted on.
+
+`GatewayTimeoutError` is the one that does not clear and is not the platform's
+answer at all. The request reached it, and any work it had already started
+carries on; what ended was one hop's willingness to hold a connection open with
+nothing crossing it, which is why retrying unchanged reproduces it exactly.
+After one on an `exec()` the next call may report the guest agent busy; after
+one on a read there is nothing left behind. `err.message` carries the response's
+own message where it sent a structured one, and this SDK's explanation where the
+hop sent an empty or HTML body — which is the usual case, since a 524 is
+generated at the edge. See [Long-running commands](#long-running-commands).
+
+`OriginUnreachableError` is its opposite and is why the two are different types.
+A gateway timeout means the request arrived and its work carries on; these mean
+it never arrived, so nothing was started and there is nothing to account for.
+521-523 are usually the platform restarting and clear on their own. 525 and 526
+are `OriginTLSError` instead — a handshake that will fail the same way on every
+retry, so it is a deployment to fix rather than an outage to wait out.
+
+`OriginResponseError` is 520 alone, and it is the trap in that range: despite the
+neighbouring number it means the platform **was** reached and its answer could
+not be read, so the work may have happened in full, in part, or not at all.
+Before retrying anything that creates something, check whether the first attempt
+took effect.
+Neither is in `isTransient` — this SDK decides transience by class, and adding a
+retrying status would be a change to retry policy rather than to naming.
 
 ## The `mandala` CLI
 

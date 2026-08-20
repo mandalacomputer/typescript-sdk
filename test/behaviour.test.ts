@@ -1,11 +1,24 @@
 /** What the handles do, as distinct from where they send it. */
 
 import { describe, expect, it } from 'vitest';
-import { Client, MandalaError, TimeoutError } from '../src/index.js';
+import {
+  APIError,
+  AuthenticationError,
+  Client,
+  GatewayTimeoutError,
+  isTransient,
+  MandalaError,
+  OriginResponseError,
+  OriginTLSError,
+  OriginUnreachableError,
+  RateLimitError,
+  TimeoutError,
+} from '../src/index.js';
 import {
   anyRoute,
   BASE,
   COMPUTER,
+  cloudflareJson,
   EXEC_OK,
   errorJson,
   json,
@@ -698,6 +711,182 @@ describe('exec', () => {
     }
   });
 
+  it('reports a proxy giving up as more than a bare status', async () => {
+    // Cloudflare content-negotiates its error page, and every request from this
+    // client asks for JSON, so the 524 arrives with an EMPTY body — which left
+    // err.message as the bare string 'HTTP 524': no cause, no way out.
+    const { client: c } = client((call) =>
+      call.path.endsWith('/exec') ? new Response('', { status: 524 }) : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    const err = await computer.exec('sleep 130', { timeoutS: 300 }).catch((e) => e);
+    expect(err).toBeInstanceOf(GatewayTimeoutError);
+    expect(err.status).toBe(524);
+    expect(err.message).toMatch(/proxy/);
+    expect(err.message).toMatch(/outlived the request/);
+    expect(err.message).toMatch(/execBackground\(\)/);
+  });
+
+  it('discards the proxy error page rather than truncating it into the message', async () => {
+    const { client: c } = client((call) =>
+      call.path.endsWith('/exec')
+        ? new Response('<!DOCTYPE html><html><body>error code: 524</body></html>', {
+            status: 524,
+            headers: { 'content-type': 'text/html' },
+          })
+        : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    const err = await computer.exec('sleep 130').catch((e) => e);
+    expect(err.message).not.toMatch(/DOCTYPE/);
+  });
+
+  it('does not offer a proxy timeout to the retry loops', async () => {
+    // Retrying reproduces it at the same place, because the hop that gave up
+    // never saw how long the caller asked to wait.
+    const { client: c } = client((call) =>
+      call.path.endsWith('/exec') ? new Response('', { status: 524 }) : anyRoute(call),
+    );
+    const err = await (await c.computers.get('vm-1')).exec('sleep 130').catch((e) => e);
+    expect(isTransient(err)).toBe(false);
+  });
+
+  it('keeps a structured message rather than overwriting it', async () => {
+    // The substitution is for a body that said nothing, not for every 504. A
+    // gateway status can be raised by any proxy in the chain, and one that
+    // speaks JSON has said something more specific than this client can.
+    const { client: c } = client((call) =>
+      call.path.endsWith('/exec')
+        ? errorJson(504, 'upstream unavailable before dispatch')
+        : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    const err = await computer.exec('make').catch((e) => e);
+    expect(err).toBeInstanceOf(GatewayTimeoutError);
+    expect(err.message).toBe('upstream unavailable before dispatch');
+  });
+
+  it('does not promise a surviving command to a read', async () => {
+    // A GET started nothing, so the wording must not claim otherwise.
+    const { client: c } = client(() => new Response('', { status: 524 }));
+    const err = await c.computers.get('vm-1').catch((e) => e);
+    expect(err).toBeInstanceOf(GatewayTimeoutError);
+    expect(err.message).toMatch(/Nothing was cancelled/);
+    expect(err.message).toMatch(/Most often/);
+    expect(err.message).not.toMatch(/whatever this request started is still running/);
+  });
+
+  it('tells an origin that was never reached apart from one that stopped answering', async () => {
+    // Opposite implications for whether the work survived: a 524 means the
+    // request arrived and is still being worked on, a 522 means it never
+    // arrived, so nothing was started and nothing outlives anything.
+    const { client: c } = client(() => new Response('', { status: 522 }));
+    const err = await c.computers.get('vm-1').catch((e) => e);
+    expect(err).toBeInstanceOf(OriginUnreachableError);
+    expect(err).not.toBeInstanceOf(GatewayTimeoutError);
+    expect(err.message).toMatch(/never sent/);
+    expect(err.message).toMatch(/clears on its own/);
+  });
+
+  it('does not tell a 520 that its work never happened', async () => {
+    // Cloudflare returns 520 when the origin DID receive the request and
+    // answered unreadably. Filed with the unreachable statuses it inherited
+    // "the request never arrived, so nothing was started" — said about a create
+    // that may have just made a billable computer.
+    const { client: c } = client(() => new Response('', { status: 520 }));
+    const err = await c.computers.create({ template: 'base' }).catch((e) => e);
+    expect(err).toBeInstanceOf(OriginResponseError);
+    expect(err).not.toBeInstanceOf(OriginUnreachableError);
+    expect(err.message).not.toMatch(/never arrived/);
+    expect(err.message).toMatch(/did arrive/);
+    expect(err.message).toMatch(/creates something/);
+  });
+
+  it('keeps a 520 body the platform may itself have written', async () => {
+    const { client: c } = client(() => errorJson(520, 'the hypervisor closed the connection'));
+    const err = await c.computers.get('vm-1').catch((e) => e);
+    expect(err.message).toBe('the hypervisor closed the connection');
+  });
+
+  it('does not tell a bad certificate to wait it out', async () => {
+    // Its own class, not the unreachable one it used to share: an origin that is
+    // down is a passing outage, a certificate is a deployment somebody must fix,
+    // and a caller asking whether to try again needs opposite answers.
+    const { client: c } = client(() => new Response('', { status: 526 }));
+    const err = await c.computers.get('vm-1').catch((e) => e);
+    expect(err).toBeInstanceOf(OriginTLSError);
+    expect(err).not.toBeInstanceOf(OriginUnreachableError);
+    expect(err.message).toMatch(/TLS handshake/);
+    expect(err.message).toMatch(/report it rather than waiting it out/);
+  });
+
+  it('leaves the retry policy exactly where it was', async () => {
+    // Naming these statuses is not the same decision as retrying them, and this
+    // SDK decides transience by class. Changing that belongs in its own change.
+    const { client: c } = client(() => new Response('', { status: 522 }));
+    const err = await c.computers.get('vm-1').catch((e) => e);
+    expect(isTransient(err)).toBe(false);
+  });
+
+  it('says which status a substituted message stands in for', async () => {
+    // Four classes, eight statuses, three of them sharing one sentence.
+    // Explaining the failure in prose took the number out of err.message, which
+    // the bare `HTTP 522` at least had.
+    for (const status of [504, 520, 522, 526]) {
+      const { client: c } = client(() => new Response('', { status }));
+      const err = await c.computers.get('vm-1').catch((e) => e);
+      expect(err.message).toMatch(new RegExp(`\\(HTTP ${status}\\)$`));
+    }
+  });
+
+  it('does not stamp a status onto a message the platform wrote', async () => {
+    // Its message is its own sentence and err.status already carries the number.
+    const { client: c } = client(() => errorJson(504, 'upstream unavailable before dispatch'));
+    const err = await c.computers.get('vm-1').catch((e) => e);
+    expect(err.message).toBe('upstream unavailable before dispatch');
+  });
+
+  it("reads the edge's structured body rather than printing it", async () => {
+    // Cloudflare answers Accept: application/json — every request from this
+    // client — with RFC 9457 for the 5xx it generates, including the 500 and
+    // 502 this SDK has no wording of its own for. Unread, the one readable
+    // sentence arrives buried in 500 characters of raw JSON.
+    const { client: c } = client(() => cloudflareJson(502));
+    const err = await c.computers.get('vm-1').catch((e) => e);
+    expect(err.message).toBe('The origin server returned an invalid response.');
+    expect(err.message).not.toMatch(/[{}"]/);
+    // The Ray ID support asks for survives on the body, as with the HTML page.
+    expect((err.body as { ray_id?: string }).ray_id).toBe('8f2a1c0d9e4b7a31');
+  });
+
+  it("does not let the edge's own account displace advice it could not have", async () => {
+    // The counterpart, and the reason `detail` is read but not deferred to. A
+    // proxy cannot know the request under it was a foreground exec with a
+    // ceiling over it, so its accurate sentence about itself is the one thing a
+    // caller cannot act on. Reading the body must not cost the substitution.
+    const { client: c } = client((call) =>
+      call.path.endsWith('/exec') ? cloudflareJson(524) : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    const err = await computer.exec('sleep 130').catch((e) => e);
+    expect(err).toBeInstanceOf(GatewayTimeoutError);
+    expect(err.message).toMatch(/execBackground/);
+    expect(err.message).not.toBe('The origin server returned an invalid response.');
+  });
+
+  it('keeps the edge error page on the error even though it never shows it', async () => {
+    // The Ray ID support asks for is in that HTML and nowhere else.
+    // Kept whole: on a real edge page it is in the footer, past the 500
+    // characters the message is cut to.
+    const page = `<html><body>${'padding '.repeat(200)}error code: 522 Ray ID: 8f2a1c</body></html>`;
+    const { client: c } = client(
+      () => new Response(page, { status: 522, headers: { 'content-type': 'text/html' } }),
+    );
+    const err = await c.computers.get('vm-1').catch((e) => e);
+    expect(err.message).not.toMatch(/Ray ID/);
+    expect(String(err.body)).toMatch(/8f2a1c/);
+  });
+
   it('refuses to open a URL on a Windows guest rather than sending a POSIX command', async () => {
     // cmd.exe answering "'nohup' is not recognized" through an ExecResult
     // reads as anything but what actually went wrong.
@@ -1028,6 +1217,76 @@ describe('the agent loop', () => {
     await expect(
       (await c.computers.get('vm-1')).agent({ prompt: 'go', modelKey: 'sk' }),
     ).rejects.toThrow(/model overloaded/);
+  });
+});
+
+describe('a status that arrived on a stream', () => {
+  const errorStream = (payload: string) =>
+    new Response(`event: error\ndata: ${payload}\n\n`, {
+      headers: { 'content-type': 'text/event-stream' },
+    });
+
+  it('is not read as a proxy that gave up', async () => {
+    // The agent loop reports its own failures as events inside a 200. The event
+    // reaching the caller is proof no proxy abandoned the request, which is the
+    // one thing GatewayTimeoutError asserts — so a downstream 504 relayed this
+    // way must not claim it.
+    const { client: c } = client((call) =>
+      call.path.endsWith('/agent')
+        ? errorStream('{"error":"model provider timed out","status":504}')
+        : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    const err = await computer.agent({ prompt: 'go', modelKey: 'sk' }).catch((e) => e);
+    expect(err).toBeInstanceOf(MandalaError);
+    expect(err).not.toBeInstanceOf(GatewayTimeoutError);
+    expect(err.status).toBe(504);
+  });
+
+  it.each([504, 520, 521, 522, 523, 525, 526])(
+    'does not read %i on a stream as the edge either',
+    async (status) => {
+      // The same argument as the 504 above, across the range. Any of these
+      // arriving inside a stream that is demonstrably open cannot describe this
+      // connection, which is the whole of what every class in that range says.
+      // Asserted on the constructor rather than with `not.toBeInstanceOf`: the
+      // four are siblings, so ruling one out leaves three that would pass.
+      const { client: c } = client((call) =>
+        call.path.endsWith('/agent')
+          ? errorStream(`{"error":"model provider failed","status":${status}}`)
+          : anyRoute(call),
+      );
+      const computer = await c.computers.get('vm-1');
+      const err = await computer.agent({ prompt: 'go', modelKey: 'sk' }).catch((e) => e);
+      expect(err.constructor).toBe(APIError);
+      expect(err.status).toBe(status);
+    },
+  );
+
+  it('still maps every status that means the same thing in both places', async () => {
+    const { client: c } = client((call) =>
+      call.path.endsWith('/agent')
+        ? errorStream('{"error":"revoked","status":401}')
+        : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    const err = await computer.agent({ prompt: 'go', modelKey: 'sk' }).catch((e) => e);
+    expect(err).toBeInstanceOf(AuthenticationError);
+  });
+
+  it('keeps a relayed rate limit a rate limit', async () => {
+    // 429 is the status the platform relays a model provider's rate budget
+    // with, and it is reached by a branch of its own rather than through the
+    // status table — so a status table consulted alone quietly loses it.
+    const { client: c } = client((call) =>
+      call.path.endsWith('/agent')
+        ? errorStream('{"error":"model API: rate limited","status":429}')
+        : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    const err = await computer.agent({ prompt: 'go', modelKey: 'sk' }).catch((e) => e);
+    expect(err).toBeInstanceOf(RateLimitError);
+    expect(isTransient(err)).toBe(true);
   });
 });
 

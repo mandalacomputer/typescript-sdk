@@ -10,7 +10,7 @@ import {
 import {
   APIError,
   AuthenticationError,
-  errorForStatus,
+  errorForEventStatus,
   isTransient,
   MandalaError,
   NotFoundError,
@@ -1141,6 +1141,17 @@ export class Computer {
    * than a longer timeout: a command that outlives `timeoutS` keeps running
    * inside the guest, and its output is then unreachable.
    *
+   * Past about two minutes a longer timeout is not merely worse, it is
+   * inoperative. The HTTP budget is derived from `timeoutS` and the platform
+   * stretches its own deadline to match, but a proxy in front of the platform
+   * abandons a request that has produced no response for roughly that long and
+   * answers 524 — arriving as {@link GatewayTimeoutError}. Measured against
+   * `app.mandala.computer`, `sleep 130` failed at 125.2s with `timeoutS: 300`
+   * and at 125.3s with `timeoutS: 3600`: the ceiling belongs to a hop that never
+   * saw the argument, so raising it buys nothing. The command survives the
+   * request that abandoned it, so the next call on this computer may report the
+   * guest agent as busy with it.
+   *
    * `env` adds variables for this command, and is the right way to hand a build
    * a token — the alternative is interpolating it into `command`, where the
    * guest's shell history and process list can both read it. On Linux it goes
@@ -1491,7 +1502,7 @@ export class Computer {
         // caller waiting forever. Returning from the generator also cancels
         // the response reader in Transport.sse's finally.
         const message = `the agent run failed: ${ev.error}`;
-        throw ev.status ? errorForStatus(ev.status, message) : new MandalaError(message);
+        throw ev.status ? errorForEventStatus(ev.status, message) : new MandalaError(message);
       }
     }
     throw new MandalaError('the agent stream ended without a result');
