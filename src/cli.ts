@@ -31,7 +31,7 @@ import process from 'node:process';
 import { pathToFileURL } from 'node:url';
 
 import type { Computer } from './computer.js';
-import { MandalaError } from './errors.js';
+import { MandalaError, ValidationError } from './errors.js';
 import { Client } from './index.js';
 
 /**
@@ -68,7 +68,19 @@ function die(message: string): never {
 
 /** The computer `target` names — an exact id, or a unique name. */
 async function resolve(client: Client, target: string): Promise<Computer> {
-  const computers = await client.computers.list();
+  let computers: Computer[];
+  try {
+    computers = await client.computers.list();
+  } catch (err) {
+    // A listing fans out across every host on the account, so one unreachable
+    // hypervisor answers 503 for the whole thing — and takes down a command
+    // that named an id the computer's own route would have answered. Tried
+    // second rather than first: a get() on a name is a 404, and paying for one
+    // on the spelling people actually use is the wrong way round.
+    const byId = await client.computers.get(target).catch(() => undefined);
+    if (byId) return byId;
+    throw err;
+  }
   const byId = computers.find((c) => c.id === target);
   if (byId) return byId;
   const named = computers.filter((c) => c.name === target);
@@ -134,6 +146,27 @@ async function interact(url: string): Promise<number> {
     } catch {
       // Racing a close is fine; the close is the news, not this.
     }
+  };
+
+  /**
+   * The guest's bytes, written one at a time and only as fast as they land.
+   *
+   * `write()` answers false when the terminal's buffer is full, and dropping
+   * that answer is how `cat` on a large file inside the guest turns into a
+   * process holding the whole file in the stream's queue: the socket cannot be
+   * paused, so nothing else pushes back. Chained through a promise rather than
+   * awaited at the call site because the frames arrive in an event listener,
+   * and the chain is what keeps them in order.
+   */
+  let queued: Promise<void> = Promise.resolve();
+  const write = (chunk: Uint8Array) => {
+    queued = queued.then(
+      () =>
+        new Promise<void>((done) => {
+          if (stdout.write(chunk)) done();
+          else stdout.once('drain', done);
+        }),
+    );
   };
 
   const onStdin = (chunk: Buffer) => {
@@ -240,12 +273,15 @@ async function interact(url: string): Promise<number> {
           );
           return;
         }
-        stdout.write(bytes);
+        write(bytes);
       });
       ws.addEventListener('close', () => resolve(), { once: true });
       ws.addEventListener('error', () => resolve(), { once: true });
     });
   } finally {
+    // The tail of the output goes out before the terminal is handed back, or
+    // the last screenful of a session lands after the shell prompt returns.
+    await queued;
     cleanup();
     try {
       ws.close();
@@ -285,6 +321,22 @@ export function remoteSide(arg: string): { target: string; path: string } | unde
   return { target: head, path: arg.slice(i + 1) };
 }
 
+/**
+ * Where a copy lands in the guest, given the destination that was typed.
+ *
+ * A trailing separator means a directory, which the files API has no concept
+ * of — so the source's basename is appended here rather than writing a file
+ * whose name ends in a separator and having the platform refuse it. Both
+ * separators, because the guest may be Windows: `C:\\Users\\dev\\` is the
+ * spelling somebody on that machine would type, and read as a filename it makes
+ * `mandala scp notes.txt vm:C:\\Users\\dev\\` fail on a path the platform
+ * cannot write.
+ */
+export function guestDestination(remotePath: string, source: string): string {
+  const directory = remotePath.endsWith('/') || remotePath.endsWith('\\');
+  return directory ? remotePath + basename(source) : remotePath;
+}
+
 async function cmdScp(srcArg: string, dstArg: string): Promise<number> {
   const src = remoteSide(srcArg);
   const dst = remoteSide(dstArg);
@@ -308,10 +360,7 @@ async function cmdScp(srcArg: string, dstArg: string): Promise<number> {
 
   const remote = dst!;
   if (!remote.path) die(`say where in the guest: ${remote.target}:/absolute/path`);
-  // A trailing slash means a directory in the guest, which the files API has no
-  // concept of — so the basename is appended here rather than writing a file
-  // whose name ends in "/" and having the platform refuse it.
-  const path = remote.path.endsWith('/') ? remote.path + basename(srcArg) : remote.path;
+  const path = guestDestination(remote.path, srcArg);
   const data = await readFile(srcArg);
   const written = await (await resolve(client, remote.target)).writeFile(path, data);
   // What the platform said, or what was sent — labelled as which, since a
@@ -357,7 +406,12 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     }
     die(`unknown command ${command}\n\n${USAGE}`);
   } catch (err) {
-    if (err instanceof Died || err instanceof MandalaError || err instanceof TypeError) {
+    // ValidationError and not TypeError: an SDK refusal is a sentence written
+    // to be read by whoever typed the command, and printing it without a stack
+    // is right. Every *other* TypeError is a bug in this file — reading a
+    // property off an undefined — and printing that one the same way disguises
+    // a crash as bad input, with the stack that would locate it thrown away.
+    if (err instanceof Died || err instanceof MandalaError || err instanceof ValidationError) {
       process.stderr.write(`mandala: ${err.message}\n`);
       return 1;
     }

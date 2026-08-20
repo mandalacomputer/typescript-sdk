@@ -14,6 +14,7 @@
  * happen.
  */
 
+import { ValidationError } from './errors.js';
 import type { Query } from './transport.js';
 
 // --- paths ----------------------------------------------------------------
@@ -34,7 +35,7 @@ export const SNAPSHOTS = 'snapshots';
  * it. Nothing in either case says the id was missing.
  */
 function pathId(id: string, what: string): string {
-  if (!id) throw new TypeError(`${what} must not be empty`);
+  if (!id) throw new ValidationError(`${what} must not be empty`);
   return encodeURIComponent(id);
 }
 
@@ -49,7 +50,7 @@ function pathId(id: string, what: string): string {
  */
 function finite(v: number, what: string): number {
   if (!Number.isFinite(v)) {
-    throw new TypeError(`${what} must be a finite number (got ${v})`);
+    throw new ValidationError(`${what} must be a finite number (got ${v})`);
   }
   return v;
 }
@@ -67,8 +68,19 @@ export const computer = (id: string): string => `computers/${pathId(id, 'compute
  */
 export const computerAction = (id: string, action: string): string => `${computer(id)}/${action}`;
 
-/** A background command's guest pid (OPL-3584). */
-export const execHandle = (id: string, pid: number): string => `${computer(id)}/exec/${pid}`;
+/**
+ * A background command's guest pid (OPL-3584).
+ *
+ * Checked for the reason {@link pathId} checks an id: interpolated raw, a NaN
+ * or a float builds `computers/vm-1/exec/NaN`, which is a 404 about a route
+ * rather than a sentence about the pid that was wrong.
+ */
+export const execHandle = (id: string, pid: number): string => {
+  if (!Number.isInteger(pid) || pid <= 0) {
+    throw new ValidationError(`pid must be a positive integer (got ${pid})`);
+  }
+  return `${computer(id)}/exec/${pid}`;
+};
 
 /** One window on the desktop (OPL-3583). The id is `0x2600003`-shaped. */
 export const windowPath = (id: string, windowId: string): string =>
@@ -160,11 +172,18 @@ export type CreateArgs = {
 export function createBody(args: CreateArgs): Json {
   const { start = true, size, template, cpu, ramMb, diskGb, name, resolution } = args;
   if (size !== undefined && [template, cpu, ramMb, diskGb].some((v) => v !== undefined)) {
-    throw new TypeError(
+    throw new ValidationError(
       'size already names a template and a shape; send size alone, ' +
         'or template/cpu/ramMb/diskGb without it',
     );
   }
+  // A NaN here goes out as JSON `null`, which the platform reads as the field's
+  // zero value: a computer built with no CPU, or — worse, on update — an idle
+  // window of "follow the host" that nobody asked for. The same failure
+  // {@link finite} catches on a coordinate, arriving through the create.
+  finiteIf(cpu, 'cpu');
+  finiteIf(ramMb, 'ramMb');
+  finiteIf(diskGb, 'diskGb');
   return {
     ...omitUndefined({
       name,
@@ -211,6 +230,13 @@ export type UpdateArgs = {
  * is a 400 that reads as though the request was malformed.
  */
 export function updateBody(args: UpdateArgs): Json {
+  finiteIf(args.cpu, 'cpu');
+  finiteIf(args.ramMb, 'ramMb');
+  finiteIf(args.diskGb, 'diskGb');
+  // Null is the documented "follow the host's own window". A NaN is serialized
+  // as the same null and would mean it by accident, on the one field here where
+  // the wrong value is silently a legitimate request.
+  if (args.idleSuspendMin != null) finite(args.idleSuspendMin, 'idleSuspendMin');
   const body = omitUndefined({
     name: args.name,
     cpu: args.cpu,
@@ -223,17 +249,30 @@ export function updateBody(args: UpdateArgs): Json {
   if (args.name !== undefined && !args.name.trim()) {
     // On create an omitted name means "you pick one"; in an update an empty one
     // can only mean a caller cleared the field.
-    throw new TypeError('name must not be empty');
+    throw new ValidationError('name must not be empty');
   }
   if (!Object.keys(body).length) {
-    throw new TypeError(
+    throw new ValidationError(
       'nothing to update: give at least one of name, cpu, ramMb, diskGb, idleSuspendMin',
     );
   }
   return body;
 }
 
-export const nameBody = (name?: string): Json => (name === undefined ? {} : { name });
+/**
+ * The optional name on a clone or a capture.
+ *
+ * Omitted means "you pick one", which is a real request. An all-whitespace name
+ * is not: it can only come from a caller building the name out of something
+ * that turned out to be empty — {@link updateBody} and {@link snapshotBody}
+ * both refuse one, and a route reached through here should not be the way to
+ * get a computer called `"  "`.
+ */
+export const nameBody = (name?: string): Json => {
+  if (name === undefined) return {};
+  if (!name.trim()) throw new ValidationError('name must not be empty');
+  return { name };
+};
 
 export type ExecArgs = {
   command: string;
@@ -294,14 +333,14 @@ const utf8Length = (s: string): number => new TextEncoder().encode(s).length;
 function envObject(env: Readonly<Record<string, string>>): Json {
   const names = Object.keys(env);
   if (names.length > MAX_ENV_ENTRIES) {
-    throw new TypeError(
+    throw new ValidationError(
       `env has ${names.length} entries; the platform accepts at most ${MAX_ENV_ENTRIES}`,
     );
   }
   for (const name of names) {
-    if (!name) throw new TypeError('env has an entry with an empty name');
+    if (!name) throw new ValidationError('env has an entry with an empty name');
     if (name.includes('=') || name.includes('\0')) {
-      throw new TypeError(`env name ${JSON.stringify(name)} must not contain '=' or a NUL`);
+      throw new ValidationError(`env name ${JSON.stringify(name)} must not contain '=' or a NUL`);
     }
     // Checked rather than cast, because the cast is a lie on the one input the
     // comment above anticipates: `{ TOKEN: process.env.TOKEN }` with the
@@ -311,16 +350,16 @@ function envObject(env: Readonly<Record<string, string>>): Json {
     // the only refusal on this surface that would not say what was wrong.
     const value: unknown = env[name];
     if (typeof value !== 'string') {
-      throw new TypeError(
+      throw new ValidationError(
         `env value for ${JSON.stringify(name)} must be a string, not ${value === null ? 'null' : typeof value}`,
       );
     }
     if (value.includes('\0')) {
-      throw new TypeError(`env value for ${JSON.stringify(name)} must not contain a NUL`);
+      throw new ValidationError(`env value for ${JSON.stringify(name)} must not contain a NUL`);
     }
     const bytes = utf8Length(name) + utf8Length(value) + 1;
     if (bytes > MAX_ENV_ENTRY_BYTES) {
-      throw new TypeError(
+      throw new ValidationError(
         `env entry ${JSON.stringify(name)} is ${bytes} bytes; the platform accepts ` +
           `at most ${MAX_ENV_ENTRY_BYTES}`,
       );
@@ -342,7 +381,15 @@ export function execBody(args: ExecArgs): Json {
   // one is on the request deadline, and a client whose deadline is disabled
   // never reaches it — so on exactly that client a NaN timeout would sail
   // through as a `null` the guest reads as no timeout at all.
-  if (args.timeoutS !== undefined) body.timeout_s = finite(args.timeoutS, 'timeoutS');
+  if (args.timeoutS !== undefined) {
+    // Negative refused as well as non-finite, the way every other duration on
+    // this surface is: a -1 is a caller's "no timeout" idiom from some other
+    // API, and the guest agent reads it as a deadline already past.
+    if (finite(args.timeoutS, 'timeoutS') < 0) {
+      throw new ValidationError(`timeoutS must not be negative (got ${args.timeoutS})`);
+    }
+    body.timeout_s = args.timeoutS;
+  }
   if (args.desktop) body.session = 'desktop';
   if (args.background) body.background = true;
   if (args.cwd) body.cwd = args.cwd;
@@ -373,11 +420,11 @@ export function execBody(args: ExecArgs): Json {
  */
 export function openUrlCommand(url: string): string {
   const trimmed = url.trim();
-  if (!trimmed) throw new TypeError('url must not be empty');
+  if (!trimmed) throw new ValidationError('url must not be empty');
   // Quoting stops the URL reaching the shell as anything but one argument. It
   // cannot stop the browser reading a leading dash as a flag, and no URL starts
   // with one, so that is refused outright rather than quoted.
-  if (trimmed.startsWith('-')) throw new TypeError(`url must not start with '-': ${trimmed}`);
+  if (trimmed.startsWith('-')) throw new ValidationError(`url must not start with '-': ${trimmed}`);
   return `nohup firefox ${shellQuote(trimmed)} >/dev/null 2>&1 &`;
 }
 
@@ -398,7 +445,7 @@ export function shellQuote(s: string): string {
  */
 export function filesQuery(path: string): Query {
   if (!path.startsWith('/') && !path.startsWith('\\\\') && !/^[A-Za-z]:[\\/]/.test(path)) {
-    throw new TypeError(`guest path must be absolute: ${JSON.stringify(path)}`);
+    throw new ValidationError(`guest path must be absolute: ${JSON.stringify(path)}`);
   }
   return { path };
 }
@@ -429,7 +476,7 @@ export const pointerBody = (action: string, x: number, y: number): Json => ({
  */
 function wholePoint(x?: number, y?: number): void {
   if ((x === undefined) !== (y === undefined)) {
-    throw new TypeError('give both x and y, or neither — half a coordinate is not a point');
+    throw new ValidationError('give both x and y, or neither — half a coordinate is not a point');
   }
   // For the same reason, one line down: a NaN coordinate is serialized as
   // `null` and read as 0, which is the same click at the corner of the screen
@@ -481,7 +528,7 @@ export function clickBody(
  */
 export function dragBody(toX: number, toY: number, fromX?: number, fromY?: number): Json {
   if ((fromX === undefined) !== (fromY === undefined)) {
-    throw new TypeError('give both fromX and fromY, or neither');
+    throw new ValidationError('give both fromX and fromY, or neither');
   }
   finiteIf(fromX, 'fromX');
   finiteIf(fromY, 'fromY');
@@ -525,7 +572,7 @@ export function scrollBody(args: {
   modifiers?: readonly string[];
 }): Json {
   if (!SCROLL_DIRECTIONS.includes(args.direction)) {
-    throw new TypeError(`direction must be one of ${SCROLL_DIRECTIONS.join(', ')}`);
+    throw new ValidationError(`direction must be one of ${SCROLL_DIRECTIONS.join(', ')}`);
   }
   wholePoint(args.x, args.y);
   const body: Json = {
@@ -541,14 +588,14 @@ export function scrollBody(args: {
 export const typeBody = (text: string): Json => ({ action: 'type', text });
 
 export function keyBody(keys: readonly string[]): Json {
-  if (!keys.length) throw new TypeError('key() needs at least one key');
+  if (!keys.length) throw new ValidationError('key() needs at least one key');
   return { action: 'key', keys: [...keys] };
 }
 
 export function holdKeyBody(keys: readonly string[], seconds: number): Json {
-  if (!keys.length) throw new TypeError('holdKey() needs at least one key');
+  if (!keys.length) throw new ValidationError('holdKey() needs at least one key');
   finite(seconds, 'seconds');
-  if (seconds <= 0) throw new TypeError('seconds must be positive');
+  if (seconds <= 0) throw new ValidationError('seconds must be positive');
   return { action: 'hold_key', keys: [...keys], duration: seconds };
 }
 
@@ -564,9 +611,11 @@ export function waitBody(seconds: number): Json {
   // false for it, and the wait would go out as `duration: null` and be taken
   // for the platform's default.
   finite(seconds, 'seconds');
-  if (seconds <= 0) throw new TypeError('seconds must be positive');
+  if (seconds <= 0) throw new ValidationError('seconds must be positive');
   if (seconds > 30) {
-    throw new TypeError('the platform caps a wait at 30 seconds; call wait() again for longer');
+    throw new ValidationError(
+      'the platform caps a wait at 30 seconds; call wait() again for longer',
+    );
   }
   return { action: 'wait', duration: seconds };
 }
@@ -595,7 +644,7 @@ export function screenshotQuery(width?: number, fresh?: boolean): Query | undefi
     // scale — into a request for the full-resolution PNG, a different and more
     // expensive call, with nothing saying so.
     if (!Number.isFinite(width) || width <= 0) {
-      throw new TypeError(`width must be a positive number: ${width}`);
+      throw new ValidationError(`width must be a positive number: ${width}`);
     }
     query.w = width;
   }
@@ -610,7 +659,7 @@ export function screenshotQuery(width?: number, fresh?: boolean): Query | undefi
     // and returns a doubly-cached one. That is exactly the shape this file
     // exists to refuse, so it is refused here rather than documented away.
     if (width !== undefined) {
-      throw new TypeError(
+      throw new ValidationError(
         'fresh cannot be combined with a width: the platform serves every downscaled ' +
           'screenshot from its cache, so the flag would be silently ignored. Drop the ' +
           'width to get an uncached frame.',
@@ -656,7 +705,7 @@ export function windowBody(args: {
   height?: number;
 }): Json {
   if (!WINDOW_ACTIONS.includes(args.action)) {
-    throw new TypeError(`action must be one of ${WINDOW_ACTIONS.join(', ')}`);
+    throw new ValidationError(`action must be one of ${WINDOW_ACTIONS.join(', ')}`);
   }
   finiteIf(args.x, 'x');
   finiteIf(args.y, 'y');
@@ -680,7 +729,7 @@ export function windowBody(args: {
  * turned out to be empty, and a snapshot called `"  "` is not what they meant.
  */
 export function snapshotBody(memory: boolean, name?: string): Json {
-  if (name !== undefined && !name.trim()) throw new TypeError('name must not be empty');
+  if (name !== undefined && !name.trim()) throw new ValidationError('name must not be empty');
   return omitUndefined({ memory, name });
 }
 
@@ -691,9 +740,10 @@ export function scheduleBody(args: {
   tz?: string;
 }): Json {
   const { enabled, hour = 4, minute = 0, tz = 'UTC' } = args;
-  if (!Number.isInteger(hour) || hour < 0 || hour > 23) throw new TypeError('hour must be 0-23');
+  if (!Number.isInteger(hour) || hour < 0 || hour > 23)
+    throw new ValidationError('hour must be 0-23');
   if (!Number.isInteger(minute) || minute < 0 || minute > 59) {
-    throw new TypeError('minute must be 0-59');
+    throw new ValidationError('minute must be 0-59');
   }
   return { enabled, hour, minute, tz };
 }
@@ -716,7 +766,7 @@ export function scheduleBody(args: {
 export function deleteQuery(opts: { deleteSnapshots?: boolean; expect?: string }): Query {
   if (!opts.deleteSnapshots) return {};
   if (!opts.expect) {
-    throw new TypeError(
+    throw new ValidationError(
       'refusing to purge snapshots without a fingerprint: call holdings() on this computer, ' +
         'check the count and size are what you meant to destroy, and pass its fingerprint as ' +
         '`expect`. Nothing has been deleted.',
@@ -734,7 +784,7 @@ export function agentBody(args: {
   model?: string;
   stream: boolean;
 }): Json {
-  if (!args.prompt.trim()) throw new TypeError('prompt must not be empty');
+  if (!args.prompt.trim()) throw new ValidationError('prompt must not be empty');
   finiteIf(args.maxSteps, 'maxSteps');
   return omitUndefined({
     prompt: args.prompt,

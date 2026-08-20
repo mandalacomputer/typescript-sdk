@@ -8,7 +8,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { remoteSide } from '../src/cli.js';
+import { guestDestination, remoteSide } from '../src/cli.js';
 
 describe('remoteSide', () => {
   it('reads <computer>:/path as the guest side', () => {
@@ -55,6 +55,24 @@ describe('remoteSide', () => {
     // The exemption is for the local side only; vm-1:C:\out.txt names a file
     // on a Windows guest and must keep working.
     expect(remoteSide('vm-1:C:\\out.txt')).toEqual({ target: 'vm-1', path: 'C:\\out.txt' });
+  });
+});
+
+describe('guestDestination', () => {
+  it('appends the source basename to a directory, on either separator', () => {
+    // A Windows guest is spelled with backslashes, and read as a filename that
+    // destination is a path the platform cannot write.
+    expect(guestDestination('/tmp/', 'local/notes.txt')).toBe('/tmp/notes.txt');
+    expect(guestDestination('C:\\Users\\dev\\', 'local/notes.txt')).toBe(
+      'C:\\Users\\dev\\notes.txt',
+    );
+  });
+
+  it('leaves a destination that names a file alone', () => {
+    expect(guestDestination('/tmp/other.txt', 'notes.txt')).toBe('/tmp/other.txt');
+    expect(guestDestination('C:\\Users\\dev\\other.txt', 'notes.txt')).toBe(
+      'C:\\Users\\dev\\other.txt',
+    );
   });
 });
 

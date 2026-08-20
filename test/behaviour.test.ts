@@ -233,6 +233,235 @@ describe('waiting', () => {
     await expect(computer.waitForGuest({ timeoutMs: 5_000, pollMs: 1 })).resolves.toBe(computer);
     expect(attempts).toBe(3);
   });
+
+  it('refuses a timeout or a poll interval that would never expire', async () => {
+    // `Date.now() >= NaN` is false and `setTimeout(fn, NaN)` fires at once, so
+    // between them a NaN turns a wait into an unthrottled request loop that
+    // never returns. `timeoutMs: Number(unsetEnvVar)` is how it arrives.
+    const { rec, client: c } = client(anyRoute);
+    const computer = await c.computers.get('vm-1');
+    const before = rec.calls.length;
+    for (const wait of [
+      () => computer.waitUntilBuilt({ timeoutMs: Number.NaN }),
+      () => computer.waitUntilRunning({ pollMs: Number.NaN }),
+      () => computer.waitForGuest({ timeoutMs: Number.POSITIVE_INFINITY }),
+      () => computer.waitUntilRunning({ timeoutMs: -1 }),
+    ]) {
+      await expect(wait()).rejects.toThrow(TypeError);
+    }
+    // Refused before the loop starts, so not one request went out.
+    expect(rec.calls.length).toBe(before);
+  });
+
+  it('does not let a poll outlive the wait it belongs to', async () => {
+    // The transport's deadline is the client's — 60 seconds by default — and a
+    // refresh made under it runs on long past the moment the wait was told to
+    // give up. What is left of the wait has to be what governs the request.
+    let gets = 0;
+    const { client: c } = client((call) => {
+      if (call.method === 'GET' && call.path === '/computers/vm-1') {
+        gets += 1;
+        if (gets === 1) return json(COMPUTER);
+        // A host that accepts the connection and then says nothing.
+        return new Promise<Response>(() => {});
+      }
+      return anyRoute(call);
+    });
+    const computer = await c.computers.get('vm-1');
+    const started = Date.now();
+    const err = await computer.waitUntilRunning({ timeoutMs: 20, pollMs: 1 }).catch((e) => e);
+    expect(err).toBeInstanceOf(TimeoutError);
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
+  it('reports the refreshes, not a stale status, when a build was never observed', async () => {
+    // waitUntilRunning's rule, on the wait that did not have it: "was still
+    // building" read off pre-wait data is a claim about a computer nobody
+    // looked at.
+    let gets = 0;
+    const { client: c } = client((call) => {
+      if (call.method === 'GET' && call.path === '/computers/vm-1') {
+        gets += 1;
+        return gets === 1
+          ? json({ ...COMPUTER, status: 'building' })
+          : errorJson(503, 'host could not be reached');
+      }
+      return anyRoute(call);
+    });
+    const computer = await c.computers.get('vm-1');
+    const err = await computer.waitUntilBuilt({ timeoutMs: 10, pollMs: 1 }).catch((e) => e);
+    expect(err).toBeInstanceOf(TimeoutError);
+    expect(err.message).toMatch(/could not be observed/);
+    expect(err.message).not.toMatch(/was still building/);
+  });
+
+  it('polls a build before its first sleep, not after it', async () => {
+    // A clone that finished while the caller was doing something else is one
+    // round trip from being known to have finished. The poll interval here is
+    // a minute: sleeping first would make this test take one.
+    let gets = 0;
+    const { client: c } = client((call) => {
+      if (call.method === 'GET' && call.path === '/computers/vm-1') {
+        gets += 1;
+        return gets === 1 ? json({ ...COMPUTER, status: 'building' }) : json(COMPUTER);
+      }
+      return anyRoute(call);
+    });
+    const computer = await c.computers.get('vm-1');
+    const started = Date.now();
+    await expect(computer.waitUntilBuilt({ timeoutMs: 5_000, pollMs: 60_000 })).resolves.toBe(
+      computer,
+    );
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
+  it('does not probe the guest of a computer that has no disk', async () => {
+    // The README promises every wait fails fast on a failed build. This one
+    // spun out its whole three minutes probing a machine with nothing to
+    // answer from.
+    const { rec, client: c } = client((call) =>
+      call.method === 'GET' && call.path === '/computers/vm-1'
+        ? json({ ...COMPUTER, status: 'build-failed', build: { failed: 'the copy died' } })
+        : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    await expect(computer.waitForGuest({ timeoutMs: 60_000, pollMs: 1 })).rejects.toThrow(
+      /the copy died/,
+    );
+    expect(rec.routes().filter(([, p]) => p.endsWith('/exec'))).toHaveLength(0);
+  });
+
+  it('waits through a suspended computer rather than refusing it, because exec resumes one', async () => {
+    // The opposite of waitUntilRunning, deliberately: nothing resumes a machine
+    // for that wait, and the probe here does it as a side effect.
+    const { client: c } = client((call) =>
+      call.method === 'GET' && call.path === '/computers/vm-1'
+        ? json({ ...COMPUTER, status: 'suspended' })
+        : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    await expect(computer.waitForGuest({ timeoutMs: 5_000, pollMs: 1 })).resolves.toBe(computer);
+  });
+});
+
+describe('a chord', () => {
+  it('takes an array with options, and still takes plain arguments', async () => {
+    // key() was the one input method with no CallOptions, which made a chord
+    // the one keystroke in this SDK that no signal could cancel.
+    const { rec, client: c } = client(anyRoute);
+    const computer = await c.computers.get('vm-1');
+    await computer.key('ctrl', 'c');
+    const spread = rec.last().body;
+    await computer.key(['ctrl', 'c']);
+    expect(rec.last().body).toEqual(spread);
+    expect(spread).toEqual({ action: 'key', keys: ['ctrl', 'c'] });
+  });
+
+  it('honours the signal the array form can carry', async () => {
+    const { client: c } = client(anyRoute);
+    const computer = await c.computers.get('vm-1');
+    await expect(computer.key(['ctrl', 'c'], { signal: AbortSignal.abort() })).rejects.toThrow();
+  });
+});
+
+describe('what a payload cannot be allowed to mean', () => {
+  it('normalizes a null count to undefined, which is what the type promises', async () => {
+    // `written === undefined` is the check a caller writes to find out whether
+    // the platform answered. A raw null is not undefined, and `mandala scp`
+    // printed "null bytes" because of it.
+    const { client: c } = client((call) => {
+      if (call.path.endsWith('/files') && call.method === 'PUT') return json({ bytes: null });
+      if (call.method === 'DELETE') return json({ snapshots_deleted: null });
+      return anyRoute(call);
+    });
+    const computer = await c.computers.get('vm-1');
+    expect(await computer.writeFile('/tmp/f', 'hi')).toBeUndefined();
+    expect(await computer.delete()).toBeUndefined();
+  });
+
+  it('refuses a screenshot that is not an image', async () => {
+    // A captive portal answers 200 with an HTML page, and these bytes go
+    // straight into an image decoder or a model's context.
+    const { client: c } = client((call) =>
+      call.path.endsWith('/screenshot')
+        ? new Response('<!DOCTYPE html><title>Sign in</title>', {
+            status: 200,
+            headers: { 'content-type': 'text/html' },
+          })
+        : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    await expect(computer.screenshot()).rejects.toThrow(/expected an image/);
+  });
+
+  it('reads a stringified false as false, not as the corner of the screen', async () => {
+    // The platform this mirrors has a Python SDK, and `str(False)` is 'False'.
+    const { client: c } = client((call) =>
+      call.path.endsWith('/input') ? json({ known: 'false', x: 0, y: 0 }) : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    expect(await computer.cursorPosition()).toBeUndefined();
+  });
+
+  it('falls back rather than answering NaN on a shape that is not a number', async () => {
+    // A NaN CPU count fails every comparison a caller writes, including the
+    // `>= 2` that was meant to be false.
+    const { client: c } = client(() => json({ ...COMPUTER, cpu: 'two', idle_suspend_min: 'soon' }));
+    const computer = await c.computers.get('vm-1');
+    expect(computer.cpu).toBe(0);
+    expect(computer.idleSuspendMin).toBeUndefined();
+  });
+
+  it('refuses an answer that is not a computer, where the id would have gone missing', async () => {
+    // refresh() already names this. get/create/clone built a handle with id ''
+    // instead, and everything it could do then threw about an empty id from a
+    // path builder, naming neither the route nor the empty answer.
+    const { client: c } = client(() => json({}));
+    await expect(c.computers.get('vm-1')).rejects.toThrow(/expected a computer from GET/);
+    await expect(c.computers.create()).rejects.toThrow(/expected a computer from POST/);
+    await expect(c.snapshots.clone('snap-1')).rejects.toThrow(/expected a computer from POST/);
+  });
+
+  it('refuses a background exec with no pid, rather than a finished job on pid 0', async () => {
+    const { client: c } = client((call) =>
+      call.path.endsWith('/exec') ? json({}) : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    await expect(computer.execBackground('sleep 60')).rejects.toThrow(/pid/);
+  });
+
+  it('reads a missing `running` as still running, when nothing has exited', async () => {
+    // False is the claim that the command is over, which is the finished-job
+    // answer again by another route.
+    const { client: c } = client((call) =>
+      call.path.endsWith('/exec') ? json({ pid: 7 }) : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    expect((await computer.execBackground('sleep 60')).running).toBe(true);
+  });
+
+  it('refuses an empty schedule read rather than reporting midnight UTC', async () => {
+    // `{}` decodes to "disabled, 00:00 UTC", which is indistinguishable from a
+    // schedule this computer really has.
+    const { client: c } = client((call) =>
+      call.path.endsWith('/schedule') ? json({}) : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    await expect(computer.schedule()).rejects.toThrow(/expected a schedule from GET/);
+  });
+
+  it('echoes what was set when the platform acknowledges with no body', async () => {
+    // It applied this and said so with a 2xx; decoding `{}` would answer with a
+    // midnight nobody chose.
+    const { client: c } = client((call) =>
+      call.path.endsWith('/schedule') ? new Response(null, { status: 204 }) : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    const set = await computer.setSchedule({ enabled: true, hour: 23, minute: 30, tz: 'UTC' });
+    expect(set).toMatchObject({ enabled: true, hour: 23, minute: 30, tz: 'UTC' });
+    // A cleared schedule is the one place an empty body is a real answer.
+    expect(await computer.clearSchedule()).toMatchObject({ enabled: false });
+  });
 });
 
 describe('the pointer', () => {

@@ -9,10 +9,19 @@
  * place that has nothing to do with the response that was wrong.
  */
 
+import { MandalaError } from './errors.js';
 import { isRecord } from './paths.js';
 
 const str = (v: unknown, fallback = ''): string => (v == null ? fallback : String(v));
-const num = (v: unknown, fallback = 0): number => {
+/**
+ * A number from a payload, with a fallback for anything that is not one.
+ *
+ * Exported for {@link Computer}'s own getters, which read the same platform
+ * fields off the same records: a bare `Number()` there answers NaN where this
+ * answers the fallback, and the two disagreeing about one payload is worse than
+ * either rule on its own.
+ */
+export const num = (v: unknown, fallback = 0): number => {
   const n = Number(v);
   return Number.isFinite(n) ? n : fallback;
 };
@@ -21,7 +30,7 @@ const num = (v: unknown, fallback = 0): number => {
 // in this file that inverts a field's meaning rather than blurring it, and
 // `timed_out: "false"` reading as timed out is a worse answer than any missing
 // number here can produce.
-const bool = (v: unknown): boolean => {
+export const bool = (v: unknown): boolean => {
   // Lowercased before the compare, because the platform this mirrors is the one
   // whose own SDK is Python: `str(False)` is `'False'`, capital F, and that is
   // by some distance the stringified boolean most likely to actually arrive.
@@ -30,6 +39,21 @@ const bool = (v: unknown): boolean => {
     return s !== '' && s !== 'false' && s !== '0';
   }
   return Boolean(v);
+};
+
+/**
+ * A count the platform may simply not have sent.
+ *
+ * `undefined` for an absent one and for a `null`, which is the shape the
+ * difference matters in: a route typed `number | undefined` that hands back the
+ * raw field hands back `null` too, against a type that says it cannot, and the
+ * `=== undefined` check the caller wrote to find out whether the platform
+ * answered is false for it.
+ */
+export const count = (v: unknown): number | undefined => {
+  if (v == null || v === '') return undefined;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : undefined;
 };
 
 /**
@@ -357,9 +381,24 @@ export type BackgroundExec = {
 };
 
 export function toBackgroundExec(d: Record<string, unknown>): BackgroundExec {
+  const pid = num(d.pid);
+  // The pid is the handle: every poll and every kill is aimed at it, and 0 is
+  // not a job on either guest OS. Defaulted to 0 the way every other number
+  // here is, an empty or truncated payload decodes as a *finished job on pid
+  // 0* — a command that ran and exited cleanly, which is the one wrong answer
+  // on this route that reads as fine and that nothing downstream can catch.
+  if (!Number.isInteger(pid) || pid <= 0) {
+    throw new MandalaError(
+      `expected a background command's pid, got ${JSON.stringify(d.pid ?? null)}`,
+    );
+  }
   return {
-    pid: num(d.pid),
-    running: bool(d.running),
+    pid,
+    // Absent is not false. `false` here is the claim that the command has
+    // exited, which is the same finished-job answer the pid check above
+    // refuses, so an absent field falls back to whether an exit code arrived —
+    // which is what "running" means in the first place.
+    running: d.running == null ? d.exit_code == null : bool(d.running),
     // The empty string counts as "did not send one", for toExecResult's reason
     // about the same field: Number('') is 0, and a command still running
     // reported as having exited successfully is the one wrong answer here that

@@ -16,6 +16,7 @@ import {
   PermissionDeniedError,
   PlanLimitError,
   TimeoutError,
+  ValidationError,
 } from './errors.js';
 import type {
   BackgroundExec,
@@ -28,6 +29,9 @@ import type {
   VncConnect,
 } from './models.js';
 import {
+  bool,
+  count,
+  num,
   toBackgroundExec,
   toExecResult,
   toGuestWindow,
@@ -88,6 +92,30 @@ const isPermanent = (err: unknown): boolean =>
 const deadlineSignal = (ms: number, caller?: AbortSignal): AbortSignal => {
   const timeout = AbortSignal.timeout(Math.max(ms, 0));
   return caller ? AbortSignal.any([caller, timeout]) : timeout;
+};
+
+/**
+ * A wait's own numbers, refused when they are not finite.
+ *
+ * `Date.now() >= NaN` is false, so a non-finite timeout is a deadline that
+ * never arrives; `setTimeout(fn, NaN)` fires at once, so a non-finite poll
+ * interval turns the wait into an unthrottled request loop against the
+ * platform. Neither says anything — the wait simply never returns, which is the
+ * one failure shape worse than a wrong answer.
+ *
+ * Refused here for the reason and in the wording {@link Transport} refuses its
+ * own deadline: `timeoutMs: Number(unsetEnvVar)` is the usual spelling of the
+ * mistake, and the only place it can be named is before the loop starts.
+ */
+const checkWait = (timeoutMs: number, pollMs: number): void => {
+  for (const [what, v] of [
+    ['timeoutMs', timeoutMs],
+    ['pollMs', pollMs],
+  ] as const) {
+    if (!Number.isFinite(v) || v < 0) {
+      throw new ValidationError(`${what} must be a non-negative finite number (got ${v})`);
+    }
+  }
 };
 
 const sleep = (ms: number, signal?: AbortSignal): Promise<void> =>
@@ -254,16 +282,21 @@ export class Computer {
     return String(this.#data.template ?? '');
   }
 
+  // num() and not Number(), on all three: a field that is not a number at all
+  // becomes NaN through Number(), and NaN CPUs fail every comparison a caller
+  // writes — including the `>= 2` that was meant to be false. models.ts decodes
+  // the same platform fields the same way; two rules for one payload is worse
+  // than either.
   get cpu(): number {
-    return Number(this.#data.cpu ?? 0);
+    return num(this.#data.cpu);
   }
 
   get ramMb(): number {
-    return Number(this.#data.ram_mb ?? 0);
+    return num(this.#data.ram_mb);
   }
 
   get diskGb(): number {
-    return Number(this.#data.disk_gb ?? 0);
+    return num(this.#data.disk_gb);
   }
 
   /**
@@ -295,8 +328,10 @@ export class Computer {
 
   /** Minutes untouched before the host suspends it, or `undefined` for the host default. */
   get idleSuspendMin(): number | undefined {
-    const v = this.#data.idle_suspend_min;
-    return v == null ? undefined : Number(v);
+    // A value that is not a number is the host's own window as far as this can
+    // honestly say. Number() would answer NaN, which is a minute count that
+    // silently fails every comparison rather than an absence a caller can see.
+    return count(this.#data.idle_suspend_min);
   }
 
   get createdAt(): string {
@@ -523,10 +558,26 @@ export class Computer {
       P.computer(this.id),
       { query: P.deleteQuery(opts), signal: opts.signal },
     );
-    return res?.snapshots_deleted;
+    // Normalized rather than handed back raw: a JSON null would otherwise
+    // arrive against a type that says it cannot, and `=== undefined` — the
+    // check a caller writes to find out whether the platform answered — is
+    // false for it.
+    return count(res?.snapshots_deleted);
   }
 
   // --- readiness ------------------------------------------------------
+
+  /**
+   * The one message for a disk copy that will not finish.
+   *
+   * Shared by the three waits that must not spin on one, so the sentence a
+   * caller sees does not depend on which of them noticed.
+   */
+  #buildFailure(): MandalaError {
+    return new MandalaError(
+      `${this.id} could not be built: ${this.buildError || 'the disk copy failed'}`,
+    );
+  }
 
   /**
    * Wait until a cloned computer's disk has been copied.
@@ -541,28 +592,54 @@ export class Computer {
    */
   async waitUntilBuilt(opts: WaitOptions = {}): Promise<this> {
     const { timeoutMs = 900_000, pollMs = 5_000, signal } = opts;
+    checkWait(timeoutMs, pollMs);
     const deadline = Date.now() + timeoutMs;
+    // waitUntilRunning's `observed`, for waitUntilRunning's reason: when every
+    // refresh fails transiently this handle is still holding whatever it held
+    // before the wait began, and "was still building" concluded from that is a
+    // claim about a computer nobody has actually looked at.
+    let observed = false;
+    let polled = false;
     for (;;) {
-      if (this.buildFailed) {
-        throw new MandalaError(
-          `${this.id} could not be built: ${this.buildError || 'the disk copy failed'}`,
-        );
-      }
+      if (this.buildFailed) throw this.#buildFailure();
       if (!this.isBuilding) return this;
       if (Date.now() >= deadline) {
         throw new TimeoutError(
-          `${this.id} was still building after ${timeoutMs}ms ` +
-            '(it has not stopped; only this wait has)',
+          observed
+            ? `${this.id} was still building after ${timeoutMs}ms ` +
+                '(it has not stopped; only this wait has)'
+            : `${this.id} could not be observed within ${timeoutMs}ms: every refresh failed`,
         );
       }
-      await sleep(pollMs, signal);
-      try {
-        await this.refresh({ signal });
-      } catch (err) {
-        // A 503 from a host busy doing exactly the disk copy being waited on
-        // is the ordinary weather of a build, not a verdict on it — the same
-        // rule waitUntilRunning applies. Anything else is not weather.
-        if (!isTransient(err)) throw err;
+      // The sleep comes before every poll but the first. A clone that finished
+      // while the caller was doing something else is one round trip from being
+      // known to have finished, and sleeping first holds that back by a whole
+      // poll interval to read nothing. A computer that is not being built still
+      // returns above without a request at all.
+      if (polled) await sleep(pollMs, signal);
+      polled = true;
+      // Guarded rather than unconditional: a sleep that ran the clock out
+      // leaves nothing to read the answer with, and the check at the top of the
+      // loop is what names that.
+      if (Date.now() < deadline) {
+        try {
+          // The poll carries what is left of this wait, as waitForGuest's probe
+          // does. Under the client's own per-request deadline alone a wait told
+          // to give up after five seconds spends up to another sixty inside a
+          // refresh whose answer it has already stopped waiting for.
+          await this.refresh({ signal: deadlineSignal(deadline - Date.now(), signal) });
+          observed = true;
+        } catch (err) {
+          // A caller who cancelled leaves now, whatever their reason is named.
+          if (signal?.aborted) throw err;
+          // This wait's own deadline firing inside a poll is this wait ending
+          // rather than a failure of the poll, and the loop's own check names
+          // it. Short of that: a 503 from a host busy doing exactly the disk
+          // copy being waited on is the ordinary weather of a build, not a
+          // verdict on it — the same rule waitUntilRunning applies. Anything
+          // else is not weather.
+          if (Date.now() < deadline && !isTransient(err)) throw err;
+        }
       }
     }
   }
@@ -580,6 +657,7 @@ export class Computer {
    */
   async waitUntilRunning(opts: WaitOptions = {}): Promise<this> {
     const { timeoutMs = 120_000, pollMs = 2_000, signal } = opts;
+    checkWait(timeoutMs, pollMs);
     const deadline = Date.now() + timeoutMs;
     // Success is a verdict, and no verdict is reached on state observed before
     // this call: when every refresh fails transiently, the handle may be
@@ -592,24 +670,31 @@ export class Computer {
     // get() one line before this call.
     let observed = false;
     for (;;) {
-      try {
-        await this.refresh({ signal });
-        observed = true;
-      } catch (err) {
-        // A host that cannot be reached answers 503, which is the ordinary
-        // weather of a machine still coming up. Letting it out would abort the
-        // one method whose whole job is to keep asking. Anything else — a
-        // revoked key, a computer that is gone — is not weather.
-        if (!isTransient(err)) throw err;
+      // Guarded rather than unconditional, so the sleep at the bottom of the
+      // loop cannot hand the clock to a poll with no time left to read it.
+      if (Date.now() < deadline) {
+        try {
+          // What is left of this wait, and not the client's own per-request
+          // deadline: a wait told to give up after five seconds must not spend
+          // another sixty inside a refresh it has stopped waiting for.
+          await this.refresh({ signal: deadlineSignal(deadline - Date.now(), signal) });
+          observed = true;
+        } catch (err) {
+          // A caller who cancelled leaves now, whatever their reason is named.
+          if (signal?.aborted) throw err;
+          // This wait's own deadline firing inside the poll is this wait
+          // ending, and the check below names it. Short of that: a host that
+          // cannot be reached answers 503, which is the ordinary weather of a
+          // machine still coming up, and letting it out would abort the one
+          // method whose whole job is to keep asking. Anything else — a revoked
+          // key, a computer that is gone — is not weather.
+          if (Date.now() < deadline && !isTransient(err)) throw err;
+        }
       }
       if (observed && this.status === 'running') return this;
       // A computer with no disk will never start on its own, and waiting out
       // the full timeout to say so helps nobody.
-      if (this.buildFailed) {
-        throw new MandalaError(
-          `${this.id} could not be built: ${this.buildError || 'the disk copy failed'}`,
-        );
-      }
+      if (this.buildFailed) throw this.#buildFailure();
       // Nor will a suspended one. Left to spin it reports a machine that is
       // one call from running as a timeout — the least informative answer
       // available about the one case the caller can fix in a line.
@@ -642,11 +727,24 @@ export class Computer {
    * the desktop being usable — on Windows especially, since the agent runs in
    * session 0 and replies well before anyone has logged in. When you need the
    * desktop rather than the machine, poll {@link screenshot}.
+   *
+   * Throws rather than waiting out the timeout on a failed build, which nothing
+   * inside will ever answer from. A *suspended* computer is not refused here,
+   * unlike in {@link waitUntilRunning}: running a command resumes one, so the
+   * probe both wakes the machine and gets its answer — which is a side effect
+   * worth knowing about on a wait that reads as passive.
    */
   async waitForGuest(opts: WaitOptions = {}): Promise<this> {
     const { timeoutMs = 180_000, pollMs = 3_000, signal } = opts;
+    checkWait(timeoutMs, pollMs);
     const deadline = Date.now() + timeoutMs;
     for (;;) {
+      // Nothing inside a computer with no disk is ever going to answer, and
+      // spending three minutes to say so helps nobody — waitUntilRunning's
+      // rule, for its reason. Read off the handle rather than through a fresh
+      // GET, because this wait probes the guest and never refreshes: what it
+      // has is what the create, clone or get that produced this handle saw.
+      if (this.buildFailed) throw this.#buildFailure();
       try {
         // The probe carries what is left of this wait, as well as the caller's
         // signal. Under the client's own per-request deadline alone a wait told
@@ -713,6 +811,17 @@ export class Computer {
       query: P.screenshotQuery(width, opts.fresh),
       signal: opts.signal,
     });
+    // A captive portal or a misconfigured proxy answers 200 with an HTML page,
+    // and these bytes go straight into an image decoder or a model's context.
+    // The JSON and SSE readers both name that failure; this route handed it
+    // back as a PNG. readFile stays permissive on purpose — a guest file is
+    // whatever the guest has — but a screenshot is an image or it is nothing.
+    if (!res.contentType.startsWith('image/')) {
+      throw new MandalaError(
+        `expected an image from GET ${P.computerAction(this.id, 'screenshot')}, ` +
+          `got ${res.contentType}`,
+      );
+    }
     return res.bytes;
   }
 
@@ -900,8 +1009,19 @@ export class Computer {
    * without translation. An unknown key raises and names itself rather than
    * being silently dropped from the chord.
    */
-  async key(...keys: string[]): Promise<void> {
-    await this.#input(P.keyBody(keys));
+  async key(keys: readonly string[], opts?: CallOptions): Promise<void>;
+  async key(...keys: string[]): Promise<void>;
+  async key(
+    first: string | readonly string[],
+    ...rest: (string | CallOptions | undefined)[]
+  ): Promise<void> {
+    // An array first is the form that can carry options — every other input
+    // method takes a CallOptions, and this one could not, so a chord was the
+    // one keystroke in this SDK that no signal could cancel. The rest-args
+    // spelling stays exactly as it was, because it is the one in every example.
+    const spread = typeof first === 'string';
+    const keys = spread ? [first, ...(rest as string[])] : [...first];
+    await this.#input(P.keyBody(keys), spread ? {} : ((rest[0] as CallOptions) ?? {}));
   }
 
   /**
@@ -941,7 +1061,7 @@ export class Computer {
     // present and still zero when it is false, which is indistinguishable from
     // the corner of the screen — the exact wrong answer to give a caller about
     // to move relative to it.
-    if (!res.known) return undefined;
+    if (!bool(res.known)) return undefined;
     return { x: Number(res.x ?? 0), y: Number(res.y ?? 0) };
   }
 
@@ -1162,7 +1282,7 @@ export class Computer {
         signal: opts.signal,
       },
     );
-    return res?.bytes;
+    return count(res?.bytes);
   }
 
   // --- snapshots ------------------------------------------------------
@@ -1217,7 +1337,17 @@ export class Computer {
       P.computerAction(this.id, 'schedule'),
       { signal: opts.signal },
     );
-    return toSchedule(data ?? {});
+    // Guarded the way refresh() guards its own payload. An empty body decodes
+    // to "disabled, midnight UTC" — a schedule this computer may never have
+    // had, and indistinguishable from one it really has — which turns "the
+    // platform did not answer" into a reading. clearSchedule below is the one
+    // route where an empty body is a real answer, and it says so there.
+    if (!P.isRecord(data) || !Object.keys(data).length) {
+      throw new MandalaError(
+        `expected a schedule from GET ${P.computerAction(this.id, 'schedule')}`,
+      );
+    }
+    return toSchedule(data);
   }
 
   /** Set the automatic daily snapshot window, in the given IANA timezone. */
@@ -1230,12 +1360,16 @@ export class Computer {
     },
     opts: CallOptions = {},
   ): Promise<Schedule> {
+    const body = P.scheduleBody(args);
     const data = await this.#t.json<Record<string, unknown>>(
       'PUT',
       P.computerAction(this.id, 'schedule'),
-      { body: P.scheduleBody(args), signal: opts.signal },
+      { body, signal: opts.signal },
     );
-    return toSchedule(data ?? {});
+    // What was asked for, when the platform acknowledges with no body. It
+    // applied this and said so with a 2xx; echoing it beats decoding `{}` into
+    // a midnight nobody chose.
+    return toSchedule(data ?? body);
   }
 
   /**
@@ -1251,7 +1385,10 @@ export class Computer {
       P.computerAction(this.id, 'schedule'),
       { signal: opts.signal },
     );
-    return toSchedule(data ?? {});
+    // `{}` is a real answer here, and the only route where it is: a cleared
+    // schedule has no window, and "disabled" with an hour nobody chose is the
+    // closest this type can come to saying so.
+    return toSchedule(data ?? { enabled: false });
   }
 
   // --- the agent loop -------------------------------------------------

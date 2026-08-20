@@ -10,7 +10,7 @@
  * — key resolution, URL building, the status table — is the whole file here.
  */
 
-import { type APIError, errorForStatus, MandalaError } from './errors.js';
+import { type APIError, errorForStatus, MandalaError, ValidationError } from './errors.js';
 import { isRecord } from './paths.js';
 
 export const DEFAULT_BASE_URL = 'https://app.mandala.computer/api/v1';
@@ -172,7 +172,9 @@ export class Transport {
     // stays legal.
     const timeoutMs = opts.timeoutMs ?? 60_000;
     if (!Number.isFinite(timeoutMs) || timeoutMs < 0) {
-      throw new TypeError(`timeoutMs must be a non-negative finite number (got ${timeoutMs})`);
+      throw new ValidationError(
+        `timeoutMs must be a non-negative finite number (got ${timeoutMs})`,
+      );
     }
     this.#timeoutMs = timeoutMs;
     // Bound to globalThis rather than passed bare: an unbound `fetch` throws
@@ -198,7 +200,7 @@ export class Transport {
     // Infinity surfaces later as a baffling "could not reach <baseUrl>" out
     // of AbortSignal.timeout. Both are caller mistakes, named as such here.
     if (!Number.isFinite(min)) {
-      throw new TypeError(`the timeout for this request is not a finite number (got ${min})`);
+      throw new ValidationError(`the timeout for this request is not a finite number (got ${min})`);
     }
     return Math.max(this.#timeoutMs, min);
   }

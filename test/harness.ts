@@ -150,6 +150,12 @@ export const SNAPSHOT = {
 
 export const EXEC_OK = { exit_code: 0, stdout: '', stderr: '', timed_out: false };
 
+/** What a background start answers with: a pid, and nothing having exited. */
+export const EXEC_STARTED = { pid: 4242, running: true, stdout: '', stderr: '' };
+
+const isRecord = (v: unknown): v is Record<string, unknown> =>
+  typeof v === 'object' && v !== null && !Array.isArray(v);
+
 /**
  * A responder that answers every route with something of the right shape.
  *
@@ -162,7 +168,13 @@ export const anyRoute: Responder = (call) => {
   const get = method === 'GET';
   if (path.endsWith('/screenshot')) return bytes('png');
   if (path.endsWith('/files')) return get ? bytes('file', 'text/plain') : json({ bytes: 5 });
-  if (path.endsWith('/exec')) return json(EXEC_OK);
+  // A background exec answers with a handle, not a result. Told apart by the
+  // request rather than answered with one shape for both, because a mock that
+  // hands a background start an EXEC_OK is a mock claiming a platform that
+  // never sends a pid — which is exactly the payload the decoder now refuses.
+  if (path.endsWith('/exec')) {
+    return json(isRecord(call.body) && call.body.background ? EXEC_STARTED : EXEC_OK);
+  }
   if (/\/exec\/\d+$/.test(path)) return json({ pid: 42, running: false, exit_code: 0 });
   if (path.endsWith('/windows')) return json([]);
   if (/\/windows\/[^/]+$/.test(path)) return json({ id: '0x1', title: 'w' });
