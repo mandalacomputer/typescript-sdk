@@ -124,6 +124,7 @@ await c.mouseUp(400, 300);
 await c.scroll(640, 400, { direction: 'down', amount: 3 });
 await c.type('hello');
 await c.key('ctrl', 'c');                     // X11 keysyms work too: Page_Down, BackSpace
+await c.key(['ctrl', 'c'], { signal });       // the same chord, cancellable
 await c.holdKey(['shift'], 1.5);
 await c.wait(2);
 const at = await c.cursorPosition();          // undefined if nothing has placed it

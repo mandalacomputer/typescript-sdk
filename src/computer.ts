@@ -16,6 +16,7 @@ import {
   PermissionDeniedError,
   PlanLimitError,
   TimeoutError,
+  ValidationError,
 } from './errors.js';
 import type {
   BackgroundExec,
@@ -28,6 +29,9 @@ import type {
   VncConnect,
 } from './models.js';
 import {
+  bool,
+  count,
+  num,
   toBackgroundExec,
   toExecResult,
   toGuestWindow,
@@ -109,7 +113,7 @@ const checkWait = (timeoutMs: number, pollMs: number): void => {
     ['pollMs', pollMs],
   ] as const) {
     if (!Number.isFinite(v) || v < 0) {
-      throw new TypeError(`${what} must be a non-negative finite number (got ${v})`);
+      throw new ValidationError(`${what} must be a non-negative finite number (got ${v})`);
     }
   }
 };
@@ -278,16 +282,21 @@ export class Computer {
     return String(this.#data.template ?? '');
   }
 
+  // num() and not Number(), on all three: a field that is not a number at all
+  // becomes NaN through Number(), and NaN CPUs fail every comparison a caller
+  // writes — including the `>= 2` that was meant to be false. models.ts decodes
+  // the same platform fields the same way; two rules for one payload is worse
+  // than either.
   get cpu(): number {
-    return Number(this.#data.cpu ?? 0);
+    return num(this.#data.cpu);
   }
 
   get ramMb(): number {
-    return Number(this.#data.ram_mb ?? 0);
+    return num(this.#data.ram_mb);
   }
 
   get diskGb(): number {
-    return Number(this.#data.disk_gb ?? 0);
+    return num(this.#data.disk_gb);
   }
 
   /**
@@ -319,8 +328,10 @@ export class Computer {
 
   /** Minutes untouched before the host suspends it, or `undefined` for the host default. */
   get idleSuspendMin(): number | undefined {
-    const v = this.#data.idle_suspend_min;
-    return v == null ? undefined : Number(v);
+    // A value that is not a number is the host's own window as far as this can
+    // honestly say. Number() would answer NaN, which is a minute count that
+    // silently fails every comparison rather than an absence a caller can see.
+    return count(this.#data.idle_suspend_min);
   }
 
   get createdAt(): string {
@@ -547,7 +558,11 @@ export class Computer {
       P.computer(this.id),
       { query: P.deleteQuery(opts), signal: opts.signal },
     );
-    return res?.snapshots_deleted;
+    // Normalized rather than handed back raw: a JSON null would otherwise
+    // arrive against a type that says it cannot, and `=== undefined` — the
+    // check a caller writes to find out whether the platform answered — is
+    // false for it.
+    return count(res?.snapshots_deleted);
   }
 
   // --- readiness ------------------------------------------------------
@@ -796,6 +811,17 @@ export class Computer {
       query: P.screenshotQuery(width, opts.fresh),
       signal: opts.signal,
     });
+    // A captive portal or a misconfigured proxy answers 200 with an HTML page,
+    // and these bytes go straight into an image decoder or a model's context.
+    // The JSON and SSE readers both name that failure; this route handed it
+    // back as a PNG. readFile stays permissive on purpose — a guest file is
+    // whatever the guest has — but a screenshot is an image or it is nothing.
+    if (!res.contentType.startsWith('image/')) {
+      throw new MandalaError(
+        `expected an image from GET ${P.computerAction(this.id, 'screenshot')}, ` +
+          `got ${res.contentType}`,
+      );
+    }
     return res.bytes;
   }
 
@@ -983,8 +1009,19 @@ export class Computer {
    * without translation. An unknown key raises and names itself rather than
    * being silently dropped from the chord.
    */
-  async key(...keys: string[]): Promise<void> {
-    await this.#input(P.keyBody(keys));
+  async key(keys: readonly string[], opts?: CallOptions): Promise<void>;
+  async key(...keys: string[]): Promise<void>;
+  async key(
+    first: string | readonly string[],
+    ...rest: (string | CallOptions | undefined)[]
+  ): Promise<void> {
+    // An array first is the form that can carry options — every other input
+    // method takes a CallOptions, and this one could not, so a chord was the
+    // one keystroke in this SDK that no signal could cancel. The rest-args
+    // spelling stays exactly as it was, because it is the one in every example.
+    const spread = typeof first === 'string';
+    const keys = spread ? [first, ...(rest as string[])] : [...first];
+    await this.#input(P.keyBody(keys), spread ? {} : ((rest[0] as CallOptions) ?? {}));
   }
 
   /**
@@ -1024,7 +1061,7 @@ export class Computer {
     // present and still zero when it is false, which is indistinguishable from
     // the corner of the screen — the exact wrong answer to give a caller about
     // to move relative to it.
-    if (!res.known) return undefined;
+    if (!bool(res.known)) return undefined;
     return { x: Number(res.x ?? 0), y: Number(res.y ?? 0) };
   }
 
@@ -1245,7 +1282,7 @@ export class Computer {
         signal: opts.signal,
       },
     );
-    return res?.bytes;
+    return count(res?.bytes);
   }
 
   // --- snapshots ------------------------------------------------------
@@ -1300,7 +1337,17 @@ export class Computer {
       P.computerAction(this.id, 'schedule'),
       { signal: opts.signal },
     );
-    return toSchedule(data ?? {});
+    // Guarded the way refresh() guards its own payload. An empty body decodes
+    // to "disabled, midnight UTC" — a schedule this computer may never have
+    // had, and indistinguishable from one it really has — which turns "the
+    // platform did not answer" into a reading. clearSchedule below is the one
+    // route where an empty body is a real answer, and it says so there.
+    if (!P.isRecord(data) || !Object.keys(data).length) {
+      throw new MandalaError(
+        `expected a schedule from GET ${P.computerAction(this.id, 'schedule')}`,
+      );
+    }
+    return toSchedule(data);
   }
 
   /** Set the automatic daily snapshot window, in the given IANA timezone. */
@@ -1313,12 +1360,16 @@ export class Computer {
     },
     opts: CallOptions = {},
   ): Promise<Schedule> {
+    const body = P.scheduleBody(args);
     const data = await this.#t.json<Record<string, unknown>>(
       'PUT',
       P.computerAction(this.id, 'schedule'),
-      { body: P.scheduleBody(args), signal: opts.signal },
+      { body, signal: opts.signal },
     );
-    return toSchedule(data ?? {});
+    // What was asked for, when the platform acknowledges with no body. It
+    // applied this and said so with a 2xx; echoing it beats decoding `{}` into
+    // a midnight nobody chose.
+    return toSchedule(data ?? body);
   }
 
   /**
@@ -1334,7 +1385,10 @@ export class Computer {
       P.computerAction(this.id, 'schedule'),
       { signal: opts.signal },
     );
-    return toSchedule(data ?? {});
+    // `{}` is a real answer here, and the only route where it is: a cleared
+    // schedule has no window, and "disabled" with an hour nobody chose is the
+    // closest this type can come to saying so.
+    return toSchedule(data ?? { enabled: false });
   }
 
   // --- the agent loop -------------------------------------------------

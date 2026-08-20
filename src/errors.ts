@@ -12,6 +12,24 @@
  * reached for.
  */
 
+/**
+ * A caller mistake, refused before the request went out.
+ *
+ * A `TypeError` subclass rather than a new hierarchy, because that is what
+ * every one of these already was and what callers already catch: passing a NaN
+ * coordinate or an empty id is a type mistake in the ordinary JS sense, and the
+ * platform is not the right place to learn about it.
+ *
+ * The subclass exists so the CLI can tell an SDK refusal — which is a sentence
+ * to print for the user — from a `TypeError` out of a bug in the CLI itself,
+ * which is a stack trace for whoever has to fix it. Not exported from the
+ * package's entry point: to a caller these are still exactly `TypeError`s, as
+ * documented.
+ */
+export class ValidationError extends TypeError {
+  override name = 'ValidationError';
+}
+
 /** Base class for every error this SDK raises. */
 export class MandalaError extends Error {
   override name = 'MandalaError';

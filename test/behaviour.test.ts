@@ -344,6 +344,126 @@ describe('waiting', () => {
   });
 });
 
+describe('a chord', () => {
+  it('takes an array with options, and still takes plain arguments', async () => {
+    // key() was the one input method with no CallOptions, which made a chord
+    // the one keystroke in this SDK that no signal could cancel.
+    const { rec, client: c } = client(anyRoute);
+    const computer = await c.computers.get('vm-1');
+    await computer.key('ctrl', 'c');
+    const spread = rec.last().body;
+    await computer.key(['ctrl', 'c']);
+    expect(rec.last().body).toEqual(spread);
+    expect(spread).toEqual({ action: 'key', keys: ['ctrl', 'c'] });
+  });
+
+  it('honours the signal the array form can carry', async () => {
+    const { client: c } = client(anyRoute);
+    const computer = await c.computers.get('vm-1');
+    await expect(computer.key(['ctrl', 'c'], { signal: AbortSignal.abort() })).rejects.toThrow();
+  });
+});
+
+describe('what a payload cannot be allowed to mean', () => {
+  it('normalizes a null count to undefined, which is what the type promises', async () => {
+    // `written === undefined` is the check a caller writes to find out whether
+    // the platform answered. A raw null is not undefined, and `mandala scp`
+    // printed "null bytes" because of it.
+    const { client: c } = client((call) => {
+      if (call.path.endsWith('/files') && call.method === 'PUT') return json({ bytes: null });
+      if (call.method === 'DELETE') return json({ snapshots_deleted: null });
+      return anyRoute(call);
+    });
+    const computer = await c.computers.get('vm-1');
+    expect(await computer.writeFile('/tmp/f', 'hi')).toBeUndefined();
+    expect(await computer.delete()).toBeUndefined();
+  });
+
+  it('refuses a screenshot that is not an image', async () => {
+    // A captive portal answers 200 with an HTML page, and these bytes go
+    // straight into an image decoder or a model's context.
+    const { client: c } = client((call) =>
+      call.path.endsWith('/screenshot')
+        ? new Response('<!DOCTYPE html><title>Sign in</title>', {
+            status: 200,
+            headers: { 'content-type': 'text/html' },
+          })
+        : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    await expect(computer.screenshot()).rejects.toThrow(/expected an image/);
+  });
+
+  it('reads a stringified false as false, not as the corner of the screen', async () => {
+    // The platform this mirrors has a Python SDK, and `str(False)` is 'False'.
+    const { client: c } = client((call) =>
+      call.path.endsWith('/input') ? json({ known: 'false', x: 0, y: 0 }) : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    expect(await computer.cursorPosition()).toBeUndefined();
+  });
+
+  it('falls back rather than answering NaN on a shape that is not a number', async () => {
+    // A NaN CPU count fails every comparison a caller writes, including the
+    // `>= 2` that was meant to be false.
+    const { client: c } = client(() => json({ ...COMPUTER, cpu: 'two', idle_suspend_min: 'soon' }));
+    const computer = await c.computers.get('vm-1');
+    expect(computer.cpu).toBe(0);
+    expect(computer.idleSuspendMin).toBeUndefined();
+  });
+
+  it('refuses an answer that is not a computer, where the id would have gone missing', async () => {
+    // refresh() already names this. get/create/clone built a handle with id ''
+    // instead, and everything it could do then threw about an empty id from a
+    // path builder, naming neither the route nor the empty answer.
+    const { client: c } = client(() => json({}));
+    await expect(c.computers.get('vm-1')).rejects.toThrow(/expected a computer from GET/);
+    await expect(c.computers.create()).rejects.toThrow(/expected a computer from POST/);
+    await expect(c.snapshots.clone('snap-1')).rejects.toThrow(/expected a computer from POST/);
+  });
+
+  it('refuses a background exec with no pid, rather than a finished job on pid 0', async () => {
+    const { client: c } = client((call) =>
+      call.path.endsWith('/exec') ? json({}) : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    await expect(computer.execBackground('sleep 60')).rejects.toThrow(/pid/);
+  });
+
+  it('reads a missing `running` as still running, when nothing has exited', async () => {
+    // False is the claim that the command is over, which is the finished-job
+    // answer again by another route.
+    const { client: c } = client((call) =>
+      call.path.endsWith('/exec') ? json({ pid: 7 }) : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    expect((await computer.execBackground('sleep 60')).running).toBe(true);
+  });
+
+  it('refuses an empty schedule read rather than reporting midnight UTC', async () => {
+    // `{}` decodes to "disabled, 00:00 UTC", which is indistinguishable from a
+    // schedule this computer really has.
+    const { client: c } = client((call) =>
+      call.path.endsWith('/schedule') ? json({}) : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    await expect(computer.schedule()).rejects.toThrow(/expected a schedule from GET/);
+  });
+
+  it('echoes what was set when the platform acknowledges with no body', async () => {
+    // It applied this and said so with a 2xx; decoding `{}` would answer with a
+    // midnight nobody chose.
+    const { client: c } = client((call) =>
+      call.path.endsWith('/schedule') ? new Response(null, { status: 204 }) : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    const set = await computer.setSchedule({ enabled: true, hour: 23, minute: 30, tz: 'UTC' });
+    expect(set).toMatchObject({ enabled: true, hour: 23, minute: 30, tz: 'UTC' });
+    // A cleared schedule is the one place an empty body is a real answer.
+    expect(await computer.clearSchedule()).toMatchObject({ enabled: false });
+  });
+});
+
 describe('the pointer', () => {
   it('says nobody knows where the pointer is, rather than guessing the corner', async () => {
     // The coordinates are present and zero when `known` is false, which is
