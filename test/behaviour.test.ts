@@ -1,7 +1,13 @@
 /** What the handles do, as distinct from where they send it. */
 
 import { describe, expect, it } from 'vitest';
-import { Client, MandalaError, TimeoutError } from '../src/index.js';
+import {
+  Client,
+  GatewayTimeoutError,
+  isTransient,
+  MandalaError,
+  TimeoutError,
+} from '../src/index.js';
 import {
   anyRoute,
   BASE,
@@ -696,6 +702,46 @@ describe('exec', () => {
       expect(res.exitCode).toBe(-1);
       expect(res.ok).toBe(false);
     }
+  });
+
+  it('reports a proxy giving up as more than a bare status', async () => {
+    // Cloudflare content-negotiates its error page, and every request from this
+    // client asks for JSON, so the 524 arrives with an EMPTY body — which left
+    // err.message as the bare string 'HTTP 524': no cause, no way out.
+    const { client: c } = client((call) =>
+      call.path.endsWith('/exec') ? new Response('', { status: 524 }) : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    const err = await computer.exec('sleep 130', { timeoutS: 300 }).catch((e) => e);
+    expect(err).toBeInstanceOf(GatewayTimeoutError);
+    expect(err.status).toBe(524);
+    expect(err.message).toMatch(/proxy/);
+    expect(err.message).toMatch(/still running/);
+    expect(err.message).toMatch(/execBackground\(\)/);
+  });
+
+  it('discards the proxy error page rather than truncating it into the message', async () => {
+    const { client: c } = client((call) =>
+      call.path.endsWith('/exec')
+        ? new Response('<!DOCTYPE html><html><body>error code: 524</body></html>', {
+            status: 524,
+            headers: { 'content-type': 'text/html' },
+          })
+        : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    const err = await computer.exec('sleep 130').catch((e) => e);
+    expect(err.message).not.toMatch(/DOCTYPE/);
+  });
+
+  it('does not offer a proxy timeout to the retry loops', async () => {
+    // Retrying reproduces it at the same place, because the hop that gave up
+    // never saw how long the caller asked to wait.
+    const { client: c } = client((call) =>
+      call.path.endsWith('/exec') ? new Response('', { status: 524 }) : anyRoute(call),
+    );
+    const err = await (await c.computers.get('vm-1')).exec('sleep 130').catch((e) => e);
+    expect(isTransient(err)).toBe(false);
   });
 
   it('refuses to open a URL on a Windows guest rather than sending a POSIX command', async () => {

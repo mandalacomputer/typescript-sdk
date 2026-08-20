@@ -216,8 +216,27 @@ await c.open('https://example.com');
 
 ### Long-running commands
 
-For builds, installs, test suites and servers. Strictly better than
-backgrounding with `&`, which throws away the exit code and the output:
+**`exec` cannot wait longer than about two minutes**, whatever `timeoutS` says.
+The HTTP budget is derived from it and the platform stretches its own deadline
+to match, but a proxy in front of the platform abandons a request that has
+produced no response for roughly that long and answers 524, which arrives as
+`GatewayTimeoutError`. Measured against `app.mandala.computer`:
+
+| command | `timeoutS` | result | wall clock |
+|---|---|---|---|
+| `sleep 110` | 230 | ok | 110.6s |
+| `sleep 130` | 300 | `GatewayTimeoutError` | 125.2s |
+| `sleep 130` | 3600 | `GatewayTimeoutError` | 125.3s |
+
+The last two rows are the point: a twelvefold difference in what was asked for,
+a tenth of a second in where it ended, because the hop that gives up never saw
+the argument. The command also survives the request that abandoned it, so the
+call after one of these often raises `ConflictError` — the guest agent still
+busy with it, which is the first failure continuing rather than a second one.
+
+So `execBackground` is not merely the tidier option past a few seconds; past two
+minutes it is the only one that works. Strictly better than backgrounding with
+`&`, which throws away the exit code and the output:
 
 ```ts
 const job = await c.execBackground('apt-get install -y build-essential');
@@ -476,6 +495,7 @@ import {
   ConflictError,       //     409 — right request, wrong moment. Retry this one.
   RateLimitError,      //     429 — retry after retryAfterMs when present
   UnavailableError,    //     503 — a listing would have been short
+  GatewayTimeoutError, //     504/524 — a proxy gave up; the work carries on
   ConnectionError,     //   the platform could not be reached. Retryable.
   TimeoutError,        //   a wait helper gave up
   isTransient,
@@ -493,6 +513,12 @@ try {
 `ConflictError` is the one that clears itself: a guest still booting, a disk still
 being copied, another operation holding the guest agent. The platform's own
 message survives onto `err.message` — these are written to be acted on.
+
+`GatewayTimeoutError` is the one that does not clear and is not the platform's
+answer at all. The request reached it and is very likely still running; what
+ended was one hop's willingness to hold a connection open with nothing crossing
+it, which is why retrying unchanged reproduces it exactly. See
+[Long-running commands](#long-running-commands).
 
 ## The `mandala` CLI
 
