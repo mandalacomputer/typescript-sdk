@@ -116,6 +116,75 @@ describe('execBody', () => {
       cwd: '/src',
     });
   });
+
+  it('carries an environment, and omits an empty one', () => {
+    expect(P.execBody({ command: 'make', env: { CI: '1' } }).env).toEqual({ CI: '1' });
+    // No env and an empty env are the same request; sending the key would
+    // claim the caller asked for something they did not.
+    expect(P.execBody({ command: 'make', env: {} })).not.toHaveProperty('env');
+  });
+
+  it('copies the environment, so a later mutation cannot change the request', () => {
+    const env: Record<string, string> = { TOKEN: 'a' };
+    const body = P.execBody({ command: 'make', env });
+    env.TOKEN = 'b';
+    expect(body.env).toEqual({ TOKEN: 'a' });
+  });
+
+  it('refuses the entries that would not fail, they would mean something else', () => {
+    // The guest agent takes KEY=value pairs, so a '=' in a name splits the
+    // entry at the wrong place, and a NUL truncates whichever half holds it.
+    // Both run the command with an environment nobody asked for, successfully.
+    expect(() => P.execBody({ command: 'x', env: { 'A=B': 'c' } })).toThrow(/must not contain/);
+    expect(() => P.execBody({ command: 'x', env: { 'A\0B': 'c' } })).toThrow(/must not contain/);
+    expect(() => P.execBody({ command: 'x', env: { A: 'b\0c' } })).toThrow(/NUL/);
+    expect(() => P.execBody({ command: 'x', env: { '': 'c' } })).toThrow(/empty name/);
+  });
+
+  it('names the key when a value is not a string', () => {
+    // `{ TOKEN: process.env.TOKEN }` with the variable unset is the shape this
+    // catches. Cast rather than checked, it reached .includes() and threw
+    // "Cannot read properties of undefined", naming neither the parameter nor
+    // the entry — the one refusal here that did not say what was wrong.
+    const unset = { TOKEN: undefined } as unknown as Record<string, string>;
+    expect(() => P.execBody({ command: 'x', env: unset })).toThrow(/"TOKEN" must be a string/);
+    const numeric = { PORT: 8080 } as unknown as Record<string, string>;
+    expect(() => P.execBody({ command: 'x', env: numeric })).toThrow(
+      /must be a string, not number/,
+    );
+  });
+
+  it('refuses more than the platform accepts, before the round trip', () => {
+    const many = Object.fromEntries(
+      Array.from({ length: P.MAX_ENV_ENTRIES + 1 }, (_, i) => [`K${i}`, 'v']),
+    );
+    expect(() => P.execBody({ command: 'x', env: many })).toThrow(/at most 64/);
+    const long = { K: 'v'.repeat(P.MAX_ENV_ENTRY_BYTES) };
+    expect(() => P.execBody({ command: 'x', env: long })).toThrow(/4096/);
+  });
+
+  it('measures an entry in bytes, as the platform does', () => {
+    // A limit counted in characters passes a value the platform then refuses:
+    // these are two bytes each, so 2048 of them are 4096 bytes and the entry is
+    // over the line once the name and the '=' are added.
+    const wide = { K: 'é'.repeat(2048) };
+    expect(() => P.execBody({ command: 'x', env: wide })).toThrow(/4096/);
+  });
+});
+
+describe('snapshotBody', () => {
+  it('always sends memory, because false is a request and not an absence', () => {
+    expect(P.snapshotBody(false)).toEqual({ memory: false });
+    expect(P.snapshotBody(true)).toEqual({ memory: true });
+  });
+
+  it('omits an unset name, which is what asks the platform to generate one', () => {
+    expect(P.snapshotBody(false, 'before-upgrade')).toEqual({
+      memory: false,
+      name: 'before-upgrade',
+    });
+    expect(() => P.snapshotBody(false, '  ')).toThrow(/must not be empty/);
+  });
 });
 
 describe('openUrlCommand', () => {
@@ -179,6 +248,40 @@ describe('screenshotQuery', () => {
     expect(P.screenshotQuery(320)).toEqual({ w: 320 });
     expect(() => P.screenshotQuery(0)).toThrow(/positive/);
     expect(() => P.screenshotQuery(-5)).toThrow(/positive/);
+  });
+
+  it('asks for an uncached frame only when told to', () => {
+    // The bare call builds the URL it built before `fresh` existed — an empty
+    // object here would put a '?' on every screenshot the SDK has ever taken.
+    expect(P.screenshotQuery(undefined, false)).toBeUndefined();
+    expect(P.screenshotQuery(undefined, true)).toEqual({ fresh: 1 });
+    expect(P.screenshotQuery(320, false)).toEqual({ w: 320 });
+  });
+
+  it('refuses fresh alongside a width, which the platform would ignore', () => {
+    // The platform's handler branches on `w` and returns the thumbnail before
+    // it reads `fresh` — and builds that thumbnail off the cached frame. So
+    // this combination promised an uncached frame and delivered a doubly-cached
+    // one, silently, on the call the docs tell a drive loop to make.
+    expect(() => P.screenshotQuery(320, true)).toThrow(/cannot be combined with a width/);
+  });
+
+  it('checks the width even alongside fresh', () => {
+    expect(() => P.screenshotQuery(0, true)).toThrow(/positive/);
+  });
+});
+
+describe('stopQuery', () => {
+  it('sends nothing for the graceful stop, which is the default', () => {
+    expect(P.stopQuery()).toEqual({});
+    expect(P.stopQuery(false)).toEqual({});
+  });
+
+  it("spells force the one way the daemon reads: 'true'", () => {
+    // Compared as a string against "true" in api.go. Anything else — 1, yes,
+    // TRUE — is a graceful stop reporting success, which is the failure the
+    // caller reached for force to escape.
+    expect(P.stopQuery(true)).toEqual({ force: 'true' });
   });
 });
 
