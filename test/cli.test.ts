@@ -10,8 +10,12 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   finishInteraction,
+  flushOutput,
+  guestBasename,
   guestDestination,
+  queueTerminalWrite,
   remoteSide,
+  terminalFrameByteLength,
   uploadSize,
   waitForWebSocketOpen,
 } from '../src/cli.js';
@@ -67,6 +71,40 @@ describe('terminal lifecycle', () => {
       vi.useRealTimers();
     }
   });
+
+  it('keeps a queued write rejection for cleanup without leaving it unobserved', async () => {
+    const queued = queueTerminalWrite(Promise.resolve(), () => {
+      throw new Error('EPIPE');
+    });
+    await expect(queued).rejects.toThrow(/EPIPE/);
+  });
+
+  it('waits for both stdout and stderr before exiting', () => {
+    const callbacks: (() => void)[] = [];
+    const stream = {
+      write(_chunk: string, callback: () => void) {
+        callbacks.push(callback);
+        return false;
+      },
+    } as unknown as NodeJS.WritableStream;
+    let exits = 0;
+    flushOutput(stream, stream, () => {
+      exits += 1;
+    });
+    expect(callbacks).toHaveLength(2);
+    callbacks[0]!();
+    expect(exits).toBe(0);
+    callbacks[1]!();
+    expect(exits).toBe(1);
+  });
+});
+
+describe('terminal frames', () => {
+  it('measures text and binary frames by their wire bytes', () => {
+    expect(terminalFrameByteLength('abc')).toBe(3);
+    expect(terminalFrameByteLength('🚀')).toBe(4);
+    expect(terminalFrameByteLength(new ArrayBuffer(7))).toBe(7);
+  });
 });
 
 describe('remoteSide', () => {
@@ -118,6 +156,11 @@ describe('remoteSide', () => {
 });
 
 describe('guestDestination', () => {
+  it('takes a guest basename using either path separator', () => {
+    expect(guestBasename('/home/dev/notes.txt')).toBe('notes.txt');
+    expect(guestBasename('C:\\Users\\dev\\notes.txt')).toBe('notes.txt');
+  });
+
   it('appends the source basename to a directory, on either separator', () => {
     // A Windows guest is spelled with backslashes, and read as a filename that
     // destination is a path the platform cannot write.
@@ -174,6 +217,8 @@ describe('argument handling', () => {
 
   it('prints usage and succeeds when asked for help', async () => {
     expect((await run(['--help'])).code).toBe(0);
+    expect((await run(['ssh', '--help'])).code).toBe(0);
+    expect((await run(['ssh', '-h'])).code).toBe(0);
   });
 
   it('names an unknown command rather than guessing', async () => {
