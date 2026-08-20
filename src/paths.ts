@@ -385,8 +385,8 @@ export function execBody(args: ExecArgs): Json {
     // Negative refused as well as non-finite, the way every other duration on
     // this surface is: a -1 is a caller's "no timeout" idiom from some other
     // API, and the guest agent reads it as a deadline already past.
-    if (finite(args.timeoutS, 'timeoutS') < 0) {
-      throw new ValidationError(`timeoutS must not be negative (got ${args.timeoutS})`);
+    if (finite(args.timeoutS, 'timeoutS') <= 0) {
+      throw new ValidationError(`timeoutS must be positive (got ${args.timeoutS})`);
     }
     body.timeout_s = args.timeoutS;
   }
@@ -785,7 +785,9 @@ export function agentBody(args: {
   stream: boolean;
 }): Json {
   if (!args.prompt.trim()) throw new ValidationError('prompt must not be empty');
-  finiteIf(args.maxSteps, 'maxSteps');
+  if (args.maxSteps !== undefined && (!Number.isInteger(args.maxSteps) || args.maxSteps < 1)) {
+    throw new ValidationError(`maxSteps must be a positive integer (got ${args.maxSteps})`);
+  }
   return omitUndefined({
     prompt: args.prompt,
     max_steps: args.maxSteps,
