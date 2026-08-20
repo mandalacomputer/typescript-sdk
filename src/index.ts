@@ -82,6 +82,7 @@ export {
   isTransient,
   MandalaError,
   NotFoundError,
+  OriginResponseError,
   OriginUnreachableError,
   PermissionDeniedError,
   PlanLimitError,
