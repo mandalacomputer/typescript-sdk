@@ -134,6 +134,21 @@ request from clicking (0, 0). Half a coordinate — `click(5)` — is refused ra
 than completed with a zero: it would succeed, at the wrong place, and nothing
 would say so.
 
+### Screenshots, and the one flag a drive loop needs
+
+```ts
+const png = await c.screenshot();                   // full-resolution PNG
+const thumb = await c.screenshot(320);              // downscaled JPEG
+const now = await c.screenshot(undefined, { fresh: true });
+```
+
+**Pass `fresh` whenever the image is feeding a decision.** A bare screenshot may
+be served from a cache up to 1.5 seconds old — which is what makes ten watchers
+of one desktop cost a single screendump, and what makes a drive loop read the
+screen as it was *before* its own last click. A model handed that frame concludes
+the click missed and clicks again, and the second click lands on whatever the
+first one revealed. A thumbnail can have the cached frame; a decision cannot.
+
 ### Windows
 
 A screenshot says what the desktop *looks like*; this says what any of it **is**,
@@ -167,6 +182,15 @@ with no display; anything with a window needs the desktop session:
 
 ```ts
 await c.exec('nohup firefox https://example.com >/dev/null 2>&1 &', { desktop: true });
+```
+
+`env` adds variables on top of the guest's profile — `PATH` and the rest survive,
+because the command runs through a login shell. It is the right way to hand a
+build a token, since the alternative is interpolating one into the command line
+where the guest's shell history and process list can both read it:
+
+```ts
+await c.exec('./deploy.sh', { cwd: '/src', env: { CI: '1', TOKEN: token } });
 ```
 
 Or call `open()` and let the SDK write that line — it names a browser that
@@ -255,6 +279,20 @@ ran out of API budget (`rate_limited`), or was declined (`refusal`) is **not**
 raised as an error — the steps already taken are real and what they did to the
 desktop stands. They say the run did not finish, which is a different thing from
 the run having gone wrong.
+
+### Power
+
+```ts
+await c.start();
+await c.stop();                               // asks the guest to shut down
+await c.stop({ force: true });                // pulls the power
+await c.restart();                            // the reset button, not a fresh boot
+```
+
+`stop()` asks the guest to shut down and gives it time. `force` skips the asking
+— the equivalent of holding the button in. It is what to reach for when a guest
+will not come down on its own, and it loses whatever had not been written to
+disk, so it is not where to start.
 
 ### Suspending
 
@@ -345,11 +383,15 @@ snapshotting or cloning it throws `ConflictError`. If the copy dies,
 
 ```ts
 const snap = await c.snapshot();                    // disk
-const live = await c.snapshot({ memory: true });    // + RAM and device state
+const live = await c.snapshot({ memory: true, name: 'before-upgrade' });
 
 const forked = await client.snapshots.clone(live.id, 'twin');
 await forked.waitUntilBuilt();                      // resumes, does not boot
 ```
+
+Naming one is worth the keystrokes. Snapshots outlive the computers they came
+from, so an account's listing fills up with generated names that record only when
+each was taken — which is the one thing a restore does not need to know.
 
 A memory snapshot forks into a live twin — same processes, same open windows,
 same network identity until it is re-identified.
@@ -473,9 +515,18 @@ that is exactly how three routes reached the platform without the Python SDK's
 surface test noticing, because "every call lands on an allowlisted route" stays
 true when the allowlist is the stale one.
 
+**Pinned to its parameters too, because routes were not enough.** A route table
+cannot see a call that lands in the right place without the argument that made
+it worth making. Four did: `stop?force`, `screenshot?fresh`, `exec`'s `env` and
+a snapshot's `name` were all documented, all on routes this SDK reached, and
+none of them sendable — and every surface test was structurally unable to
+notice. So `PARAMETERS` mirrors the platform's `DOCS` table as well, the surface
+test asserts each one is actually reached, and `check-surface.mjs` diffs both.
+
 **The gap is a number, not a vibe.** Routes the platform exposes that this SDK
-cannot call live in `UNIMPLEMENTED`. Closing one means deleting its line, which
-is the point.
+cannot call live in `UNIMPLEMENTED`, and parameters it does not send in
+`UNIMPLEMENTED_PARAMETERS`. Closing one means deleting its line, which is the
+point.
 
 **Validation that saves a round trip, and no more.** Everything refused locally
 — a relative guest path, half a coordinate, a `size` next to a `cpu`, a purge
@@ -512,7 +563,7 @@ failure reads differently depending which one you reached for.
 
 ```sh
 npm install
-npm test           # vitest, then the surface diff against the platform repo
+npm test           # vitest, then the route + parameter diff against the platform repo
 npm run typecheck
 npm run lint
 npm run build
