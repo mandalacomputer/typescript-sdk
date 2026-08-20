@@ -209,10 +209,10 @@ actually works on the image, quotes the URL, and detaches the launch:
 await c.open('https://example.com');
 ```
 
-> `xdg-open`, `exo-open`, `sensible-browser` and `x-www-browser` are all on the
-> base image and all exit 0 while launching nothing, because the image's
-> default-browser association points at a desktop entry it does not ship. Exit 0
-> and an unchanged screen is the worst shape a failure can take.
+> Firefox by name, rather than `xdg-open` or one of the other portable
+> wrappers: naming it puts the choice in one place. `open()` is the only thing
+> that decides which browser the guest opens, so if that ever needs to be a
+> different one, it changes there and your callers do not.
 
 ### Long-running commands
 
