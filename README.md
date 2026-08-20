@@ -496,6 +496,7 @@ import {
   RateLimitError,      //     429 — retry after retryAfterMs when present
   UnavailableError,    //     503 — a listing would have been short
   GatewayTimeoutError, //     504/524 — a proxy gave up; the work carries on
+  OriginUnreachableError,//   520-523/525/526 — a proxy never reached it at all
   ConnectionError,     //   the platform could not be reached. Retryable.
   TimeoutError,        //   a wait helper gave up
   isTransient,
@@ -523,6 +524,14 @@ one on a read there is nothing left behind. `err.message` carries the response's
 own message where it sent a structured one, and this SDK's explanation where the
 hop sent an empty or HTML body — which is the usual case, since a 524 is
 generated at the edge. See [Long-running commands](#long-running-commands).
+
+`OriginUnreachableError` is its opposite and is why the two are different types.
+A gateway timeout means the request arrived and its work carries on; these mean
+it never arrived, so nothing was started and there is nothing to account for.
+520-523 are usually the platform restarting and clear on their own; 525 and 526
+are a TLS handshake that will fail the same way on every retry, and say so.
+Neither is in `isTransient` — this SDK decides transience by class, and adding a
+retrying status would be a change to retry policy rather than to naming.
 
 ## The `mandala` CLI
 

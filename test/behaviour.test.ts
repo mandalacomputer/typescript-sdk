@@ -7,6 +7,7 @@ import {
   GatewayTimeoutError,
   isTransient,
   MandalaError,
+  OriginUnreachableError,
   TimeoutError,
 } from '../src/index.js';
 import {
@@ -768,6 +769,34 @@ describe('exec', () => {
     expect(err.message).toMatch(/Nothing was cancelled/);
     expect(err.message).toMatch(/Most often/);
     expect(err.message).not.toMatch(/whatever this request started is still running/);
+  });
+
+  it('tells an origin that was never reached apart from one that stopped answering', async () => {
+    // Opposite implications for whether the work survived: a 524 means the
+    // request arrived and is still being worked on, a 522 means it never
+    // arrived, so nothing was started and nothing outlives anything.
+    const { client: c } = client(() => new Response('', { status: 522 }));
+    const err = await c.computers.get('vm-1').catch((e) => e);
+    expect(err).toBeInstanceOf(OriginUnreachableError);
+    expect(err).not.toBeInstanceOf(GatewayTimeoutError);
+    expect(err.message).toMatch(/never arrived/);
+    expect(err.message).toMatch(/clears on its own/);
+  });
+
+  it('does not tell a bad certificate to wait it out', async () => {
+    const { client: c } = client(() => new Response('', { status: 526 }));
+    const err = await c.computers.get('vm-1').catch((e) => e);
+    expect(err).toBeInstanceOf(OriginUnreachableError);
+    expect(err.message).toMatch(/TLS handshake/);
+    expect(err.message).toMatch(/report it rather than waiting it out/);
+  });
+
+  it('leaves the retry policy exactly where it was', async () => {
+    // Naming these statuses is not the same decision as retrying them, and this
+    // SDK decides transience by class. Changing that belongs in its own change.
+    const { client: c } = client(() => new Response('', { status: 522 }));
+    const err = await c.computers.get('vm-1').catch((e) => e);
+    expect(isTransient(err)).toBe(false);
   });
 
   it('refuses to open a URL on a Windows guest rather than sending a POSIX command', async () => {

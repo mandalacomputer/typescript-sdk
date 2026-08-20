@@ -168,6 +168,33 @@ export class GatewayTimeoutError extends APIError {
   override name = 'GatewayTimeoutError';
 }
 
+/**
+ * 520-523, 525, 526 — a proxy in front of the platform could not reach it.
+ *
+ * The rest of what an edge generates on its own, and the same defect as
+ * {@link GatewayTimeoutError} a few statuses along: with no class and no written
+ * message these fell through to the bare `HTTP 522`, which names no cause, no
+ * culprit and no way out.
+ *
+ * A different event from a gateway timeout, which is why it is a different type
+ * rather than more entries on that one. A 524 means the request arrived and is
+ * still being worked on; these mean it never arrived at all, so nothing was
+ * started and there is no command outliving anything. A caller branching on the
+ * class to decide whether its work survived gets opposite answers, correctly.
+ *
+ * mandala-computer-mcp reached this first and argued the divergence the other
+ * way: that a developer-facing client did not need it, because its messages are
+ * read by a person who can go and look up what a 523 is, while a model cannot.
+ * The counter is what this SDK is for. It is an agent SDK — its errors are fed
+ * to models routinely, by the frameworks it exists to be used from — so the
+ * audience that cannot look up a 523 is on this side of the line too. And a
+ * person seeing `HTTP 522` is not much better served: the 52x range is Cloudflare's
+ * own numbering, and nothing about it is guessable from the number.
+ */
+export class OriginUnreachableError extends APIError {
+  override name = 'OriginUnreachableError';
+}
+
 /** A wait helper gave up before the computer reached the expected state. */
 export class TimeoutError extends MandalaError {
   override name = 'TimeoutError';
@@ -181,8 +208,25 @@ const BY_STATUS: Record<number, typeof APIError> = {
   409: ConflictError,
   503: UnavailableError,
   504: GatewayTimeoutError,
+  520: OriginUnreachableError,
+  521: OriginUnreachableError,
+  522: OriginUnreachableError,
+  523: OriginUnreachableError,
   524: GatewayTimeoutError,
+  525: OriginUnreachableError,
+  526: OriginUnreachableError,
 };
+
+/**
+ * The two of those that waiting cannot fix.
+ *
+ * 525 and 526 are a handshake the edge and the platform cannot agree on — an
+ * expired certificate, a mismatched name. Nothing about that is passing, so they
+ * get their own wording; the other four are an origin that is down or
+ * unreachable, which is what a restart looks like from outside and does come
+ * back.
+ */
+const TLS_STATUSES = new Set([525, 526]);
 
 /**
  * What a caller is told when a proxy abandoned the request and named nothing.
@@ -224,6 +268,21 @@ const GATEWAY_TIMEOUT_MESSAGE =
  * proxy in the chain, including one in front of a `baseUrl` this client has
  * never seen.
  */
+/** What a caller is told when a proxy could not reach the platform at all. */
+const ORIGIN_UNREACHABLE_MESSAGE =
+  'a proxy in front of the platform could not reach it. The request never arrived, so ' +
+  'nothing was started and nothing is running — unlike a gateway timeout, there is no ' +
+  'work on the other side of this to account for. Usually the platform restarting or a ' +
+  'short outage, which clears on its own; if it persists the platform is down, and ' +
+  'waiting is the only thing that helps';
+
+/** The same, for the two of those that waiting will not fix. */
+const ORIGIN_TLS_MESSAGE =
+  'a proxy in front of the platform could not complete a TLS handshake with it. The ' +
+  'request never arrived, so nothing was started and nothing is running. This is a ' +
+  'misconfigured deployment rather than a passing outage — an expired or mismatched ' +
+  'certificate fails the same way on every retry, so report it rather than waiting it out';
+
 function namedTheFailure(body: unknown): boolean {
   if (!body || typeof body !== 'object') return false;
   const err = (body as { error?: unknown }).error;
@@ -244,6 +303,14 @@ export function errorForStatus(
   // that is the one case where the response knows more than this file does.
   if (Cls === GatewayTimeoutError && !namedTheFailure(body)) {
     return new GatewayTimeoutError(GATEWAY_TIMEOUT_MESSAGE, status, body);
+  }
+  // No `namedTheFailure` guard here, and the asymmetry is the point. Every one
+  // of 520-526 means the request never reached the platform, so there is no
+  // reading on which that body carries the platform's account of what happened —
+  // nothing to defer to, and a guard would only look symmetrical.
+  if (Cls === OriginUnreachableError) {
+    const said = TLS_STATUSES.has(status) ? ORIGIN_TLS_MESSAGE : ORIGIN_UNREACHABLE_MESSAGE;
+    return new OriginUnreachableError(said, status, body);
   }
   return new Cls(message, status, body);
 }
@@ -277,6 +344,13 @@ export function errorForEventStatus(status: number, message: string): APIError {
  * decide than a fixed policy is.
  */
 export function isTransient(err: unknown): boolean {
+  // {@link OriginUnreachableError} is deliberately not here, though 520-523 do
+  // clear on their own and mandala-computer-mcp does retry them. This SDK
+  // decides transience by class and treats every other 5xx as terminal — see
+  // {@link ConflictError}, which documents a guest agent past its boot window
+  // becoming a 502 precisely so that a retry loop STOPS. Adding a retrying
+  // status here would be a change to retry policy smuggled into a change about
+  // what errors are called, and the two deserve to be argued separately.
   return (
     err instanceof ConflictError ||
     err instanceof RateLimitError ||
