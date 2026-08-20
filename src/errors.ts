@@ -308,6 +308,15 @@ const GATEWAY_TIMEOUT_MESSAGE =
  * replacing it would be this client overwriting a hop that knew more than it
  * does with a guess.
  *
+ * `error` and not RFC 9457's `detail`, though Cloudflare answers these statuses
+ * with one and `messageFromBody` in transport.ts reads it. Deliberate, and the
+ * distinction is what each hop can know. Cloudflare's `detail` describes the
+ * edge accurately and stops there, because a proxy cannot know that the request
+ * under it was a foreground exec with a two-minute ceiling over it and an
+ * execBackground alternative. Counting it here would hand that sentence the
+ * substitution and lose the only part a caller can act on — on 504 and 524,
+ * which is to say on almost every real one of these.
+ *
  * Which hop wrote it is not knowable from here and does not need to be. The test
  * is whether SOMETHING said something specific — a 504 can be raised by any
  * proxy in the chain, including one in front of a `baseUrl` this client has
