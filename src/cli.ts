@@ -69,6 +69,46 @@ function die(message: string): never {
   throw new Died(message);
 }
 
+/** A guest path's final component, regardless of which OS the guest runs. */
+export function guestBasename(path: string): string {
+  const parts = path.split(/[\\/]/);
+  return parts.at(-1) ?? '';
+}
+
+/** A terminal frame's wire size. Text is bounded in bytes, just like binary. */
+export function terminalFrameByteLength(data: string | ArrayBuffer): number {
+  return typeof data === 'string' ? Buffer.byteLength(data) : data.byteLength;
+}
+
+/**
+ * Extend the stdout chain while marking a possible rejection as handled now.
+ * The original rejected promise is retained so finishInteraction can surface
+ * it; the side catch only prevents an unhandledRejection before the socket ends.
+ */
+export function queueTerminalWrite(
+  queued: Promise<void>,
+  write: (done: () => void) => void,
+): Promise<void> {
+  const next = queued.then(() => new Promise<void>((done) => write(done)));
+  void next.catch(() => {});
+  return next;
+}
+
+/** Wait for both output streams before process.exit can discard either tail. */
+export function flushOutput(
+  stdout: NodeJS.WritableStream,
+  stderr: NodeJS.WritableStream,
+  done: () => void,
+): void {
+  let pending = 2;
+  const drained = () => {
+    pending -= 1;
+    if (pending === 0) done();
+  };
+  stdout.write('', drained);
+  stderr.write('', drained);
+}
+
 /**
  * Wait for the websocket handshake without letting a silent TCP peer hold the
  * command forever. A close before open is a failed handshake, even when the
@@ -231,13 +271,10 @@ async function interact(url: string): Promise<number> {
    */
   let queued: Promise<void> = Promise.resolve();
   const write = (chunk: Uint8Array) => {
-    queued = queued.then(
-      () =>
-        new Promise<void>((done) => {
-          if (stdout.write(chunk)) done();
-          else stdout.once('drain', done);
-        }),
-    );
+    queued = queueTerminalWrite(queued, (done) => {
+      if (stdout.write(chunk)) done();
+      else stdout.once('drain', done);
+    });
   };
 
   const onStdin = (chunk: Buffer) => {
@@ -283,6 +320,13 @@ async function interact(url: string): Promise<number> {
 
     await new Promise<void>((resolve) => {
       ws.addEventListener('message', (ev) => {
+        const byteLength = terminalFrameByteLength(ev.data as string | ArrayBuffer);
+        if (byteLength > MAX_FRAME) {
+          process.stderr.write(
+            `mandala: dropped a ${byteLength}-byte frame — not the terminal protocol\n`,
+          );
+          return;
+        }
         if (typeof ev.data === 'string') {
           try {
             const control = JSON.parse(ev.data);
@@ -319,17 +363,6 @@ async function interact(url: string): Promise<number> {
           return;
         }
         const bytes = new Uint8Array(ev.data as ArrayBuffer);
-        if (bytes.byteLength > MAX_FRAME) {
-          // Still dropped — a frame this size is not the terminal protocol and
-          // writing it would be worse. But said out loud: spliced silently out
-          // of the middle of a byte stream it reads as a working shell
-          // producing corrupted output, which is the one shape of failure this
-          // repo refuses everywhere else.
-          process.stderr.write(
-            `mandala: dropped a ${bytes.byteLength}-byte frame — not the terminal protocol\n`,
-          );
-          return;
-        }
         write(bytes);
       });
       ws.addEventListener('close', () => resolve(), { once: true });
@@ -417,7 +450,7 @@ async function cmdScp(srcArg: string, dstArg: string): Promise<number> {
     let local = dstArg;
     // A directory destination takes the source's own basename, like scp.
     const info = await stat(local).catch(() => undefined);
-    if (info?.isDirectory()) local = join(local, basename(src.path));
+    if (info?.isDirectory()) local = join(local, guestBasename(src.path));
     await writeFile(local, data);
     process.stderr.write(`${src.target}:${src.path} -> ${local} (${data.length} bytes)\n`);
     return 0;
@@ -446,6 +479,10 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
       return command ? 0 : 2;
     }
     if (command === 'ssh') {
+      if (rest.some((arg) => arg === '-h' || arg === '--help')) {
+        process.stdout.write(USAGE);
+        return 0;
+      }
       let session = 'main';
       const positional: string[] = [];
       for (let i = 0; i < rest.length; i++) {
@@ -511,11 +548,10 @@ if (invokedDirectly) {
   // the OS first. (Exiting via process.exitCode instead would flush too, but
   // waits on every open handle — undici's keep-alive sockets among them.)
   const exit = (code: number): void => {
-    process.stdout.write('', () => process.exit(code));
+    flushOutput(process.stdout, process.stderr, () => process.exit(code));
   };
   main().then(exit, (err) => {
-    process.stderr.write(`mandala: ${err instanceof Error ? err.message : String(err)}\n`, () =>
-      exit(1),
-    );
+    process.stderr.write(`mandala: ${err instanceof Error ? err.message : String(err)}\n`);
+    exit(1);
   });
 }

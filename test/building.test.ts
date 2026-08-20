@@ -416,6 +416,13 @@ describe('path encoding', () => {
     expect(() => P.snapshot('')).toThrow(/snapshot id must not be empty/);
     expect(() => P.windowPath('vm-1', '')).toThrow(/window id must not be empty/);
   });
+
+  it('refuses dot-segment ids before URL parsing can rewrite the route', () => {
+    expect(() => P.computer('.')).toThrow(/computer id/);
+    expect(() => P.computer('..')).toThrow(/computer id/);
+    expect(() => P.snapshot('..')).toThrow(/snapshot id/);
+    expect(() => P.windowPath('vm-1', '.')).toThrow(/window id/);
+  });
 });
 
 describe('finite numbers', () => {
