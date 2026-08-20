@@ -105,6 +105,29 @@ export const errorJson = (
     headers: { 'content-type': 'application/json', ...Object.fromEntries(new Headers(headers)) },
   });
 
+/**
+ * What Cloudflare answers `Accept: application/json` with, in its own shape.
+ *
+ * RFC 9457, which it sends for the 5xx it generates itself — 500, 502, 504 and
+ * 520-526. Note there is no `error` field: this is the body the platform's own
+ * shape does not describe.
+ */
+export const cloudflareJson = (status: number): Response =>
+  new Response(
+    JSON.stringify({
+      type: 'https://developers.cloudflare.com/support/troubleshooting/http-status-codes/',
+      title: 'Bad gateway',
+      status,
+      detail: 'The origin server returned an invalid response.',
+      error_code: status,
+      error_name: 'bad_gateway',
+      ray_id: '8f2a1c0d9e4b7a31',
+      retryable: true,
+      what_you_should_do: 'Wait a few minutes and try again.',
+    }),
+    { status, headers: { 'content-type': 'application/json' } },
+  );
+
 export const COMPUTER = {
   id: 'vm-1',
   name: 'demo',
