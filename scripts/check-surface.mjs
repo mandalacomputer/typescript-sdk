@@ -27,7 +27,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { balanced, topLevelKeys } from './surface-text.mjs';
+import { balanced, stripComments, topLevelKeys } from './surface-text.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = resolve(here, '..');
@@ -58,8 +58,6 @@ if (!platform) {
 // are heavily commented and several of those comments quote the very shapes
 // being matched — over them, the regexes invent routes and parameters.
 
-const strip = (s) => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
-
 /**
  * The text between the bracket at `from` and the one that balances it.
  *
@@ -82,7 +80,8 @@ function routeTable(name) {
   const body = balanced(surfaceSource, start + decl.length - 1, '[', ']');
   const re = /method:\s*'([A-Z]+)'[\s\S]*?pattern:\s*'([^']+)'/g;
   const routes = [];
-  for (let m = re.exec(strip(body)); m; m = re.exec(strip(body))) routes.push(`${m[1]} ${m[2]}`);
+  const clean = stripComments(body);
+  for (let m = re.exec(clean); m; m = re.exec(clean)) routes.push(`${m[1]} ${m[2]}`);
   return new Set(routes);
 }
 
@@ -95,7 +94,7 @@ function mirrorSection(name, until) {
   const from = mirrorSource.indexOf(`export const ${name}`);
   if (from === -1) throw new Error(`${name} not found in test/allowlist.ts`);
   const to = mirrorSource.indexOf(`export const ${until}`, from);
-  return strip(mirrorSource.slice(from, to === -1 ? undefined : to));
+  return stripComments(mirrorSource.slice(from, to === -1 ? undefined : to));
 }
 
 const mirrorRoutes = new Set(
@@ -117,7 +116,7 @@ const docSource = readFileSync(join(platform, 'web/lib/apidoc.ts'), 'utf8');
  */
 const sharedQuery = new Map();
 for (const m of docSource.matchAll(/^const ([A-Z_]+): Query = \{/gm)) {
-  const named = strip(balanced(docSource, m.index + m[0].length - 1, '{', '}')).match(
+  const named = stripComments(balanced(docSource, m.index + m[0].length - 1, '{', '}')).match(
     /name:\s*'([^']+)'/,
   );
   if (named) sharedQuery.set(m[1], named[1]);
@@ -143,7 +142,7 @@ function platformParameters() {
     // Past this entry rather than into it: a nested `'GET x': {` inside a
     // description would otherwise be read as a route of its own.
     entry.lastIndex = m.index + m[0].length + body.length;
-    const clean = strip(body);
+    const clean = stripComments(body);
     const params = new Set();
 
     for (const [key, kind] of [
