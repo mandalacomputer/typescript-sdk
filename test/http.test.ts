@@ -15,7 +15,7 @@ import {
   RateLimitError,
   UnavailableError,
 } from '../src/index.js';
-import { anyRoute, BASE, COMPUTER, errorJson, json, recorder, SNAPSHOT } from './harness.js';
+import { anyRoute, BASE, bytes, COMPUTER, errorJson, json, recorder, SNAPSHOT } from './harness.js';
 
 const client = (rec: ReturnType<typeof recorder>, opts = {}) =>
   new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: rec.fetch, ...opts });
@@ -201,6 +201,17 @@ describe('decoding', () => {
       return json([]);
     });
     await expect(client(rec, { timeoutMs: 5 }).computers.list()).rejects.toThrow(/timed out/);
+  });
+
+  it('lets one file transfer explicitly disable the client deadline', async () => {
+    const rec = recorder(async (call) => {
+      if (!call.path.endsWith('/files')) return anyRoute(call);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      return call.method === 'GET' ? bytes('file', 'text/plain') : json({ bytes: 4 });
+    });
+    const computer = await client(rec, { timeoutMs: 10 }).computers.get('vm-1');
+    await expect(computer.readFile('/tmp/file', { timeoutMs: 0 })).resolves.toHaveLength(4);
+    await expect(computer.writeFile('/tmp/file', 'file', { timeoutMs: 0 })).resolves.toBe(4);
   });
 
   it("composes the caller's cancellation with the client's deadline", async () => {

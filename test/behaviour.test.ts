@@ -543,6 +543,16 @@ describe('what a payload cannot be allowed to mean', () => {
     }
   });
 
+  it('refuses a window action with no window instead of inventing one', async () => {
+    const { client: c } = client((call) =>
+      /\/windows\/[^/]+$/.test(call.path) ? new Response(null, { status: 204 }) : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    await expect(computer.windowAction('0x1', 'focus')).rejects.toThrow(
+      /expected a window from POST/,
+    );
+  });
+
   it('refuses a background exec with no pid, rather than a finished job on pid 0', async () => {
     const { client: c } = client((call) =>
       call.path.endsWith('/exec') ? json({}) : anyRoute(call),
@@ -966,6 +976,58 @@ describe('the agent loop', () => {
       clearTimeout(timer);
     }
     expect(cancelled).toBe(true);
+  });
+
+  it.each([
+    ['done', '{"stop":"end_turn","text":"ok"}'],
+    ['error', '{"error":"failed","status":500}'],
+  ])('ends agentStream itself as soon as it reports %s', async (event, data) => {
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      start(ctrl) {
+        ctrl.enqueue(new TextEncoder().encode(`event: ${event}\ndata: ${data}\n\n`));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const { client: c } = client((call) =>
+      call.path.endsWith('/agent')
+        ? new Response(body, { headers: { 'content-type': 'text/event-stream' } })
+        : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    const seen = [];
+    for await (const ev of computer.agentStream({ prompt: 'go', modelKey: 'sk' }))
+      seen.push(ev.type);
+    expect(seen).toEqual([event]);
+    expect(cancelled).toBe(true);
+  });
+
+  it('refuses a done event that has no stop reason', async () => {
+    const { client: c } = client((call) =>
+      call.path.endsWith('/agent')
+        ? new Response('event: done\ndata: {"text":"ambiguous"}\n\n', {
+            headers: { 'content-type': 'text/event-stream' },
+          })
+        : anyRoute(call),
+    );
+    await expect(
+      (await c.computers.get('vm-1')).agent({ prompt: 'go', modelKey: 'sk' }),
+    ).rejects.toThrow(/done event that had no stop reason/);
+  });
+
+  it('preserves a non-object error payload as the failure message', async () => {
+    const { client: c } = client((call) =>
+      call.path.endsWith('/agent')
+        ? new Response('event: error\ndata: "model overloaded"\n\n', {
+            headers: { 'content-type': 'text/event-stream' },
+          })
+        : anyRoute(call),
+    );
+    await expect(
+      (await c.computers.get('vm-1')).agent({ prompt: 'go', modelKey: 'sk' }),
+    ).rejects.toThrow(/model overloaded/);
   });
 });
 
