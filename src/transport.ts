@@ -339,12 +339,14 @@ export class Transport {
         message = typeof err === 'string' && err ? err : text.slice(0, 500);
       } catch {
         message = text.slice(0, 500);
-        // Kept, not just read. errorForStatus replaces the message on every
-        // edge status with wording of its own, and this is the only copy of
-        // what the edge actually said — a Cloudflare Ray ID lives in that HTML
-        // and nowhere else, and it is the first thing support asks for. Shown
-        // to nobody; available to whoever needs it.
-        body = message;
+        // Kept whole, not just read. errorForStatus replaces the message on
+        // every edge status with wording of its own, and this is the only copy
+        // of what the edge actually said — a Cloudflare Ray ID lives in that
+        // HTML and nowhere else, and it is the first thing support asks for.
+        // Untruncated because the Ray ID sits in the page's footer, well past
+        // the 500 characters the message is cut to. Shown to nobody; available
+        // to whoever needs it.
+        body = text;
       }
     }
     return errorForStatus(

@@ -10,6 +10,7 @@ import {
   OriginResponseError,
   OriginTLSError,
   OriginUnreachableError,
+  RateLimitError,
   TimeoutError,
 } from '../src/index.js';
 import {
@@ -845,7 +846,9 @@ describe('exec', () => {
 
   it('keeps the edge error page on the error even though it never shows it', async () => {
     // The Ray ID support asks for is in that HTML and nowhere else.
-    const page = '<html><body>error code: 522 Ray ID: 8f2a1c</body></html>';
+    // Kept whole: on a real edge page it is in the footer, past the 500
+    // characters the message is cut to.
+    const page = `<html><body>${'padding '.repeat(200)}error code: 522 Ray ID: 8f2a1c</body></html>`;
     const { client: c } = client(
       () => new Response(page, { status: 522, headers: { 'content-type': 'text/html' } }),
     );
@@ -1210,6 +1213,22 @@ describe('a status that arrived on a stream', () => {
     expect(err.status).toBe(504);
   });
 
+  it('does not read an edge status on a stream as the edge either', async () => {
+    // The same argument as the 504 above, a few statuses along. A 522 arriving
+    // inside a stream that is demonstrably open cannot mean a proxy failed to
+    // reach the platform, which is the whole of what OriginUnreachableError
+    // says. It is a downstream provider's status being relayed.
+    const { client: c } = client((call) =>
+      call.path.endsWith('/agent')
+        ? errorStream('{"error":"model provider unreachable","status":522}')
+        : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    const err = await computer.agent({ prompt: 'go', modelKey: 'sk' }).catch((e) => e);
+    expect(err).not.toBeInstanceOf(OriginUnreachableError);
+    expect(err.status).toBe(522);
+  });
+
   it('still maps every status that means the same thing in both places', async () => {
     const { client: c } = client((call) =>
       call.path.endsWith('/agent')
@@ -1219,6 +1238,21 @@ describe('a status that arrived on a stream', () => {
     const computer = await c.computers.get('vm-1');
     const err = await computer.agent({ prompt: 'go', modelKey: 'sk' }).catch((e) => e);
     expect(err).toBeInstanceOf(AuthenticationError);
+  });
+
+  it('keeps a relayed rate limit a rate limit', async () => {
+    // 429 is the status the platform relays a model provider's rate budget
+    // with, and it is reached by a branch of its own rather than through the
+    // status table — so a status table consulted alone quietly loses it.
+    const { client: c } = client((call) =>
+      call.path.endsWith('/agent')
+        ? errorStream('{"error":"model API: rate limited","status":429}')
+        : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    const err = await computer.agent({ prompt: 'go', modelKey: 'sk' }).catch((e) => e);
+    expect(err).toBeInstanceOf(RateLimitError);
+    expect(isTransient(err)).toBe(true);
   });
 });
 

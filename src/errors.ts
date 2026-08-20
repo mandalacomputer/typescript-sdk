@@ -144,9 +144,11 @@ export class UnavailableError extends APIError {
 /**
  * 504, 524 — a proxy in front of the platform gave up before the platform answered.
  *
- * Not a refusal, and not the platform's answer at all. The request arrived, is
- * very likely still running, and nothing was cancelled; what ended was one hop's
- * willingness to hold a connection open with no response crossing it.
+ * Not a refusal, and not the platform's answer at all. Nothing was cancelled;
+ * what ended was one hop's willingness to hold a connection open with no
+ * response crossing it. Usually the platform has the request and is still
+ * working on it — but only usually, because a 504 can also come from a hop that
+ * never reached it, and the status alone does not say which hop wrote it.
  *
  * Deliberately absent from {@link isTransient}, which is a change from nothing:
  * neither status was transient before this class existed either. Retrying the
@@ -169,7 +171,7 @@ export class GatewayTimeoutError extends APIError {
 }
 
 /**
- * 520-523, 525, 526 — a proxy in front of the platform could not reach it.
+ * 521-523 — a proxy in front of the platform could not reach it.
  *
  * The rest of what an edge generates on its own, and the same defect as
  * {@link GatewayTimeoutError} a few statuses along: with no class and no written
@@ -178,9 +180,13 @@ export class GatewayTimeoutError extends APIError {
  *
  * A different event from a gateway timeout, which is why it is a different type
  * rather than more entries on that one. A 524 means the request arrived and is
- * still being worked on; these mean it never arrived at all, so nothing was
- * started and there is no command outliving anything. A caller branching on the
- * class to decide whether its work survived gets opposite answers, correctly.
+ * still being worked on; these mean it almost certainly never arrived, so
+ * nothing was started and there is no command outliving anything. Almost,
+ * because a 522 can also be a connection that timed out after it was
+ * established, and bytes already on the wire are not unsent because the answer
+ * never came back — so a caller branching on the class to decide whether its
+ * work survived gets opposite answers, and should still look before repeating
+ * something that creates.
  *
  * mandala-computer-mcp reached this first and argued the divergence the other
  * way: that a developer-facing client did not need it, because its messages are
@@ -395,17 +401,30 @@ export function errorForStatus(
  * 200 and stayed open, so the status in the event is the platform relaying what
  * happened downstream — not a description of this connection.
  *
- * Which is why a gateway status cannot mean here what it means there. The event
- * reached the caller, so no proxy abandoned anything, and
- * {@link GatewayTimeoutError} asserts exactly that it did. A downstream provider
- * timing out and an edge that stopped waiting are different events with opposite
- * implications for whether the work survived, and a caller branching on the
- * class would be answered wrongly. Every other status means the same thing in
- * both places and is mapped the same way.
+ * Which is why an edge status cannot mean here what it means there. The event
+ * reached the caller, so no proxy abandoned anything and none of them failed to
+ * reach the platform — and every class in that range asserts exactly that one of
+ * those happened. A downstream provider timing out and an edge that stopped
+ * waiting are different events with opposite implications for whether the work
+ * survived, and a caller branching on the class would be answered wrongly. All
+ * of them fall back to a plain {@link APIError}, which still carries the status.
+ *
+ * Every other status means the same thing in both places and is mapped the same
+ * way, 429 included: the platform relays a model provider's rate limit as one of
+ * these events, and it is as much a {@link RateLimitError} there as on a
+ * response. Without the header there is no `retryAfterMs` to pass on.
  */
+const DESCRIBES_THIS_CONNECTION: ReadonlySet<typeof APIError> = new Set([
+  GatewayTimeoutError,
+  OriginResponseError,
+  OriginTLSError,
+  OriginUnreachableError,
+]);
+
 export function errorForEventStatus(status: number, message: string): APIError {
+  if (status === 429) return new RateLimitError(message, status);
   const Cls = BY_STATUS[status] ?? APIError;
-  if (Cls === GatewayTimeoutError) return new APIError(message, status);
+  if (DESCRIBES_THIS_CONNECTION.has(Cls)) return new APIError(message, status);
   return new Cls(message, status);
 }
 
