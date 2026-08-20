@@ -163,6 +163,12 @@ describe('execBody', () => {
     });
   });
 
+  it('refuses a relative cwd under the documented absolute-path contract', () => {
+    expect(() => P.execBody({ command: 'make', cwd: 'src' })).toThrow(/cwd must be absolute/);
+    expect(() => P.execBody({ command: 'make', cwd: '' })).toThrow(/cwd must be absolute/);
+    expect(P.execBody({ command: 'make', cwd: 'C:\\src' }).cwd).toBe('C:\\src');
+  });
+
   it('carries an environment, and omits an empty one', () => {
     expect(P.execBody({ command: 'make', env: { CI: '1' } }).env).toEqual({ CI: '1' });
     // No env and an empty env are the same request; sending the key would
