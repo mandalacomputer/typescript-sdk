@@ -401,7 +401,7 @@ export function execBody(args: ExecArgs): Json {
   }
   if (args.desktop) body.session = 'desktop';
   if (args.background) body.background = true;
-  if (args.cwd) body.cwd = args.cwd;
+  if (args.cwd !== undefined) body.cwd = absoluteGuestPath(args.cwd, 'cwd');
   // An empty object is omitted rather than sent: the platform reads no `env`
   // and an empty one the same way, and sending it puts a key on the wire that
   // says a caller asked for something they did not.
@@ -442,6 +442,14 @@ export function shellQuote(s: string): string {
   return `'${s.replaceAll("'", `'\\''`)}'`;
 }
 
+/** Validate any path that the platform interprets inside a Linux or Windows guest. */
+function absoluteGuestPath(path: string, what: string): string {
+  if (!path.startsWith('/') && !path.startsWith('\\\\') && !/^[A-Za-z]:[\\/]/.test(path)) {
+    throw new ValidationError(`${what} must be absolute: ${JSON.stringify(path)}`);
+  }
+  return path;
+}
+
 /**
  * The query naming which guest file, checked before the round trip.
  *
@@ -453,9 +461,7 @@ export function shellQuote(s: string): string {
  * stays refused is the drive-relative `C:notes.txt` and anything rootless.
  */
 export function filesQuery(path: string): Query {
-  if (!path.startsWith('/') && !path.startsWith('\\\\') && !/^[A-Za-z]:[\\/]/.test(path)) {
-    throw new ValidationError(`guest path must be absolute: ${JSON.stringify(path)}`);
-  }
+  absoluteGuestPath(path, 'guest path');
   return { path };
 }
 

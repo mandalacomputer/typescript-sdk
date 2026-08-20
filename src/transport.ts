@@ -51,9 +51,9 @@ export type RequestOptions = {
   /**
    * Exempt this request from the client's per-request deadline.
    *
-   * For the streaming routes, and only those. A stream is meant to stay open —
-   * an agent run is minutes of clicking — and the ordinary 60-second deadline
-   * would cut every one of them short at exactly the same place.
+   * For streaming routes and explicitly unbounded file transfers. A stream is
+   * meant to stay open — an agent run is minutes of clicking — and a copy's
+   * duration depends on its size and link, not a fixed SDK default.
    *
    * A flag rather than "pass a signal and skip the timeout", which is what this
    * was at first and did not work: the composition below folds the timeout in
