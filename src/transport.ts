@@ -35,6 +35,9 @@ export const MODEL_KEY_HEADER = 'X-Model-Key';
 /** The header the platform sets when a fan-out listing came back short. */
 const INCOMPLETE_HEADER = 'X-GC-Incomplete';
 
+/** Largest single event retained while waiting for its blank-line delimiter. */
+const MAX_SSE_EVENT_CHARS = 1 << 20;
+
 export type Query = Record<string, string | number | boolean | undefined>;
 
 export type RequestOptions = {
@@ -492,9 +495,19 @@ export class Transport {
         for (;;) {
           const sep = buffer.indexOf('\n\n');
           if (sep === -1) break;
+          if (sep > MAX_SSE_EVENT_CHARS) {
+            throw new MandalaError(
+              `event stream from ${method} ${path} exceeded ${MAX_SSE_EVENT_CHARS} characters without a boundary`,
+            );
+          }
           const parsed = parseEvent(buffer.slice(0, sep));
           buffer = buffer.slice(sep + 2);
           if (parsed) yield parsed;
+        }
+        if (buffer.length > MAX_SSE_EVENT_CHARS) {
+          throw new MandalaError(
+            `event stream from ${method} ${path} exceeded ${MAX_SSE_EVENT_CHARS} characters without a boundary`,
+          );
         }
       }
       // Flushed, not dropped. A stream that ends mid-character leaves the front
@@ -503,6 +516,11 @@ export class Transport {
       // silently loses them and looks complete; with it they decode to U+FFFD,
       // which is a visible mark that something was cut off.
       buffer += decoder.decode();
+      if (buffer.length > MAX_SSE_EVENT_CHARS) {
+        throw new MandalaError(
+          `event stream from ${method} ${path} exceeded ${MAX_SSE_EVENT_CHARS} characters without a boundary`,
+        );
+      }
       const tail = parseEvent(buffer);
       if (tail) yield tail;
     } finally {
