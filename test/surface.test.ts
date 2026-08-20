@@ -6,8 +6,9 @@
  * fails at runtime in a user's hands rather than here.
  */
 
+import { readFile } from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
-import { Client } from '../src/index.js';
+import { Client, VERSION } from '../src/index.js';
 import { ALLOWED, patternFor, UNIMPLEMENTED } from './allowlist.js';
 import { anyRoute, BASE, recorder } from './harness.js';
 
@@ -140,5 +141,23 @@ describe('surface', () => {
     expect(patternFor('computers/vm-1/windows/0x2600003')).toBe('computers/:id/windows/:window');
     // A computer whose id looks like a route segment is still an id.
     expect(patternFor('computers/audit')).toBe('computers/:id');
+    // And what follows such an id is still what it is. Keyed off the raw
+    // previous segment, an id spelled 'exec' or 'windows' made the action after
+    // it a ':pid' or a ':window' — a shape no route has, failing this suite for
+    // a reason nothing about the failure would explain.
+    expect(patternFor('computers/exec/start')).toBe('computers/:id/start');
+    expect(patternFor('computers/windows/exec/42')).toBe('computers/:id/exec/:pid');
+    expect(patternFor('snapshots/snapshots/restore')).toBe('snapshots/:id/restore');
+  });
+
+  it('exports a VERSION that matches the package', async () => {
+    // A mirror nobody compares is just a comment — the reason this file exists
+    // for the route table, applied to the other constant that duplicates
+    // something outside the source. They agree today; the first release bump is
+    // what would silently part them.
+    const pkg = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8')) as {
+      version: string;
+    };
+    expect(VERSION).toBe(pkg.version);
   });
 });
