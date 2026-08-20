@@ -127,6 +127,15 @@ describe('waiting', () => {
     expect(err.message).toMatch(/it has not stopped; only this wait has/);
   });
 
+  it('describes an already-building handle accurately when no poll was allowed', async () => {
+    const { client: c } = client(() => json({ ...COMPUTER, status: 'building' }));
+    const computer = await c.computers.get('vm-1');
+    const err = await computer.waitUntilBuilt({ timeoutMs: 0, pollMs: 1 }).catch((e) => e);
+    expect(err).toBeInstanceOf(TimeoutError);
+    expect(err.message).toMatch(/was still building/);
+    expect(err.message).not.toMatch(/every refresh failed/);
+  });
+
   it('rides out a transient error from the host busy doing the copy being waited on', async () => {
     // A 503 during a minutes-long disk copy is the ordinary weather of a
     // build; one of them must not abort the whole wait.
@@ -379,6 +388,24 @@ describe('waiting', () => {
     expect(rec.routes().filter(([, p]) => p.endsWith('/exec'))).toHaveLength(0);
   });
 
+  it('refreshes a building clone so a failed copy stops guest probing', async () => {
+    let gets = 0;
+    const { rec, client: c } = client((call) => {
+      if (call.method === 'GET' && call.path === '/computers/vm-1') {
+        gets += 1;
+        return gets === 1
+          ? json({ ...COMPUTER, status: 'building' })
+          : json({ ...COMPUTER, status: 'build-failed', build: { failed: 'copy failed' } });
+      }
+      return anyRoute(call);
+    });
+    const computer = await c.computers.get('vm-1');
+    await expect(computer.waitForGuest({ timeoutMs: 60_000, pollMs: 1 })).rejects.toThrow(
+      /copy failed/,
+    );
+    expect(rec.routes().filter(([, p]) => p.endsWith('/exec'))).toHaveLength(0);
+  });
+
   it('waits through a suspended computer rather than refusing it, because exec resumes one', async () => {
     // The opposite of waitUntilRunning, deliberately: nothing resumes a machine
     // for that wait, and the probe here does it as a side effect.
@@ -409,6 +436,12 @@ describe('a chord', () => {
     const { client: c } = client(anyRoute);
     const computer = await c.computers.get('vm-1');
     await expect(computer.key(['ctrl', 'c'], { signal: AbortSignal.abort() })).rejects.toThrow();
+  });
+
+  it('reports the validation error when JavaScript calls key with no arguments', async () => {
+    const { client: c } = client(anyRoute);
+    const computer = await c.computers.get('vm-1');
+    await expect((computer.key as () => Promise<void>)()).rejects.toThrow(/at least one key/);
   });
 });
 
@@ -557,6 +590,16 @@ describe('what a payload cannot be allowed to mean', () => {
     expect(set).toMatchObject({ enabled: true, hour: 23, minute: 30, tz: 'UTC' });
     // A cleared schedule is the one place an empty body is a real answer.
     expect(await computer.clearSchedule()).toMatchObject({ enabled: false });
+  });
+
+  it('also treats a 200 empty object as an acknowledgement of the schedule body', async () => {
+    const { client: c } = client((call) =>
+      call.path.endsWith('/schedule') ? json({}) : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    await expect(
+      computer.setSchedule({ enabled: true, hour: 23, minute: 30, tz: 'UTC' }),
+    ).resolves.toMatchObject({ enabled: true, hour: 23, minute: 30, tz: 'UTC' });
   });
 });
 
@@ -892,6 +935,36 @@ describe('the agent loop', () => {
     );
     const computer = await c.computers.get('vm-1');
     await expect(computer.agent({ prompt: 'go', modelKey: 'sk' })).rejects.toThrow(/failed/);
+    expect(cancelled).toBe(true);
+  });
+
+  it('stops consuming as soon as the stream reports done', async () => {
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      start(ctrl) {
+        ctrl.enqueue(
+          new TextEncoder().encode('event: done\ndata: {"stop":"end_turn","text":"ok"}\n\n'),
+        );
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const { client: c } = client((call) =>
+      call.path.endsWith('/agent')
+        ? new Response(body, { headers: { 'content-type': 'text/event-stream' } })
+        : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(new Error('done was ignored')), 100);
+    try {
+      await expect(
+        computer.agent({ prompt: 'go', modelKey: 'sk', signal: ac.signal }),
+      ).resolves.toMatchObject({ finished: true, text: 'ok' });
+    } finally {
+      clearTimeout(timer);
+    }
     expect(cancelled).toBe(true);
   });
 });

@@ -8,6 +8,32 @@ function quotedEnd(text, from) {
   return text.length;
 }
 
+/** Remove comments without treating comment markers inside strings as syntax. */
+export function stripComments(text) {
+  let clean = '';
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === "'" || ch === '"' || ch === '`') {
+      const end = quotedEnd(text, i);
+      clean += text.slice(i, end);
+      i = end - 1;
+    } else if (ch === '/' && text[i + 1] === '/') {
+      const end = text.indexOf('\n', i + 2);
+      const stop = end === -1 ? text.length : end;
+      clean += ' '.repeat(stop - i);
+      i = stop - 1;
+    } else if (ch === '/' && text[i + 1] === '*') {
+      const end = text.indexOf('*/', i + 2);
+      const stop = end === -1 ? text.length : end + 2;
+      clean += text.slice(i, stop).replace(/[^\r\n]/g, ' ');
+      i = stop - 1;
+    } else {
+      clean += ch;
+    }
+  }
+  return clean;
+}
+
 /** The text inside a balanced pair, ignoring delimiters in literals and comments. */
 export function balanced(text, from, open, close) {
   let depth = 0;
