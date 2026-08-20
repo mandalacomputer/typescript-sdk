@@ -8,7 +8,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { guestDestination, remoteSide } from '../src/cli.js';
+import { guestDestination, remoteSide, uploadSize } from '../src/cli.js';
 
 describe('remoteSide', () => {
   it('reads <computer>:/path as the guest side', () => {
@@ -76,6 +76,14 @@ describe('guestDestination', () => {
   });
 });
 
+describe('uploadSize', () => {
+  it('refuses a short write reported as success', () => {
+    expect(() => uploadSize(10, 9)).toThrow(/incomplete/);
+    expect(uploadSize(10, 10)).toBe('10 bytes');
+    expect(uploadSize(10)).toBe('10 bytes sent');
+  });
+});
+
 describe('argument handling', () => {
   const run = async (argv: string[]) => {
     const { main } = await import('../src/cli.js');
@@ -128,6 +136,12 @@ describe('argument handling', () => {
 
   it('refuses an scp missing an operand', async () => {
     const { code, out } = await run(['scp', 'demo:/a']);
+    expect(code).toBe(1);
+    expect(out).toContain('mandala scp <src> <dst>');
+  });
+
+  it('refuses extra scp operands instead of dropping them', async () => {
+    const { code, out } = await run(['scp', 'a.txt', 'demo:/a', 'ignored.txt']);
     expect(code).toBe(1);
     expect(out).toContain('mandala scp <src> <dst>');
   });

@@ -77,11 +77,13 @@ export {
   APIError,
   AuthenticationError,
   ConflictError,
+  ConnectionError,
   isTransient,
   MandalaError,
   NotFoundError,
   PermissionDeniedError,
   PlanLimitError,
+  RateLimitError,
   TimeoutError,
   UnavailableError,
 } from './errors.js';
