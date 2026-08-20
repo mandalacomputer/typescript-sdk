@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { balanced, topLevelKeys } from '../scripts/surface-text.mjs';
+import { balanced, stripComments, topLevelKeys } from '../scripts/surface-text.mjs';
 
 describe('the surface source scanner', () => {
   it('ignores brackets in quoted strings and comments', () => {
@@ -18,5 +18,19 @@ describe('the surface source scanner', () => {
     expect(
       topLevelKeys(`name: 'real', description: "fake: value", nested: { inner: true }`),
     ).toEqual(['name', 'description', 'nested']);
+  });
+
+  it('strips real comments without truncating comment markers inside strings', () => {
+    const source = `
+      const docs = { url: 'https://example.com/a//b' }; // remove this
+      const template = \`https://example.com/${'path'}\`;
+      /* remove this too */ const kept = "// still text";
+    `;
+    const clean = stripComments(source);
+    expect(clean).toHaveLength(source.length);
+    expect(clean).toContain("'https://example.com/a//b'");
+    expect(clean).toContain('`https://example.com/path`');
+    expect(clean).toContain('"// still text"');
+    expect(clean).not.toContain('remove this');
   });
 });

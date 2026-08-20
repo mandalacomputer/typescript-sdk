@@ -627,7 +627,7 @@ export class Computer {
       if (!this.isBuilding) return this;
       if (Date.now() >= deadline) {
         throw new TimeoutError(
-          observed
+          observed || !polled
             ? `${this.id} was still building after ${timeoutMs}ms ` +
                 '(it has not stopped; only this wait has)'
             : `${this.id} could not be observed within ${timeoutMs}ms: every refresh failed`,
@@ -764,6 +764,16 @@ export class Computer {
     const { timeoutMs = 180_000, pollMs = 3_000, signal } = opts;
     checkWait(timeoutMs, pollMs);
     const deadline = Date.now() + timeoutMs;
+    // A clone may be handed straight to this wait. There is no guest to probe
+    // until its disk copy finishes, and only a state refresh can discover that
+    // the copy failed while we were waiting.
+    if (this.isBuilding) {
+      await this.waitUntilBuilt({
+        timeoutMs: Math.max(deadline - Date.now(), 0),
+        pollMs,
+        signal,
+      });
+    }
     for (;;) {
       let delayMs = pollMs;
       // Nothing inside a computer with no disk is ever going to answer, and
@@ -1054,7 +1064,7 @@ export class Computer {
   async key(keys: readonly string[], opts?: CallOptions): Promise<void>;
   async key(...keys: string[]): Promise<void>;
   async key(
-    first: string | readonly string[],
+    first: string | readonly string[] | undefined,
     ...rest: (string | CallOptions | undefined)[]
   ): Promise<void> {
     // An array first is the form that can carry options — every other input
@@ -1062,7 +1072,7 @@ export class Computer {
     // one keystroke in this SDK that no signal could cancel. The rest-args
     // spelling stays exactly as it was, because it is the one in every example.
     const spread = typeof first === 'string';
-    const keys = spread ? [first, ...(rest as string[])] : [...first];
+    const keys = first == null ? [] : spread ? [first, ...(rest as string[])] : [...first];
     await this.#input(P.keyBody(keys), spread ? {} : ((rest[0] as CallOptions) ?? {}));
   }
 
@@ -1414,7 +1424,7 @@ export class Computer {
     // What was asked for, when the platform acknowledges with no body. It
     // applied this and said so with a 2xx; echoing it beats decoding `{}` into
     // a midnight nobody chose.
-    return toSchedule(data ?? body);
+    return toSchedule(P.isRecord(data) && Object.keys(data).length ? data : body);
   }
 
   /**
@@ -1462,10 +1472,14 @@ export class Computer {
    * {@link AgentResult.finished}.
    */
   async agent(args: AgentArgs): Promise<AgentResult> {
-    let result: AgentResult | undefined;
     for await (const ev of this.agentStream(args)) {
-      if (ev.type === 'done') result = ev.result;
-      else if (ev.type === 'error') {
+      if (ev.type === 'done') {
+        // A done event is terminal even if a proxy or server leaves the SSE
+        // response open for heartbeats. Returning also cancels the reader in
+        // Transport.sse's finally block.
+        return ev.result;
+      }
+      if (ev.type === 'error') {
         // Stop consuming immediately. The stream has no request deadline, so a
         // server that reports an error and then stays open must not keep the
         // caller waiting forever. Returning from the generator also cancels
@@ -1474,10 +1488,7 @@ export class Computer {
         throw ev.status ? errorForStatus(ev.status, message) : new MandalaError(message);
       }
     }
-    if (!result) {
-      throw new MandalaError('the agent stream ended without a result');
-    }
-    return result;
+    throw new MandalaError('the agent stream ended without a result');
   }
 
   /**
