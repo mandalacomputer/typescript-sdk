@@ -24,6 +24,21 @@ export type ListOptions = { allowPartial?: boolean; signal?: AbortSignal };
 /** What every method here accepts beyond its own arguments. */
 export type CallOptions = { signal?: AbortSignal };
 
+/**
+ * The one computer a route promised, refused when the payload was not one.
+ *
+ * {@link Computer.refresh} already guards its own answer this way, and for the
+ * same reason: an empty body flattens to a handle with no id, and everything
+ * that handle can do throws about an empty id somewhere else entirely — a
+ * TypeError out of a path builder, naming neither the request that came back
+ * empty nor the route it came from.
+ */
+const oneComputer = (t: Transport, data: unknown, method: string, path: string): Computer => {
+  const payload = P.computerPayload(data);
+  if (!payload.id) throw new MandalaError(`expected a computer from ${method} ${path}`);
+  return new Computer(t, payload);
+};
+
 export class Computers {
   #t: Transport;
 
@@ -62,8 +77,9 @@ export class Computers {
   }
 
   async get(computerId: string, opts: CallOptions = {}): Promise<Computer> {
-    const data = await this.#t.json('GET', P.computer(computerId), { signal: opts.signal });
-    return new Computer(this.#t, P.computerPayload(data));
+    const path = P.computer(computerId);
+    const data = await this.#t.json('GET', path, { signal: opts.signal });
+    return oneComputer(this.#t, data, 'GET', path);
   }
 
   /**
@@ -100,7 +116,7 @@ export class Computers {
       body: P.createBody(args),
       signal: opts.signal,
     });
-    return new Computer(this.#t, P.computerPayload(data));
+    return oneComputer(this.#t, data, 'POST', P.COMPUTERS);
   }
 
   /**
@@ -260,11 +276,12 @@ export class Snapshots {
    * throws `ConflictError`; wait with {@link Computer.waitUntilBuilt}.
    */
   async clone(snapshotId: string, name?: string, opts: CallOptions = {}): Promise<Computer> {
-    const data = await this.#t.json('POST', P.snapshotAction(snapshotId, 'clone'), {
+    const path = P.snapshotAction(snapshotId, 'clone');
+    const data = await this.#t.json('POST', path, {
       body: P.nameBody(name),
       signal: opts.signal,
     });
-    return new Computer(this.#t, P.computerPayload(data));
+    return oneComputer(this.#t, data, 'POST', path);
   }
 
   /** Remove a snapshot permanently. Later snapshots in the same chain are unaffected. */
