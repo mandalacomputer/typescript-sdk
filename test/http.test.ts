@@ -103,6 +103,63 @@ describe('the client deadline', () => {
     const c = new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: stalling, timeoutMs: 40 });
     await expect(c.computers.get('vm-1')).rejects.toThrow(/timed out after 40ms/);
   });
+
+  // The same signal governs an error body, which used to be read outside the
+  // rule: whatever went wrong reading it became an empty body, and the caller
+  // was answered with the status. So a request abandoned on purpose came back
+  // as ConflictError — which this SDK documents as the one worth retrying —
+  // and a deadline came back as whatever the response happened to say.
+  const stalledError = (status: number) =>
+    (async (_url: unknown, init?: RequestInit) => {
+      const signal = init?.signal;
+      return new Response(
+        // Headers arrived and said the status; the body never comes.
+        new ReadableStream({
+          start(ctrl) {
+            signal?.addEventListener('abort', () => ctrl.error(signal.reason), { once: true });
+          },
+        }),
+        { status },
+      );
+    }) as typeof globalThis.fetch;
+
+  it("reports a cancellation while an error body stalls as the caller's", async () => {
+    const ac = new AbortController();
+    const c = new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: stalledError(409) });
+    setTimeout(() => ac.abort(new Error('caller went away')), 5);
+    const err = await c.computers.get('vm-1', { signal: ac.signal }).catch((e) => e);
+    expect(err).not.toBeInstanceOf(MandalaError);
+    expect(err.message).toBe('caller went away');
+  });
+
+  it('names a deadline that fires while an error body stalls', async () => {
+    const c = new Client({
+      apiKey: 'com_test',
+      baseUrl: BASE,
+      fetch: stalledError(409),
+      timeoutMs: 40,
+    });
+    await expect(c.computers.get('vm-1')).rejects.toThrow(/timed out after 40ms/);
+  });
+
+  it('still answers with the status when the body is merely unreadable', async () => {
+    // Not every failed read is the caller's doing. A body that errors for its
+    // own reasons says nothing the status does not, and must not stop the
+    // status being reported.
+    const broken = (async () =>
+      new Response(
+        new ReadableStream({
+          start(ctrl) {
+            ctrl.error(new Error('connection reset'));
+          },
+        }),
+        { status: 409 },
+      )) as typeof globalThis.fetch;
+    const c = new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: broken });
+    const err = await c.computers.get('vm-1').catch((e) => e);
+    expect(err).toBeInstanceOf(ConflictError);
+    expect(err.message).toBe('HTTP 409');
+  });
 });
 
 describe('status mapping', () => {
