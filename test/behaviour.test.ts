@@ -2,6 +2,7 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  APIError,
   AuthenticationError,
   Client,
   GatewayTimeoutError,
@@ -17,6 +18,7 @@ import {
   anyRoute,
   BASE,
   COMPUTER,
+  cloudflareJson,
   EXEC_OK,
   errorJson,
   json,
@@ -844,6 +846,34 @@ describe('exec', () => {
     expect(err.message).toBe('upstream unavailable before dispatch');
   });
 
+  it("reads the edge's structured body rather than printing it", async () => {
+    // Cloudflare answers Accept: application/json — every request from this
+    // client — with RFC 9457 for the 5xx it generates, including the 500 and
+    // 502 this SDK has no wording of its own for. Unread, the one readable
+    // sentence arrives buried in 500 characters of raw JSON.
+    const { client: c } = client(() => cloudflareJson(502));
+    const err = await c.computers.get('vm-1').catch((e) => e);
+    expect(err.message).toBe('The origin server returned an invalid response.');
+    expect(err.message).not.toMatch(/[{}"]/);
+    // The Ray ID support asks for survives on the body, as with the HTML page.
+    expect((err.body as { ray_id?: string }).ray_id).toBe('8f2a1c0d9e4b7a31');
+  });
+
+  it("does not let the edge's own account displace advice it could not have", async () => {
+    // The counterpart, and the reason `detail` is read but not deferred to. A
+    // proxy cannot know the request under it was a foreground exec with a
+    // ceiling over it, so its accurate sentence about itself is the one thing a
+    // caller cannot act on. Reading the body must not cost the substitution.
+    const { client: c } = client((call) =>
+      call.path.endsWith('/exec') ? cloudflareJson(524) : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    const err = await computer.exec('sleep 130').catch((e) => e);
+    expect(err).toBeInstanceOf(GatewayTimeoutError);
+    expect(err.message).toMatch(/execBackground/);
+    expect(err.message).not.toBe('The origin server returned an invalid response.');
+  });
+
   it('keeps the edge error page on the error even though it never shows it', async () => {
     // The Ray ID support asks for is in that HTML and nowhere else.
     // Kept whole: on a real edge page it is in the footer, past the 500
@@ -1213,21 +1243,25 @@ describe('a status that arrived on a stream', () => {
     expect(err.status).toBe(504);
   });
 
-  it('does not read an edge status on a stream as the edge either', async () => {
-    // The same argument as the 504 above, a few statuses along. A 522 arriving
-    // inside a stream that is demonstrably open cannot mean a proxy failed to
-    // reach the platform, which is the whole of what OriginUnreachableError
-    // says. It is a downstream provider's status being relayed.
-    const { client: c } = client((call) =>
-      call.path.endsWith('/agent')
-        ? errorStream('{"error":"model provider unreachable","status":522}')
-        : anyRoute(call),
-    );
-    const computer = await c.computers.get('vm-1');
-    const err = await computer.agent({ prompt: 'go', modelKey: 'sk' }).catch((e) => e);
-    expect(err).not.toBeInstanceOf(OriginUnreachableError);
-    expect(err.status).toBe(522);
-  });
+  it.each([504, 520, 521, 522, 523, 525, 526])(
+    'does not read %i on a stream as the edge either',
+    async (status) => {
+      // The same argument as the 504 above, across the range. Any of these
+      // arriving inside a stream that is demonstrably open cannot describe this
+      // connection, which is the whole of what every class in that range says.
+      // Asserted on the constructor rather than with `not.toBeInstanceOf`: the
+      // four are siblings, so ruling one out leaves three that would pass.
+      const { client: c } = client((call) =>
+        call.path.endsWith('/agent')
+          ? errorStream(`{"error":"model provider failed","status":${status}}`)
+          : anyRoute(call),
+      );
+      const computer = await c.computers.get('vm-1');
+      const err = await computer.agent({ prompt: 'go', modelKey: 'sk' }).catch((e) => e);
+      expect(err.constructor).toBe(APIError);
+      expect(err.status).toBe(status);
+    },
+  );
 
   it('still maps every status that means the same thing in both places', async () => {
     const { client: c } = client((call) =>
