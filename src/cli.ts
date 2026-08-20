@@ -49,6 +49,9 @@ const MAX_FRAME = 1 << 22;
  */
 const EXIT_DRAIN_MS = 3_000;
 
+/** A terminal websocket must either upgrade or fail within this window. */
+const CONNECT_TIMEOUT_MS = 15_000;
+
 const USAGE = `mandala — your own terminal, against a Mandala computer.
 
   mandala ssh <computer> [--session NAME]   an interactive shell in the guest
@@ -64,6 +67,74 @@ class Died extends Error {}
 
 function die(message: string): never {
   throw new Died(message);
+}
+
+/**
+ * Wait for the websocket handshake without letting a silent TCP peer hold the
+ * command forever. A close before open is a failed handshake, even when the
+ * implementation emits no separate error event for it.
+ *
+ * Exported only so the CLI's event-boundary behavior can be tested; this module
+ * is not part of the package's library exports.
+ */
+export function waitForWebSocketOpen(ws: WebSocket, timeoutMs = CONNECT_TIMEOUT_MS): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const cleanup = () => {
+      clearTimeout(timer);
+      ws.removeEventListener('open', onOpen);
+      ws.removeEventListener('error', onError);
+      ws.removeEventListener('close', onClose);
+    };
+    const finish = (fn: () => void) => {
+      cleanup();
+      fn();
+    };
+    const failure = () =>
+      new Died(
+        'could not reach the terminal. If this computer has been running since ' +
+          'before its host learned the feature, stop it and start it again ' +
+          '(a restart is not enough), then retry.',
+      );
+    const onOpen = () => finish(resolve);
+    const onError = () => finish(() => reject(failure()));
+    const onClose = () => finish(() => reject(failure()));
+    const timer = setTimeout(
+      () => finish(() => reject(new Died(`terminal connection timed out after ${timeoutMs}ms`))),
+      timeoutMs,
+    );
+    ws.addEventListener('open', onOpen, { once: true });
+    ws.addEventListener('error', onError, { once: true });
+    ws.addEventListener('close', onClose, { once: true });
+  });
+}
+
+/**
+ * Drain terminal output, but always hand the TTY back and close the websocket.
+ * The timeout covers a stdout stream that returned false and never emits
+ * `drain`; the nested finally covers a write that throws or rejects.
+ */
+export async function finishInteraction(
+  queued: Promise<void>,
+  cleanup: () => void,
+  close: () => void,
+  timeoutMs = EXIT_DRAIN_MS,
+): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      queued,
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+    try {
+      cleanup();
+    } finally {
+      close();
+    }
+  }
 }
 
 /** The computer `target` names — an exact id, or a unique name. */
@@ -198,21 +269,7 @@ async function interact(url: string): Promise<number> {
   };
 
   try {
-    await new Promise<void>((resolve, reject) => {
-      ws.addEventListener('open', () => resolve(), { once: true });
-      ws.addEventListener(
-        'error',
-        () =>
-          reject(
-            new Died(
-              'could not reach the terminal. If this computer has been running since ' +
-                'before its host learned the feature, stop it and start it again ' +
-                '(a restart is not enough), then retry.',
-            ),
-          ),
-        { once: true },
-      );
-    });
+    await waitForWebSocketOpen(ws);
 
     if (stdin.isTTY) {
       stdin.setRawMode(true);
@@ -281,13 +338,13 @@ async function interact(url: string): Promise<number> {
   } finally {
     // The tail of the output goes out before the terminal is handed back, or
     // the last screenful of a session lands after the shell prompt returns.
-    await queued;
-    cleanup();
-    try {
-      ws.close();
-    } catch {
-      // Already closed; that is the ordinary way out of the loop above.
-    }
+    await finishInteraction(queued, cleanup, () => {
+      try {
+        ws.close();
+      } catch {
+        // Already closed; that is the ordinary way out of the loop above.
+      }
+    });
   }
 
   if (exitCode === undefined) {
