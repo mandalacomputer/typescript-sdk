@@ -185,22 +185,50 @@ const BY_STATUS: Record<number, typeof APIError> = {
 };
 
 /**
- * What a caller is told when a proxy abandoned the request.
+ * What a caller is told when a proxy abandoned the request and named nothing.
  *
- * Written here rather than taken from the response, which is the one case where
- * the body is worth discarding. A 524 is generated at the edge, so it carries a
- * proxy's HTML error page or — when the request asked for JSON, as every request
- * from this client does — nothing at all. The empty case is the dangerous one:
- * it left `err.message` as the bare string `HTTP 524`, naming no cause, no
- * culprit and no way out.
+ * Used only where the response carried no structured message of its own — see
+ * {@link namedTheFailure}. A 524 is generated at the edge, so that is the usual
+ * case: it carries a proxy's HTML error page or — when the request asked for
+ * JSON, as every request from this client does — nothing at all, which left
+ * `err.message` as the bare string `HTTP 524`, naming no cause, no culprit and
+ * no way out.
+ *
+ * Worded for any route, because any of them can meet the ceiling, and the exec
+ * sentence is hedged rather than asserted. A read that met it started no command
+ * and cannot make a guest agent busy; telling its caller that their work is
+ * still running would be a confident falsehood about something that never began.
  */
 const GATEWAY_TIMEOUT_MESSAGE =
   'a proxy in front of the platform gave up waiting for it to answer. Nothing was ' +
-  'cancelled: whatever this request started is still running, which is why the next ' +
-  'call on the same computer may report the guest agent as busy. A foreground exec() ' +
-  'ends this way after about two minutes however large a timeoutS it was given — the ' +
-  'ceiling belongs to the proxy, not to the platform or to this client. Use ' +
-  'execBackground() to run anything slower than that';
+  'cancelled: the platform never saw this deadline, so any work the request had ' +
+  'already started carries on. Most often that is a foreground exec(), which ends this ' +
+  'way after about two minutes however large a timeoutS it was given — the ceiling ' +
+  'belongs to the proxy, not to the platform or to this client, so raising timeoutS ' +
+  'cannot buy time from it and execBackground() is the way to run something slower. ' +
+  'After one of those, the next call on that computer may report the guest agent as ' +
+  'busy with the command that outlived the request';
+
+/**
+ * Whether the response named this failure in the shape this surface uses.
+ *
+ * Only a JSON body with a non-empty `error` string counts. An HTML page and an
+ * empty body are an intermediary's, and both are worth discarding for the
+ * wording above; a structured message is not. "upstream unavailable before
+ * dispatch" is a more specific true thing than anything written here, and
+ * replacing it would be this client overwriting a hop that knew more than it
+ * does with a guess.
+ *
+ * Which hop wrote it is not knowable from here and does not need to be. The test
+ * is whether SOMETHING said something specific — a 504 can be raised by any
+ * proxy in the chain, including one in front of a `baseUrl` this client has
+ * never seen.
+ */
+function namedTheFailure(body: unknown): boolean {
+  if (!body || typeof body !== 'object') return false;
+  const err = (body as { error?: unknown }).error;
+  return typeof err === 'string' && err.length > 0;
+}
 
 /** Build the error for a status, with the platform's own message when it sent one. */
 export function errorForStatus(
@@ -211,13 +239,34 @@ export function errorForStatus(
 ): APIError {
   if (status === 429) return new RateLimitError(message, status, body, retryAfterMs);
   const Cls = BY_STATUS[status] ?? APIError;
-  // Unconditionally, rather than only when the body was empty: a proxy's error
-  // page is not this platform's error, so there is no status where relaying it
-  // beats saying what happened.
-  if (Cls === GatewayTimeoutError) {
+  // Substituted for an empty body, which says nothing, and for a proxy's HTML
+  // page, which says 500 characters of nothing. NOT for a structured message:
+  // that is the one case where the response knows more than this file does.
+  if (Cls === GatewayTimeoutError && !namedTheFailure(body)) {
     return new GatewayTimeoutError(GATEWAY_TIMEOUT_MESSAGE, status, body);
   }
   return new Cls(message, status, body);
+}
+
+/**
+ * The error a status deserves when it arrived ON a stream rather than as one.
+ *
+ * The agent loop reports its own failures as events inside a response that was a
+ * 200 and stayed open, so the status in the event is the platform relaying what
+ * happened downstream — not a description of this connection.
+ *
+ * Which is why a gateway status cannot mean here what it means there. The event
+ * reached the caller, so no proxy abandoned anything, and
+ * {@link GatewayTimeoutError} asserts exactly that it did. A downstream provider
+ * timing out and an edge that stopped waiting are different events with opposite
+ * implications for whether the work survived, and a caller branching on the
+ * class would be answered wrongly. Every other status means the same thing in
+ * both places and is mapped the same way.
+ */
+export function errorForEventStatus(status: number, message: string): APIError {
+  const Cls = BY_STATUS[status] ?? APIError;
+  if (Cls === GatewayTimeoutError) return new APIError(message, status);
+  return new Cls(message, status);
 }
 
 /**

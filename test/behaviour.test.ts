@@ -2,6 +2,7 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  AuthenticationError,
   Client,
   GatewayTimeoutError,
   isTransient,
@@ -716,7 +717,7 @@ describe('exec', () => {
     expect(err).toBeInstanceOf(GatewayTimeoutError);
     expect(err.status).toBe(524);
     expect(err.message).toMatch(/proxy/);
-    expect(err.message).toMatch(/still running/);
+    expect(err.message).toMatch(/outlived the request/);
     expect(err.message).toMatch(/execBackground\(\)/);
   });
 
@@ -742,6 +743,31 @@ describe('exec', () => {
     );
     const err = await (await c.computers.get('vm-1')).exec('sleep 130').catch((e) => e);
     expect(isTransient(err)).toBe(false);
+  });
+
+  it('keeps a structured message rather than overwriting it', async () => {
+    // The substitution is for a body that said nothing, not for every 504. A
+    // gateway status can be raised by any proxy in the chain, and one that
+    // speaks JSON has said something more specific than this client can.
+    const { client: c } = client((call) =>
+      call.path.endsWith('/exec')
+        ? errorJson(504, 'upstream unavailable before dispatch')
+        : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    const err = await computer.exec('make').catch((e) => e);
+    expect(err).toBeInstanceOf(GatewayTimeoutError);
+    expect(err.message).toBe('upstream unavailable before dispatch');
+  });
+
+  it('does not promise a surviving command to a read', async () => {
+    // A GET started nothing, so the wording must not claim otherwise.
+    const { client: c } = client(() => new Response('', { status: 524 }));
+    const err = await c.computers.get('vm-1').catch((e) => e);
+    expect(err).toBeInstanceOf(GatewayTimeoutError);
+    expect(err.message).toMatch(/Nothing was cancelled/);
+    expect(err.message).toMatch(/Most often/);
+    expect(err.message).not.toMatch(/whatever this request started is still running/);
   });
 
   it('refuses to open a URL on a Windows guest rather than sending a POSIX command', async () => {
@@ -1074,6 +1100,41 @@ describe('the agent loop', () => {
     await expect(
       (await c.computers.get('vm-1')).agent({ prompt: 'go', modelKey: 'sk' }),
     ).rejects.toThrow(/model overloaded/);
+  });
+});
+
+describe('a status that arrived on a stream', () => {
+  const errorStream = (payload: string) =>
+    new Response(`event: error\ndata: ${payload}\n\n`, {
+      headers: { 'content-type': 'text/event-stream' },
+    });
+
+  it('is not read as a proxy that gave up', async () => {
+    // The agent loop reports its own failures as events inside a 200. The event
+    // reaching the caller is proof no proxy abandoned the request, which is the
+    // one thing GatewayTimeoutError asserts — so a downstream 504 relayed this
+    // way must not claim it.
+    const { client: c } = client((call) =>
+      call.path.endsWith('/agent')
+        ? errorStream('{"error":"model provider timed out","status":504}')
+        : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    const err = await computer.agent({ prompt: 'go', modelKey: 'sk' }).catch((e) => e);
+    expect(err).toBeInstanceOf(MandalaError);
+    expect(err).not.toBeInstanceOf(GatewayTimeoutError);
+    expect(err.status).toBe(504);
+  });
+
+  it('still maps every status that means the same thing in both places', async () => {
+    const { client: c } = client((call) =>
+      call.path.endsWith('/agent')
+        ? errorStream('{"error":"revoked","status":401}')
+        : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    const err = await computer.agent({ prompt: 'go', modelKey: 'sk' }).catch((e) => e);
+    expect(err).toBeInstanceOf(AuthenticationError);
   });
 });
 

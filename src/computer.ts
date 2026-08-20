@@ -10,7 +10,7 @@ import {
 import {
   APIError,
   AuthenticationError,
-  errorForStatus,
+  errorForEventStatus,
   isTransient,
   MandalaError,
   NotFoundError,
@@ -1502,7 +1502,7 @@ export class Computer {
         // caller waiting forever. Returning from the generator also cancels
         // the response reader in Transport.sse's finally.
         const message = `the agent run failed: ${ev.error}`;
-        throw ev.status ? errorForStatus(ev.status, message) : new MandalaError(message);
+        throw ev.status ? errorForEventStatus(ev.status, message) : new MandalaError(message);
       }
     }
     throw new MandalaError('the agent stream ended without a result');
