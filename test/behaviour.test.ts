@@ -825,6 +825,35 @@ describe('exec', () => {
     expect(isTransient(err)).toBe(false);
   });
 
+  it('says which status a substituted message stands in for', async () => {
+    // Four classes, eight statuses, three of them sharing one sentence.
+    // Explaining the failure in prose took the number out of err.message, which
+    // the bare `HTTP 522` at least had.
+    for (const status of [504, 520, 522, 526]) {
+      const { client: c } = client(() => new Response('', { status }));
+      const err = await c.computers.get('vm-1').catch((e) => e);
+      expect(err.message).toMatch(new RegExp(`\\(HTTP ${status}\\)$`));
+    }
+  });
+
+  it('does not stamp a status onto a message the platform wrote', async () => {
+    // Its message is its own sentence and err.status already carries the number.
+    const { client: c } = client(() => errorJson(504, 'upstream unavailable before dispatch'));
+    const err = await c.computers.get('vm-1').catch((e) => e);
+    expect(err.message).toBe('upstream unavailable before dispatch');
+  });
+
+  it('keeps the edge error page on the error even though it never shows it', async () => {
+    // The Ray ID support asks for is in that HTML and nowhere else.
+    const page = '<html><body>error code: 522 Ray ID: 8f2a1c</body></html>';
+    const { client: c } = client(
+      () => new Response(page, { status: 522, headers: { 'content-type': 'text/html' } }),
+    );
+    const err = await c.computers.get('vm-1').catch((e) => e);
+    expect(err.message).not.toMatch(/Ray ID/);
+    expect(String(err.body)).toMatch(/8f2a1c/);
+  });
+
   it('refuses to open a URL on a Windows guest rather than sending a POSIX command', async () => {
     // cmd.exe answering "'nohup' is not recognized" through an ExecResult
     // reads as anything but what actually went wrong.
