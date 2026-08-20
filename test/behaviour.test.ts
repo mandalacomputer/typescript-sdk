@@ -7,6 +7,7 @@ import {
   GatewayTimeoutError,
   isTransient,
   MandalaError,
+  OriginResponseError,
   OriginUnreachableError,
   TimeoutError,
 } from '../src/index.js';
@@ -781,6 +782,26 @@ describe('exec', () => {
     expect(err).not.toBeInstanceOf(GatewayTimeoutError);
     expect(err.message).toMatch(/never arrived/);
     expect(err.message).toMatch(/clears on its own/);
+  });
+
+  it('does not tell a 520 that its work never happened', async () => {
+    // Cloudflare returns 520 when the origin DID receive the request and
+    // answered unreadably. Filed with the unreachable statuses it inherited
+    // "the request never arrived, so nothing was started" — said about a create
+    // that may have just made a billable computer.
+    const { client: c } = client(() => new Response('', { status: 520 }));
+    const err = await c.computers.create({ template: 'base' }).catch((e) => e);
+    expect(err).toBeInstanceOf(OriginResponseError);
+    expect(err).not.toBeInstanceOf(OriginUnreachableError);
+    expect(err.message).not.toMatch(/never arrived/);
+    expect(err.message).toMatch(/did arrive/);
+    expect(err.message).toMatch(/creates something/);
+  });
+
+  it('keeps a 520 body the platform may itself have written', async () => {
+    const { client: c } = client(() => errorJson(520, 'the hypervisor closed the connection'));
+    const err = await c.computers.get('vm-1').catch((e) => e);
+    expect(err.message).toBe('the hypervisor closed the connection');
   });
 
   it('does not tell a bad certificate to wait it out', async () => {

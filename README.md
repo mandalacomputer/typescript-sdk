@@ -496,7 +496,8 @@ import {
   RateLimitError,      //     429 — retry after retryAfterMs when present
   UnavailableError,    //     503 — a listing would have been short
   GatewayTimeoutError, //     504/524 — a proxy gave up; the work carries on
-  OriginUnreachableError,//   520-523/525/526 — a proxy never reached it at all
+  OriginResponseError, //     520 — it answered, unreadably; work may have happened
+  OriginUnreachableError,//   521-523/525/526 — a proxy never reached it at all
   ConnectionError,     //   the platform could not be reached. Retryable.
   TimeoutError,        //   a wait helper gave up
   isTransient,
@@ -528,8 +529,14 @@ generated at the edge. See [Long-running commands](#long-running-commands).
 `OriginUnreachableError` is its opposite and is why the two are different types.
 A gateway timeout means the request arrived and its work carries on; these mean
 it never arrived, so nothing was started and there is nothing to account for.
-520-523 are usually the platform restarting and clear on their own; 525 and 526
+521-523 are usually the platform restarting and clear on their own; 525 and 526
 are a TLS handshake that will fail the same way on every retry, and say so.
+
+`OriginResponseError` is 520 alone, and it is the trap in that range: despite the
+neighbouring number it means the platform **was** reached and its answer could
+not be read, so the work may have happened in full, in part, or not at all.
+Before retrying anything that creates something, check whether the first attempt
+took effect.
 Neither is in `isTransient` — this SDK decides transience by class, and adding a
 retrying status would be a change to retry policy rather than to naming.
 
