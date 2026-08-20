@@ -95,10 +95,14 @@ export const bytes = (data: string, contentType = 'image/png'): Response =>
     headers: { 'content-type': contentType },
   });
 
-export const errorJson = (status: number, error: string): Response =>
+export const errorJson = (
+  status: number,
+  error: string,
+  headers: ResponseInit['headers'] = {},
+): Response =>
   new Response(JSON.stringify({ error }), {
     status,
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', ...Object.fromEntries(new Headers(headers)) },
   });
 
 export const COMPUTER = {

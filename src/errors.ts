@@ -35,6 +35,11 @@ export class MandalaError extends Error {
   override name = 'MandalaError';
 }
 
+/** The platform could not be reached. Safe to retry without changing the request. */
+export class ConnectionError extends MandalaError {
+  override name = 'ConnectionError';
+}
+
 /** The API returned an unsuccessful response. */
 export class APIError extends MandalaError {
   override name = 'APIError';
@@ -107,6 +112,24 @@ export class ConflictError extends APIError {
 }
 
 /**
+ * 429 — the request is valid, but the caller has exhausted a temporary rate budget.
+ *
+ * `retryAfterMs` is present when the platform supplied a valid `Retry-After`
+ * header. Wait helpers honour it rather than immediately adding more load.
+ */
+export class RateLimitError extends APIError {
+  override name = 'RateLimitError';
+  constructor(
+    message: string,
+    status: number,
+    body?: unknown,
+    readonly retryAfterMs?: number,
+  ) {
+    super(message, status, body);
+  }
+}
+
+/**
  * 503 — a hypervisor could not be reached, so an inventory would be short.
  *
  * The platform fails closed about this by design: `GET /computers` and
@@ -133,7 +156,13 @@ const BY_STATUS: Record<number, typeof APIError> = {
 };
 
 /** Build the error for a status, with the platform's own message when it sent one. */
-export function errorForStatus(status: number, message: string, body?: unknown): APIError {
+export function errorForStatus(
+  status: number,
+  message: string,
+  body?: unknown,
+  retryAfterMs?: number,
+): APIError {
+  if (status === 429) return new RateLimitError(message, status, body, retryAfterMs);
   const Cls = BY_STATUS[status] ?? APIError;
   return new Cls(message, status, body);
 }
@@ -146,5 +175,10 @@ export function errorForStatus(status: number, message: string, body?: unknown):
  * decide than a fixed policy is.
  */
 export function isTransient(err: unknown): boolean {
-  return err instanceof ConflictError || err instanceof UnavailableError;
+  return (
+    err instanceof ConflictError ||
+    err instanceof RateLimitError ||
+    err instanceof UnavailableError ||
+    err instanceof ConnectionError
+  );
 }

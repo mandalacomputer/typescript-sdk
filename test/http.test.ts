@@ -6,11 +6,13 @@ import {
   AuthenticationError,
   Client,
   ConflictError,
+  ConnectionError,
   isTransient,
   MandalaError,
   NotFoundError,
   PermissionDeniedError,
   PlanLimitError,
+  RateLimitError,
   UnavailableError,
 } from '../src/index.js';
 import { anyRoute, BASE, COMPUTER, errorJson, json, recorder, SNAPSHOT } from './harness.js';
@@ -73,6 +75,12 @@ describe('the client deadline', () => {
     expect(() => new Client({ apiKey: 'com_test', baseUrl: BASE, timeoutMs: 0 })).not.toThrow();
   });
 
+  it('refuses a delay that Node would wrap to one millisecond', () => {
+    expect(
+      () => new Client({ apiKey: 'com_test', baseUrl: BASE, timeoutMs: 2_147_483_648 }),
+    ).toThrow(/2147483647/);
+  });
+
   it('names a deadline that fires while the body is still arriving', async () => {
     // The composed signal governs the body as well as the headers, so a
     // download whose bytes stop arriving is aborted after the fetch already
@@ -104,6 +112,7 @@ describe('status mapping', () => {
     [403, PermissionDeniedError],
     [404, NotFoundError],
     [409, ConflictError],
+    [429, RateLimitError],
     [503, UnavailableError],
     [500, APIError],
   ];
@@ -141,9 +150,20 @@ describe('status mapping', () => {
 
   it('knows which failures are worth retrying', () => {
     expect(isTransient(new ConflictError('', 409))).toBe(true);
+    expect(isTransient(new RateLimitError('', 429))).toBe(true);
     expect(isTransient(new UnavailableError('', 503))).toBe(true);
+    expect(isTransient(new ConnectionError('offline'))).toBe(true);
     expect(isTransient(new PlanLimitError('', 402))).toBe(false);
     expect(isTransient(new Error('boom'))).toBe(false);
+  });
+
+  it('keeps the rate limit retry interval', async () => {
+    const rec = recorder(() => errorJson(429, 'slow down', { 'Retry-After': '1.5' }));
+    const err = await client(rec)
+      .computers.list()
+      .catch((e) => e);
+    expect(err).toBeInstanceOf(RateLimitError);
+    expect(err.retryAfterMs).toBe(1_500);
   });
 });
 
@@ -229,6 +249,17 @@ describe('decoding', () => {
     });
     const c = await client(rec, { timeoutMs: 10 }).computers.get('vm-1');
     await expect(c.exec('sleep 1', { timeoutS: 1 })).resolves.toMatchObject({ ok: true });
+  });
+
+  it('lets held input outlive a shorter client deadline', async () => {
+    const rec = recorder(async (call) => {
+      if (!call.path.endsWith('/input')) return anyRoute(call);
+      await new Promise((r) => setTimeout(r, 30));
+      return json({});
+    });
+    const c = await client(rec, { timeoutMs: 5 }).computers.get('vm-1');
+    await expect(c.holdKey(['shift'], 0.01)).resolves.toBeUndefined();
+    await expect(c.wait(0.01)).resolves.toBeUndefined();
   });
 
   it('still applies the deadline when a caller passes a signal that never fires', async () => {
