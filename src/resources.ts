@@ -33,11 +33,14 @@ export type CallOptions = { signal?: AbortSignal };
  * TypeError out of a path builder, naming neither the request that came back
  * empty nor the route it came from.
  */
-const oneComputer = (t: Transport, data: unknown, method: string, path: string): Computer => {
+const computerRecord = (data: unknown, method: string, path: string): Record<string, unknown> => {
   const payload = P.computerPayload(data);
   if (!payload.id) throw new MandalaError(`expected a computer from ${method} ${path}`);
-  return new Computer(t, payload);
+  return payload;
 };
+
+const oneComputer = (t: Transport, data: unknown, method: string, path: string): Computer =>
+  new Computer(t, computerRecord(data, method, path));
 
 export class Computers {
   #t: Transport;
@@ -169,7 +172,7 @@ export class Computers {
       body: P.createBody(args),
       signal: opts.signal,
     });
-    const computer = new EphemeralComputer(this.#t, P.computerPayload(data));
+    const computer = new EphemeralComputer(this.#t, computerRecord(data, 'POST', P.COMPUTERS));
     if (!fn) return computer;
     let result: T;
     try {

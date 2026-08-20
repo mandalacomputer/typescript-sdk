@@ -184,6 +184,9 @@ export function createBody(args: CreateArgs): Json {
   finiteIf(cpu, 'cpu');
   finiteIf(ramMb, 'ramMb');
   finiteIf(diskGb, 'diskGb');
+  if (name !== undefined && !name.trim()) {
+    throw new ValidationError('name must not be empty');
+  }
   return {
     ...omitUndefined({
       name,

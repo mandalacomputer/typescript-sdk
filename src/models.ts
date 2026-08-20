@@ -398,7 +398,7 @@ export function toBackgroundExec(d: Record<string, unknown>): BackgroundExec {
     // exited, which is the same finished-job answer the pid check above
     // refuses, so an absent field falls back to whether an exit code arrived —
     // which is what "running" means in the first place.
-    running: d.running == null ? d.exit_code == null : bool(d.running),
+    running: d.running == null ? d.exit_code == null || d.exit_code === '' : bool(d.running),
     // The empty string counts as "did not send one", for toExecResult's reason
     // about the same field: Number('') is 0, and a command still running
     // reported as having exited successfully is the one wrong answer here that

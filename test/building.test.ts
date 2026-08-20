@@ -28,6 +28,10 @@ describe('createBody', () => {
     expect(() => P.createBody({ size: 'large', template: 'base' })).toThrow(/size alone/);
     expect(() => P.createBody({ size: 'large' })).not.toThrow();
   });
+
+  it('refuses an all-whitespace name', () => {
+    expect(() => P.createBody({ name: '  ' })).toThrow(/must not be empty/);
+  });
 });
 
 describe('updateBody', () => {

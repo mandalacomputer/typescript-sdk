@@ -442,6 +442,16 @@ describe('what a payload cannot be allowed to mean', () => {
     await expect(computer.screenshot()).rejects.toThrow(/expected an image/);
   });
 
+  it('accepts a mixed-case image media type', async () => {
+    const { client: c } = client((call) =>
+      call.path.endsWith('/screenshot')
+        ? new Response('png', { headers: { 'content-type': 'Image/PNG' } })
+        : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    expect(new TextDecoder().decode(await computer.screenshot())).toBe('png');
+  });
+
   it('reads a stringified false as false, not as the corner of the screen', async () => {
     // The platform this mirrors has a Python SDK, and `str(False)` is 'False'.
     const { client: c } = client((call) =>
@@ -470,6 +480,36 @@ describe('what a payload cannot be allowed to mean', () => {
     await expect(c.snapshots.clone('snap-1')).rejects.toThrow(/expected a computer from POST/);
   });
 
+  it('guards the other two create-computer routes against an empty answer', async () => {
+    const { client: c } = client((call) => (call.method === 'POST' ? json({}) : anyRoute(call)));
+    const computer = await c.computers.get('vm-1');
+    await expect(computer.clone()).rejects.toThrow(/expected a computer from POST/);
+    await expect(c.computers.ephemeral()).rejects.toThrow(/expected a computer from POST/);
+  });
+
+  it('refuses empty single-record answers instead of inventing records', async () => {
+    for (const route of ['snapshot', 'holdings', 'agentOnce'] as const) {
+      const { client: c } = client((call) => {
+        if (call.path.endsWith('/snapshots')) {
+          if (route === 'snapshot' && call.method === 'POST') return json({});
+          if (route === 'holdings' && call.method === 'GET') return json({});
+        }
+        if (route === 'agentOnce' && call.path.endsWith('/agent')) return json({});
+        return anyRoute(call);
+      });
+      const computer = await c.computers.get('vm-1');
+      const answer =
+        route === 'snapshot'
+          ? computer.snapshot()
+          : route === 'holdings'
+            ? computer.holdings()
+            : computer.agentOnce({ prompt: 'go', modelKey: 'sk' });
+      await expect(answer).rejects.toThrow(
+        /expected (a snapshot|snapshot holdings|an agent result)/,
+      );
+    }
+  });
+
   it('refuses a background exec with no pid, rather than a finished job on pid 0', async () => {
     const { client: c } = client((call) =>
       call.path.endsWith('/exec') ? json({}) : anyRoute(call),
@@ -483,6 +523,14 @@ describe('what a payload cannot be allowed to mean', () => {
     // answer again by another route.
     const { client: c } = client((call) =>
       call.path.endsWith('/exec') ? json({ pid: 7 }) : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    expect((await computer.execBackground('sleep 60')).running).toBe(true);
+  });
+
+  it('also reads an empty exit code as no evidence that a background job exited', async () => {
+    const { client: c } = client((call) =>
+      call.path.endsWith('/exec') ? json({ pid: 7, exit_code: '' }) : anyRoute(call),
     );
     const computer = await c.computers.get('vm-1');
     expect((await computer.execBackground('sleep 60')).running).toBe(true);
@@ -529,6 +577,14 @@ describe('the pointer', () => {
     );
     const computer = await c.computers.get('vm-1');
     expect(await computer.cursorPosition()).toEqual({ x: 12, y: 34 });
+  });
+
+  it('does not expose NaN when a known position contains malformed coordinates', async () => {
+    const { client: c } = client((call) =>
+      call.path.endsWith('/input') ? json({ known: true, x: 'left', y: {} }) : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    expect(await computer.cursorPosition()).toEqual({ x: 0, y: 0 });
   });
 });
 
@@ -815,6 +871,38 @@ describe('the agent loop', () => {
     await expect(
       (await c.computers.get('vm-1')).agent({ prompt: 'go', modelKey: 'sk' }),
     ).rejects.toThrow(MandalaError);
+  });
+
+  it('stops consuming as soon as the stream reports an error', async () => {
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      start(ctrl) {
+        ctrl.enqueue(
+          new TextEncoder().encode('event: error\ndata: {"error":"failed","status":500}\n\n'),
+        );
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const { client: c } = client((call) =>
+      call.path.endsWith('/agent')
+        ? new Response(body, { headers: { 'content-type': 'text/event-stream' } })
+        : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    await expect(computer.agent({ prompt: 'go', modelKey: 'sk' })).rejects.toThrow(/failed/);
+    expect(cancelled).toBe(true);
+  });
+});
+
+describe('expired guest waits', () => {
+  it('does not start a guest probe after its deadline has already elapsed', async () => {
+    const { rec, client: c } = client(anyRoute);
+    const computer = await c.computers.get('vm-1');
+    rec.calls.length = 0;
+    await expect(computer.waitForGuest({ timeoutMs: 0, pollMs: 1 })).rejects.toThrow(TimeoutError);
+    expect(rec.calls).toHaveLength(0);
   });
 });
 
