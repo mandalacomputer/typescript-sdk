@@ -35,7 +35,7 @@ import { Client } from 'mandala-computer';
 const client = new Client();                  // reads MANDALA_API_KEY
 
 await client.computers.ephemeral({ template: 'base' }, async (c) => {
-  await c.waitForGuest();                     // the desktop answers, not just the VM
+  await c.waitForGuest();                     // the guest agent answers, not just the VM
   await c.open('https://example.com');        // on the screen, not as root
   const png = await c.screenshot();
   await c.click(640, 400);
@@ -474,7 +474,9 @@ import {
   PermissionDeniedError,//    403 — the key's role is too low
   NotFoundError,       //     404 — no such computer, snapshot, or route
   ConflictError,       //     409 — right request, wrong moment. Retry this one.
+  RateLimitError,      //     429 — retry after retryAfterMs when present
   UnavailableError,    //     503 — a listing would have been short
+  ConnectionError,     //   the platform could not be reached. Retryable.
   TimeoutError,        //   a wait helper gave up
   isTransient,
 } from 'mandala-computer';

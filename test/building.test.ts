@@ -60,10 +60,10 @@ describe('numbers that would go out as null', () => {
     expect(() => P.updateBody({ idleSuspendMin: null })).not.toThrow();
   });
 
-  it('refuses a negative exec timeout, and keeps zero', () => {
-    expect(() => P.execBody({ command: 'ls', timeoutS: -1 })).toThrow(/must not be negative/);
+  it('refuses a non-positive exec timeout', () => {
+    expect(() => P.execBody({ command: 'ls', timeoutS: -1 })).toThrow(/positive/);
     expect(() => P.execBody({ command: 'ls', timeoutS: Number.NaN })).toThrow(/finite/);
-    expect(P.execBody({ command: 'ls', timeoutS: 0 })).toEqual({ command: 'ls', timeout_s: 0 });
+    expect(() => P.execBody({ command: 'ls', timeoutS: 0 })).toThrow(/positive/);
   });
 
   it('refuses a pid that is not one, rather than pathing to it', () => {
@@ -435,10 +435,18 @@ describe('finite numbers', () => {
   it('refuses a NaN amount, max_steps, timeout or window geometry', () => {
     expect(() => P.scrollBody({ direction: 'down', amount: Number.NaN })).toThrow(/finite number/);
     expect(() => P.agentBody({ prompt: 'go', stream: true, maxSteps: Number.NaN })).toThrow(
-      /finite number/,
+      /positive integer/,
     );
     expect(() => P.execBody({ command: 'ls', timeoutS: Number.NaN })).toThrow(/finite number/);
     expect(() => P.windowBody({ action: 'move', x: Number.NaN, y: 2 })).toThrow(/finite number/);
+  });
+
+  it('refuses an agent step count the platform cannot execute', () => {
+    for (const maxSteps of [0, -1, 1.5]) {
+      expect(() => P.agentBody({ prompt: 'go', stream: true, maxSteps })).toThrow(
+        /positive integer/,
+      );
+    }
   });
 
   it('still takes the zeros and the ordinary values', () => {

@@ -27,6 +27,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { balanced, topLevelKeys } from './surface-text.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = resolve(here, '..');
@@ -38,7 +39,9 @@ const candidates = [
   resolve(repo, '..', 'app'),
 ].filter(Boolean);
 
-const platform = candidates.find((dir) => existsSync(join(dir, 'web/lib/surface.ts')));
+const platform = candidates.find((dir) =>
+  ['web/lib/surface.ts', 'web/lib/apidoc.ts'].every((file) => existsSync(join(dir, file))),
+);
 if (!platform) {
   console.log(
     'check:surface — platform repo not found, skipping.\n' +
@@ -64,15 +67,6 @@ const strip = (s) => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '
  * table here nests: a route's `query` array holds objects, and a body's schema
  * holds more of them.
  */
-function balanced(text, from, open, close) {
-  let depth = 0;
-  for (let i = from; i < text.length; i++) {
-    if (text[i] === open) depth++;
-    else if (text[i] === close && --depth === 0) return text.slice(from + 1, i);
-  }
-  throw new Error(`unbalanced ${open} from offset ${from}`);
-}
-
 // --- routes -----------------------------------------------------------------
 
 const surfaceSource = readFileSync(join(platform, 'web/lib/surface.ts'), 'utf8');
@@ -136,32 +130,6 @@ for (const m of docSource.matchAll(/^const ([A-Z_]+): Query = \{/gm)) {
  * every one of them would read as a body field. Quoted strings are skipped
  * whole, because a description is prose and prose contains colons.
  */
-function topLevelKeys(body) {
-  const keys = [];
-  let depth = 0;
-  let i = 0;
-  while (i < body.length) {
-    const ch = body[i];
-    if (ch === '{' || ch === '[' || ch === '(') depth++;
-    else if (ch === '}' || ch === ']' || ch === ')') depth--;
-    else if (ch === "'") {
-      const end = body.indexOf("'", i + 1);
-      i = end === -1 ? body.length : end + 1;
-      continue;
-    }
-    if (depth === 0) {
-      const m = body.slice(i).match(/^([A-Za-z_][A-Za-z0-9_]*)\s*:/);
-      if (m) {
-        keys.push(m[1]);
-        i += m[0].length;
-        continue;
-      }
-    }
-    i++;
-  }
-  return keys;
-}
-
 /** Every query, header and body field the platform documents, by route. */
 function platformParameters() {
   const start = docSource.indexOf('export const DOCS: Record<string, Doc> = {');
