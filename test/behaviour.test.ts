@@ -203,6 +203,53 @@ describe('waiting', () => {
     expect(attempts).toBe(3);
   });
 
+  it('retries a temporary network failure while waiting for the machine', async () => {
+    let gets = 0;
+    const { client: c } = client((call) => {
+      if (call.method === 'GET' && call.path === '/computers/vm-1') {
+        gets += 1;
+        if (gets === 1) return json({ ...COMPUTER, status: 'starting' });
+        if (gets === 2) throw new TypeError('fetch failed');
+        return json(COMPUTER);
+      }
+      return anyRoute(call);
+    });
+    const computer = await c.computers.get('vm-1');
+    await expect(computer.waitUntilRunning({ timeoutMs: 5_000, pollMs: 1 })).resolves.toBe(
+      computer,
+    );
+    expect(gets).toBe(3);
+  });
+
+  it('honours Retry-After while polling through a rate limit', async () => {
+    let attempts = 0;
+    const { client: c } = client((call) => {
+      if (call.path.endsWith('/exec')) {
+        attempts += 1;
+        return attempts === 1
+          ? errorJson(429, 'slow down', { 'Retry-After': '0.02' })
+          : json(EXEC_OK);
+      }
+      return anyRoute(call);
+    });
+    const computer = await c.computers.get('vm-1');
+    const started = Date.now();
+    await expect(computer.waitForGuest({ timeoutMs: 5_000, pollMs: 1 })).resolves.toBe(computer);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(15);
+    expect(attempts).toBe(2);
+  });
+
+  it('does not turn a malformed guest request into a readiness timeout', async () => {
+    const { rec, client: c } = client((call) =>
+      call.path.endsWith('/exec') ? errorJson(400, 'bad probe') : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    await expect(computer.waitForGuest({ timeoutMs: 60_000, pollMs: 1_000 })).rejects.toThrow(
+      /bad probe/,
+    );
+    expect(rec.routes().filter(([, p]) => p.endsWith('/exec'))).toHaveLength(1);
+  });
+
   it('gives up at once on a failure no amount of waiting will clear', async () => {
     // A revoked key is not going to become valid three minutes from now, and
     // reporting it as a timeout names the wrong problem. The long timeout here
@@ -246,6 +293,7 @@ describe('waiting', () => {
       () => computer.waitUntilRunning({ pollMs: Number.NaN }),
       () => computer.waitForGuest({ timeoutMs: Number.POSITIVE_INFINITY }),
       () => computer.waitUntilRunning({ timeoutMs: -1 }),
+      () => computer.waitUntilBuilt({ pollMs: 2_147_483_648 }),
     ]) {
       await expect(wait()).rejects.toThrow(TypeError);
     }

@@ -8,6 +8,7 @@ import {
   toAgentResult,
 } from './agent.js';
 import {
+  APIError,
   AuthenticationError,
   errorForStatus,
   isTransient,
@@ -15,6 +16,7 @@ import {
   NotFoundError,
   PermissionDeniedError,
   PlanLimitError,
+  RateLimitError,
   TimeoutError,
   ValidationError,
 } from './errors.js';
@@ -42,7 +44,7 @@ import {
 } from './models.js';
 import * as P from './paths.js';
 import type { CallOptions } from './resources.js';
-import { MODEL_KEY_HEADER, type Query, type Transport } from './transport.js';
+import { MAX_TIMER_MS, MODEL_KEY_HEADER, type Query, type Transport } from './transport.js';
 
 /**
  * What a computer renders at when its create did not ask for anything else.
@@ -90,7 +92,7 @@ const isPermanent = (err: unknown): boolean =>
  * moment the wait was told to give up.
  */
 const deadlineSignal = (ms: number, caller?: AbortSignal): AbortSignal => {
-  const timeout = AbortSignal.timeout(Math.max(ms, 0));
+  const timeout = AbortSignal.timeout(Math.ceil(Math.max(ms, 0)));
   return caller ? AbortSignal.any([caller, timeout]) : timeout;
 };
 
@@ -112,11 +114,26 @@ const checkWait = (timeoutMs: number, pollMs: number): void => {
     ['timeoutMs', timeoutMs],
     ['pollMs', pollMs],
   ] as const) {
-    if (!Number.isFinite(v) || v < 0) {
-      throw new ValidationError(`${what} must be a non-negative finite number (got ${v})`);
+    if (!Number.isFinite(v) || v < 0 || v > MAX_TIMER_MS) {
+      throw new ValidationError(
+        `${what} must be a non-negative finite number no greater than ${MAX_TIMER_MS} (got ${v})`,
+      );
     }
   }
 };
+
+/** The ordinary polling delay, raised when the platform explicitly asks us to wait longer. */
+const retryDelay = (pollMs: number, err: unknown): number =>
+  err instanceof RateLimitError && err.retryAfterMs !== undefined
+    ? Math.max(pollMs, err.retryAfterMs)
+    : pollMs;
+
+/** A poll sleep that cannot carry its loop beyond the loop's own deadline. */
+const sleepUntilNextPoll = (
+  delayMs: number,
+  deadline: number,
+  signal?: AbortSignal,
+): Promise<void> => sleep(Math.min(delayMs, Math.max(deadline - Date.now(), 0)), signal);
 
 const sleep = (ms: number, signal?: AbortSignal): Promise<void> =>
   new Promise((resolve, reject) => {
@@ -600,6 +617,7 @@ export class Computer {
     // claim about a computer nobody has actually looked at.
     let observed = false;
     let polled = false;
+    let delayMs = pollMs;
     for (;;) {
       if (this.buildFailed) throw this.#buildFailure();
       if (!this.isBuilding) return this;
@@ -616,8 +634,9 @@ export class Computer {
       // known to have finished, and sleeping first holds that back by a whole
       // poll interval to read nothing. A computer that is not being built still
       // returns above without a request at all.
-      if (polled) await sleep(pollMs, signal);
+      if (polled) await sleepUntilNextPoll(delayMs, deadline, signal);
       polled = true;
+      delayMs = pollMs;
       // Guarded rather than unconditional: a sleep that ran the clock out
       // leaves nothing to read the answer with, and the check at the top of the
       // loop is what names that.
@@ -639,6 +658,7 @@ export class Computer {
           // verdict on it — the same rule waitUntilRunning applies. Anything
           // else is not weather.
           if (Date.now() < deadline && !isTransient(err)) throw err;
+          delayMs = retryDelay(pollMs, err);
         }
       }
     }
@@ -670,6 +690,7 @@ export class Computer {
     // get() one line before this call.
     let observed = false;
     for (;;) {
+      let delayMs = pollMs;
       // Guarded rather than unconditional, so the sleep at the bottom of the
       // loop cannot hand the clock to a poll with no time left to read it.
       if (Date.now() < deadline) {
@@ -689,6 +710,7 @@ export class Computer {
           // method whose whole job is to keep asking. Anything else — a revoked
           // key, a computer that is gone — is not weather.
           if (Date.now() < deadline && !isTransient(err)) throw err;
+          delayMs = retryDelay(pollMs, err);
         }
       }
       if (observed && this.status === 'running') return this;
@@ -712,7 +734,7 @@ export class Computer {
             : `${this.id} could not be observed within ${timeoutMs}ms: every refresh failed`,
         );
       }
-      await sleep(pollMs, signal);
+      await sleepUntilNextPoll(delayMs, deadline, signal);
     }
   }
 
@@ -739,6 +761,7 @@ export class Computer {
     checkWait(timeoutMs, pollMs);
     const deadline = Date.now() + timeoutMs;
     for (;;) {
+      let delayMs = pollMs;
       // Nothing inside a computer with no disk is ever going to answer, and
       // spending three minutes to say so helps nobody — waitUntilRunning's
       // rule, for its reason. Read off the handle rather than through a fresh
@@ -766,11 +789,22 @@ export class Computer {
         // a probe is not caught here — that is this loop ending, and the check
         // below is what names it.
         if (signal?.aborted) throw err;
+        // The guest can answer 502 for the first seconds of a boot. Everything
+        // else retried here is one of the same typed transient failures as the
+        // two refresh-based waits; a malformed request must not be disguised as
+        // three minutes of guest unavailability.
+        if (
+          Date.now() < deadline &&
+          !(isTransient(err) || (err instanceof APIError && err.status === 502))
+        ) {
+          throw err;
+        }
+        delayMs = retryDelay(pollMs, err);
       }
       if (Date.now() >= deadline) {
         throw new TimeoutError(`${this.id} guest did not respond within ${timeoutMs}ms`);
       }
-      await sleep(pollMs, signal);
+      await sleepUntilNextPoll(delayMs, deadline, signal);
     }
   }
 
@@ -875,10 +909,12 @@ export class Computer {
   async #input(
     body: Record<string, unknown>,
     opts: CallOptions = {},
+    minTimeoutMs?: number,
   ): Promise<Record<string, unknown>> {
     return (
       (await this.#t.json<Record<string, unknown>>('POST', P.computerAction(this.id, 'input'), {
         body,
+        minTimeoutMs,
         signal: opts.signal,
       })) ?? {}
     );
@@ -1031,7 +1067,7 @@ export class Computer {
    * arrow key that repeats, a modifier that changes what a UI shows.
    */
   async holdKey(keys: readonly string[], seconds: number, opts: CallOptions = {}): Promise<void> {
-    await this.#input(P.holdKeyBody(keys, seconds), opts);
+    await this.#input(P.holdKeyBody(keys, seconds), opts, (seconds + 30) * 1_000);
   }
 
   /**
@@ -1043,7 +1079,7 @@ export class Computer {
    * seconds by the platform.
    */
   async wait(seconds: number, opts: CallOptions = {}): Promise<void> {
-    await this.#input(P.waitBody(seconds), opts);
+    await this.#input(P.waitBody(seconds), opts, (seconds + 30) * 1_000);
   }
 
   /**

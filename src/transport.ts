@@ -10,10 +10,19 @@
  * — key resolution, URL building, the status table — is the whole file here.
  */
 
-import { type APIError, errorForStatus, MandalaError, ValidationError } from './errors.js';
+import {
+  type APIError,
+  ConnectionError,
+  errorForStatus,
+  MandalaError,
+  ValidationError,
+} from './errors.js';
 import { isRecord } from './paths.js';
 
 export const DEFAULT_BASE_URL = 'https://app.mandala.computer/api/v1';
+
+/** Largest delay Node timers can represent without wrapping to one millisecond. */
+export const MAX_TIMER_MS = 2_147_483_647;
 
 /**
  * Anthropic's own key, forwarded for the one route that runs a model.
@@ -137,6 +146,16 @@ const incompleteCount = (header: string): number => {
   return Number.isFinite(n) ? n : 0;
 };
 
+/** A Retry-After header, in milliseconds from now. */
+const retryAfterMs = (header: string | null): number | undefined => {
+  if (!header) return undefined;
+  const seconds = Number(header);
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1_000;
+  const at = Date.parse(header);
+  if (!Number.isFinite(at)) return undefined;
+  return Math.max(at - Date.now(), 0);
+};
+
 const env = (name: string): string | undefined =>
   // Guarded so the library imports cleanly in a browser or a worker, where
   // `process` does not exist and reading it is a ReferenceError rather than
@@ -171,9 +190,9 @@ export class Transport {
     // AbortSignal.timeout. 0 is the documented way to disable the deadline and
     // stays legal.
     const timeoutMs = opts.timeoutMs ?? 60_000;
-    if (!Number.isFinite(timeoutMs) || timeoutMs < 0) {
+    if (!Number.isFinite(timeoutMs) || timeoutMs < 0 || timeoutMs > MAX_TIMER_MS) {
       throw new ValidationError(
-        `timeoutMs must be a non-negative finite number (got ${timeoutMs})`,
+        `timeoutMs must be a non-negative finite number no greater than ${MAX_TIMER_MS} (got ${timeoutMs})`,
       );
     }
     this.#timeoutMs = timeoutMs;
@@ -199,8 +218,10 @@ export class Transport {
     // silently removes the one guard against a request hanging forever; an
     // Infinity surfaces later as a baffling "could not reach <baseUrl>" out
     // of AbortSignal.timeout. Both are caller mistakes, named as such here.
-    if (!Number.isFinite(min)) {
-      throw new ValidationError(`the timeout for this request is not a finite number (got ${min})`);
+    if (!Number.isFinite(min) || min < 0 || min > MAX_TIMER_MS) {
+      throw new ValidationError(
+        `the timeout for this request must be between 0 and ${MAX_TIMER_MS}ms (got ${min})`,
+      );
     }
     return Math.max(this.#timeoutMs, min);
   }
@@ -253,12 +274,12 @@ export class Transport {
       // AbortSignal.timeout it says only "the operation was aborted", which is
       // indistinguishable from a caller cancelling on purpose.
       if (cause instanceof Error && cause.name === 'TimeoutError') {
-        throw new MandalaError(`${method} ${path} timed out after ${timeoutMs}ms`);
+        throw new ConnectionError(`${method} ${path} timed out after ${timeoutMs}ms`);
       }
       if (cause instanceof Error && cause.name === 'AbortError') throw cause;
       // Rewritten, because the raw message names a DNS or TLS failure and the
       // thing a caller can act on is "the platform is not reachable".
-      throw new MandalaError(
+      throw new ConnectionError(
         `could not reach ${this.baseUrl}: ${cause instanceof Error ? cause.message : String(cause)}`,
       );
     }
@@ -290,7 +311,7 @@ export class Transport {
       // named, and is never rewritten — #fetchRaw's rule, for its reason.
       if (caller?.aborted) throw cause;
       if (cause instanceof Error && cause.name === 'TimeoutError') {
-        throw new MandalaError(`${method} ${path} timed out after ${sent.timeoutMs}ms`);
+        throw new ConnectionError(`${method} ${path} timed out after ${sent.timeoutMs}ms`);
       }
       throw cause;
     }
@@ -317,7 +338,12 @@ export class Transport {
         message = text.slice(0, 500);
       }
     }
-    return errorForStatus(resp.status, message, body);
+    return errorForStatus(
+      resp.status,
+      message,
+      body,
+      retryAfterMs(resp.headers.get('retry-after')),
+    );
   }
 
   /**
