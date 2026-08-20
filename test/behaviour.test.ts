@@ -8,6 +8,7 @@ import {
   isTransient,
   MandalaError,
   OriginResponseError,
+  OriginTLSError,
   OriginUnreachableError,
   TimeoutError,
 } from '../src/index.js';
@@ -780,7 +781,7 @@ describe('exec', () => {
     const err = await c.computers.get('vm-1').catch((e) => e);
     expect(err).toBeInstanceOf(OriginUnreachableError);
     expect(err).not.toBeInstanceOf(GatewayTimeoutError);
-    expect(err.message).toMatch(/never arrived/);
+    expect(err.message).toMatch(/never sent/);
     expect(err.message).toMatch(/clears on its own/);
   });
 
@@ -805,9 +806,13 @@ describe('exec', () => {
   });
 
   it('does not tell a bad certificate to wait it out', async () => {
+    // Its own class, not the unreachable one it used to share: an origin that is
+    // down is a passing outage, a certificate is a deployment somebody must fix,
+    // and a caller asking whether to try again needs opposite answers.
     const { client: c } = client(() => new Response('', { status: 526 }));
     const err = await c.computers.get('vm-1').catch((e) => e);
-    expect(err).toBeInstanceOf(OriginUnreachableError);
+    expect(err).toBeInstanceOf(OriginTLSError);
+    expect(err).not.toBeInstanceOf(OriginUnreachableError);
     expect(err.message).toMatch(/TLS handshake/);
     expect(err.message).toMatch(/report it rather than waiting it out/);
   });
