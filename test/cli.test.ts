@@ -7,8 +7,67 @@
  * is the guest, and what the argument parser does with what it was handed.
  */
 
-import { describe, expect, it } from 'vitest';
-import { guestDestination, remoteSide, uploadSize } from '../src/cli.js';
+import { describe, expect, it, vi } from 'vitest';
+import {
+  finishInteraction,
+  guestDestination,
+  remoteSide,
+  uploadSize,
+  waitForWebSocketOpen,
+} from '../src/cli.js';
+
+describe('terminal lifecycle', () => {
+  it('rejects a websocket that closes before its handshake opens', async () => {
+    const socket = new EventTarget() as WebSocket;
+    const opening = waitForWebSocketOpen(socket, 100);
+    socket.dispatchEvent(new Event('close'));
+    await expect(opening).rejects.toThrow(/could not reach the terminal/);
+  });
+
+  it('times out a websocket handshake that never answers', async () => {
+    vi.useFakeTimers();
+    try {
+      const socket = new EventTarget() as WebSocket;
+      const opening = expect(waitForWebSocketOpen(socket, 10)).rejects.toThrow(
+        /timed out after 10ms/,
+      );
+      await vi.advanceTimersByTimeAsync(10);
+      await opening;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('restores the terminal and closes the socket when an output write rejects', async () => {
+    const calls: string[] = [];
+    await expect(
+      finishInteraction(
+        Promise.reject(new Error('stdout failed')),
+        () => calls.push('cleanup'),
+        () => calls.push('close'),
+      ),
+    ).rejects.toThrow(/stdout failed/);
+    expect(calls).toEqual(['cleanup', 'close']);
+  });
+
+  it('restores the terminal when stdout never drains', async () => {
+    vi.useFakeTimers();
+    try {
+      const calls: string[] = [];
+      const finishing = finishInteraction(
+        new Promise<void>(() => {}),
+        () => calls.push('cleanup'),
+        () => calls.push('close'),
+        10,
+      );
+      await vi.advanceTimersByTimeAsync(10);
+      await finishing;
+      expect(calls).toEqual(['cleanup', 'close']);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
 
 describe('remoteSide', () => {
   it('reads <computer>:/path as the guest side', () => {

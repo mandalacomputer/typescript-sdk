@@ -414,6 +414,17 @@ describe('server-sent events', () => {
     expect(seen.map((e) => e.type)).toEqual(['step', 'done']);
   });
 
+  it('bounds an event that never sends a frame boundary', async () => {
+    const oversized = `data: ${'x'.repeat((1 << 20) + 1)}`;
+    const rec = recorder((call) =>
+      call.path.endsWith('/agent') ? stream(oversized, oversized.length) : anyRoute(call),
+    );
+    const c = await client(rec).computers.get('vm-1');
+    await expect(c.agent({ prompt: 'go', modelKey: 'sk' })).rejects.toThrow(
+      /exceeded 1048576 characters without a boundary/,
+    );
+  });
+
   it('frames a stream a proxy reframed with CRLF', async () => {
     // Splitting on "\n\n" alone would never find a boundary, collapse the whole
     // run into one unparseable event, and lose the result of a run that had in
