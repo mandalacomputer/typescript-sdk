@@ -259,4 +259,46 @@ describe('path encoding', () => {
     expect(P.snapshot('a b')).toBe('snapshots/a%20b');
     expect(P.windowPath('vm-1', '0x1?x')).toBe('computers/vm-1/windows/0x1%3Fx');
   });
+
+  it('refuses an empty id rather than aiming at the collection route', () => {
+    // encodeURIComponent('') is '', so an empty id does not 404 — it produces
+    // `computers/`, and a get then decodes the whole listing as one computer.
+    expect(() => P.computer('')).toThrow(/computer id must not be empty/);
+    expect(() => P.snapshot('')).toThrow(/snapshot id must not be empty/);
+    expect(() => P.windowPath('vm-1', '')).toThrow(/window id must not be empty/);
+  });
+});
+
+describe('finite numbers', () => {
+  // A NaN passes every range check written as a comparison, and JSON.stringify
+  // then writes it as `null` — which the platform reads as the field's zero
+  // value. The call succeeds, at the wrong place, and nothing says so.
+  it('refuses a NaN duration, which both range checks let through', () => {
+    expect(() => P.waitBody(Number.NaN)).toThrow(/finite number/);
+    expect(() => P.holdKeyBody(['ctrl'], Number.NaN)).toThrow(/finite number/);
+    expect(() => P.waitBody(Number.POSITIVE_INFINITY)).toThrow(/finite number/);
+  });
+
+  it('refuses a NaN coordinate, which would click the corner of the screen', () => {
+    expect(() => P.pointerBody('move', Number.NaN, 5)).toThrow(/finite number/);
+    expect(() => P.clickBody('left_click', 5, Number.NaN)).toThrow(/finite number/);
+    expect(() => P.buttonBody('left_mouse_down', Number.NaN, 5)).toThrow(/finite number/);
+    expect(() => P.dragBody(Number.NaN, 5)).toThrow(/finite number/);
+    expect(() => P.dragBody(1, 2, 3, Number.NaN)).toThrow(/finite number/);
+  });
+
+  it('refuses a NaN amount, max_steps, timeout or window geometry', () => {
+    expect(() => P.scrollBody({ direction: 'down', amount: Number.NaN })).toThrow(/finite number/);
+    expect(() => P.agentBody({ prompt: 'go', stream: true, maxSteps: Number.NaN })).toThrow(
+      /finite number/,
+    );
+    expect(() => P.execBody({ command: 'ls', timeoutS: Number.NaN })).toThrow(/finite number/);
+    expect(() => P.windowBody({ action: 'move', x: Number.NaN, y: 2 })).toThrow(/finite number/);
+  });
+
+  it('still takes the zeros and the ordinary values', () => {
+    expect(P.pointerBody('move', 0, 0)).toEqual({ action: 'move', x: 0, y: 0 });
+    expect(P.waitBody(0.5)).toEqual({ action: 'wait', duration: 0.5 });
+    expect(P.scrollBody({ direction: 'down', amount: 0 }).amount).toBe(0);
+  });
 });

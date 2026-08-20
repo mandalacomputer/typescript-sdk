@@ -86,14 +86,22 @@ export const UNIMPLEMENTED: ReadonlySet<string> = new Set([
  */
 export function patternFor(path: string): string {
   const parts = path.split('/').filter(Boolean);
-  return parts
-    .map((seg, i) => {
-      const prev = parts[i - 1];
-      if (!prev) return seg;
-      if (prev === 'computers' || prev === 'snapshots') return ':id';
-      if (prev === 'exec') return ':pid';
-      if (prev === 'windows') return ':window';
-      return seg;
-    })
-    .join('/');
+  const out: string[] = [];
+  for (const seg of parts) {
+    // Keyed off what the previous segment was normalised TO, not what it was.
+    // Read off the raw path, a computer whose id happens to be spelled "exec"
+    // turns the action after it into a ':pid' — `computers/exec/start` becomes
+    // `computers/:id/:pid`, a shape the platform has no route for, failing this
+    // test for a reason nothing about the failure would explain. A segment that
+    // already became a parameter is an id, and what follows an id is a literal.
+    const prev = out[out.length - 1];
+    if (prev === undefined || PARAMETERS.has(prev)) out.push(seg);
+    else if (prev === 'computers' || prev === 'snapshots') out.push(':id');
+    else if (prev === 'exec') out.push(':pid');
+    else if (prev === 'windows') out.push(':window');
+    else out.push(seg);
+  }
+  return out.join('/');
 }
+
+const PARAMETERS: ReadonlySet<string> = new Set([':id', ':pid', ':window']);

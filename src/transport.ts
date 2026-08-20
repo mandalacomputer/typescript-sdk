@@ -11,6 +11,7 @@
  */
 
 import { type APIError, errorForStatus, MandalaError } from './errors.js';
+import { isRecord } from './paths.js';
 
 export const DEFAULT_BASE_URL = 'https://app.mandala.computer/api/v1';
 
@@ -82,6 +83,26 @@ export type Listing<T> = {
   incomplete: number | null;
 };
 
+/**
+ * The array check {@link Transport.jsonArray} and {@link Transport.listing} share.
+ *
+ * The array-ness is checked rather than cast. A caller that casts and then
+ * calls `.map` on an object gets `data.map is not a function` — an anonymous
+ * TypeError naming neither the request nor the platform, which is the failure
+ * #decode exists to prevent one layer up. A missing body is an empty list,
+ * since a list route with nothing to say and a list route that said nothing are
+ * the same answer.
+ */
+function expectArray(data: unknown, method: string, path: string): unknown[] {
+  if (data == null) return [];
+  if (!Array.isArray(data)) {
+    throw new MandalaError(
+      `expected a JSON array from ${method} ${path}, got: ${JSON.stringify(data).slice(0, 200)}`,
+    );
+  }
+  return data;
+}
+
 /** One server-sent event off a streaming route. */
 export type SSEEvent = { event: string; data: unknown };
 
@@ -99,6 +120,21 @@ export type TransportOptions = {
   timeoutMs?: number;
   /** Swap in a fetch implementation. Defaults to the global one. */
   fetch?: typeof globalThis.fetch;
+};
+
+/**
+ * A response, carried with the deadline the request was made under.
+ *
+ * Kept together because consuming the body is the second half of the request
+ * and runs under the same signal — see {@link Transport.#readBody}, which needs
+ * the number to say what a mid-read abort actually was.
+ */
+type Sent = { resp: Response; timeoutMs: number };
+
+/** The incomplete-header count, or 0 for anything that is not a number. */
+const incompleteCount = (header: string): number => {
+  const n = Number(header);
+  return Number.isFinite(n) ? n : 0;
 };
 
 const env = (name: string): string | undefined =>
@@ -126,7 +162,19 @@ export class Transport {
       '',
     );
     this.#headers = { Authorization: `Bearer ${key}`, Accept: 'application/json' };
-    this.#timeoutMs = opts.timeoutMs ?? 60_000;
+    // Checked here for the reason #deadlineMs checks minTimeoutMs below — one
+    // hazard with two doors into it, and only one of them was guarded. A NaN
+    // (`timeoutMs: Number(unsetEnvVar)` is the usual spelling) reads as "no
+    // timeout" there and silently removes the one guard against a request
+    // hanging forever; a negative reaches the same place through Math.max; an
+    // Infinity surfaces later as a baffling "could not reach <baseUrl>" out of
+    // AbortSignal.timeout. 0 is the documented way to disable the deadline and
+    // stays legal.
+    const timeoutMs = opts.timeoutMs ?? 60_000;
+    if (!Number.isFinite(timeoutMs) || timeoutMs < 0) {
+      throw new TypeError(`timeoutMs must be a non-negative finite number (got ${timeoutMs})`);
+    }
+    this.#timeoutMs = timeoutMs;
     // Bound to globalThis rather than passed bare: an unbound `fetch` throws
     // "Illegal invocation" in some runtimes.
     this.#fetch = opts.fetch ?? globalThis.fetch.bind(globalThis);
@@ -168,7 +216,7 @@ export class Transport {
     return caller ? AbortSignal.any([caller, timeout]) : timeout;
   }
 
-  async #fetchRaw(method: string, path: string, opts: RequestOptions = {}): Promise<Response> {
+  async #fetchRaw(method: string, path: string, opts: RequestOptions = {}): Promise<Sent> {
     const timeoutMs = this.#deadlineMs(opts);
     const headers: Record<string, string> = { ...this.#headers, ...opts.headers };
     let body: string | Uint8Array | undefined;
@@ -213,7 +261,37 @@ export class Transport {
       );
     }
     if (!resp.ok) throw await this.#error(resp);
-    return resp;
+    return { resp, timeoutMs };
+  }
+
+  /**
+   * Read a response body, reporting a deadline that fired mid-read as one.
+   *
+   * The composed signal governs the body as well as the headers, so a download
+   * whose bytes stop arriving is aborted here rather than at the fetch — long
+   * after #fetchRaw's own translation has gone out of scope. Left raw, the
+   * TimeoutError says only "the operation was aborted", which is exactly what a
+   * caller cancelling on purpose says, and the two are worth telling apart on
+   * the transfer routes most likely to hit a deadline in the first place.
+   */
+  async #readBody<T>(
+    read: () => Promise<T>,
+    method: string,
+    path: string,
+    sent: Sent,
+    caller?: AbortSignal,
+  ): Promise<T> {
+    try {
+      return await read();
+    } catch (cause) {
+      // A caller's own signal firing is a cancellation whatever its reason is
+      // named, and is never rewritten — #fetchRaw's rule, for its reason.
+      if (caller?.aborted) throw cause;
+      if (cause instanceof Error && cause.name === 'TimeoutError') {
+        throw new MandalaError(`${method} ${path} timed out after ${sent.timeoutMs}ms`);
+      }
+      throw cause;
+    }
   }
 
   /**
@@ -248,9 +326,14 @@ export class Transport {
    * <!DOCTYPE html…` and a bare `SyntaxError: Unexpected token '<'` is whether
    * the reader learns which request went wrong.
    */
-  async #decode<T>(resp: Response, method: string, path: string): Promise<T | undefined> {
-    if (resp.status === 204) return undefined;
-    const text = await resp.text();
+  async #decode<T>(
+    sent: Sent,
+    method: string,
+    path: string,
+    caller?: AbortSignal,
+  ): Promise<T | undefined> {
+    if (sent.resp.status === 204) return undefined;
+    const text = await this.#readBody(() => sent.resp.text(), method, path, sent, caller);
     if (!text) return undefined;
     try {
       return JSON.parse(text) as T;
@@ -260,8 +343,13 @@ export class Transport {
   }
 
   async json<T = unknown>(method: string, path: string, opts: RequestOptions = {}): Promise<T> {
-    const resp = await this.#fetchRaw(method, path, opts);
-    return (await this.#decode<T>(resp, method, path)) as T;
+    const sent = await this.#fetchRaw(method, path, opts);
+    return (await this.#decode<T>(sent, method, path, opts.signal)) as T;
+  }
+
+  /** {@link json}, for the routes whose answer is a list. See {@link expectArray}. */
+  async jsonArray(method: string, path: string, opts: RequestOptions = {}): Promise<unknown[]> {
+    return expectArray(await this.json<unknown>(method, path, opts), method, path);
   }
 
   /**
@@ -271,22 +359,43 @@ export class Transport {
    * routes that can set it are the two whose short answer is indistinguishable
    * from an empty account.
    */
-  async listing<T>(path: string, opts: RequestOptions = {}): Promise<Listing<T>> {
-    const resp = await this.#fetchRaw('GET', path, opts);
-    const short = resp.headers.get(INCOMPLETE_HEADER);
+  async listing(
+    path: string,
+    opts: RequestOptions = {},
+  ): Promise<Listing<Record<string, unknown>>> {
+    const sent = await this.#fetchRaw('GET', path, opts);
+    const short = sent.resp.headers.get(INCOMPLETE_HEADER);
+    const data = await this.#decode<unknown>(sent, 'GET', path, opts.signal);
     return {
-      items: (await this.#decode<T[]>(resp, 'GET', path)) ?? [],
-      incomplete: short === null ? null : Number(short),
+      // The same check and the same element filter {@link jsonArray}'s callers
+      // get, because these are the two list routes a user actually calls. Cast
+      // to `T[]`, an object answer reached `items.map` as an anonymous
+      // TypeError, and a single null element reached toSnapshot as `d.id` of
+      // null — both of them naming neither the request nor the platform.
+      items: expectArray(data, 'GET', path).filter(isRecord),
+      // A header that is not a number came from something other than the
+      // platform, and Number() turns it into a NaN that poisons the first sum a
+      // caller does with it. Presence is the signal — see {@link Listing} — so
+      // the warning survives as a count of 0 rather than as arithmetic nobody
+      // can trace back to a header.
+      incomplete: short === null ? null : incompleteCount(short),
     };
   }
 
   /** For the routes whose body is not JSON: the screenshot and the file download. */
   async bytes(method: string, path: string, opts: RequestOptions = {}): Promise<Bytes> {
-    const resp = await this.#fetchRaw(method, path, opts);
+    const sent = await this.#fetchRaw(method, path, opts);
+    const buffer = await this.#readBody(
+      () => sent.resp.arrayBuffer(),
+      method,
+      path,
+      sent,
+      opts.signal,
+    );
     return {
-      bytes: new Uint8Array(await resp.arrayBuffer()),
-      contentType: resp.headers.get('content-type') ?? 'application/octet-stream',
-      filename: filenameFrom(resp.headers.get('content-disposition')),
+      bytes: new Uint8Array(buffer),
+      contentType: sent.resp.headers.get('content-type') ?? 'application/octet-stream',
+      filename: filenameFrom(sent.resp.headers.get('content-disposition')),
     };
   }
 
@@ -302,12 +411,25 @@ export class Transport {
    * place. A caller's own `signal` is the only thing that stops one early.
    */
   async *sse(method: string, path: string, opts: RequestOptions = {}): AsyncGenerator<SSEEvent> {
-    const resp = await this.#fetchRaw(method, path, {
+    const { resp } = await this.#fetchRaw(method, path, {
       ...opts,
       headers: { ...opts.headers, Accept: 'text/event-stream' },
       noTimeout: true,
     });
     if (!resp.body) throw new MandalaError(`${method} ${path} answered with no body`);
+    // The captive-portal case #decode names, on the one route that had no such
+    // check. An HTML page contains no `data:` lines, so it parses to a stream of
+    // no events and surfaces as "the agent stream ended without a result" — a
+    // sentence about the platform, describing a proxy that answered instead of
+    // it.
+    const contentType = resp.headers.get('content-type') ?? '';
+    if (!contentType.toLowerCase().includes('text/event-stream')) {
+      const text = await resp.text().catch(() => '');
+      throw new MandalaError(
+        `expected an event stream from ${method} ${path}, got ` +
+          `${contentType || 'no content type'}: ${text.slice(0, 200)}`,
+      );
+    }
 
     const reader = resp.body.getReader();
     const decoder = new TextDecoder();
@@ -347,6 +469,12 @@ export class Transport {
           if (parsed) yield parsed;
         }
       }
+      // Flushed, not dropped. A stream that ends mid-character leaves the front
+      // half of it inside the decoder, and every `{ stream: true }` decode above
+      // holds those bytes back waiting for the rest. Without this the tail event
+      // silently loses them and looks complete; with it they decode to U+FFFD,
+      // which is a visible mark that something was cut off.
+      buffer += decoder.decode();
       const tail = parseEvent(buffer);
       if (tail) yield tail;
     } finally {

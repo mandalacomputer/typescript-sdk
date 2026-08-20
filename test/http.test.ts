@@ -13,7 +13,7 @@ import {
   PlanLimitError,
   UnavailableError,
 } from '../src/index.js';
-import { anyRoute, BASE, COMPUTER, errorJson, json, recorder } from './harness.js';
+import { anyRoute, BASE, COMPUTER, errorJson, json, recorder, SNAPSHOT } from './harness.js';
 
 const client = (rec: ReturnType<typeof recorder>, opts = {}) =>
   new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: rec.fetch, ...opts });
@@ -53,6 +53,47 @@ describe('auth', () => {
       .computers.list()
       .catch((e) => e);
     expect(JSON.stringify({ message: err.message, body: err.body })).not.toContain('com_test');
+  });
+});
+
+describe('the client deadline', () => {
+  it('refuses a timeout that is not a finite number, rather than disabling itself', () => {
+    // `timeoutMs: Number(unsetEnvVar)` is the usual spelling. Absorbed, a NaN
+    // reads as "no timeout" and silently removes the one guard against a
+    // request hanging forever; a negative reaches the same place, and an
+    // Infinity surfaces later as a baffling "could not reach <baseUrl>".
+    for (const timeoutMs of [Number.NaN, -1, Number.POSITIVE_INFINITY]) {
+      expect(() => new Client({ apiKey: 'com_test', baseUrl: BASE, timeoutMs })).toThrow(
+        /non-negative finite number/,
+      );
+    }
+  });
+
+  it('still takes 0, which is how the deadline is turned off', () => {
+    expect(() => new Client({ apiKey: 'com_test', baseUrl: BASE, timeoutMs: 0 })).not.toThrow();
+  });
+
+  it('names a deadline that fires while the body is still arriving', async () => {
+    // The composed signal governs the body as well as the headers, so a
+    // download whose bytes stop arriving is aborted after the fetch already
+    // resolved — outside the translation that names a timeout. Left raw it says
+    // only "the operation was aborted", which is what a caller cancelling on
+    // purpose says too. The stream is wired to the signal here because that is
+    // what a real fetch does with one.
+    const stalling = (async (_url: unknown, init?: RequestInit) => {
+      const signal = init?.signal;
+      return new Response(
+        new ReadableStream({
+          start(ctrl) {
+            ctrl.enqueue(new TextEncoder().encode('{"id":'));
+            signal?.addEventListener('abort', () => ctrl.error(signal.reason), { once: true });
+          },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    }) as typeof globalThis.fetch;
+    const c = new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: stalling, timeoutMs: 40 });
+    await expect(c.computers.get('vm-1')).rejects.toThrow(/timed out after 40ms/);
   });
 });
 
@@ -470,4 +511,96 @@ describe('MandalaError', () => {
 // Keep vi imported-and-used so the linter does not strip it in a future edit.
 it('has a working test runner', () => {
   expect(vi.isMockFunction(() => {})).toBe(false);
+});
+
+describe('answers that are not what the route promised', () => {
+  it('reads a mangled incomplete header as 0 rather than as a NaN', () => {
+    // Presence is the signal — see Listing — so the warning has to survive a
+    // header nobody can parse. Through Number() alone it became a NaN that
+    // poisons the first sum a caller does with it.
+    const rec = recorder(
+      () =>
+        new Response(JSON.stringify([COMPUTER]), {
+          status: 200,
+          headers: { 'content-type': 'application/json', 'X-GC-Incomplete': 'lots' },
+        }),
+    );
+    return expect(
+      client(rec)
+        .computers.listWithStatus({ allowPartial: true })
+        .then((l) => l.incomplete),
+    ).resolves.toBe(0);
+  });
+
+  it('names the route when a list route answers with an object', async () => {
+    // Cast and filtered, this was `data.filter is not a function` — an
+    // anonymous TypeError naming neither the request nor the platform.
+    const rec = recorder(() => json({ error: 'not a list' }));
+    await expect(client(rec).templates.list()).rejects.toThrow(
+      /expected a JSON array from GET templates/,
+    );
+    await expect(client(rec).sizes.list()).rejects.toThrow(/expected a JSON array from GET sizes/);
+  });
+
+  it('names the route when the two list routes a user calls answer with an object', async () => {
+    // listing() is the path behind computers.list() and snapshots.list(), and
+    // it cast to T[] where jsonArray checks — so a proxy answering
+    // `{"computers": [...]}` died as `items.map is not a function`, one layer
+    // further in and naming neither the request nor the platform.
+    const rec = recorder(() => json({ computers: [] }));
+    await expect(client(rec).computers.list()).rejects.toThrow(
+      /expected a JSON array from GET computers/,
+    );
+    await expect(client(rec).snapshots.list()).rejects.toThrow(
+      /expected a JSON array from GET snapshots/,
+    );
+  });
+
+  it('drops a non-record element from a listing rather than decoding it', async () => {
+    // toSnapshot reads d.id off every element, so one null in the array threw
+    // "cannot read properties of null" from inside the decoder. The same
+    // isRecord filter templates.list and sizes.list already apply.
+    const rec = recorder((call) => json(call.path === '/snapshots' ? [null, SNAPSHOT] : [null]));
+    expect(await client(rec).snapshots.list()).toHaveLength(1);
+    expect(await client(rec).computers.list()).toHaveLength(0);
+  });
+
+  it('names the route when a stream route answers with a page', async () => {
+    // A captive portal answering 200 with HTML parses to a stream of no events
+    // and surfaced as "the agent stream ended without a result" — a sentence
+    // about the platform, describing the proxy that answered instead of it.
+    const rec = recorder((call) =>
+      call.path.endsWith('/agent')
+        ? new Response('<!DOCTYPE html><title>Sign in</title>', {
+            status: 200,
+            headers: { 'content-type': 'text/html' },
+          })
+        : anyRoute(call),
+    );
+    const c = await client(rec).computers.get('vm-1');
+    await expect(c.agent({ prompt: 'go', modelKey: 'sk' })).rejects.toThrow(
+      /expected an event stream from POST computers\/vm-1\/agent.*text\/html/s,
+    );
+  });
+
+  it('keeps the status a failed agent run reported, as the typed error for it', async () => {
+    // Thrown as a bare MandalaError, the one failure that reaches a caller
+    // inside a stream was the one their `instanceof` checks could not classify.
+    const rec = recorder((call) =>
+      call.path.endsWith('/agent')
+        ? new Response(
+            'event: error\ndata: {"error":"that key has been revoked","status":401}\n\n',
+            {
+              status: 200,
+              headers: { 'content-type': 'text/event-stream' },
+            },
+          )
+        : anyRoute(call),
+    );
+    const c = await client(rec).computers.get('vm-1');
+    const err = await c.agent({ prompt: 'go', modelKey: 'sk' }).catch((e) => e);
+    expect(err).toBeInstanceOf(AuthenticationError);
+    expect(err.status).toBe(401);
+    expect(err.message).toContain('that key has been revoked');
+  });
 });

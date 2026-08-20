@@ -125,4 +125,13 @@ describe('argument handling', () => {
     expect(code).toBe(1);
     expect(out).toContain('--session needs a name');
   });
+
+  it('refuses an ssh carrying a command rather than silently dropping it', async () => {
+    // `mandala ssh vm ls -la` is the ubiquitous ssh idiom and this command does
+    // not have it. Ignoring the tail opened an interactive shell instead, which
+    // looks like it worked.
+    const { code, out } = await run(['ssh', 'demo', 'ls']);
+    expect(code).toBe(1);
+    expect(out).toContain('runs no command');
+  });
 });

@@ -9,6 +9,7 @@ import {
 } from './agent.js';
 import {
   AuthenticationError,
+  errorForStatus,
   isTransient,
   MandalaError,
   NotFoundError,
@@ -36,6 +37,7 @@ import {
   toVncConnect,
 } from './models.js';
 import * as P from './paths.js';
+import type { CallOptions } from './resources.js';
 import { MODEL_KEY_HEADER, type Transport } from './transport.js';
 
 /**
@@ -75,6 +77,19 @@ const isPermanent = (err: unknown): boolean =>
   err instanceof NotFoundError ||
   err instanceof PlanLimitError;
 
+/**
+ * A signal that fires when the caller's does, or when `ms` have passed.
+ *
+ * What makes a wait's own deadline binding on the request in flight. The
+ * transport's per-request deadline is the client's, which can be far longer
+ * than what is left of the wait, and a poll made under it runs on past the
+ * moment the wait was told to give up.
+ */
+const deadlineSignal = (ms: number, caller?: AbortSignal): AbortSignal => {
+  const timeout = AbortSignal.timeout(Math.max(ms, 0));
+  return caller ? AbortSignal.any([caller, timeout]) : timeout;
+};
+
 const sleep = (ms: number, signal?: AbortSignal): Promise<void> =>
   new Promise((resolve, reject) => {
     if (signal?.aborted) return reject(signal.reason);
@@ -101,7 +116,7 @@ export type WaitOptions = {
   signal?: AbortSignal;
 };
 
-export type ScrollOptions = {
+export type ScrollOptions = CallOptions & {
   direction?: P.ScrollDirection;
   amount?: number;
   modifiers?: readonly string[];
@@ -118,7 +133,7 @@ export type DeleteOptions = {
   deleteSnapshots?: boolean;
   /** The fingerprint from {@link Computer.holdings}. */
   expect?: string;
-};
+} & CallOptions;
 
 export class Computer {
   #t: Transport;
@@ -217,10 +232,18 @@ export class Computer {
     return this.status === 'build-failed';
   }
 
-  /** Why the disk copy failed, or `''` if it did not. */
+  /**
+   * Why the disk copy failed, or `''` if it did not.
+   *
+   * `build.failed` and nothing else. The sibling `build.source` names what the
+   * disk is being copied *from* and is present throughout a perfectly healthy
+   * build, so reading it as a fallback reason answers "why did this fail" with
+   * a snapshot id — `vm-1 could not be built: snap-42`, about a computer that
+   * may still be building.
+   */
   get buildError(): string {
     const b = this.#data.build;
-    return P.isRecord(b) ? String(b.failed ?? b.source ?? '') : '';
+    return P.isRecord(b) ? String(b.failed ?? '') : '';
   }
 
   get os(): string {
@@ -331,8 +354,20 @@ export class Computer {
    * Also how a computer from `computers.list()` acquires a {@link vnc} connect
    * surface, which the list deliberately omits.
    */
-  async refresh(): Promise<this> {
-    this.#data = P.computerPayload(await this.#t.json('GET', P.computer(this.id)));
+  async refresh(opts: CallOptions = {}): Promise<this> {
+    const data = P.computerPayload(
+      await this.#t.json('GET', P.computer(this.id), { signal: opts.signal }),
+    );
+    // Guarded for the reason #power is guarded, on the route that has less
+    // excuse: assigned unguarded, a 204 or an empty body flattens to `{}` and
+    // this handle loses its id along with everything else — every field then
+    // reads as absent, and the next call is aimed at `computers/`. #power can
+    // fall back to a refresh; a refresh has nowhere to fall back to, so the
+    // answer that was not a computer is named as such.
+    if (!data.id) {
+      throw new MandalaError(`expected a computer from GET ${P.computer(this.id)}`);
+    }
+    this.#data = data;
     return this;
   }
 
@@ -342,8 +377,8 @@ export class Computer {
    * A suspended computer does not boot: its saved RAM is read back and the same
    * processes and windows come up roughly a second later.
    */
-  async start(): Promise<this> {
-    return this.#power('start');
+  async start(opts: CallOptions = {}): Promise<this> {
+    return this.#power('start', opts);
   }
 
   /**
@@ -351,8 +386,8 @@ export class Computer {
    *
    * Use {@link suspend} to keep it.
    */
-  async stop(): Promise<this> {
-    return this.#power('stop');
+  async stop(opts: CallOptions = {}): Promise<this> {
+    return this.#power('stop', opts);
   }
 
   /**
@@ -366,8 +401,8 @@ export class Computer {
    * clear on their own — a capture or a clone reading the disk, a migration in
    * flight, or somebody driving the guest at that moment.
    */
-  async suspend(): Promise<this> {
-    return this.#power('suspend');
+  async suspend(opts: CallOptions = {}): Promise<this> {
+    return this.#power('suspend', opts);
   }
 
   /**
@@ -379,21 +414,23 @@ export class Computer {
    *
    * Desktop credentials do not survive this — see {@link vnc}.
    */
-  async restart(): Promise<this> {
-    return this.#power('restart');
+  async restart(opts: CallOptions = {}): Promise<this> {
+    return this.#power('restart', opts);
   }
 
-  async #power(action: string): Promise<this> {
+  async #power(action: string, opts: CallOptions = {}): Promise<this> {
     // The platform answers a power action with the computer, so this is one
     // round trip where the Python SDK spends two. Guarded anyway: a platform
     // that answered 204 would otherwise leave a handle reporting the state the
     // machine was in before the call.
-    const data = P.computerPayload(await this.#t.json('POST', P.computerAction(this.id, action)));
+    const data = P.computerPayload(
+      await this.#t.json('POST', P.computerAction(this.id, action), { signal: opts.signal }),
+    );
     if (data.id) {
       this.#data = data;
       return this;
     }
-    return this.refresh();
+    return this.refresh(opts);
   }
 
   /**
@@ -403,9 +440,10 @@ export class Computer {
    * copying a disk runs for minutes, so the clone comes back `"building"` and
    * fills in behind you. Follow with {@link waitUntilBuilt} before starting it.
    */
-  async clone(name?: string): Promise<Computer> {
+  async clone(name?: string, opts: CallOptions = {}): Promise<Computer> {
     const data = await this.#t.json('POST', P.computerAction(this.id, 'clone'), {
       body: P.nameBody(name),
+      signal: opts.signal,
     });
     return new Computer(this.#t, P.computerPayload(data));
   }
@@ -424,16 +462,26 @@ export class Computer {
    *
    * Snapshots already taken keep the name they were captured under.
    */
-  async update(args: P.UpdateArgs): Promise<this> {
-    this.#data = P.computerPayload(
-      await this.#t.json('PATCH', P.computer(this.id), { body: P.updateBody(args) }),
+  async update(args: P.UpdateArgs, opts: CallOptions = {}): Promise<this> {
+    const data = P.computerPayload(
+      await this.#t.json('PATCH', P.computer(this.id), {
+        body: P.updateBody(args),
+        signal: opts.signal,
+      }),
     );
-    return this;
+    // #power's guard, for #power's reason: a platform that answered 204 would
+    // otherwise leave this handle holding `{}` — no id, no name, no status —
+    // and reporting the update as applied.
+    if (data.id) {
+      this.#data = data;
+      return this;
+    }
+    return this.refresh(opts);
   }
 
   /** Give this computer a new name. Sugar over {@link update}. */
-  async rename(name: string): Promise<this> {
-    return this.update({ name });
+  async rename(name: string, opts: CallOptions = {}): Promise<this> {
+    return this.update({ name }, opts);
   }
 
   /**
@@ -464,7 +512,7 @@ export class Computer {
     const res = await this.#t.json<{ snapshots_deleted?: number } | undefined>(
       'DELETE',
       P.computer(this.id),
-      { query: P.deleteQuery(opts) },
+      { query: P.deleteQuery(opts), signal: opts.signal },
     );
     return res?.snapshots_deleted;
   }
@@ -500,7 +548,7 @@ export class Computer {
       }
       await sleep(pollMs, signal);
       try {
-        await this.refresh();
+        await this.refresh({ signal });
       } catch (err) {
         // A 503 from a host busy doing exactly the disk copy being waited on
         // is the ordinary weather of a build, not a verdict on it — the same
@@ -536,7 +584,7 @@ export class Computer {
     let observed = false;
     for (;;) {
       try {
-        await this.refresh();
+        await this.refresh({ signal });
         observed = true;
       } catch (err) {
         // A host that cannot be reached answers 503, which is the ordinary
@@ -591,7 +639,15 @@ export class Computer {
     const deadline = Date.now() + timeoutMs;
     for (;;) {
       try {
-        const res = await this.exec(GUEST_PROBE, { timeoutS: 5 });
+        // The probe carries what is left of this wait, as well as the caller's
+        // signal. Under the client's own per-request deadline alone a wait told
+        // to give up after 180 seconds spends up to another 60 inside a request
+        // whose answer it has already stopped waiting for — and a caller's
+        // abort could not interrupt a probe already in flight at all.
+        const res = await this.exec(GUEST_PROBE, {
+          timeoutS: 5,
+          signal: deadlineSignal(deadline - Date.now(), signal),
+        });
         if (res.ok) return this;
       } catch (err) {
         // Everything else is polled through: a 409 means the agent is not up
@@ -599,6 +655,10 @@ export class Computer {
         // is merely slow answers 502 for the first seconds of a boot. Those are
         // what this loop is for. A revoked key is not.
         if (isPermanent(err)) throw err;
+        // Nor is a caller who cancelled. The wait's own deadline firing inside
+        // a probe is not caught here — that is this loop ending, and the check
+        // below is what names it.
+        if (signal?.aborted) throw err;
       }
       if (Date.now() >= deadline) {
         throw new TimeoutError(`${this.id} guest did not respond within ${timeoutMs}ms`);
@@ -622,9 +682,10 @@ export class Computer {
    * host's idle window; anything that drives the desktop — {@link click},
    * {@link type}, {@link exec} — both counts as use and resumes it.
    */
-  async screenshot(width?: number): Promise<Uint8Array> {
+  async screenshot(width?: number, opts: CallOptions = {}): Promise<Uint8Array> {
     const res = await this.#t.bytes('GET', P.computerAction(this.id, 'screenshot'), {
       query: P.screenshotQuery(width),
+      signal: opts.signal,
     });
     return res.bytes;
   }
@@ -640,11 +701,12 @@ export class Computer {
    * guest with one terminal open has five windows, four of which are not
    * applications. Pass `{ includeAll: true }` for all of them.
    */
-  async windows(opts: { includeAll?: boolean } = {}): Promise<GuestWindow[]> {
-    const data = await this.#t.json<unknown[]>('GET', P.computerAction(this.id, 'windows'), {
+  async windows(opts: { includeAll?: boolean } & CallOptions = {}): Promise<GuestWindow[]> {
+    const data = await this.#t.jsonArray('GET', P.computerAction(this.id, 'windows'), {
       query: { include: opts.includeAll ? 'all' : undefined },
+      signal: opts.signal,
     });
-    return (data ?? []).filter(P.isRecord).map(toGuestWindow);
+    return data.filter(P.isRecord).map(toGuestWindow);
   }
 
   /**
@@ -663,21 +725,26 @@ export class Computer {
     windowId: string,
     action: P.WindowAction,
     geometry: { x?: number; y?: number; width?: number; height?: number } = {},
+    opts: CallOptions = {},
   ): Promise<GuestWindow> {
     const data = await this.#t.json<Record<string, unknown>>(
       'POST',
       P.windowPath(this.id, windowId),
-      { body: P.windowBody({ action, ...geometry }) },
+      { body: P.windowBody({ action, ...geometry }), signal: opts.signal },
     );
     return toGuestWindow(data ?? {});
   }
 
   // --- controlling ----------------------------------------------------
 
-  async #input(body: Record<string, unknown>): Promise<Record<string, unknown>> {
+  async #input(
+    body: Record<string, unknown>,
+    opts: CallOptions = {},
+  ): Promise<Record<string, unknown>> {
     return (
       (await this.#t.json<Record<string, unknown>>('POST', P.computerAction(this.id, 'input'), {
         body,
+        signal: opts.signal,
       })) ?? {}
     );
   }
@@ -688,8 +755,8 @@ export class Computer {
    * Coordinates are in the computer's own {@link resolution}, which is a
    * create-time choice — not a fixed 1280x800.
    */
-  async move(x: number, y: number): Promise<void> {
-    await this.#input(P.pointerBody('move', x, y));
+  async move(x: number, y: number, opts: CallOptions = {}): Promise<void> {
+    await this.#input(P.pointerBody('move', x, y), opts);
   }
 
   /**
@@ -698,25 +765,50 @@ export class Computer {
    * `modifiers` are held down for the click, e.g.
    * `click(100, 200, ['shift'])` to extend a selection.
    */
-  async click(x?: number, y?: number, modifiers: readonly string[] = []): Promise<void> {
-    await this.#input(P.clickBody('left_click', x, y, modifiers));
+  async click(
+    x?: number,
+    y?: number,
+    modifiers: readonly string[] = [],
+    opts: CallOptions = {},
+  ): Promise<void> {
+    await this.#input(P.clickBody('left_click', x, y, modifiers), opts);
   }
 
-  async rightClick(x?: number, y?: number, modifiers: readonly string[] = []): Promise<void> {
-    await this.#input(P.clickBody('right_click', x, y, modifiers));
+  async rightClick(
+    x?: number,
+    y?: number,
+    modifiers: readonly string[] = [],
+    opts: CallOptions = {},
+  ): Promise<void> {
+    await this.#input(P.clickBody('right_click', x, y, modifiers), opts);
   }
 
-  async middleClick(x?: number, y?: number, modifiers: readonly string[] = []): Promise<void> {
-    await this.#input(P.clickBody('middle_click', x, y, modifiers));
+  async middleClick(
+    x?: number,
+    y?: number,
+    modifiers: readonly string[] = [],
+    opts: CallOptions = {},
+  ): Promise<void> {
+    await this.#input(P.clickBody('middle_click', x, y, modifiers), opts);
   }
 
-  async doubleClick(x?: number, y?: number, modifiers: readonly string[] = []): Promise<void> {
-    await this.#input(P.clickBody('double_click', x, y, modifiers));
+  async doubleClick(
+    x?: number,
+    y?: number,
+    modifiers: readonly string[] = [],
+    opts: CallOptions = {},
+  ): Promise<void> {
+    await this.#input(P.clickBody('double_click', x, y, modifiers), opts);
   }
 
   /** Three clicks, which is how most editors select a whole line. */
-  async tripleClick(x?: number, y?: number, modifiers: readonly string[] = []): Promise<void> {
-    await this.#input(P.clickBody('triple_click', x, y, modifiers));
+  async tripleClick(
+    x?: number,
+    y?: number,
+    modifiers: readonly string[] = [],
+    opts: CallOptions = {},
+  ): Promise<void> {
+    await this.#input(P.clickBody('triple_click', x, y, modifiers), opts);
   }
 
   /**
@@ -730,8 +822,8 @@ export class Computer {
    * nothing has moved it yet, rather than guessing at an origin and selecting
    * the wrong thing.
    */
-  async drag(toX: number, toY: number, from?: Point): Promise<void> {
-    await this.#input(P.dragBody(toX, toY, from?.x, from?.y));
+  async drag(toX: number, toY: number, from?: Point, opts: CallOptions = {}): Promise<void> {
+    await this.#input(P.dragBody(toX, toY, from?.x, from?.y), opts);
   }
 
   /**
@@ -741,13 +833,13 @@ export class Computer {
    * call that throws in between leaves the button held — wrap them in
    * `try`/`finally` if that matters.
    */
-  async mouseDown(x?: number, y?: number): Promise<void> {
-    await this.#input(P.buttonBody('left_mouse_down', x, y));
+  async mouseDown(x?: number, y?: number, opts: CallOptions = {}): Promise<void> {
+    await this.#input(P.buttonBody('left_mouse_down', x, y), opts);
   }
 
   /** Release the left button. */
-  async mouseUp(x?: number, y?: number): Promise<void> {
-    await this.#input(P.buttonBody('left_mouse_up', x, y));
+  async mouseUp(x?: number, y?: number, opts: CallOptions = {}): Promise<void> {
+    await this.#input(P.buttonBody('left_mouse_up', x, y), opts);
   }
 
   /**
@@ -761,7 +853,7 @@ export class Computer {
    */
   async scroll(x?: number, y?: number, opts: ScrollOptions = {}): Promise<void> {
     const { direction = 'down', amount = 3, modifiers } = opts;
-    await this.#input(P.scrollBody({ direction, amount, x, y, modifiers }));
+    await this.#input(P.scrollBody({ direction, amount, x, y, modifiers }), opts);
   }
 
   /**
@@ -770,8 +862,8 @@ export class Computer {
    * Characters with no key mapping are skipped rather than raising, so a stray
    * emoji in a prompt cannot fail the whole call.
    */
-  async type(text: string): Promise<void> {
-    await this.#input(P.typeBody(text));
+  async type(text: string, opts: CallOptions = {}): Promise<void> {
+    await this.#input(P.typeBody(text), opts);
   }
 
   /**
@@ -792,8 +884,8 @@ export class Computer {
    * For the keys that mean something while held rather than when tapped — an
    * arrow key that repeats, a modifier that changes what a UI shows.
    */
-  async holdKey(keys: readonly string[], seconds: number): Promise<void> {
-    await this.#input(P.holdKeyBody(keys, seconds));
+  async holdKey(keys: readonly string[], seconds: number, opts: CallOptions = {}): Promise<void> {
+    await this.#input(P.holdKeyBody(keys, seconds), opts);
   }
 
   /**
@@ -804,8 +896,8 @@ export class Computer {
    * the screenshot polls of anything else watching the desktop. Capped at 30
    * seconds by the platform.
    */
-  async wait(seconds: number): Promise<void> {
-    await this.#input(P.waitBody(seconds));
+  async wait(seconds: number, opts: CallOptions = {}): Promise<void> {
+    await this.#input(P.waitBody(seconds), opts);
   }
 
   /**
@@ -817,8 +909,8 @@ export class Computer {
    * honest answer is that nobody knows — hence `undefined` rather than a
    * confident `(0, 0)`.
    */
-  async cursorPosition(): Promise<Point | undefined> {
-    const res = await this.#input(P.cursorBody());
+  async cursorPosition(opts: CallOptions = {}): Promise<Point | undefined> {
+    const res = await this.#input(P.cursorBody(), opts);
     // `known` is checked rather than assumed because the coordinates are still
     // present and still zero when it is false, which is indistinguishable from
     // the corner of the screen — the exact wrong answer to give a caller about
@@ -850,7 +942,7 @@ export class Computer {
    */
   async exec(
     command: string,
-    opts: { timeoutS?: number; desktop?: boolean; cwd?: string } = {},
+    opts: { timeoutS?: number; desktop?: boolean; cwd?: string } & CallOptions = {},
   ): Promise<ExecResult> {
     const { timeoutS = 30, desktop, cwd } = opts;
     const data = await this.#t.json<Record<string, unknown>>(
@@ -863,6 +955,7 @@ export class Computer {
         // timeoutS past it was guaranteed to be aborted client-side while the
         // command ran on in the guest with its output unreachable.
         minTimeoutMs: (timeoutS + 30) * 1_000,
+        signal: opts.signal,
       },
     );
     return toExecResult(data ?? {});
@@ -877,12 +970,15 @@ export class Computer {
    */
   async execBackground(
     command: string,
-    opts: { desktop?: boolean; cwd?: string } = {},
+    opts: { desktop?: boolean; cwd?: string } & CallOptions = {},
   ): Promise<BackgroundExec> {
     const data = await this.#t.json<Record<string, unknown>>(
       'POST',
       P.computerAction(this.id, 'exec'),
-      { body: P.execBody({ command, background: true, desktop: opts.desktop, cwd: opts.cwd }) },
+      {
+        body: P.execBody({ command, background: true, desktop: opts.desktop, cwd: opts.cwd }),
+        signal: opts.signal,
+      },
     );
     return toBackgroundExec(data ?? {});
   }
@@ -896,8 +992,10 @@ export class Computer {
    * each seeing all of it. When {@link BackgroundExec.more} is set there is
    * further output waiting — poll again straight away.
    */
-  async execPoll(pid: number): Promise<BackgroundExec> {
-    const data = await this.#t.json<Record<string, unknown>>('GET', P.execHandle(this.id, pid));
+  async execPoll(pid: number, opts: CallOptions = {}): Promise<BackgroundExec> {
+    const data = await this.#t.json<Record<string, unknown>>('GET', P.execHandle(this.id, pid), {
+      signal: opts.signal,
+    });
     return toBackgroundExec(data ?? {});
   }
 
@@ -907,8 +1005,10 @@ export class Computer {
    * Answers with its final state, including whatever it printed that you had not
    * read.
    */
-  async execKill(pid: number): Promise<BackgroundExec> {
-    const data = await this.#t.json<Record<string, unknown>>('DELETE', P.execHandle(this.id, pid));
+  async execKill(pid: number, opts: CallOptions = {}): Promise<BackgroundExec> {
+    const data = await this.#t.json<Record<string, unknown>>('DELETE', P.execHandle(this.id, pid), {
+      signal: opts.signal,
+    });
     return toBackgroundExec(data ?? {});
   }
 
@@ -932,14 +1032,18 @@ export class Computer {
    * command it sends is a POSIX one, and cmd.exe answering "'nohup' is not
    * recognized" through an ExecResult reads as anything but what went wrong.
    */
-  async open(url: string, opts: { timeoutS?: number } = {}): Promise<ExecResult> {
+  async open(url: string, opts: { timeoutS?: number } & CallOptions = {}): Promise<ExecResult> {
     if (this.os === 'windows') {
       throw new MandalaError(
         `open() is Linux-only for now: ${this.id} runs Windows. ` +
           'Use exec() with a Windows launch command instead.',
       );
     }
-    return this.exec(P.openUrlCommand(url), { timeoutS: opts.timeoutS ?? 30, desktop: true });
+    return this.exec(P.openUrlCommand(url), {
+      timeoutS: opts.timeoutS ?? 30,
+      desktop: true,
+      signal: opts.signal,
+    });
   }
 
   // --- files ----------------------------------------------------------
@@ -956,16 +1060,23 @@ export class Computer {
    * transfer — a large file can legitimately outlive the default 60 seconds,
    * and the exec docs send large output through this very path.
    */
-  async readFile(path: string, opts: { timeoutMs?: number } = {}): Promise<Uint8Array> {
+  async readFile(
+    path: string,
+    opts: { timeoutMs?: number } & CallOptions = {},
+  ): Promise<Uint8Array> {
     const res = await this.#t.bytes('GET', P.computerAction(this.id, 'files'), {
       query: P.filesQuery(path),
       minTimeoutMs: opts.timeoutMs,
+      signal: opts.signal,
     });
     return res.bytes;
   }
 
   /** {@link readFile}, decoded as UTF-8. */
-  async readTextFile(path: string, opts: { timeoutMs?: number } = {}): Promise<string> {
+  async readTextFile(
+    path: string,
+    opts: { timeoutMs?: number } & CallOptions = {},
+  ): Promise<string> {
     return new TextDecoder().decode(await this.readFile(path, opts));
   }
 
@@ -979,20 +1090,29 @@ export class Computer {
    * `timeoutMs` extends the client's per-request deadline for this one
    * transfer, as on {@link readFile}.
    *
-   * @returns how many bytes the platform says it wrote.
+   * @returns how many bytes the platform says it wrote, or `undefined` if it
+   * did not say. Not defaulted to what was sent: that would turn "it did not
+   * say" into the affirmative claim that everything landed, which is the one
+   * thing a caller checks this number to find out. Same reasoning as
+   * {@link delete}'s undefined snapshot count.
    */
   async writeFile(
     path: string,
     data: Uint8Array | string,
-    opts: { timeoutMs?: number } = {},
-  ): Promise<number> {
+    opts: { timeoutMs?: number } & CallOptions = {},
+  ): Promise<number | undefined> {
     const bytes = typeof data === 'string' ? new TextEncoder().encode(data) : data;
     const res = await this.#t.json<{ bytes?: number } | undefined>(
       'PUT',
       P.computerAction(this.id, 'files'),
-      { query: P.filesQuery(path), raw: bytes, minTimeoutMs: opts.timeoutMs },
+      {
+        query: P.filesQuery(path),
+        raw: bytes,
+        minTimeoutMs: opts.timeoutMs,
+        signal: opts.signal,
+      },
     );
-    return res?.bytes ?? bytes.length;
+    return res?.bytes;
   }
 
   // --- snapshots ------------------------------------------------------
@@ -1006,11 +1126,11 @@ export class Computer {
    * resolution and the host's machine type, so it will only load onto a matching
    * one.
    */
-  async snapshot(opts: { memory?: boolean } = {}): Promise<Snapshot> {
+  async snapshot(opts: { memory?: boolean } & CallOptions = {}): Promise<Snapshot> {
     const data = await this.#t.json<Record<string, unknown>>(
       'POST',
       P.computerAction(this.id, 'snapshots'),
-      { body: P.snapshotBody(Boolean(opts.memory)) },
+      { body: P.snapshotBody(Boolean(opts.memory)), signal: opts.signal },
     );
     return toSnapshot(data ?? {});
   }
@@ -1026,34 +1146,39 @@ export class Computer {
    * This is **not** a listing of the snapshots themselves — for that, filter
    * `client.snapshots.list({ computerId })`.
    */
-  async holdings(): Promise<Holdings> {
+  async holdings(opts: CallOptions = {}): Promise<Holdings> {
     const data = await this.#t.json<Record<string, unknown>>(
       'GET',
       P.computerAction(this.id, 'snapshots'),
+      { signal: opts.signal },
     );
     return toHoldings(data ?? {});
   }
 
   /** The automatic daily snapshot schedule. */
-  async schedule(): Promise<Schedule> {
+  async schedule(opts: CallOptions = {}): Promise<Schedule> {
     const data = await this.#t.json<Record<string, unknown>>(
       'GET',
       P.computerAction(this.id, 'schedule'),
+      { signal: opts.signal },
     );
     return toSchedule(data ?? {});
   }
 
   /** Set the automatic daily snapshot window, in the given IANA timezone. */
-  async setSchedule(args: {
-    enabled: boolean;
-    hour?: number;
-    minute?: number;
-    tz?: string;
-  }): Promise<Schedule> {
+  async setSchedule(
+    args: {
+      enabled: boolean;
+      hour?: number;
+      minute?: number;
+      tz?: string;
+    },
+    opts: CallOptions = {},
+  ): Promise<Schedule> {
     const data = await this.#t.json<Record<string, unknown>>(
       'PUT',
       P.computerAction(this.id, 'schedule'),
-      { body: P.scheduleBody(args) },
+      { body: P.scheduleBody(args), signal: opts.signal },
     );
     return toSchedule(data ?? {});
   }
@@ -1065,10 +1190,11 @@ export class Computer {
    * restores it, and keeps the scheduler's bookkeeping with it. Clearing returns
    * the computer to never having had a schedule.
    */
-  async clearSchedule(): Promise<Schedule> {
+  async clearSchedule(opts: CallOptions = {}): Promise<Schedule> {
     const data = await this.#t.json<Record<string, unknown>>(
       'DELETE',
       P.computerAction(this.id, 'schedule'),
+      { signal: opts.signal },
     );
     return toSchedule(data ?? {});
   }
@@ -1106,7 +1232,13 @@ export class Computer {
       else if (ev.type === 'error') failure = ev;
     }
     if (failure) {
-      throw new MandalaError(`the agent run failed: ${failure.error}`);
+      // Through errorForStatus, so a 401 that arrives mid-run is an
+      // AuthenticationError like a 401 anywhere else. Thrown as a bare
+      // MandalaError, the one failure that reaches a caller inside a stream was
+      // the one failure their `catch (e) { if (e instanceof ...) }` — and
+      // isTransient — could not classify.
+      const message = `the agent run failed: ${failure.error}`;
+      throw failure.status ? errorForStatus(failure.status, message) : new MandalaError(message);
     }
     if (!result) {
       throw new MandalaError('the agent stream ended without a result');
