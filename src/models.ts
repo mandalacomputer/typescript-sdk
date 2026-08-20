@@ -161,6 +161,15 @@ export function toSize(d: Record<string, unknown>): Size {
 export type Snapshot = {
   id: string;
   computerId: string;
+  /**
+   * The source computer's name — its current one where the computer still
+   * exists, so a rename shows through without re-reading anything, and the name
+   * at capture for an orphan, which is all there is left of it.
+   *
+   * `''` on a snapshot taken before the platform recorded this, and on an
+   * {@link unreachable} placeholder.
+   */
+  computerName: string;
   name: string;
   /** `"disk"`, or `"memory"` for a live RAM+disk capture. */
   kind: string;
@@ -191,6 +200,25 @@ export type Snapshot = {
    * is missing and then reports a confident count.
    */
   unreachable: boolean;
+  /**
+   * The shape a clone of this snapshot comes up as.
+   *
+   * Carried on the snapshot rather than read off its computer, because the
+   * computer may be gone and the snapshot is still cloneable — and because a
+   * computer that was resized after the capture no longer describes it. Zero and
+   * `''` on an {@link unreachable} placeholder, which carries an id and nothing
+   * else.
+   */
+  os: string;
+  template: string;
+  cpu: number;
+  ramMb: number;
+  diskGb: number;
+  /**
+   * The screen the capture was taken at, `WIDTHxHEIGHTxDEPTH`, and the
+   * coordinate space a clone of it will click in.
+   */
+  resolution: string;
   raw: Record<string, unknown>;
 };
 
@@ -198,6 +226,7 @@ export function toSnapshot(d: Record<string, unknown>): Snapshot {
   return {
     id: str(d.id),
     computerId: str(d.computer_id),
+    computerName: str(d.computer_name),
     name: str(d.name),
     kind: str(d.kind, 'disk'),
     state: str(d.state),
@@ -209,6 +238,12 @@ export function toSnapshot(d: Record<string, unknown>): Snapshot {
     memory: str(d.kind, 'disk') === 'memory',
     orphaned: bool(d.orphaned),
     unreachable: bool(d.unreachable),
+    os: str(d.os),
+    template: str(d.template),
+    cpu: num(d.cpu),
+    ramMb: num(d.ram_mb),
+    diskGb: num(d.disk_gb),
+    resolution: str(d.resolution),
     raw: { ...d },
   };
 }
