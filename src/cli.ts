@@ -52,6 +52,9 @@ const EXIT_DRAIN_MS = 3_000;
 /** A terminal websocket must either upgrade or fail within this window. */
 const CONNECT_TIMEOUT_MS = 15_000;
 
+/** File copies have no intrinsic duration; caller cancellation is the bound. */
+const SCP_TRANSFER_TIMEOUT_MS = 0;
+
 const USAGE = `mandala — your own terminal, against a Mandala computer.
 
   mandala ssh <computer> [--session NAME]   an interactive shell in the guest
@@ -105,8 +108,28 @@ export function flushOutput(
     pending -= 1;
     if (pending === 0) done();
   };
-  stdout.write('', drained);
-  stderr.write('', drained);
+  const flush = (stream: NodeJS.WritableStream) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      drained();
+    };
+    try {
+      stream.write('', finish);
+    } catch {
+      // There is nothing useful to do with an already-broken output stream,
+      // but it must not keep the other stream (or process exit) waiting.
+      finish();
+    }
+  };
+  flush(stdout);
+  flush(stderr);
+}
+
+/** Preserve diagnostics for a CLI bug that escaped the expected error path. */
+export function unexpectedErrorText(err: unknown): string {
+  return err instanceof Error ? (err.stack ?? err.message) : String(err);
 }
 
 /**
@@ -446,7 +469,9 @@ async function cmdScp(srcArg: string, dstArg: string): Promise<number> {
 
   if (src) {
     if (!src.path) die(`say which file: ${src.target}:/absolute/path`);
-    const data = await (await resolve(client, src.target)).readFile(src.path);
+    const data = await (await resolve(client, src.target)).readFile(src.path, {
+      timeoutMs: SCP_TRANSFER_TIMEOUT_MS,
+    });
     let local = dstArg;
     // A directory destination takes the source's own basename, like scp.
     const info = await stat(local).catch(() => undefined);
@@ -460,7 +485,9 @@ async function cmdScp(srcArg: string, dstArg: string): Promise<number> {
   if (!remote.path) die(`say where in the guest: ${remote.target}:/absolute/path`);
   const path = guestDestination(remote.path, srcArg);
   const data = await readFile(srcArg);
-  const written = await (await resolve(client, remote.target)).writeFile(path, data);
+  const written = await (await resolve(client, remote.target)).writeFile(path, data, {
+    timeoutMs: SCP_TRANSFER_TIMEOUT_MS,
+  });
   // What the platform said, or what was sent — labelled as which, since a
   // platform that does not report a count is not evidence that everything
   // landed.
@@ -492,6 +519,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
         else if (arg.startsWith('--session=')) session = arg.slice('--session='.length);
         else positional.push(arg);
       }
+      if (!session.trim()) die('--session needs a name');
       const target = positional[0] ?? die('mandala ssh <computer>');
       if (positional.length > 1) {
         // `mandala ssh vm ls -la` is the ubiquitous ssh idiom, and this command
@@ -502,6 +530,10 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
       return await cmdSsh(target, session);
     }
     if (command === 'scp') {
+      if (rest.some((arg) => arg === '-h' || arg === '--help')) {
+        process.stdout.write(USAGE);
+        return 0;
+      }
       const [src, dst] = rest;
       if (!src || !dst || rest.length !== 2) die('mandala scp <src> <dst>');
       return await cmdScp(src, dst);
@@ -551,7 +583,7 @@ if (invokedDirectly) {
     flushOutput(process.stdout, process.stderr, () => process.exit(code));
   };
   main().then(exit, (err) => {
-    process.stderr.write(`mandala: ${err instanceof Error ? err.message : String(err)}\n`);
+    process.stderr.write(`mandala: ${unexpectedErrorText(err)}\n`);
     exit(1);
   });
 }
