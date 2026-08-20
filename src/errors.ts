@@ -341,6 +341,19 @@ function namedTheFailure(body: unknown): boolean {
 }
 
 /** Build the error for a status, with the platform's own message when it sent one. */
+/**
+ * Our wording for a failure, carrying the status it stands in for.
+ *
+ * The number matters on a message this file wrote in a way it does not on one
+ * the platform wrote. Four classes cover eight statuses between them and three
+ * of those share a sentence, so a log line holding only `err.message` could no
+ * longer tell 521 from 523 — which it could when the message was `HTTP 522`.
+ * Applied only where the wording is ours: a message the platform sent is its own
+ * sentence, `err.status` already carries the number, and appending one would be
+ * this client editing the platform's words.
+ */
+const said = (message: string, status: number) => `${message} (HTTP ${status})`;
+
 export function errorForStatus(
   status: number,
   message: string,
@@ -353,7 +366,7 @@ export function errorForStatus(
   // page, which says 500 characters of nothing. NOT for a structured message:
   // that is the one case where the response knows more than this file does.
   if (Cls === GatewayTimeoutError && !namedTheFailure(body)) {
-    return new GatewayTimeoutError(GATEWAY_TIMEOUT_MESSAGE, status, body);
+    return new GatewayTimeoutError(said(GATEWAY_TIMEOUT_MESSAGE, status), status, body);
   }
   // No `namedTheFailure` guard here, and the asymmetry is the point. Every one
   // of 520-526 means the request never reached the platform, so there is no
@@ -364,13 +377,13 @@ export function errorForStatus(
   // answer arriving mangled, so a body that parsed as this surface's JSON
   // plausibly IS its account. On 521-526 it provably cannot be.
   if (Cls === OriginResponseError && !namedTheFailure(body)) {
-    return new OriginResponseError(ORIGIN_RESPONSE_MESSAGE, status, body);
+    return new OriginResponseError(said(ORIGIN_RESPONSE_MESSAGE, status), status, body);
   }
   if (Cls === OriginTLSError) {
-    return new OriginTLSError(ORIGIN_TLS_MESSAGE, status, body);
+    return new OriginTLSError(said(ORIGIN_TLS_MESSAGE, status), status, body);
   }
   if (Cls === OriginUnreachableError) {
-    return new OriginUnreachableError(ORIGIN_UNREACHABLE_MESSAGE, status, body);
+    return new OriginUnreachableError(said(ORIGIN_UNREACHABLE_MESSAGE, status), status, body);
   }
   return new Cls(message, status, body);
 }
