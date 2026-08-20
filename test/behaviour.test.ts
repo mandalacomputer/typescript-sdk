@@ -350,6 +350,32 @@ describe('snapshots', () => {
     expect(rows[1]!.unreachable).toBe(true);
   });
 
+  it('decodes what a clone of a snapshot will come up as', async () => {
+    // These describe the CAPTURE, not the computer: the source may be gone and
+    // an orphan is still cloneable, and a computer resized since no longer says
+    // what its old snapshots hold. Read off the snapshot or not at all.
+    const { client: c } = client(() => json([SNAPSHOT]));
+    const [snap] = await c.snapshots.list();
+    expect(snap).toMatchObject({
+      computerName: 'scratch',
+      os: 'linux',
+      template: 'base',
+      cpu: 2,
+      ramMb: 4096,
+      diskGb: 40,
+      resolution: '1920x1080x24',
+    });
+  });
+
+  it('leaves an unreachable placeholder empty rather than inventing a shape', async () => {
+    // Such a row carries an id and nothing else, because there was no host to
+    // ask. A zero cpu is not a claim about the snapshot, and nothing should
+    // read it as one — which is what `unreachable` is there to say.
+    const { client: c } = client(() => json([{ id: 'snap-9', unreachable: true }]));
+    const [snap] = await c.snapshots.list();
+    expect(snap).toMatchObject({ unreachable: true, computerName: '', os: '', cpu: 0 });
+  });
+
   it('reads the fingerprint that binds a purge to a set', async () => {
     const { client: c } = client((call) =>
       call.method === 'GET' && call.path === '/computers/vm-1/snapshots'

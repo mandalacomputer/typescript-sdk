@@ -245,7 +245,89 @@ export type ExecArgs = {
   background?: boolean;
   /** Absolute path to run in. */
   cwd?: string;
+  /**
+   * Environment variables for the command.
+   *
+   * On Linux, added on top of the guest's profile rather than replacing it. The
+   * guest agent does replace the environment of the process it spawns, but a
+   * Linux exec runs through `/bin/bash -lc`, which sources the profile and puts
+   * `PATH` and the rest back before the command sees it.
+   *
+   * On Windows it *replaces*. The shell there is `cmd.exe /c`, which sources no
+   * profile, so the command runs with these variables and nothing else — no
+   * `PATH`, no `SystemRoot`, which is most of what `cmd.exe` needs to invoke
+   * anything. Pass the variables that command depends on, or set them inside
+   * `command` itself.
+   */
+  env?: Readonly<Record<string, string>>;
 };
+
+/**
+ * The platform's bounds on an exec environment, mirrored from execbg.go.
+ *
+ * Mirrored rather than left to the server for this file's usual reason: they
+ * are refusals knowable without a round trip. Neither is a limit anybody
+ * legitimately meets, so a request that meets one is a caller passing something
+ * other than what they think — `process.env` in full, most likely — and the
+ * sooner it says so the better.
+ */
+export const MAX_ENV_ENTRIES = 64;
+export const MAX_ENV_ENTRY_BYTES = 4096;
+
+/** Bytes, not characters: the platform's limit is on the encoded entry. */
+const utf8Length = (s: string): number => new TextEncoder().encode(s).length;
+
+/**
+ * Check an exec environment, and hand back a copy.
+ *
+ * The two character refusals are the ones that would otherwise not fail. The
+ * guest agent takes the environment as a `KEY=value` list, so a `=` inside a
+ * name makes the entry split at the wrong place and mean something other than
+ * what it says; a NUL ends a C string, so anything after one in either half is
+ * dropped by the agent rather than refused. Both produce a command that runs
+ * with an environment nobody asked for and reports success.
+ *
+ * A copy because the body is built once and sent later: a caller that mutates
+ * the object it passed would otherwise change what goes on the wire after the
+ * checks below have already passed over it.
+ */
+function envObject(env: Readonly<Record<string, string>>): Json {
+  const names = Object.keys(env);
+  if (names.length > MAX_ENV_ENTRIES) {
+    throw new TypeError(
+      `env has ${names.length} entries; the platform accepts at most ${MAX_ENV_ENTRIES}`,
+    );
+  }
+  for (const name of names) {
+    if (!name) throw new TypeError('env has an entry with an empty name');
+    if (name.includes('=') || name.includes('\0')) {
+      throw new TypeError(`env name ${JSON.stringify(name)} must not contain '=' or a NUL`);
+    }
+    // Checked rather than cast, because the cast is a lie on the one input the
+    // comment above anticipates: `{ TOKEN: process.env.TOKEN }` with the
+    // variable unset hands this an `undefined`, and every JS caller can hand it
+    // anything at all. Without this the next line throws a bare "Cannot read
+    // properties of undefined", which names neither the parameter nor the key —
+    // the only refusal on this surface that would not say what was wrong.
+    const value: unknown = env[name];
+    if (typeof value !== 'string') {
+      throw new TypeError(
+        `env value for ${JSON.stringify(name)} must be a string, not ${value === null ? 'null' : typeof value}`,
+      );
+    }
+    if (value.includes('\0')) {
+      throw new TypeError(`env value for ${JSON.stringify(name)} must not contain a NUL`);
+    }
+    const bytes = utf8Length(name) + utf8Length(value) + 1;
+    if (bytes > MAX_ENV_ENTRY_BYTES) {
+      throw new TypeError(
+        `env entry ${JSON.stringify(name)} is ${bytes} bytes; the platform accepts ` +
+          `at most ${MAX_ENV_ENTRY_BYTES}`,
+      );
+    }
+  }
+  return { ...env };
+}
 
 /**
  * Build an exec payload.
@@ -264,6 +346,10 @@ export function execBody(args: ExecArgs): Json {
   if (args.desktop) body.session = 'desktop';
   if (args.background) body.background = true;
   if (args.cwd) body.cwd = args.cwd;
+  // An empty object is omitted rather than sent: the platform reads no `env`
+  // and an empty one the same way, and sending it puts a key on the wire that
+  // says a caller asked for something they did not.
+  if (args.env && Object.keys(args.env).length) body.env = envObject(args.env);
   return body;
 }
 
@@ -487,17 +573,66 @@ export function waitBody(seconds: number): Json {
 
 export const cursorBody = (): Json => ({ action: 'cursor_position' });
 
-export function screenshotQuery(width?: number): Query | undefined {
-  if (width === undefined) return undefined;
-  // 0 is refused rather than read as "no width": truthiness would silently
-  // convert screenshot(0) — the natural result of a miscomputed thumbnail
-  // scale — into a request for the full-resolution PNG, a different and more
-  // expensive call, with nothing saying so.
-  if (!Number.isFinite(width) || width <= 0) {
-    throw new TypeError(`width must be a positive number: ${width}`);
+/**
+ * `w` downscales, `fresh` skips the cache — and never both.
+ *
+ * A bare screenshot may be served from a cache up to 1.5 seconds old, which is
+ * what makes N dashboard watchers cost one screendump — and what makes a drive
+ * loop act on the screen as it was before its own last click. The model reads a
+ * frame that predates the action, concludes the click missed, and clicks again;
+ * that is how a dialog gets dismissed twice. So `fresh` is the flag to pass
+ * whenever the image is feeding a decision rather than filling a thumbnail.
+ *
+ * `1` rather than `true` because the platform's screenshot handler accepts both
+ * spellings and its own documentation names this one; every other flag on this
+ * surface is a literal wire value too.
+ */
+export function screenshotQuery(width?: number, fresh?: boolean): Query | undefined {
+  const query: Query = {};
+  if (width !== undefined) {
+    // 0 is refused rather than read as "no width": truthiness would silently
+    // convert screenshot(0) — the natural result of a miscomputed thumbnail
+    // scale — into a request for the full-resolution PNG, a different and more
+    // expensive call, with nothing saying so.
+    if (!Number.isFinite(width) || width <= 0) {
+      throw new TypeError(`width must be a positive number: ${width}`);
+    }
+    query.w = width;
   }
-  return { w: width };
+  if (fresh) {
+    // Refused rather than sent, because the platform takes it and ignores it.
+    // Its handler branches on `w` first and returns the thumbnail before it
+    // ever reads `fresh` — and that thumbnail is built off the *cached* frame
+    // and then cached a second time itself. So `{ w: 320, fresh: 1 }` is a
+    // request the wire carries happily and the platform cannot honour, which
+    // makes `screenshot(320, { fresh: true })` — the natural spelling, given
+    // the signature — the one call that promises an uncached frame in capitals
+    // and returns a doubly-cached one. That is exactly the shape this file
+    // exists to refuse, so it is refused here rather than documented away.
+    if (width !== undefined) {
+      throw new TypeError(
+        'fresh cannot be combined with a width: the platform serves every downscaled ' +
+          'screenshot from its cache, so the flag would be silently ignored. Drop the ' +
+          'width to get an uncached frame.',
+      );
+    }
+    query.fresh = 1;
+  }
+  // Undefined rather than an empty object for the bare call, so the URL this
+  // builds is byte-for-byte the one it built before `fresh` existed.
+  return Object.keys(query).length ? query : undefined;
 }
+
+/**
+ * The query that pulls the power instead of asking the guest to shut down.
+ *
+ * `'true'` and not the boolean, which is not a style choice: the daemon reads
+ * this with `Query().Get("force") == "true"`, so anything else — `1`, `yes`,
+ * `TRUE` — is a graceful stop that reports success while the guest is still
+ * being asked politely, which is the failure a caller reaching for `force`
+ * already tried once.
+ */
+export const stopQuery = (force?: boolean): Query => (force ? { force: 'true' } : {});
 
 // --- windows --------------------------------------------------------------
 
@@ -532,7 +667,22 @@ export function windowBody(args: {
 
 // --- snapshots ------------------------------------------------------------
 
-export const snapshotBody = (memory: boolean): Json => ({ memory });
+/**
+ * Build a capture payload.
+ *
+ * `memory` is always sent, because false is a real request — a disk-only
+ * capture — and not the absence of one. `name` is omitted when unset, which is
+ * what asks the platform to generate one; sent empty it would be a name, and
+ * the platform would take the caller at their word.
+ *
+ * An all-whitespace name is refused for the reason {@link updateBody} refuses
+ * one: it can only come from a caller building the name out of something that
+ * turned out to be empty, and a snapshot called `"  "` is not what they meant.
+ */
+export function snapshotBody(memory: boolean, name?: string): Json {
+  if (name !== undefined && !name.trim()) throw new TypeError('name must not be empty');
+  return omitUndefined({ memory, name });
+}
 
 export function scheduleBody(args: {
   enabled: boolean;
