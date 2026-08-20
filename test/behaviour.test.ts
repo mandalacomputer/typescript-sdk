@@ -618,19 +618,37 @@ describe('answers that would leave a handle worse off', () => {
     expect(started.running).toBe(true);
   });
 
-  it('does not read a stringified "false" as true', async () => {
+  it('does not read a background exit code it cannot parse as success', async () => {
+    // num()'s implicit fallback is 0, so `"killed"` decoded to "exited
+    // successfully" — the same wrong-answer-that-reads-as-fine the empty-string
+    // guard above exists for. toExecResult passes -1 on the same field.
+    for (const spelling of ['killed', 'signal:9', {}]) {
+      const { client: c } = client((call) =>
+        /\/exec$/.test(call.path)
+          ? json({ pid: 42, running: false, exit_code: spelling })
+          : anyRoute(call),
+      );
+      const started = await (await c.computers.get('vm-1')).execBackground('sleep 60');
+      expect(started.exitCode).toBe(-1);
+    }
+  });
+
+  it('does not read a stringified "false" as true, in either spelling', async () => {
     // Boolean('false') is true — the one coercion in the decoders that inverts
-    // a field's meaning rather than blurring it.
-    const { client: c } = client((call) =>
-      /\/exec$/.test(call.path)
-        ? json({ ...EXEC_OK, timed_out: 'false', out_truncated: 'false' })
-        : anyRoute(call),
-    );
-    const computer = await c.computers.get('vm-1');
-    const res = await computer.exec('true');
-    expect(res.timedOut).toBe(false);
-    expect(res.truncated).toBe(false);
-    expect(res.ok).toBe(true);
+    // a field's meaning rather than blurring it. 'False' is the spelling most
+    // likely to arrive: the platform's own SDK is Python's, and str(False)
+    // capitalises.
+    for (const no of ['false', 'False', 'FALSE']) {
+      const { client: c } = client((call) =>
+        /\/exec$/.test(call.path)
+          ? json({ ...EXEC_OK, timed_out: no, out_truncated: no })
+          : anyRoute(call),
+      );
+      const res = await (await c.computers.get('vm-1')).exec('true');
+      expect(res.timedOut).toBe(false);
+      expect(res.truncated).toBe(false);
+      expect(res.ok).toBe(true);
+    }
   });
 
   it('lets a caller abort a guest wait during the probe, not only between them', async () => {

@@ -11,6 +11,7 @@
  */
 
 import { type APIError, errorForStatus, MandalaError } from './errors.js';
+import { isRecord } from './paths.js';
 
 export const DEFAULT_BASE_URL = 'https://app.mandala.computer/api/v1';
 
@@ -81,6 +82,26 @@ export type Listing<T> = {
   /** `null` when the answer was complete. A number — possibly 0 — when it was not. */
   incomplete: number | null;
 };
+
+/**
+ * The array check {@link Transport.jsonArray} and {@link Transport.listing} share.
+ *
+ * The array-ness is checked rather than cast. A caller that casts and then
+ * calls `.map` on an object gets `data.map is not a function` — an anonymous
+ * TypeError naming neither the request nor the platform, which is the failure
+ * #decode exists to prevent one layer up. A missing body is an empty list,
+ * since a list route with nothing to say and a list route that said nothing are
+ * the same answer.
+ */
+function expectArray(data: unknown, method: string, path: string): unknown[] {
+  if (data == null) return [];
+  if (!Array.isArray(data)) {
+    throw new MandalaError(
+      `expected a JSON array from ${method} ${path}, got: ${JSON.stringify(data).slice(0, 200)}`,
+    );
+  }
+  return data;
+}
 
 /** One server-sent event off a streaming route. */
 export type SSEEvent = { event: string; data: unknown };
@@ -326,23 +347,9 @@ export class Transport {
     return (await this.#decode<T>(sent, method, path, opts.signal)) as T;
   }
 
-  /**
-   * {@link json}, for the routes whose answer is a list.
-   *
-   * The array-ness is checked rather than cast. A caller that casts and then
-   * calls `.filter` on an object gets `data.filter is not a function` — an
-   * anonymous TypeError naming neither the request nor the platform, which is
-   * the failure #decode exists to prevent one layer up.
-   */
+  /** {@link json}, for the routes whose answer is a list. See {@link expectArray}. */
   async jsonArray(method: string, path: string, opts: RequestOptions = {}): Promise<unknown[]> {
-    const data = await this.json<unknown>(method, path, opts);
-    if (data == null) return [];
-    if (!Array.isArray(data)) {
-      throw new MandalaError(
-        `expected a JSON array from ${method} ${path}, got: ${JSON.stringify(data).slice(0, 200)}`,
-      );
-    }
-    return data;
+    return expectArray(await this.json<unknown>(method, path, opts), method, path);
   }
 
   /**
@@ -352,11 +359,20 @@ export class Transport {
    * routes that can set it are the two whose short answer is indistinguishable
    * from an empty account.
    */
-  async listing<T>(path: string, opts: RequestOptions = {}): Promise<Listing<T>> {
+  async listing(
+    path: string,
+    opts: RequestOptions = {},
+  ): Promise<Listing<Record<string, unknown>>> {
     const sent = await this.#fetchRaw('GET', path, opts);
     const short = sent.resp.headers.get(INCOMPLETE_HEADER);
+    const data = await this.#decode<unknown>(sent, 'GET', path, opts.signal);
     return {
-      items: (await this.#decode<T[]>(sent, 'GET', path, opts.signal)) ?? [],
+      // The same check and the same element filter {@link jsonArray}'s callers
+      // get, because these are the two list routes a user actually calls. Cast
+      // to `T[]`, an object answer reached `items.map` as an anonymous
+      // TypeError, and a single null element reached toSnapshot as `d.id` of
+      // null — both of them naming neither the request nor the platform.
+      items: expectArray(data, 'GET', path).filter(isRecord),
       // A header that is not a number came from something other than the
       // platform, and Number() turns it into a NaN that poisons the first sum a
       // caller does with it. Presence is the signal — see {@link Listing} — so

@@ -13,7 +13,7 @@ import {
   PlanLimitError,
   UnavailableError,
 } from '../src/index.js';
-import { anyRoute, BASE, COMPUTER, errorJson, json, recorder } from './harness.js';
+import { anyRoute, BASE, COMPUTER, errorJson, json, recorder, SNAPSHOT } from './harness.js';
 
 const client = (rec: ReturnType<typeof recorder>, opts = {}) =>
   new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: rec.fetch, ...opts });
@@ -540,6 +540,29 @@ describe('answers that are not what the route promised', () => {
       /expected a JSON array from GET templates/,
     );
     await expect(client(rec).sizes.list()).rejects.toThrow(/expected a JSON array from GET sizes/);
+  });
+
+  it('names the route when the two list routes a user calls answer with an object', async () => {
+    // listing() is the path behind computers.list() and snapshots.list(), and
+    // it cast to T[] where jsonArray checks — so a proxy answering
+    // `{"computers": [...]}` died as `items.map is not a function`, one layer
+    // further in and naming neither the request nor the platform.
+    const rec = recorder(() => json({ computers: [] }));
+    await expect(client(rec).computers.list()).rejects.toThrow(
+      /expected a JSON array from GET computers/,
+    );
+    await expect(client(rec).snapshots.list()).rejects.toThrow(
+      /expected a JSON array from GET snapshots/,
+    );
+  });
+
+  it('drops a non-record element from a listing rather than decoding it', async () => {
+    // toSnapshot reads d.id off every element, so one null in the array threw
+    // "cannot read properties of null" from inside the decoder. The same
+    // isRecord filter templates.list and sizes.list already apply.
+    const rec = recorder((call) => json(call.path === '/snapshots' ? [null, SNAPSHOT] : [null]));
+    expect(await client(rec).snapshots.list()).toHaveLength(1);
+    expect(await client(rec).computers.list()).toHaveLength(0);
   });
 
   it('names the route when a stream route answers with a page', async () => {

@@ -54,7 +54,7 @@ export class Computers {
    * would turn "here is part of the fleet" into "here is the fleet".
    */
   async listWithStatus(opts: ListOptions = {}): Promise<Listing<Computer>> {
-    const { items, incomplete } = await this.#t.listing<Record<string, unknown>>(P.COMPUTERS, {
+    const { items, incomplete } = await this.#t.listing(P.COMPUTERS, {
       query: { allow_partial: opts.allowPartial ? 1 : undefined },
       signal: opts.signal,
     });
@@ -221,7 +221,7 @@ export class Snapshots {
   async listWithStatus(
     opts: ListOptions & { computerId?: string; includeUnfinished?: boolean } = {},
   ): Promise<Listing<Snapshot>> {
-    const { items, incomplete } = await this.#t.listing<Record<string, unknown>>(P.SNAPSHOTS, {
+    const { items, incomplete } = await this.#t.listing(P.SNAPSHOTS, {
       query: {
         include: opts.includeUnfinished ? 'unfinished' : undefined,
         allow_partial: opts.allowPartial ? 1 : undefined,
