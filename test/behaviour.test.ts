@@ -233,6 +233,115 @@ describe('waiting', () => {
     await expect(computer.waitForGuest({ timeoutMs: 5_000, pollMs: 1 })).resolves.toBe(computer);
     expect(attempts).toBe(3);
   });
+
+  it('refuses a timeout or a poll interval that would never expire', async () => {
+    // `Date.now() >= NaN` is false and `setTimeout(fn, NaN)` fires at once, so
+    // between them a NaN turns a wait into an unthrottled request loop that
+    // never returns. `timeoutMs: Number(unsetEnvVar)` is how it arrives.
+    const { rec, client: c } = client(anyRoute);
+    const computer = await c.computers.get('vm-1');
+    const before = rec.calls.length;
+    for (const wait of [
+      () => computer.waitUntilBuilt({ timeoutMs: Number.NaN }),
+      () => computer.waitUntilRunning({ pollMs: Number.NaN }),
+      () => computer.waitForGuest({ timeoutMs: Number.POSITIVE_INFINITY }),
+      () => computer.waitUntilRunning({ timeoutMs: -1 }),
+    ]) {
+      await expect(wait()).rejects.toThrow(TypeError);
+    }
+    // Refused before the loop starts, so not one request went out.
+    expect(rec.calls.length).toBe(before);
+  });
+
+  it('does not let a poll outlive the wait it belongs to', async () => {
+    // The transport's deadline is the client's — 60 seconds by default — and a
+    // refresh made under it runs on long past the moment the wait was told to
+    // give up. What is left of the wait has to be what governs the request.
+    let gets = 0;
+    const { client: c } = client((call) => {
+      if (call.method === 'GET' && call.path === '/computers/vm-1') {
+        gets += 1;
+        if (gets === 1) return json(COMPUTER);
+        // A host that accepts the connection and then says nothing.
+        return new Promise<Response>(() => {});
+      }
+      return anyRoute(call);
+    });
+    const computer = await c.computers.get('vm-1');
+    const started = Date.now();
+    const err = await computer.waitUntilRunning({ timeoutMs: 20, pollMs: 1 }).catch((e) => e);
+    expect(err).toBeInstanceOf(TimeoutError);
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
+  it('reports the refreshes, not a stale status, when a build was never observed', async () => {
+    // waitUntilRunning's rule, on the wait that did not have it: "was still
+    // building" read off pre-wait data is a claim about a computer nobody
+    // looked at.
+    let gets = 0;
+    const { client: c } = client((call) => {
+      if (call.method === 'GET' && call.path === '/computers/vm-1') {
+        gets += 1;
+        return gets === 1
+          ? json({ ...COMPUTER, status: 'building' })
+          : errorJson(503, 'host could not be reached');
+      }
+      return anyRoute(call);
+    });
+    const computer = await c.computers.get('vm-1');
+    const err = await computer.waitUntilBuilt({ timeoutMs: 10, pollMs: 1 }).catch((e) => e);
+    expect(err).toBeInstanceOf(TimeoutError);
+    expect(err.message).toMatch(/could not be observed/);
+    expect(err.message).not.toMatch(/was still building/);
+  });
+
+  it('polls a build before its first sleep, not after it', async () => {
+    // A clone that finished while the caller was doing something else is one
+    // round trip from being known to have finished. The poll interval here is
+    // a minute: sleeping first would make this test take one.
+    let gets = 0;
+    const { client: c } = client((call) => {
+      if (call.method === 'GET' && call.path === '/computers/vm-1') {
+        gets += 1;
+        return gets === 1 ? json({ ...COMPUTER, status: 'building' }) : json(COMPUTER);
+      }
+      return anyRoute(call);
+    });
+    const computer = await c.computers.get('vm-1');
+    const started = Date.now();
+    await expect(computer.waitUntilBuilt({ timeoutMs: 5_000, pollMs: 60_000 })).resolves.toBe(
+      computer,
+    );
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
+  it('does not probe the guest of a computer that has no disk', async () => {
+    // The README promises every wait fails fast on a failed build. This one
+    // spun out its whole three minutes probing a machine with nothing to
+    // answer from.
+    const { rec, client: c } = client((call) =>
+      call.method === 'GET' && call.path === '/computers/vm-1'
+        ? json({ ...COMPUTER, status: 'build-failed', build: { failed: 'the copy died' } })
+        : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    await expect(computer.waitForGuest({ timeoutMs: 60_000, pollMs: 1 })).rejects.toThrow(
+      /the copy died/,
+    );
+    expect(rec.routes().filter(([, p]) => p.endsWith('/exec'))).toHaveLength(0);
+  });
+
+  it('waits through a suspended computer rather than refusing it, because exec resumes one', async () => {
+    // The opposite of waitUntilRunning, deliberately: nothing resumes a machine
+    // for that wait, and the probe here does it as a side effect.
+    const { client: c } = client((call) =>
+      call.method === 'GET' && call.path === '/computers/vm-1'
+        ? json({ ...COMPUTER, status: 'suspended' })
+        : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    await expect(computer.waitForGuest({ timeoutMs: 5_000, pollMs: 1 })).resolves.toBe(computer);
+  });
 });
 
 describe('the pointer', () => {

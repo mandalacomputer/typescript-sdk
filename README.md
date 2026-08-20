@@ -369,8 +369,11 @@ await c.waitForGuest();        // something inside the guest answers
 expecting a screenshot to show a desktop rather than a boot screen. It probes
 with `exit 0`, a builtin of both bash and cmd.exe, so it works on either OS.
 
-These throw rather than waiting out the timeout for states that will not resolve
-on their own — a failed build, and a suspended session nobody has resumed.
+These throw rather than waiting out the timeout for a state that will not
+resolve on its own. A failed build stops all three. A suspended session stops
+`waitUntilRunning`, which is the wait it will never resolve for — `waitForGuest`
+runs a command in the guest, and a command *resumes* a suspended computer, so it
+waits through the resume and returns when the guest answers.
 
 ### Computers that are still being built
 
