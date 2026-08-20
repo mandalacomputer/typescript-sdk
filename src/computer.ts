@@ -38,7 +38,7 @@ import {
 } from './models.js';
 import * as P from './paths.js';
 import type { CallOptions } from './resources.js';
-import { MODEL_KEY_HEADER, type Transport } from './transport.js';
+import { MODEL_KEY_HEADER, type Query, type Transport } from './transport.js';
 
 /**
  * What a computer renders at when its create did not ask for anything else.
@@ -385,9 +385,15 @@ export class Computer {
    * Stop this computer, discarding a suspended session if it has one.
    *
    * Use {@link suspend} to keep it.
+   *
+   * The guest is asked to shut down and given time to do it. `force` skips the
+   * asking and pulls the power — the equivalent of holding the button in. It is
+   * what to reach for when a guest will not come down on its own, and it can
+   * lose whatever had not been written to disk, so it is not the default and
+   * should not be the first attempt.
    */
-  async stop(opts: CallOptions = {}): Promise<this> {
-    return this.#power('stop', opts);
+  async stop(opts: { force?: boolean } & CallOptions = {}): Promise<this> {
+    return this.#power('stop', opts, P.stopQuery(opts.force));
   }
 
   /**
@@ -418,13 +424,16 @@ export class Computer {
     return this.#power('restart', opts);
   }
 
-  async #power(action: string, opts: CallOptions = {}): Promise<this> {
+  async #power(action: string, opts: CallOptions = {}, query?: Query): Promise<this> {
     // The platform answers a power action with the computer, so this is one
     // round trip where the Python SDK spends two. Guarded anyway: a platform
     // that answered 204 would otherwise leave a handle reporting the state the
     // machine was in before the call.
     const data = P.computerPayload(
-      await this.#t.json('POST', P.computerAction(this.id, action), { signal: opts.signal }),
+      await this.#t.json('POST', P.computerAction(this.id, action), {
+        query,
+        signal: opts.signal,
+      }),
     );
     if (data.id) {
       this.#data = data;
@@ -676,15 +685,32 @@ export class Computer {
    * instead — much cheaper, and enough for a thumbnail or a "has anything
    * changed" check.
    *
+   * **PASS `fresh` WHENEVER THE IMAGE IS FEEDING A DECISION.** Without it the
+   * platform may serve a frame up to 1.5 seconds old, which is what makes N
+   * watchers of one desktop cost a single screendump and what makes a drive
+   * loop act on the screen as it was *before* its own last click. A model
+   * handed that frame concludes the click missed and clicks again — which is
+   * how a dialog gets dismissed twice, and how the second dismissal lands on
+   * whatever the first one revealed. A thumbnail can have the cached frame; a
+   * decision cannot.
+   *
+   * `fresh` and `width` cannot be combined, and asking for both is refused
+   * rather than half-honoured: the platform serves every downscaled screenshot
+   * from its cache, so a `fresh` alongside a width is a flag it would accept
+   * and ignore. Anything deciding on the image wants the full frame anyway.
+   *
    * A screenshot is not *use* as far as the platform's idle sweep is concerned,
    * and does not resume a suspended computer. A loop that only polls the screen
    * can therefore watch its own machine be suspended out from under it after the
    * host's idle window; anything that drives the desktop — {@link click},
    * {@link type}, {@link exec} — both counts as use and resumes it.
    */
-  async screenshot(width?: number, opts: CallOptions = {}): Promise<Uint8Array> {
+  async screenshot(
+    width?: number,
+    opts: { fresh?: boolean } & CallOptions = {},
+  ): Promise<Uint8Array> {
     const res = await this.#t.bytes('GET', P.computerAction(this.id, 'screenshot'), {
-      query: P.screenshotQuery(width),
+      query: P.screenshotQuery(width, opts.fresh),
       signal: opts.signal,
     });
     return res.bytes;
@@ -939,17 +965,31 @@ export class Computer {
    * For anything slower than a few seconds, use {@link execBackground} rather
    * than a longer timeout: a command that outlives `timeoutS` keeps running
    * inside the guest, and its output is then unreachable.
+   *
+   * `env` adds variables for this command, and is the right way to hand a build
+   * a token — the alternative is interpolating it into `command`, where the
+   * guest's shell history and process list can both read it. On Linux it goes
+   * on top of the guest's profile rather than replacing it: the command runs
+   * through `bash -lc`, so `PATH` and the rest survive. On **Windows it
+   * replaces** — `cmd.exe /c` sources no profile, so the command sees these
+   * variables and nothing else, `PATH` and `SystemRoot` included. Pass what
+   * that command needs, or set it inside `command`.
    */
   async exec(
     command: string,
-    opts: { timeoutS?: number; desktop?: boolean; cwd?: string } & CallOptions = {},
+    opts: {
+      timeoutS?: number;
+      desktop?: boolean;
+      cwd?: string;
+      env?: Readonly<Record<string, string>>;
+    } & CallOptions = {},
   ): Promise<ExecResult> {
-    const { timeoutS = 30, desktop, cwd } = opts;
+    const { timeoutS = 30, desktop, cwd, env } = opts;
     const data = await this.#t.json<Record<string, unknown>>(
       'POST',
       P.computerAction(this.id, 'exec'),
       {
-        body: P.execBody({ command, timeoutS, desktop, cwd }),
+        body: P.execBody({ command, timeoutS, desktop, cwd, env }),
         // The guest was just granted timeoutS to finish, so the HTTP request
         // has to outlive that. Under the fixed client deadline alone, any
         // timeoutS past it was guaranteed to be aborted client-side while the
@@ -970,13 +1010,23 @@ export class Computer {
    */
   async execBackground(
     command: string,
-    opts: { desktop?: boolean; cwd?: string } & CallOptions = {},
+    opts: {
+      desktop?: boolean;
+      cwd?: string;
+      env?: Readonly<Record<string, string>>;
+    } & CallOptions = {},
   ): Promise<BackgroundExec> {
     const data = await this.#t.json<Record<string, unknown>>(
       'POST',
       P.computerAction(this.id, 'exec'),
       {
-        body: P.execBody({ command, background: true, desktop: opts.desktop, cwd: opts.cwd }),
+        body: P.execBody({
+          command,
+          background: true,
+          desktop: opts.desktop,
+          cwd: opts.cwd,
+          env: opts.env,
+        }),
         signal: opts.signal,
       },
     );
@@ -1125,12 +1175,17 @@ export class Computer {
    * — the computer must be running for that, and the capture records the screen
    * resolution and the host's machine type, so it will only load onto a matching
    * one.
+   *
+   * `name` is worth giving. Snapshots outlive the computers they came from, and
+   * an account's listing fills with generated names that say only when each was
+   * taken — which is exactly the information a restore does not need. Omitted,
+   * the platform generates one.
    */
-  async snapshot(opts: { memory?: boolean } & CallOptions = {}): Promise<Snapshot> {
+  async snapshot(opts: { memory?: boolean; name?: string } & CallOptions = {}): Promise<Snapshot> {
     const data = await this.#t.json<Record<string, unknown>>(
       'POST',
       P.computerAction(this.id, 'snapshots'),
-      { body: P.snapshotBody(Boolean(opts.memory)), signal: opts.signal },
+      { body: P.snapshotBody(Boolean(opts.memory), opts.name), signal: opts.signal },
     );
     return toSnapshot(data ?? {});
   }

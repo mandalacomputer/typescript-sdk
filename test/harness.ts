@@ -122,9 +122,17 @@ export const COMPUTER = {
   },
 };
 
+/**
+ * One snapshot as the platform sends it, in full.
+ *
+ * In full deliberately: the shape a snapshot comes back as is what a clone of
+ * it will be, and a fixture carrying only the fields the SDK happened to decode
+ * first is a fixture that cannot fail when a field stops being decoded.
+ */
 export const SNAPSHOT = {
   id: 'snap-1',
   computer_id: 'vm-1',
+  computer_name: 'scratch',
   name: 'nightly',
   kind: 'disk',
   state: 'durable',
@@ -132,6 +140,12 @@ export const SNAPSHOT = {
   created_at: '2026-08-19T00:00:00Z',
   incremental: true,
   auto: true,
+  os: 'linux',
+  template: 'base',
+  cpu: 2,
+  ram_mb: 4096,
+  disk_gb: 40,
+  resolution: '1920x1080x24',
 };
 
 export const EXEC_OK = { exit_code: 0, stdout: '', stderr: '', timed_out: false };

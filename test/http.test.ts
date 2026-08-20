@@ -308,6 +308,46 @@ describe('bytes', () => {
     await c.screenshot(320);
     expect(rec.last().query.w).toBe('320');
   });
+
+  it('takes the cached frame unless the caller asks for a live one', async () => {
+    const rec = recorder(anyRoute);
+    const c = await client(rec).computers.get('vm-1');
+    await c.screenshot();
+    expect(rec.last().query).not.toHaveProperty('fresh');
+    await c.screenshot(undefined, { fresh: true });
+    expect(rec.last().query.fresh).toBe('1');
+  });
+});
+
+describe('the parameters a drive loop needs', () => {
+  it('asks the guest to shut down unless force was given', async () => {
+    const rec = recorder(anyRoute);
+    const c = await client(rec).computers.get('vm-1');
+    await c.stop();
+    expect(rec.last().query).not.toHaveProperty('force');
+    await c.stop({ force: true });
+    // The daemon compares this against the string "true", so what reaches the
+    // wire matters more than the type at the call site.
+    expect(rec.last().query.force).toBe('true');
+  });
+
+  it('carries an exec environment on both the waiting and background forms', async () => {
+    const rec = recorder(anyRoute);
+    const c = await client(rec).computers.get('vm-1');
+    await c.exec('make', { env: { CI: '1' } });
+    expect((rec.last().body as { env?: unknown }).env).toEqual({ CI: '1' });
+    await c.execBackground('make', { env: { CI: '1' } });
+    expect((rec.last().body as { env?: unknown }).env).toEqual({ CI: '1' });
+  });
+
+  it('names a snapshot when asked, and lets the platform name it otherwise', async () => {
+    const rec = recorder(anyRoute);
+    const c = await client(rec).computers.get('vm-1');
+    await c.snapshot();
+    expect(rec.last().body).toEqual({ memory: false });
+    await c.snapshot({ memory: true, name: 'before-upgrade' });
+    expect(rec.last().body).toEqual({ memory: true, name: 'before-upgrade' });
+  });
 });
 
 describe('server-sent events', () => {

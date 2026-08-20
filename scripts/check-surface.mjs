@@ -1,14 +1,23 @@
 #!/usr/bin/env node
 /**
- * Diff the mirrored allowlist in test/allowlist.ts against the real one in the
- * platform repo.
+ * Diff the mirrors in test/allowlist.ts against the real tables in the platform
+ * repo — the routes, and the parameters each route takes.
  *
- * The mirror is what keeps this SDK honest about which routes exist, and a
- * mirror nobody compares is just a comment. mandala-computer-python has the
- * mirror and not this script, which is how `computers/:id/exec/:pid` (both
- * verbs) and `GET computers/:id/snapshots` reached the platform without its
- * surface test ever noticing — the test kept passing, because "every call lands
- * on an allowlisted route" stays true when the allowlist is the stale one.
+ * The mirror is what keeps this SDK honest about what exists, and a mirror
+ * nobody compares is just a comment. mandala-computer-python has the mirror and
+ * not this script, which is how `computers/:id/exec/:pid` (both verbs) and
+ * `GET computers/:id/snapshots` reached the platform without its surface test
+ * ever noticing — the test kept passing, because "every call lands on an
+ * allowlisted route" stays true when the allowlist is the stale one.
+ *
+ * The parameter half exists because the route half was not enough. Every route
+ * was reachable and four documented parameters were not: `stop?force`,
+ * `screenshot?fresh`, `exec`'s `env` and a snapshot's `name`. A route table
+ * cannot see any of them — the call lands on the right route either way, and
+ * the only thing missing is the argument that made it worth making. Two of the
+ * four were the difference between a call that works and a call that works
+ * wrongly and says nothing: a graceful stop for a guest that will not come
+ * down, and a cached frame for a model deciding where to click next.
  *
  * Exits 0 and says so when the platform repo is not checked out. That is the
  * ordinary case in CI on this repository, and failing over it would make the
@@ -34,79 +43,260 @@ if (!platform) {
   console.log(
     'check:surface — platform repo not found, skipping.\n' +
       `  Looked in: ${candidates.join(', ')}\n` +
-      '  Set MANDALA_PLATFORM_REPO to compare against web/lib/surface.ts.',
+      '  Set MANDALA_PLATFORM_REPO to compare against web/lib.',
   );
   process.exit(0);
 }
 
-const source = readFileSync(join(platform, 'web/lib/surface.ts'), 'utf8');
+// --- reading TypeScript without a TypeScript loader -------------------------
+//
+// Both files are read as text and matched over, so this runs with no build step
+// and no dependency. Comments are stripped from anything matched, because both
+// are heavily commented and several of those comments quote the very shapes
+// being matched — over them, the regexes invent routes and parameters.
 
-/** Pull one `export const NAME: Route[] = [...]` table out, balanced by bracket depth. */
-function table(name) {
+const strip = (s) => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+
+/**
+ * The text between the bracket at `from` and the one that balances it.
+ *
+ * Depth counting rather than a lazy match to the next closer, because every
+ * table here nests: a route's `query` array holds objects, and a body's schema
+ * holds more of them.
+ */
+function balanced(text, from, open, close) {
+  let depth = 0;
+  for (let i = from; i < text.length; i++) {
+    if (text[i] === open) depth++;
+    else if (text[i] === close && --depth === 0) return text.slice(from + 1, i);
+  }
+  throw new Error(`unbalanced ${open} from offset ${from}`);
+}
+
+// --- routes -----------------------------------------------------------------
+
+const surfaceSource = readFileSync(join(platform, 'web/lib/surface.ts'), 'utf8');
+
+/** Pull one `export const NAME: Route[] = [...]` table out. */
+function routeTable(name) {
   const decl = `export const ${name}: Route[] = [`;
-  const start = source.indexOf(decl);
+  const start = surfaceSource.indexOf(decl);
   if (start === -1) throw new Error(`${name} not found in web/lib/surface.ts`);
   // The opening bracket of the table, not the one in `Route[]` a few characters
   // earlier — which is what an indexOf('[') from the declaration finds, and
   // which closes immediately.
-  let depth = 0;
-  let i = start + decl.length - 1;
-  const from = i;
-  for (; i < source.length; i++) {
-    if (source[i] === '[') depth++;
-    else if (source[i] === ']' && --depth === 0) break;
-  }
-  const body = source.slice(from + 1, i);
-  const routes = [];
-  // Comments are stripped first: the table is heavily commented, and several of
-  // those comments quote route patterns. Matching over them invents routes.
-  const code = body.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+  const body = balanced(surfaceSource, start + decl.length - 1, '[', ']');
   const re = /method:\s*'([A-Z]+)'[\s\S]*?pattern:\s*'([^']+)'/g;
-  for (let m = re.exec(code); m; m = re.exec(code)) routes.push(`${m[1]} ${m[2]}`);
+  const routes = [];
+  for (let m = re.exec(strip(body)); m; m = re.exec(strip(body))) routes.push(`${m[1]} ${m[2]}`);
   return new Set(routes);
 }
 
-const platformRoutes = table('V1_ROUTES');
+const platformRoutes = routeTable('V1_ROUTES');
 
-// Read the mirror out of the TypeScript rather than importing it, so this runs
-// with no build step and no TypeScript loader.
 const mirrorSource = readFileSync(join(repo, 'test/allowlist.ts'), 'utf8');
-const mirrorBody = mirrorSource
-  .slice(
-    mirrorSource.indexOf('export const ALLOWED'),
-    mirrorSource.indexOf('export const UNIMPLEMENTED'),
-  )
-  .replace(/\/\*[\s\S]*?\*\//g, '')
-  .replace(/\/\/[^\n]*/g, '');
-const mirror = new Set(
-  [...mirrorBody.matchAll(/\[\s*'([A-Z]+)'\s*,\s*'([^']+)'\s*\]/g)].map((m) => `${m[1]} ${m[2]}`),
+
+/** The text of one `export const NAME` declaration in the mirror. */
+function mirrorSection(name, until) {
+  const from = mirrorSource.indexOf(`export const ${name}`);
+  if (from === -1) throw new Error(`${name} not found in test/allowlist.ts`);
+  const to = mirrorSource.indexOf(`export const ${until}`, from);
+  return strip(mirrorSource.slice(from, to === -1 ? undefined : to));
+}
+
+const mirrorRoutes = new Set(
+  [
+    ...mirrorSection('ALLOWED', 'UNIMPLEMENTED').matchAll(/\[\s*'([A-Z]+)'\s*,\s*'([^']+)'\s*\]/g),
+  ].map((m) => `${m[1]} ${m[2]}`),
 );
 
-const missing = [...platformRoutes].filter((r) => !mirror.has(r)).sort();
-const extra = [...mirror].filter((r) => !platformRoutes.has(r)).sort();
+// --- parameters -------------------------------------------------------------
 
-if (!missing.length && !extra.length) {
+const docSource = readFileSync(join(platform, 'web/lib/apidoc.ts'), 'utf8');
+
+/**
+ * Module-level `const NAME: Query = {...}` entries.
+ *
+ * A route's `query` array can reference one of these by identifier instead of
+ * spelling it out — ALLOW_PARTIAL is shared by two routes — so the identifier
+ * has to resolve to a parameter name or those routes read as taking none.
+ */
+const sharedQuery = new Map();
+for (const m of docSource.matchAll(/^const ([A-Z_]+): Query = \{/gm)) {
+  const named = strip(balanced(docSource, m.index + m[0].length - 1, '{', '}')).match(
+    /name:\s*'([^']+)'/,
+  );
+  if (named) sharedQuery.set(m[1], named[1]);
+}
+
+/**
+ * The keys of an object literal, at its own depth only.
+ *
+ * Nested schemas have keys of their own — `type`, `description`, `items` — and
+ * every one of them would read as a body field. Quoted strings are skipped
+ * whole, because a description is prose and prose contains colons.
+ */
+function topLevelKeys(body) {
+  const keys = [];
+  let depth = 0;
+  let i = 0;
+  while (i < body.length) {
+    const ch = body[i];
+    if (ch === '{' || ch === '[' || ch === '(') depth++;
+    else if (ch === '}' || ch === ']' || ch === ')') depth--;
+    else if (ch === "'") {
+      const end = body.indexOf("'", i + 1);
+      i = end === -1 ? body.length : end + 1;
+      continue;
+    }
+    if (depth === 0) {
+      const m = body.slice(i).match(/^([A-Za-z_][A-Za-z0-9_]*)\s*:/);
+      if (m) {
+        keys.push(m[1]);
+        i += m[0].length;
+        continue;
+      }
+    }
+    i++;
+  }
+  return keys;
+}
+
+/** Every query, header and body field the platform documents, by route. */
+function platformParameters() {
+  const start = docSource.indexOf('export const DOCS: Record<string, Doc> = {');
+  if (start === -1) throw new Error('DOCS not found in web/lib/apidoc.ts');
+  const docs = balanced(docSource, docSource.indexOf('{', start + 40), '{', '}');
+
+  const table = new Map();
+  const entry = /'([A-Z]+) ([^']+)':\s*\{/g;
+  for (let m = entry.exec(docs); m; m = entry.exec(docs)) {
+    const body = balanced(docs, m.index + m[0].length - 1, '{', '}');
+    // Past this entry rather than into it: a nested `'GET x': {` inside a
+    // description would otherwise be read as a route of its own.
+    entry.lastIndex = m.index + m[0].length + body.length;
+    const clean = strip(body);
+    const params = new Set();
+
+    for (const [key, kind] of [
+      ['query', 'query'],
+      ['headers', 'header'],
+    ]) {
+      const at = clean.indexOf(`${key}: [`);
+      if (at === -1) continue;
+      const list = balanced(clean, clean.indexOf('[', at), '[', ']');
+      for (const n of list.matchAll(/name:\s*'([^']+)'/g)) params.add(`${kind}:${n[1]}`);
+      // `$` as well as a separator, and it is not decoration: `query:
+      // [ALLOW_PARTIAL]` on one line is the whole list with nothing after the
+      // identifier, so a lookahead demanding a trailing comma or bracket found
+      // nothing and GET computers read as taking no parameters at all.
+      for (const id of list.matchAll(/(?:^|[[,\s])([A-Z_]{2,})(?=[,\s\]]|$)/g)) {
+        if (sharedQuery.has(id[1])) params.add(`query:${sharedQuery.get(id[1])}`);
+      }
+    }
+
+    // Only the `object(...)` bodies have named fields. A raw one — the file
+    // upload's `{ type: 'string', format: 'binary' }` — has none to name.
+    const bodyAt = clean.indexOf('body: object(');
+    if (bodyAt !== -1) {
+      const args = balanced(clean, clean.indexOf('(', bodyAt), '(', ')');
+      for (const k of topLevelKeys(balanced(args, args.indexOf('{'), '{', '}'))) {
+        params.add(`body:${k}`);
+      }
+    }
+    table.set(`${m[1]} ${m[2]}`, params);
+  }
+  return table;
+}
+
+/** The same, read out of the mirror's PARAMETERS map. */
+function mirrorParameters() {
+  const section = mirrorSection('PARAMETERS', 'UNIMPLEMENTED_PARAMETERS');
+  const table = new Map();
+  const entry = /\[\s*'([A-Z]+ [^']+)'\s*,\s*\[/g;
+  for (let m = entry.exec(section); m; m = entry.exec(section)) {
+    const list = balanced(section, m.index + m[0].length - 1, '[', ']');
+    table.set(m[1], new Set([...list.matchAll(/'([^']+)'/g)].map((p) => p[1])));
+  }
+  return table;
+}
+
+// --- the comparison ---------------------------------------------------------
+
+const problems = [];
+
+const missingRoutes = [...platformRoutes].filter((r) => !mirrorRoutes.has(r)).sort();
+const extraRoutes = [...mirrorRoutes].filter((r) => !platformRoutes.has(r)).sort();
+
+if (missingRoutes.length) {
+  problems.push(
+    'routes the platform exposes that the mirror does not list:\n' +
+      missingRoutes.map((r) => `  + ${r}`).join('\n') +
+      '\n\n  Add each to ALLOWED in test/allowlist.ts. If this SDK cannot call it yet,\n' +
+      '  add it to UNIMPLEMENTED too, so the gap stays a number somebody has to edit down.',
+  );
+}
+if (extraRoutes.length) {
+  problems.push(
+    'routes the mirror lists that the platform does not expose:\n' +
+      extraRoutes.map((r) => `  - ${r}`).join('\n') +
+      '\n\n  Either the platform dropped these, or the mirror invented them. A call to\n' +
+      "  one of these 404s in a user's hands.",
+  );
+}
+
+const platformParams = platformParameters();
+const mirrorParams = mirrorParameters();
+
+// Only over the routes both tables agree exist. A route missing from the mirror
+// is already reported above, and reporting each of its parameters again buries
+// the one line that says what to do about it.
+const shared = [...platformRoutes].filter((r) => mirrorRoutes.has(r)).sort();
+const missingParams = [];
+const extraParams = [];
+let counted = 0;
+
+for (const route of shared) {
+  const theirs = platformParams.get(route) ?? new Set();
+  const ours = mirrorParams.get(route) ?? new Set();
+  counted += theirs.size;
+  for (const p of [...theirs].sort()) if (!ours.has(p)) missingParams.push(`${route}  ${p}`);
+  for (const p of [...ours].sort()) if (!theirs.has(p)) extraParams.push(`${route}  ${p}`);
+}
+
+if (!platformParams.size) {
+  problems.push(
+    'no parameters could be read out of web/lib/apidoc.ts.\n\n' +
+      '  The DOCS table moved or changed shape. This check is silently vacuous until\n' +
+      '  the reader above is fixed — which is worse than it failing, so it fails.',
+  );
+}
+if (missingParams.length) {
+  problems.push(
+    'parameters the platform documents that the mirror does not list:\n' +
+      missingParams.map((p) => `  + ${p}`).join('\n') +
+      '\n\n  Add each to PARAMETERS in test/allowlist.ts. If this SDK cannot send it yet,\n' +
+      '  add it to UNIMPLEMENTED_PARAMETERS too — which is the line that makes the gap\n' +
+      "  somebody's to close rather than nobody's to notice.",
+  );
+}
+if (extraParams.length) {
+  problems.push(
+    'parameters the mirror lists that the platform does not document:\n' +
+      extraParams.map((p) => `  - ${p}`).join('\n') +
+      '\n\n  Either the platform dropped these, or the mirror invented them. One the SDK\n' +
+      '  actually sends is a field the platform ignores, silently.',
+  );
+}
+
+if (!problems.length) {
   console.log(
-    `check:surface — the mirror matches the platform (${mirror.size} routes, from ${platform}).`,
+    `check:surface — the mirror matches the platform (${mirrorRoutes.size} routes, ` +
+      `${counted} parameters, from ${platform}).`,
   );
   process.exit(0);
 }
 
-if (missing.length) {
-  console.error('\ncheck:surface — routes the platform exposes that the mirror does not list:');
-  for (const r of missing) console.error(`  + ${r}`);
-  console.error(
-    '\n  Add each to ALLOWED in test/allowlist.ts. If this SDK cannot call it yet,\n' +
-      '  add it to UNIMPLEMENTED too, so the gap stays a number somebody has to edit down.',
-  );
-}
-if (extra.length) {
-  console.error('\ncheck:surface — routes the mirror lists that the platform does not expose:');
-  for (const r of extra) console.error(`  - ${r}`);
-  console.error(
-    '\n  Either the platform dropped these, or the mirror invented them. A call to\n' +
-      "  one of these 404s in a user's hands.",
-  );
-}
-console.error(`\n  Platform: ${join(platform, 'web/lib/surface.ts')}`);
+for (const p of problems) console.error(`\ncheck:surface — ${p}`);
+console.error(`\n  Platform: ${join(platform, 'web/lib')}`);
 process.exit(1);
