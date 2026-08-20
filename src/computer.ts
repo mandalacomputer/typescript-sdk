@@ -502,11 +502,15 @@ export class Computer {
    * fills in behind you. Follow with {@link waitUntilBuilt} before starting it.
    */
   async clone(name?: string, opts: CallOptions = {}): Promise<Computer> {
-    const data = await this.#t.json('POST', P.computerAction(this.id, 'clone'), {
-      body: P.nameBody(name),
-      signal: opts.signal,
-    });
-    return new Computer(this.#t, P.computerPayload(data));
+    const path = P.computerAction(this.id, 'clone');
+    const data = P.computerPayload(
+      await this.#t.json('POST', path, {
+        body: P.nameBody(name),
+        signal: opts.signal,
+      }),
+    );
+    if (!data.id) throw new MandalaError(`expected a computer from POST ${path}`);
+    return new Computer(this.#t, data);
   }
 
   /**
@@ -768,38 +772,40 @@ export class Computer {
       // GET, because this wait probes the guest and never refreshes: what it
       // has is what the create, clone or get that produced this handle saw.
       if (this.buildFailed) throw this.#buildFailure();
-      try {
-        // The probe carries what is left of this wait, as well as the caller's
-        // signal. Under the client's own per-request deadline alone a wait told
-        // to give up after 180 seconds spends up to another 60 inside a request
-        // whose answer it has already stopped waiting for — and a caller's
-        // abort could not interrupt a probe already in flight at all.
-        const res = await this.exec(GUEST_PROBE, {
-          timeoutS: 5,
-          signal: deadlineSignal(deadline - Date.now(), signal),
-        });
-        if (res.ok) return this;
-      } catch (err) {
-        // Everything else is polled through: a 409 means the agent is not up
-        // yet, a 503 means its host could not be reached, and a guest agent that
-        // is merely slow answers 502 for the first seconds of a boot. Those are
-        // what this loop is for. A revoked key is not.
-        if (isPermanent(err)) throw err;
-        // Nor is a caller who cancelled. The wait's own deadline firing inside
-        // a probe is not caught here — that is this loop ending, and the check
-        // below is what names it.
-        if (signal?.aborted) throw err;
-        // The guest can answer 502 for the first seconds of a boot. Everything
-        // else retried here is one of the same typed transient failures as the
-        // two refresh-based waits; a malformed request must not be disguised as
-        // three minutes of guest unavailability.
-        if (
-          Date.now() < deadline &&
-          !(isTransient(err) || (err instanceof APIError && err.status === 502))
-        ) {
-          throw err;
+      if (Date.now() < deadline) {
+        try {
+          // The probe carries what is left of this wait, as well as the caller's
+          // signal. Under the client's own per-request deadline alone a wait told
+          // to give up after 180 seconds spends up to another 60 inside a request
+          // whose answer it has already stopped waiting for — and a caller's
+          // abort could not interrupt a probe already in flight at all.
+          const res = await this.exec(GUEST_PROBE, {
+            timeoutS: 5,
+            signal: deadlineSignal(deadline - Date.now(), signal),
+          });
+          if (res.ok) return this;
+        } catch (err) {
+          // Everything else is polled through: a 409 means the agent is not up
+          // yet, a 503 means its host could not be reached, and a guest agent that
+          // is merely slow answers 502 for the first seconds of a boot. Those are
+          // what this loop is for. A revoked key is not.
+          if (isPermanent(err)) throw err;
+          // Nor is a caller who cancelled. The wait's own deadline firing inside
+          // a probe is not caught here — that is this loop ending, and the check
+          // below is what names it.
+          if (signal?.aborted) throw err;
+          // The guest can answer 502 for the first seconds of a boot. Everything
+          // else retried here is one of the same typed transient failures as the
+          // two refresh-based waits; a malformed request must not be disguised as
+          // three minutes of guest unavailability.
+          if (
+            Date.now() < deadline &&
+            !(isTransient(err) || (err instanceof APIError && err.status === 502))
+          ) {
+            throw err;
+          }
+          delayMs = retryDelay(pollMs, err);
         }
-        delayMs = retryDelay(pollMs, err);
       }
       if (Date.now() >= deadline) {
         throw new TimeoutError(`${this.id} guest did not respond within ${timeoutMs}ms`);
@@ -850,7 +856,7 @@ export class Computer {
     // The JSON and SSE readers both name that failure; this route handed it
     // back as a PNG. readFile stays permissive on purpose — a guest file is
     // whatever the guest has — but a screenshot is an image or it is nothing.
-    if (!res.contentType.startsWith('image/')) {
+    if (!res.contentType.toLowerCase().startsWith('image/')) {
       throw new MandalaError(
         `expected an image from GET ${P.computerAction(this.id, 'screenshot')}, ` +
           `got ${res.contentType}`,
@@ -1098,7 +1104,7 @@ export class Computer {
     // the corner of the screen — the exact wrong answer to give a caller about
     // to move relative to it.
     if (!bool(res.known)) return undefined;
-    return { x: Number(res.x ?? 0), y: Number(res.y ?? 0) };
+    return { x: num(res.x), y: num(res.y) };
   }
 
   // --- the guest ------------------------------------------------------
@@ -1338,12 +1344,15 @@ export class Computer {
    * the platform generates one.
    */
   async snapshot(opts: { memory?: boolean; name?: string } & CallOptions = {}): Promise<Snapshot> {
-    const data = await this.#t.json<Record<string, unknown>>(
-      'POST',
-      P.computerAction(this.id, 'snapshots'),
-      { body: P.snapshotBody(Boolean(opts.memory), opts.name), signal: opts.signal },
-    );
-    return toSnapshot(data ?? {});
+    const path = P.computerAction(this.id, 'snapshots');
+    const data = await this.#t.json<Record<string, unknown>>('POST', path, {
+      body: P.snapshotBody(Boolean(opts.memory), opts.name),
+      signal: opts.signal,
+    });
+    if (!P.isRecord(data) || !data.id) {
+      throw new MandalaError(`expected a snapshot from POST ${path}`);
+    }
+    return toSnapshot(data);
   }
 
   /**
@@ -1358,12 +1367,12 @@ export class Computer {
    * `client.snapshots.list({ computerId })`.
    */
   async holdings(opts: CallOptions = {}): Promise<Holdings> {
-    const data = await this.#t.json<Record<string, unknown>>(
-      'GET',
-      P.computerAction(this.id, 'snapshots'),
-      { signal: opts.signal },
-    );
-    return toHoldings(data ?? {});
+    const path = P.computerAction(this.id, 'snapshots');
+    const data = await this.#t.json<Record<string, unknown>>('GET', path, { signal: opts.signal });
+    if (!P.isRecord(data) || !Object.keys(data).length) {
+      throw new MandalaError(`expected snapshot holdings from GET ${path}`);
+    }
+    return toHoldings(data);
   }
 
   /** The automatic daily snapshot schedule. */
@@ -1454,19 +1463,16 @@ export class Computer {
    */
   async agent(args: AgentArgs): Promise<AgentResult> {
     let result: AgentResult | undefined;
-    let failure: { error: string; status: number } | undefined;
     for await (const ev of this.agentStream(args)) {
       if (ev.type === 'done') result = ev.result;
-      else if (ev.type === 'error') failure = ev;
-    }
-    if (failure) {
-      // Through errorForStatus, so a 401 that arrives mid-run is an
-      // AuthenticationError like a 401 anywhere else. Thrown as a bare
-      // MandalaError, the one failure that reaches a caller inside a stream was
-      // the one failure their `catch (e) { if (e instanceof ...) }` — and
-      // isTransient — could not classify.
-      const message = `the agent run failed: ${failure.error}`;
-      throw failure.status ? errorForStatus(failure.status, message) : new MandalaError(message);
+      else if (ev.type === 'error') {
+        // Stop consuming immediately. The stream has no request deadline, so a
+        // server that reports an error and then stays open must not keep the
+        // caller waiting forever. Returning from the generator also cancels
+        // the response reader in Transport.sse's finally.
+        const message = `the agent run failed: ${ev.error}`;
+        throw ev.status ? errorForStatus(ev.status, message) : new MandalaError(message);
+      }
     }
     if (!result) {
       throw new MandalaError('the agent stream ended without a result');
@@ -1550,7 +1556,12 @@ export class Computer {
         noTimeout: true,
       },
     );
-    return toAgentResult(data ?? {});
+    if (!P.isRecord(data) || data.stop == null) {
+      throw new MandalaError(
+        `expected an agent result from POST ${P.computerAction(this.id, 'agent')}`,
+      );
+    }
+    return toAgentResult(data);
   }
 }
 
