@@ -131,16 +131,28 @@ export class Computers {
    * killed — nothing in a language can promise that — so a long-lived fleet
    * wants the platform's idle suspend as the real backstop, not this.
    */
-  async ephemeral(args?: P.CreateArgs): Promise<EphemeralComputer>;
+  async ephemeral(args?: P.CreateArgs, opts?: CallOptions): Promise<EphemeralComputer>;
   async ephemeral<T>(
     args: P.CreateArgs,
     fn: (computer: EphemeralComputer) => Promise<T>,
+    opts?: CallOptions,
   ): Promise<T>;
   async ephemeral<T>(
     args: P.CreateArgs = {},
-    fn?: (computer: EphemeralComputer) => Promise<T>,
+    fnOrOpts?: ((computer: EphemeralComputer) => Promise<T>) | CallOptions,
+    rest: CallOptions = {},
   ): Promise<T | EphemeralComputer> {
-    const data = await this.#t.json('POST', P.COMPUTERS, { body: P.createBody(args) });
+    // The callback is optional and the options follow it, so the second
+    // argument is whichever of the two the caller supplied.
+    const fn = typeof fnOrOpts === 'function' ? fnOrOpts : undefined;
+    const opts = typeof fnOrOpts === 'function' ? rest : (fnOrOpts ?? {});
+    // Only the create carries the signal. Cancelling the cleanup delete would
+    // leave a billable machine behind, which is the one thing this method
+    // exists to prevent.
+    const data = await this.#t.json('POST', P.COMPUTERS, {
+      body: P.createBody(args),
+      signal: opts.signal,
+    });
     const computer = new EphemeralComputer(this.#t, P.computerPayload(data));
     if (!fn) return computer;
     let result: T;
@@ -230,8 +242,8 @@ export class Snapshots {
    * Refused on an orphaned snapshot — {@link clone} is what works there, because
    * a restore puts the disk back on a source that no longer exists.
    */
-  async restore(snapshotId: string): Promise<void> {
-    await this.#t.json('POST', P.snapshotAction(snapshotId, 'restore'));
+  async restore(snapshotId: string, opts: CallOptions = {}): Promise<void> {
+    await this.#t.json('POST', P.snapshotAction(snapshotId, 'restore'), { signal: opts.signal });
   }
 
   /**
@@ -247,16 +259,17 @@ export class Snapshots {
    * `"building"`. Until that lands there is nothing to boot and starting it
    * throws `ConflictError`; wait with {@link Computer.waitUntilBuilt}.
    */
-  async clone(snapshotId: string, name?: string): Promise<Computer> {
+  async clone(snapshotId: string, name?: string, opts: CallOptions = {}): Promise<Computer> {
     const data = await this.#t.json('POST', P.snapshotAction(snapshotId, 'clone'), {
       body: P.nameBody(name),
+      signal: opts.signal,
     });
     return new Computer(this.#t, P.computerPayload(data));
   }
 
   /** Remove a snapshot permanently. Later snapshots in the same chain are unaffected. */
-  async delete(snapshotId: string): Promise<void> {
-    await this.#t.json('DELETE', P.snapshot(snapshotId));
+  async delete(snapshotId: string, opts: CallOptions = {}): Promise<void> {
+    await this.#t.json('DELETE', P.snapshot(snapshotId), { signal: opts.signal });
   }
 }
 
@@ -270,8 +283,8 @@ export class Templates {
 
   /** The base images a computer can be created from. */
   async list(opts: CallOptions = {}): Promise<Template[]> {
-    const data = await this.#t.json<unknown[]>('GET', P.TEMPLATES, { signal: opts.signal });
-    return (data ?? []).filter(P.isRecord).map(toTemplate);
+    const data = await this.#t.jsonArray('GET', P.TEMPLATES, { signal: opts.signal });
+    return data.filter(P.isRecord).map(toTemplate);
   }
 }
 
@@ -290,7 +303,7 @@ export class Sizes {
    * is typically answered in about a second where a custom shape boots cold.
    */
   async list(opts: CallOptions = {}): Promise<Size[]> {
-    const data = await this.#t.json<unknown[]>('GET', P.SIZES, { signal: opts.signal });
-    return (data ?? []).filter(P.isRecord).map(toSize);
+    const data = await this.#t.jsonArray('GET', P.SIZES, { signal: opts.signal });
+    return data.filter(P.isRecord).map(toSize);
   }
 }

@@ -16,7 +16,15 @@ const num = (v: unknown, fallback = 0): number => {
   const n = Number(v);
   return Number.isFinite(n) ? n : fallback;
 };
-const bool = (v: unknown): boolean => Boolean(v);
+// Not Boolean() alone. A platform that ever stringifies one of these sends
+// `"false"`, which is a non-empty string and therefore true — the one coercion
+// in this file that inverts a field's meaning rather than blurring it, and
+// `timed_out: "false"` reading as timed out is a worse answer than any missing
+// number here can produce.
+const bool = (v: unknown): boolean => {
+  if (typeof v === 'string') return v !== '' && v !== 'false' && v !== '0';
+  return Boolean(v);
+};
 
 /**
  * Everything needed to put a computer's live desktop on a page.
@@ -311,7 +319,11 @@ export function toBackgroundExec(d: Record<string, unknown>): BackgroundExec {
   return {
     pid: num(d.pid),
     running: bool(d.running),
-    exitCode: d.exit_code == null ? undefined : num(d.exit_code),
+    // The empty string counts as "did not send one", for toExecResult's reason
+    // about the same field: Number('') is 0, and a command still running
+    // reported as having exited successfully is the one wrong answer here that
+    // reads as fine.
+    exitCode: d.exit_code == null || d.exit_code === '' ? undefined : num(d.exit_code),
     stdout: str(d.stdout),
     stderr: str(d.stderr),
     more: bool(d.more),
