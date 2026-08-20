@@ -195,6 +195,34 @@ export class OriginUnreachableError extends APIError {
   override name = 'OriginUnreachableError';
 }
 
+/**
+ * 520 — the platform answered a proxy with something it could not read.
+ *
+ * Sits between the other two and must not be filed with either, because the
+ * question a caller is really asking is whether their work happened, and this is
+ * the one status whose honest answer is "unknown".
+ *
+ * A 524 means the request arrived and is still being worked on. 521-523 mean it
+ * never arrived, so nothing was started. A 520 means it **did** arrive — the
+ * platform received it and then returned an empty, unknown or oversized
+ * response, so it may have been carried out in full, in part, or not at all, and
+ * the answer was lost rather than never produced.
+ *
+ * Which makes a blind retry the thing to be careful about. Re-sending a read
+ * costs nothing; re-sending a create can leave two computers where one was
+ * meant, both billable, on the strength of a failure that said the first never
+ * happened.
+ *
+ * It was filed with {@link OriginUnreachableError} at first, on the reading that
+ * the whole 52x range is the edge failing to reach the platform. It is not, and
+ * the message that came with it — "the request never arrived, so nothing was
+ * started" — was exactly the confident falsehood this work exists to remove,
+ * pointed the other way.
+ */
+export class OriginResponseError extends APIError {
+  override name = 'OriginResponseError';
+}
+
 /** A wait helper gave up before the computer reached the expected state. */
 export class TimeoutError extends MandalaError {
   override name = 'TimeoutError';
@@ -208,7 +236,9 @@ const BY_STATUS: Record<number, typeof APIError> = {
   409: ConflictError,
   503: UnavailableError,
   504: GatewayTimeoutError,
-  520: OriginUnreachableError,
+  // NOT OriginUnreachableError, which is the trap in this range: 520 means the
+  // platform WAS reached and answered unreadably. See OriginResponseError.
+  520: OriginResponseError,
   521: OriginUnreachableError,
   522: OriginUnreachableError,
   523: OriginUnreachableError,
@@ -268,6 +298,15 @@ const GATEWAY_TIMEOUT_MESSAGE =
  * proxy in the chain, including one in front of a `baseUrl` this client has
  * never seen.
  */
+/** What a caller is told when the platform's own answer arrived unreadable. */
+const ORIGIN_RESPONSE_MESSAGE =
+  'the platform answered a proxy in front of it with something the proxy could not read — ' +
+  'an empty, unknown or oversized response. Unlike an unreachable origin, the request did ' +
+  'arrive: it may have been carried out in full, in part, or not at all, and it is the ' +
+  'answer that was lost rather than never produced. Retrying a read costs nothing; before ' +
+  'retrying anything that creates something — a computer, a snapshot — check whether the ' +
+  'first attempt took effect, or you may end up with two of it';
+
 /** What a caller is told when a proxy could not reach the platform at all. */
 const ORIGIN_UNREACHABLE_MESSAGE =
   'a proxy in front of the platform could not reach it. The request never arrived, so ' +
@@ -308,6 +347,13 @@ export function errorForStatus(
   // of 520-526 means the request never reached the platform, so there is no
   // reading on which that body carries the platform's account of what happened —
   // nothing to defer to, and a guard would only look symmetrical.
+  // Guarded, where the unreachable statuses below are not, and the difference is
+  // which of them the platform could have spoken through. A 520 is its own
+  // answer arriving mangled, so a body that parsed as this surface's JSON
+  // plausibly IS its account. On 521-526 it provably cannot be.
+  if (Cls === OriginResponseError && !namedTheFailure(body)) {
+    return new OriginResponseError(ORIGIN_RESPONSE_MESSAGE, status, body);
+  }
   if (Cls === OriginUnreachableError) {
     const said = TLS_STATUSES.has(status) ? ORIGIN_TLS_MESSAGE : ORIGIN_UNREACHABLE_MESSAGE;
     return new OriginUnreachableError(said, status, body);
