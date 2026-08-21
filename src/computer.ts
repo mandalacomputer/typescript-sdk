@@ -16,8 +16,10 @@ import {
   NotFoundError,
   PermissionDeniedError,
   PlanLimitError,
+  RangeNotSatisfiableError,
   RateLimitError,
   TimeoutError,
+  TooLargeError,
   ValidationError,
 } from './errors.js';
 import type {
@@ -44,7 +46,13 @@ import {
 } from './models.js';
 import * as P from './paths.js';
 import type { CallOptions } from './resources.js';
-import { MAX_TIMER_MS, MODEL_KEY_HEADER, type Query, type Transport } from './transport.js';
+import {
+  type Bytes,
+  MAX_TIMER_MS,
+  MODEL_KEY_HEADER,
+  type Query,
+  type Transport,
+} from './transport.js';
 
 /**
  * What a computer renders at when its create did not ask for anything else.
@@ -179,6 +187,134 @@ export type DeleteOptions = {
   /** The fingerprint from {@link Computer.holdings}. */
   expect?: string;
 } & CallOptions;
+
+/**
+ * A window of a guest file, and where it sits in the whole one.
+ *
+ * The metadata is half the point of asking for a window: a request can come
+ * back with fewer bytes than it asked for — a window past what one request
+ * moves is trimmed rather than refused — so `offset` and `total` are the only
+ * authority on where the answer starts and how much is left. Without them a
+ * `Range` would be write-only.
+ */
+export type FileChunk = {
+  bytes: Uint8Array;
+  /** Where in the file these bytes start. */
+  offset: number;
+  /**
+   * The file's whole length.
+   *
+   * `undefined` only for a file the guest cannot measure — see `seekable` —
+   * where there is no total to promise rather than a total of zero.
+   */
+  total?: number;
+  /**
+   * Whether this is the window that was asked for rather than the whole file.
+   *
+   * `false` means the range was ignored and everything came, which is the
+   * answer for a file no range can be served out of. The status is how a caller
+   * tells; the byte count is not, since a window can legitimately be the whole
+   * file.
+   */
+  partial: boolean;
+  /**
+   * Whether this file can be windowed at all.
+   *
+   * `false` for a file whose length the guest could not report — a `/proc`
+   * entry, say. Those have no byte positions to name, so a range against one is
+   * ignored and there is no total to page towards.
+   */
+  seekable: boolean;
+};
+
+/** What a caller is told about a 206 that cannot be placed in its file. */
+const unplaceable = (path: string, why: string): MandalaError =>
+  new MandalaError(
+    `the platform answered 206 for ${path} ${why}, so where these bytes belong in the ` +
+      'file is unknown',
+  );
+
+/**
+ * A 206 that named no length to page towards.
+ *
+ * Its own sentence because both ends of a paged read can meet it, and both have
+ * the same two bad answers available: stop, and hand back a truncated file
+ * saying nothing, or ask on, and walk off the end into a 416.
+ */
+const noTotal = (path: string): MandalaError =>
+  new MandalaError(
+    `the platform answered 206 for ${path} without a total, so there is no length to page ` +
+      'towards and no way to tell a short answer from the end of the file',
+  );
+
+/** {@link Bytes} off the files route, read as a window of a file. */
+function toFileChunk(res: Bytes, path: string): FileChunk {
+  const partial = res.status === 206;
+  const seekable = res.acceptRanges !== 'none';
+  if (!partial) {
+    // No range was honoured, so the whole file arrived. Where there is a length
+    // to state, that is it — a caller deciding whether to page has the answer
+    // already and it is not a guess.
+    //
+    // A file the guest could not measure has no such number. The platform
+    // declines to promise one precisely because the next read of a /proc entry
+    // is a different length, and manufacturing one here out of the bytes that
+    // happened to arrive would be this SDK asserting what the platform refused
+    // to. `seekable` is the signal there, as the type says.
+    return {
+      bytes: res.bytes,
+      offset: 0,
+      total: seekable ? res.bytes.length : undefined,
+      partial,
+      seekable,
+    };
+  }
+  if (!res.contentRange) {
+    // A 206 whose Content-Range did not survive the trip — stripped by a proxy,
+    // or unreadable. Refused rather than assumed to start at zero: these bytes
+    // are somewhere in the file and nothing left says where, and a caller
+    // writing them at a guessed offset corrupts the copy silently. This is the
+    // one failure the status was added to prevent, so it is not papered over.
+    throw unplaceable(path, 'without a readable Content-Range');
+  }
+  // The header and the body have to agree about how many bytes this is. They
+  // are two statements of one fact and only the header is checked anywhere
+  // else, so a disagreement leaves the same question open as a missing header:
+  // an empty body reads to the paging loop as the end of the file — `scp` then
+  // reports 0 bytes and exits 0 — and a body longer than its window carries the
+  // offset past the total, which ends the loop as a complete file with extra
+  // bytes in it. Both are silent, and both are answered here.
+  const window = res.contentRange.end - res.contentRange.start + 1;
+  if (res.bytes.length !== window) {
+    throw unplaceable(path, `with ${res.bytes.length} bytes for a Content-Range naming ${window}`);
+  }
+  return {
+    bytes: res.bytes,
+    offset: res.contentRange.start,
+    total: res.contentRange.total,
+    partial,
+    seekable,
+  };
+}
+
+/**
+ * A refusal for size, told what to do about it in this SDK's own words.
+ *
+ * The platform's message names the `Range` header, which is the right sentence
+ * for the curl in its docs and the wrong one here — a caller of this SDK never
+ * writes that header and has no way to guess which method does. Appended rather
+ * than substituted: the platform's half carries the file's actual size and the
+ * ceiling it met, and neither is knowable from this side.
+ */
+function pointPastTheCeiling(err: unknown): unknown {
+  if (!(err instanceof TooLargeError)) return err;
+  return new TooLargeError(
+    `${err.message} — from this SDK that is readFileChunks(path), which pages a file of any ` +
+      'size, or readFilePart(path, { offset, length }) for one window of it',
+    err.status,
+    err.body,
+  );
+}
 
 export class Computer {
   #t: Transport;
@@ -1332,13 +1468,7 @@ export class Computer {
     path: string,
     opts: { timeoutMs?: number } & CallOptions = {},
   ): Promise<Uint8Array> {
-    const res = await this.#t.bytes('GET', P.computerAction(this.id, 'files'), {
-      query: P.filesQuery(path),
-      noTimeout: opts.timeoutMs === 0,
-      minTimeoutMs: opts.timeoutMs,
-      signal: opts.signal,
-    });
-    return res.bytes;
+    return (await this.#readFileRequest(path, opts)).bytes;
   }
 
   /** {@link readFile}, decoded as UTF-8. */
@@ -1347,6 +1477,226 @@ export class Computer {
     opts: { timeoutMs?: number } & CallOptions = {},
   ): Promise<string> {
     return new TextDecoder().decode(await this.readFile(path, opts));
+  }
+
+  /** The one request behind every read on this route. */
+  async #readFileRequest(
+    path: string,
+    opts: { offset?: number; length?: number; timeoutMs?: number } & CallOptions,
+  ): Promise<Bytes> {
+    const headers = P.rangeHeaders(opts.offset, opts.length);
+    try {
+      return await this.#t.bytes('GET', P.computerAction(this.id, 'files'), {
+        query: P.filesQuery(path),
+        headers,
+        noTimeout: opts.timeoutMs === 0,
+        minTimeoutMs: opts.timeoutMs,
+        signal: opts.signal,
+      });
+    } catch (err) {
+      // Here rather than on readFile, which was the only method that had it —
+      // readFilePart with no window is the same whole-file read and earned the
+      // same refusal with none of the help. And only where no window was asked
+      // for: the platform applies the ceiling to the file when there is no
+      // range and to the WINDOW when there is, so a ranged request cannot earn
+      // a 413 at all. Which makes the rewrite unambiguous rather than a guess —
+      // wherever it fires, paging really is the answer.
+      throw headers ? err : pointPastTheCeiling(err);
+    }
+  }
+
+  /**
+   * One window of a file, with where it starts and how much file there is.
+   *
+   * ```ts
+   * const head = await c.readFilePart('/var/log/app.log', { length: 64 * 1024 });
+   * const tail = await c.readFilePart('/var/log/app.log', { offset: -4096 });
+   * console.log(`${head.bytes.length} of ${head.total} bytes`);
+   * ```
+   *
+   * `offset` is where to start and `length` how much to ask for; a **negative**
+   * offset is the tail — the last `-offset` bytes — and takes no length. With
+   * neither, this is {@link readFile} with the answer's metadata attached.
+   *
+   * **You can get fewer bytes than you asked for.** A window larger than one
+   * request moves is trimmed rather than refused, since the ceiling is not
+   * knowable before you ask — so {@link FileChunk.offset} and the length of
+   * what came back, not the numbers you passed, are where the next window
+   * starts. {@link readFileChunks} is that loop, already written.
+   *
+   * A file whose length the guest cannot report — a `/proc` entry — has no byte
+   * positions to name, so the range is ignored and the whole thing arrives with
+   * `partial: false` and `seekable: false`.
+   */
+  async readFilePart(
+    path: string,
+    opts: { offset?: number; length?: number; timeoutMs?: number } & CallOptions = {},
+  ): Promise<FileChunk> {
+    return toFileChunk(await this.#readFileRequest(path, opts), path);
+  }
+
+  /**
+   * A file of any size, in as many requests as it takes.
+   *
+   * ```ts
+   * const out = await open('./build.tar', 'w');
+   * for await (const chunk of c.readFileChunks('/home/user/build.tar')) {
+   *   await out.write(chunk.bytes);
+   * }
+   * await out.close();
+   * ```
+   *
+   * This is what `Range` exists for. One request moves a bounded number of
+   * bytes across the guest agent — 64 MiB today, and not a number to hard-code
+   * — so a 2 GB build output is something to page through rather than something
+   * {@link readFile} refuses with a {@link TooLargeError}. Chunks arrive in
+   * order and end to end, so writing each one where the last finished
+   * reconstructs the file; nothing is buffered but the chunk in hand.
+   *
+   * `offset` and `length` narrow it to part of the file, spelled as on
+   * {@link readFilePart} — a negative offset is the tail, which is paged from
+   * its true start so the chunks still arrive in order. `chunkBytes` caps how
+   * much any one request asks for, for a caller who wants to hold less than the
+   * platform is willing to send; left out, each request asks for the rest and
+   * takes whatever the ceiling allows.
+   *
+   * An empty file yields nothing. A file no range can be served out of yields
+   * once, with `partial: false`.
+   */
+  async *readFileChunks(
+    path: string,
+    opts: {
+      offset?: number;
+      length?: number;
+      chunkBytes?: number;
+      timeoutMs?: number;
+    } & CallOptions = {},
+  ): AsyncGenerator<FileChunk> {
+    const { chunkBytes } = opts;
+    if (chunkBytes !== undefined && (!Number.isSafeInteger(chunkBytes) || chunkBytes < 1)) {
+      throw new ValidationError(`chunkBytes must be at least one byte (got ${chunkBytes})`);
+    }
+    // Judged against the spelling the caller used, before the tail below turns
+    // it into something else. A `{ offset: -100, length: 10 }` is a range no
+    // header can express and has to be refused as one — resolved first it would
+    // instead become a silently ignored length, and a fractional offset would
+    // be reported against a number the caller never passed.
+    P.rangeHeader(opts.offset, opts.length);
+    const each = { timeoutMs: opts.timeoutMs, signal: opts.signal };
+    let offset = opts.offset ?? 0;
+    let remaining = opts.length;
+    let total: number | undefined;
+
+    if (offset < 0) {
+      // A tail, resolved to where it starts before anything is paged.
+      //
+      // The alternative — asking for `bytes=-N` and paging on from there —
+      // cannot work: a tail longer than one request moves is trimmed at its
+      // NEAR end, so the first answer would be the LAST chunk of the file and
+      // everything after it would arrive backwards. One byte is enough to learn
+      // the length, and from there this is an ordinary forward read whose start
+      // is the tail's own start. That is not the mistake the trimming rule
+      // warns about: the offset is derived from the file's real length rather
+      // than assumed, so the window still ends where the file does.
+      const wanted = -offset;
+      const probe = await this.readFilePart(path, { offset: -1, ...each }).catch((err: unknown) => {
+        // An empty file has no last byte, so the probe is refused with a
+        // total of zero rather than answered with nothing.
+        if (err instanceof RangeNotSatisfiableError && err.total === 0) return undefined;
+        throw err;
+      });
+      if (!probe) return;
+      if (!probe.partial) {
+        // No range could be served out of this file, so the probe brought all
+        // of it. There is nothing left to page towards.
+        yield probe;
+        return;
+      }
+      // A probe that WAS a window and named no total is the forward loop's
+      // failure met one request earlier, and it has to be answered the same
+      // way. Yielded and returned — which is what this did — it hands back the
+      // file's last byte as though it were the tail that was asked for: a
+      // one-byte `mandala scp` that reports success.
+      if (probe.total === undefined) throw noTotal(path);
+      total = probe.total;
+      offset = Math.max(0, total - wanted);
+      remaining = total - offset;
+    }
+
+    for (let first = true; ; first = false) {
+      const length =
+        remaining === undefined
+          ? chunkBytes
+          : chunkBytes === undefined
+            ? remaining
+            : Math.min(remaining, chunkBytes);
+      const chunk = await this.readFilePart(path, { offset, length, ...each }).catch(
+        (err: unknown) => {
+          // An empty file refuses every range, since there is no byte for one
+          // to name. Nothing to yield, and not a failure to report — but only
+          // on the first request: further along it would mean the file shrank
+          // under the read, which is worth surfacing rather than reading as an
+          // ordinary end.
+          if (first && err instanceof RangeNotSatisfiableError && err.total === 0) return undefined;
+          throw err;
+        },
+      );
+      if (!chunk) return;
+      if (!chunk.partial) {
+        // The range was ignored and the whole file came instead. Honest as the
+        // first answer — an unmeasurable file — and a contradiction as any
+        // later one, where these would be the file's first bytes handed back in
+        // the middle of a read that is already past them.
+        if (!first) {
+          throw new MandalaError(
+            `asked ${path} for bytes from ${offset} and was answered with the whole file; ` +
+              'a paging read cannot go on from that',
+          );
+        }
+        yield chunk;
+        return;
+      }
+      if (chunk.offset !== offset) {
+        throw new MandalaError(
+          `asked ${path} for bytes from ${offset} and was answered from ${chunk.offset}; ` +
+            'a paging read cannot go on from an answer that is not where it asked',
+        );
+      }
+      // A window wider than the one asked for. Not something the platform can
+      // do — it clamps to the request and then to its own ceiling — but a
+      // caller who bounded the read with `length` bounded it, and quietly
+      // handing back more than that is not a smaller wrong than handing back
+      // less. toFileChunk has already made the body and the header agree, so
+      // this is the request's own bound rather than a second check of theirs.
+      if (length !== undefined && chunk.bytes.length > length) {
+        throw new MandalaError(
+          `asked ${path} for ${length} bytes from ${offset} and was answered with ` +
+            `${chunk.bytes.length}; a paging read cannot hand back more than it asked for`,
+        );
+      }
+      if (chunk.total === undefined) throw noTotal(path);
+      if (total === undefined) {
+        total = chunk.total;
+      } else if (chunk.total !== total) {
+        throw new MandalaError(
+          `the total for ${path} changed from ${total} to ${chunk.total} during a paging read; ` +
+            'the chunks may belong to different versions of the file',
+        );
+      }
+      yield chunk;
+      // Unreachable for a real answer: a Content-Range names at least one byte,
+      // and toFileChunk refuses a 206 whose body does not fill the window it
+      // names. Kept as the one thing standing between a future change there and
+      // an unbounded request loop against the platform, which is the worst way
+      // any of this could fail.
+      if (chunk.bytes.length === 0) return;
+      offset += chunk.bytes.length;
+      if (remaining !== undefined) {
+        remaining -= chunk.bytes.length;
+        if (remaining <= 0) return;
+      }
+      if (offset >= total) return;
+    }
   }
 
   /**

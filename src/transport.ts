@@ -72,12 +72,47 @@ export type RequestOptions = {
   minTimeoutMs?: number;
 };
 
+/**
+ * One `Content-Range` window, as the response stated it.
+ *
+ * `total` is the whole file's length and not the window's — which is what makes
+ * a paging loop possible at all: it is how a caller reads off how much is left
+ * after being handed less than they asked for. Absent only where the response
+ * answered `*`, which this platform does not do on a 206 but which the grammar
+ * allows and a proxy in front of it could.
+ */
+export type ContentRange = {
+  /** First byte of the window, inclusive. */
+  start: number;
+  /** Last byte of the window, inclusive. */
+  end: number;
+  /** The whole representation's length, when the response named one. */
+  total?: number;
+};
+
 /** A non-JSON response body, with what the platform said it was. */
 export type Bytes = {
   bytes: Uint8Array;
   contentType: string;
   /** From Content-Disposition, when the platform named the file. */
   filename?: string;
+  /**
+   * The response's status.
+   *
+   * Carried because a `206` and a `200` are the same bytes and opposite
+   * answers: one is the window that was asked for, the other is the whole file
+   * with the range ignored. Without the status a caller cannot tell which they
+   * got, and a `Range` becomes write-only — you could ask for a window and not
+   * learn what came back.
+   */
+  status: number;
+  /** Which bytes these are, and how many the file has. Present on a `206`. */
+  contentRange?: ContentRange;
+  /**
+   * `Accept-Ranges`, lowercased. `none` is a file whose length the guest could
+   * not report — a `/proc` entry — which cannot be windowed at all.
+   */
+  acceptRanges?: string;
 };
 
 /**
@@ -169,6 +204,44 @@ const incompleteCount = (header: string): number => {
   const n = Number(header);
   return Number.isFinite(n) ? n : 0;
 };
+
+/**
+ * A `Content-Range` on a response that carried bytes: `bytes 0-1048575/2147483648`.
+ *
+ * Refused rather than half-read when the positions do not describe a window —
+ * this number is what a paging loop asks the next request from, so a start it
+ * cannot trust is worse than no start at all. The total is treated more gently:
+ * it is dropped when it contradicts the window, because losing "how much is
+ * left" still leaves the caller with bytes they know the position of.
+ */
+export function parseContentRange(header: string | null): ContentRange | undefined {
+  if (!header) return undefined;
+  const m = /^\s*bytes\s+(\d+)\s*-\s*(\d+)\s*\/\s*(\d+|\*)\s*$/i.exec(header);
+  if (!m) return undefined;
+  const start = Number(m[1]);
+  const end = Number(m[2]);
+  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || end < start) return undefined;
+  const total = m[3] === '*' ? Number.NaN : Number(m[3]);
+  // `end` is inclusive, so a file of `total` bytes has no byte at `total`.
+  return Number.isSafeInteger(total) && total > end ? { start, end, total } : { start, end };
+}
+
+/**
+ * The file's length off an unsatisfied range's `Content-Range`, whose window is
+ * a bare `*` and whose total is the number wanted.
+ *
+ * The whole point of a 416 — the caller asked a question about a file whose
+ * size they did not know, and this is the one answer that lets them ask again
+ * correctly instead of guessing. Read here rather than left for a caller to
+ * regex out of a header they never see.
+ */
+export function unsatisfiedTotal(header: string | null): number | undefined {
+  if (!header) return undefined;
+  const m = /^\s*bytes\s*\*\s*\/\s*(\d+)\s*$/i.exec(header);
+  if (!m) return undefined;
+  const total = Number(m[1]);
+  return Number.isSafeInteger(total) ? total : undefined;
+}
 
 /** A Retry-After header, in milliseconds from now. */
 const retryAfterMs = (header: string | null): number | undefined => {
@@ -394,12 +467,12 @@ export class Transport {
         body = text;
       }
     }
-    return errorForStatus(
-      resp.status,
-      message,
-      body,
-      retryAfterMs(resp.headers.get('retry-after')),
-    );
+    return errorForStatus(resp.status, message, body, {
+      retryAfterMs: retryAfterMs(resp.headers.get('retry-after')),
+      // Only ever set on a 416, which is the one status that answers with a
+      // Content-Range naming the file rather than a window of it.
+      rangeTotal: unsatisfiedTotal(resp.headers.get('content-range')),
+    });
   }
 
   /**
@@ -476,10 +549,14 @@ export class Transport {
       sent,
       opts.signal,
     );
+    const acceptRanges = sent.resp.headers.get('accept-ranges');
     return {
       bytes: new Uint8Array(buffer),
       contentType: sent.resp.headers.get('content-type') ?? 'application/octet-stream',
       filename: filenameFrom(sent.resp.headers.get('content-disposition')),
+      status: sent.resp.status,
+      contentRange: parseContentRange(sent.resp.headers.get('content-range')),
+      acceptRanges: acceptRanges?.trim().toLowerCase() || undefined,
     };
   }
 
