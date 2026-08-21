@@ -76,7 +76,10 @@ export class Computers {
       query: { allow_partial: opts.allowPartial ? 1 : undefined },
       signal: opts.signal,
     });
-    return { items: items.map((c) => new Computer(this.#t, c)), incomplete };
+    return {
+      items: items.map((c) => oneComputer(this.#t, c, 'GET', P.COMPUTERS)),
+      incomplete,
+    };
   }
 
   async get(computerId: string, opts: CallOptions = {}): Promise<Computer> {

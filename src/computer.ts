@@ -476,6 +476,21 @@ export class Computer {
     return this.#power('restart', opts);
   }
 
+  async #refreshAfterMutation(mutation: string, opts: CallOptions): Promise<this> {
+    try {
+      return await this.refresh(opts);
+    } catch (cause) {
+      // The mutating request has already answered successfully. Keep that fact
+      // out of the transient error taxonomy: retrying a start, stop, restart or
+      // update because only this GET failed can repeat work that was applied.
+      throw new MandalaError(
+        `${mutation} succeeded, but refreshing ${this.id} failed; this handle still has its ` +
+          'previous state. Do not retry the mutation solely because of this refresh failure.',
+        { cause },
+      );
+    }
+  }
+
   async #power(action: string, opts: CallOptions = {}, query?: Query): Promise<this> {
     // The platform answers a power action with the computer, so this is one
     // round trip where the Python SDK spends two. Guarded anyway: a platform
@@ -491,7 +506,7 @@ export class Computer {
       this.#data = data;
       return this;
     }
-    return this.refresh(opts);
+    return this.#refreshAfterMutation(`POST ${P.computerAction(this.id, action)}`, opts);
   }
 
   /**
@@ -541,7 +556,7 @@ export class Computer {
       this.#data = data;
       return this;
     }
-    return this.refresh(opts);
+    return this.#refreshAfterMutation(`PATCH ${P.computer(this.id)}`, opts);
   }
 
   /** Give this computer a new name. Sugar over {@link update}. */
@@ -675,14 +690,18 @@ export class Computer {
    * while the guest OS is still booting. Use {@link waitForGuest} when you need
    * something inside the guest to be ready.
    *
-   * Throws rather than waiting out the timeout for the two states that will not
-   * become "running" on their own — a failed build, and a suspended session
-   * nobody has resumed.
+   * Throws rather than waiting out the timeout for states that will not become
+   * "running" on their own — a failed build, a stopped machine, and a suspended
+   * session nobody has resumed.
    */
   async waitUntilRunning(opts: WaitOptions = {}): Promise<this> {
     const { timeoutMs = 120_000, pollMs = 2_000, signal } = opts;
     checkWait(timeoutMs, pollMs);
     const deadline = Date.now() + timeoutMs;
+    // A create may return a stopped computer and the reason its first start
+    // failed. refresh() correctly clears that one-attempt field, so retain it
+    // for the failure this wait is about before the first poll replaces it.
+    const initialStartError = this.startError;
     // Success is a verdict, and no verdict is reached on state observed before
     // this call: when every refresh fails transiently, the handle may be
     // holding data from an old list(), and "running" concluded from that —
@@ -721,6 +740,18 @@ export class Computer {
       // A computer with no disk will never start on its own, and waiting out
       // the full timeout to say so helps nobody.
       if (this.buildFailed) throw this.#buildFailure();
+      // Stopped is stable just like suspended: neither state progresses to
+      // running without a start request. In particular, a create that returned
+      // start_error used to lose that explanation on refresh and poll until the
+      // full timeout while repeatedly observing the same stopped state.
+      if (this.status === 'stopped') {
+        const reason = this.startError || initialStartError;
+        throw new MandalaError(
+          reason
+            ? `${this.id} is stopped after it failed to start: ${reason}. Call start() to try again`
+            : `${this.id} is stopped and will not start on its own: call start() to start it`,
+        );
+      }
       // Nor will a suspended one. Left to spin it reports a machine that is
       // one call from running as a timeout — the least informative answer
       // available about the one case the caller can fix in a line.
