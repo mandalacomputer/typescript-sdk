@@ -1109,6 +1109,37 @@ describe('paging a file bigger than one request', () => {
     expect(rangesOf(rec)).toHaveLength(2);
   });
 
+  it.each([
+    ['shrinks', 600],
+    ['grows', 1300],
+  ])('rejects a source that %s between pages', async (_change, changedTotal) => {
+    let page = 0;
+    const { rec, computer } = await computerOn((call) => {
+      if (!call.path.endsWith('/files')) return anyRoute(call);
+      const offset = page === 0 ? 0 : 300;
+      const total = page++ === 0 ? 1000 : changedTotal;
+      return new Response(filled(300), {
+        status: 206,
+        headers: {
+          'content-type': 'application/octet-stream',
+          'accept-ranges': 'bytes',
+          'content-range': `bytes ${offset}-${offset + 299}/${total}`,
+        },
+      });
+    });
+    const chunks: FileChunk[] = [];
+
+    await expect(
+      (async () => {
+        for await (const chunk of computer.readFileChunks('/tmp/changing.bin')) {
+          chunks.push(chunk);
+        }
+      })(),
+    ).rejects.toThrow(new RegExp(`changed from 1000 to ${changedTotal}`));
+    expect(chunks).toHaveLength(1);
+    expect(rangesOf(rec)).toEqual(['bytes=0-', 'bytes=300-']);
+  });
+
   it('holds no more than chunkBytes at a time when asked to', async () => {
     const { rec, computer } = await computerOn(guestFile(filled(1000)));
     const sizes: number[] = [];

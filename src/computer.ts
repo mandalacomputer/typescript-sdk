@@ -1585,6 +1585,7 @@ export class Computer {
     const each = { timeoutMs: opts.timeoutMs, signal: opts.signal };
     let offset = opts.offset ?? 0;
     let remaining = opts.length;
+    let total: number | undefined;
 
     if (offset < 0) {
       // A tail, resolved to where it starts before anything is paged.
@@ -1617,8 +1618,9 @@ export class Computer {
       // file's last byte as though it were the tail that was asked for: a
       // one-byte `mandala scp` that reports success.
       if (probe.total === undefined) throw noTotal(path);
-      offset = Math.max(0, probe.total - wanted);
-      remaining = probe.total - offset;
+      total = probe.total;
+      offset = Math.max(0, total - wanted);
+      remaining = total - offset;
     }
 
     for (let first = true; ; first = false) {
@@ -1672,6 +1674,15 @@ export class Computer {
             `${chunk.bytes.length}; a paging read cannot hand back more than it asked for`,
         );
       }
+      if (chunk.total === undefined) throw noTotal(path);
+      if (total === undefined) {
+        total = chunk.total;
+      } else if (chunk.total !== total) {
+        throw new MandalaError(
+          `the total for ${path} changed from ${total} to ${chunk.total} during a paging read; ` +
+            'the chunks may belong to different versions of the file',
+        );
+      }
       yield chunk;
       // Unreachable for a real answer: a Content-Range names at least one byte,
       // and toFileChunk refuses a 206 whose body does not fill the window it
@@ -1684,10 +1695,7 @@ export class Computer {
         remaining -= chunk.bytes.length;
         if (remaining <= 0) return;
       }
-      // No length to page towards. This platform always names the total, so
-      // anything reaching here is a hop in front of it rewriting the header.
-      if (chunk.total === undefined) throw noTotal(path);
-      if (offset >= chunk.total) return;
+      if (offset >= total) return;
     }
   }
 
