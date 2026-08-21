@@ -200,10 +200,11 @@ export class Transport {
         'No API key. Pass apiKey, or set MANDALA_API_KEY ' + '(create one at Settings → API keys).',
       );
     }
-    this.baseUrl = (opts.baseUrl ?? env('MANDALA_BASE_URL') ?? DEFAULT_BASE_URL).replace(
-      /\/+$/,
-      '',
-    );
+    // Empty environment variables are common in layered configuration and are
+    // absence, not a URL. Let them continue down the documented fallback chain
+    // instead of storing '' and throwing an anonymous Invalid URL on first use.
+    const baseUrl = opts.baseUrl?.trim() || env('MANDALA_BASE_URL')?.trim() || DEFAULT_BASE_URL;
+    this.baseUrl = baseUrl.replace(/\/+$/, '');
     this.#headers = { Authorization: `Bearer ${key}`, Accept: 'application/json' };
     // Checked here for the reason #deadlineMs checks minTimeoutMs below — one
     // hazard with two doors into it, and only one of them was guarded. A NaN
@@ -305,6 +306,7 @@ export class Transport {
       // thing a caller can act on is "the platform is not reachable".
       throw new ConnectionError(
         `could not reach ${this.baseUrl}: ${cause instanceof Error ? cause.message : String(cause)}`,
+        { cause },
       );
     }
     if (!resp.ok) throw await this.#error(resp, method, path, timeoutMs, opts.signal);
