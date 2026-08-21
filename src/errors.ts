@@ -112,6 +112,48 @@ export class ConflictError extends APIError {
 }
 
 /**
+ * 413 — more of that file than one request moves.
+ *
+ * The ceiling is on a single transfer, not on the file: the bytes cross the
+ * guest agent in chunks and one request holds that channel for as long as it
+ * takes. On a download it is therefore not a dead end — {@link
+ * Computer.readFileChunks} pages a file of any size through it, and
+ * {@link Computer.readFilePart} reads one window — which is why this is its own
+ * class rather than a bare {@link APIError}: a caller who cannot tell a 413
+ * from a 400 has no reason to look for the way past it.
+ *
+ * On an upload there is no such door. The body IS the file, so a write past the
+ * ceiling has to be split by whoever is sending it.
+ */
+export class TooLargeError extends APIError {
+  override name = 'TooLargeError';
+}
+
+/**
+ * 416 — the range named no byte the file has.
+ *
+ * `total` is the file's real length, off the refusal's own `Content-Range`.
+ * That number is the entire value of this status: the caller asked a question
+ * about a file whose size they did not know, and it is the one answer that lets
+ * them ask again correctly rather than guess. Reaching it used to mean parsing
+ * a header off an error nobody had a class for.
+ *
+ * Absent only where the response did not carry a readable one — which this
+ * platform always does, and something in front of it might not.
+ */
+export class RangeNotSatisfiableError extends APIError {
+  override name = 'RangeNotSatisfiableError';
+  constructor(
+    message: string,
+    status: number,
+    body?: unknown,
+    readonly total?: number,
+  ) {
+    super(message, status, body);
+  }
+}
+
+/**
  * 429 — the request is valid, but the caller has exhausted a temporary rate budget.
  *
  * `retryAfterMs` is present when the platform supplied a valid `Retry-After`
@@ -256,6 +298,8 @@ const BY_STATUS: Record<number, typeof APIError> = {
   403: PermissionDeniedError,
   404: NotFoundError,
   409: ConflictError,
+  413: TooLargeError,
+  416: RangeNotSatisfiableError,
   503: UnavailableError,
   504: GatewayTimeoutError,
   // NOT OriginUnreachableError, which is the trap in this range: 520 means the
@@ -369,14 +413,32 @@ function namedTheFailure(body: unknown): boolean {
  */
 const said = (message: string, status: number) => `${message} (HTTP ${status})`;
 
+/**
+ * What the response's own headers added to a failure, for the two classes that
+ * carry one.
+ *
+ * An options object rather than two more positional numbers: they are both
+ * optional, both a bare `number`, and adjacent, so the one call site that
+ * passes them would be free to swap them and nothing would say so.
+ */
+export type ErrorHeaders = {
+  /** From `Retry-After`, in milliseconds from now. */
+  retryAfterMs?: number;
+  /** The file's real length, from a 416's `Content-Range`. */
+  rangeTotal?: number;
+};
+
 export function errorForStatus(
   status: number,
   message: string,
   body?: unknown,
-  retryAfterMs?: number,
+  headers: ErrorHeaders = {},
 ): APIError {
-  if (status === 429) return new RateLimitError(message, status, body, retryAfterMs);
+  if (status === 429) return new RateLimitError(message, status, body, headers.retryAfterMs);
   const Cls = BY_STATUS[status] ?? APIError;
+  if (Cls === RangeNotSatisfiableError) {
+    return new RangeNotSatisfiableError(message, status, body, headers.rangeTotal);
+  }
   // Substituted for an empty body, which says nothing, and for a proxy's HTML
   // page, which says 500 characters of nothing. NOT for a structured message:
   // that is the one case where the response knows more than this file does.
