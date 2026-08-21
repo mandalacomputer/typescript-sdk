@@ -7,6 +7,7 @@ import {
   Client,
   ConflictError,
   ConnectionError,
+  DEFAULT_BASE_URL,
   isTransient,
   MandalaError,
   NotFoundError,
@@ -40,6 +41,19 @@ describe('auth', () => {
     } finally {
       delete process.env.MANDALA_API_KEY;
       delete process.env.MANDALA_BASE_URL;
+    }
+  });
+
+  it('treats a blank configured base URL as missing', () => {
+    const saved = process.env.MANDALA_BASE_URL;
+    delete process.env.MANDALA_BASE_URL;
+    try {
+      expect(new Client({ apiKey: 'com_test', baseUrl: '' }).baseUrl).toBe(DEFAULT_BASE_URL);
+      process.env.MANDALA_BASE_URL = '';
+      expect(new Client({ apiKey: 'com_test' }).baseUrl).toBe(DEFAULT_BASE_URL);
+    } finally {
+      if (saved === undefined) delete process.env.MANDALA_BASE_URL;
+      else process.env.MANDALA_BASE_URL = saved;
     }
   });
 
@@ -159,6 +173,17 @@ describe('the client deadline', () => {
     const err = await c.computers.get('vm-1').catch((e) => e);
     expect(err).toBeInstanceOf(ConflictError);
     expect(err.message).toBe('HTTP 409');
+  });
+
+  it('preserves the original network failure as the connection error cause', async () => {
+    const original = new Error('certificate verify failed');
+    const broken = (async () => {
+      throw original;
+    }) as typeof globalThis.fetch;
+    const c = new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: broken });
+    const err = await c.computers.get('vm-1').catch((e) => e);
+    expect(err).toBeInstanceOf(ConnectionError);
+    expect(err.cause).toBe(original);
   });
 });
 
@@ -713,6 +738,13 @@ describe('answers that are not what the route promised', () => {
     const rec = recorder((call) => json(call.path === '/snapshots' ? [null, SNAPSHOT] : [null]));
     expect(await client(rec).snapshots.list()).toHaveLength(1);
     expect(await client(rec).computers.list()).toHaveLength(0);
+  });
+
+  it('names the computers route when a listed record has no id', async () => {
+    const rec = recorder(() => json([{ name: 'missing its id' }]));
+    await expect(client(rec).computers.listWithStatus()).rejects.toThrow(
+      /expected a computer from GET computers/,
+    );
   });
 
   it('names the route when a stream route answers with a page', async () => {

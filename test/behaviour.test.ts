@@ -126,6 +126,28 @@ describe('waiting', () => {
     await expect(computer.waitUntilRunning({ timeoutMs: 60_000 })).rejects.toThrow(/the copy died/);
   });
 
+  it('does not spin on a stopped computer and preserves its create start error', async () => {
+    const { rec, client: c } = client((call) => {
+      if (call.method === 'POST' && call.path === '/computers') {
+        return json({
+          computer: { ...COMPUTER, status: 'stopped' },
+          start_error: 'no host had room',
+        });
+      }
+      return json({ ...COMPUTER, status: 'stopped' });
+    });
+    const computer = await c.computers.create({ template: 'base' });
+    const err = await computer.waitUntilRunning({ timeoutMs: 50, pollMs: 1 }).catch((e) => e);
+    expect(err).toBeInstanceOf(MandalaError);
+    expect(err).not.toBeInstanceOf(TimeoutError);
+    expect(err.message).toMatch(/no host had room/);
+    expect(err.message).toMatch(/start\(\) to try again/);
+    expect(rec.routes()).toEqual([
+      ['POST', 'computers'],
+      ['GET', 'computers/vm-1'],
+    ]);
+  });
+
   it('returns at once for a computer that is not being built', async () => {
     const { client: c } = client(anyRoute);
     const computer = await c.computers.get('vm-1');
@@ -1323,6 +1345,26 @@ describe('power', () => {
       ['GET', 'computers/vm-1'],
     ]);
   });
+
+  it('does not report a successful power action as retryable when only its refresh failed', async () => {
+    let gets = 0;
+    const { client: c } = client((call) => {
+      if (call.method === 'GET' && call.path === '/computers/vm-1') {
+        gets += 1;
+        return gets === 1 ? json(COMPUTER) : errorJson(503, 'host could not be reached');
+      }
+      if (call.path.endsWith('/stop')) return new Response(null, { status: 204 });
+      return anyRoute(call);
+    });
+    const computer = await c.computers.get('vm-1');
+    const err = await computer.stop().catch((e) => e);
+    expect(err).toBeInstanceOf(MandalaError);
+    expect(isTransient(err)).toBe(false);
+    expect(err.message).toMatch(/POST computers\/vm-1\/stop succeeded/);
+    expect(err.message).toMatch(/Do not retry the mutation/);
+    expect(err.cause).toBeInstanceOf(APIError);
+    expect(computer.status).toBe('running');
+  });
 });
 
 describe('answers that would leave a handle worse off', () => {
@@ -1360,6 +1402,26 @@ describe('answers that would leave a handle worse off', () => {
       ['GET', 'computers/vm-1'],
     ]);
     expect(computer.id).toBe('vm-1');
+  });
+
+  it('distinguishes an applied update from a failed follow-up refresh', async () => {
+    let gets = 0;
+    const { client: c } = client((call) => {
+      if (call.method === 'GET' && call.path === '/computers/vm-1') {
+        gets += 1;
+        return gets === 1 ? json(COMPUTER) : errorJson(503, 'host could not be reached');
+      }
+      if (call.method === 'PATCH') return new Response(null, { status: 204 });
+      return anyRoute(call);
+    });
+    const computer = await c.computers.get('vm-1');
+    const err = await computer.rename('renamed').catch((e) => e);
+    expect(err).toBeInstanceOf(MandalaError);
+    expect(isTransient(err)).toBe(false);
+    expect(err.message).toMatch(/PATCH computers\/vm-1 succeeded/);
+    expect(err.message).toMatch(/previous state/);
+    expect(err.cause).toBeInstanceOf(APIError);
+    expect(computer.name).toBe('demo');
   });
 
   it('does not offer the snapshot a disk is copied from as the reason it failed', async () => {
