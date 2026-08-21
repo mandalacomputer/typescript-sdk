@@ -98,6 +98,12 @@ async function exerciseEverything(client: Client): Promise<void> {
   await c.open('https://example.com');
 
   await c.readFile('/home/user/out.txt');
+  // The ranged forms as well as the whole-file one: `Range` is a parameter of
+  // this route like any other, and a read that never sends it is exactly the
+  // gap the parameter half of this test exists to see.
+  await c.readFilePart('/home/user/out.txt', { offset: 0, length: 1024 });
+  await c.readFilePart('/home/user/out.txt', { offset: -16 });
+  for await (const _ of c.readFileChunks('/home/user/out.txt')) break;
   await c.writeFile('/home/user/in.txt', 'hello');
 
   await c.snapshot();

@@ -13,7 +13,9 @@ import {
   NotFoundError,
   PermissionDeniedError,
   PlanLimitError,
+  RangeNotSatisfiableError,
   RateLimitError,
+  TooLargeError,
   UnavailableError,
 } from '../src/index.js';
 import { anyRoute, BASE, bytes, COMPUTER, errorJson, json, recorder, SNAPSHOT } from './harness.js';
@@ -784,5 +786,89 @@ describe('answers that are not what the route promised', () => {
     expect(err).toBeInstanceOf(AuthenticationError);
     expect(err.status).toBe(401);
     expect(err.message).toContain('that key has been revoked');
+  });
+});
+
+describe('content ranges', () => {
+  it('reads the window and the file length off a satisfied range', async () => {
+    const { parseContentRange } = await import('../src/transport.js');
+    expect(parseContentRange('bytes 0-1048575/2147483648')).toEqual({
+      start: 0,
+      end: 1048575,
+      total: 2147483648,
+    });
+    expect(parseContentRange('BYTES  10 - 19 / 20')).toEqual({ start: 10, end: 19, total: 20 });
+  });
+
+  it('keeps the window when the total is missing or contradicts it', async () => {
+    // Losing "how much is left" still leaves a caller with bytes they know the
+    // position of. Losing the position leaves them with bytes they cannot place.
+    const { parseContentRange } = await import('../src/transport.js');
+    expect(parseContentRange('bytes 0-9/*')).toEqual({ start: 0, end: 9 });
+    // `end` is inclusive, so a 10-byte file has no byte at 10 — a total that
+    // does not exceed it is a header contradicting itself.
+    expect(parseContentRange('bytes 0-9/9')).toEqual({ start: 0, end: 9 });
+  });
+
+  it('reports a window it cannot trust as no window at all', async () => {
+    const { parseContentRange } = await import('../src/transport.js');
+    expect(parseContentRange(null)).toBeUndefined();
+    expect(parseContentRange('items 0-9/20')).toBeUndefined();
+    expect(parseContentRange('bytes 9-0/20')).toBeUndefined();
+    expect(parseContentRange('bytes */4096')).toBeUndefined();
+  });
+
+  it("reads the file's length off an unsatisfied range and nothing else", async () => {
+    const { unsatisfiedTotal } = await import('../src/transport.js');
+    expect(unsatisfiedTotal('bytes */4096')).toBe(4096);
+    expect(unsatisfiedTotal('bytes */0')).toBe(0);
+    expect(unsatisfiedTotal('bytes 0-9/20')).toBeUndefined();
+    expect(unsatisfiedTotal(null)).toBeUndefined();
+  });
+});
+
+describe('the statuses a transfer earns', () => {
+  it('gives a size refusal its own class rather than the generic error', async () => {
+    const rec = recorder((call) =>
+      call.path.endsWith('/files')
+        ? errorJson(413, 'that file is 200000000 bytes; this endpoint moves at most 67108864')
+        : anyRoute(call),
+    );
+    const computer = await client(rec).computers.get('vm-1');
+    const err = await computer.readFilePart('/tmp/big.bin').catch((e) => e);
+    expect(err).toBeInstanceOf(TooLargeError);
+    expect(err.status).toBe(413);
+    // Not transient: no amount of waiting makes the file smaller.
+    expect(isTransient(err)).toBe(false);
+  });
+
+  it('lifts the length off a 416 so nobody has to parse a header they never see', async () => {
+    const rec = recorder((call) =>
+      call.path.endsWith('/files')
+        ? errorJson(416, 'that range is outside the file, which is 4096 bytes', {
+            'content-range': 'bytes */4096',
+          })
+        : anyRoute(call),
+    );
+    const computer = await client(rec).computers.get('vm-1');
+    const err = await computer.readFilePart('/tmp/a.bin', { offset: 9000 }).catch((e) => e);
+    expect(err).toBeInstanceOf(RangeNotSatisfiableError);
+    expect(err.total).toBe(4096);
+    expect(err.message).toMatch(/4096 bytes/);
+    expect(isTransient(err)).toBe(false);
+  });
+
+  it('leaves the length undefined rather than zero when the refusal carried none', async () => {
+    // Zero is a real file length. Defaulting to it would turn "the response did
+    // not say" into the claim that the file is empty.
+    const rec = recorder((call) =>
+      call.path.endsWith('/files')
+        ? errorJson(416, 'that range is outside the file')
+        : anyRoute(call),
+    );
+    const computer = await client(rec).computers.get('vm-1');
+    const err = await computer.readFilePart('/tmp/a.bin', { offset: 9000 }).catch((e) => e);
+    expect(err).toBeInstanceOf(RangeNotSatisfiableError);
+    expect(err.total).toBeUndefined();
   });
 });

@@ -471,3 +471,53 @@ describe('finite numbers', () => {
     expect(P.scrollBody({ direction: 'down', amount: 0 }).amount).toBe(0);
   });
 });
+
+describe('rangeHeader', () => {
+  it('sends nothing at all for a whole-file read', () => {
+    expect(P.rangeHeader()).toBeUndefined();
+    expect(P.rangeHeaders()).toBeUndefined();
+  });
+
+  it('spells an offset and a length as an inclusive bytes= window', () => {
+    // The off-by-one everybody writes once: last-byte-pos is inclusive, so a
+    // 1024-byte window from 0 ends at 1023 and asking for 1024 reads one byte
+    // too many.
+    expect(P.rangeHeader(0, 1024)).toBe('bytes=0-1023');
+    expect(P.rangeHeader(1024, 1024)).toBe('bytes=1024-2047');
+    expect(P.rangeHeaders(100, 1)).toEqual({ Range: 'bytes=100-100' });
+  });
+
+  it('leaves an open-ended window open', () => {
+    expect(P.rangeHeader(1048576)).toBe('bytes=1048576-');
+    expect(P.rangeHeader(0)).toBe('bytes=0-');
+  });
+
+  it('reads a negative offset as the tail, in the spelling that stays one', () => {
+    // `bytes=-N` and not `bytes=(total-N)-`: the suffix form is anchored at the
+    // END, which is what keeps an over-long tail the tail of the file.
+    expect(P.rangeHeader(-4096)).toBe('bytes=-4096');
+  });
+
+  it('takes a length with no offset as the first bytes of the file', () => {
+    expect(P.rangeHeader(undefined, 512)).toBe('bytes=0-511');
+  });
+
+  it('refuses a tail with a length, which no byte range can express', () => {
+    expect(() => P.rangeHeader(-100, 10)).toThrow(/cannot also take a length/);
+  });
+
+  it('refuses a window of no bytes, which is a 416 rather than an empty answer', () => {
+    expect(() => P.rangeHeader(0, 0)).toThrow(/at least one byte/);
+    expect(() => P.rangeHeader(10, -5)).toThrow(/at least one byte/);
+  });
+
+  it('refuses positions that are not whole numbers of bytes', () => {
+    // A NaN reaches the header as the string "NaN", which the platform refuses
+    // with a 400 a round trip later; a float reads as a byte position nothing
+    // has.
+    expect(() => P.rangeHeader(Number.NaN)).toThrow(/whole number of bytes/);
+    expect(() => P.rangeHeader(1.5)).toThrow(/whole number of bytes/);
+    expect(() => P.rangeHeader(0, Number.POSITIVE_INFINITY)).toThrow(/whole number of bytes/);
+    expect(() => P.rangeHeader(Number.MAX_SAFE_INTEGER, 2)).toThrow(/whole number of bytes/);
+  });
+});

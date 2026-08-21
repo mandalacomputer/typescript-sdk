@@ -64,7 +64,7 @@ export type {
   AgentStop,
   AgentUsage,
 } from './agent.js';
-export type { DeleteOptions, ScrollOptions, WaitOptions } from './computer.js';
+export type { DeleteOptions, FileChunk, ScrollOptions, WaitOptions } from './computer.js';
 export {
   Computer,
   DEFAULT_RESOLUTION,
@@ -87,8 +87,10 @@ export {
   OriginUnreachableError,
   PermissionDeniedError,
   PlanLimitError,
+  RangeNotSatisfiableError,
   RateLimitError,
   TimeoutError,
+  TooLargeError,
   UnavailableError,
 } from './errors.js';
 export type {
@@ -107,7 +109,7 @@ export type { CreateArgs, ExecArgs, ScrollDirection, UpdateArgs, WindowAction } 
 export { SCROLL_DIRECTIONS, WINDOW_ACTIONS } from './paths.js';
 export type { CallOptions, ListOptions } from './resources.js';
 export { Computers, Sizes, Snapshots, Templates } from './resources.js';
-export type { Bytes, Listing, SSEEvent, TransportOptions } from './transport.js';
+export type { Bytes, ContentRange, Listing, SSEEvent, TransportOptions } from './transport.js';
 export { DEFAULT_BASE_URL, MODEL_KEY_HEADER } from './transport.js';
 
 export const VERSION = '0.1.0';

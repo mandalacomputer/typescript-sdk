@@ -460,6 +460,67 @@ export function filesQuery(path: string): Query {
   return { path };
 }
 
+/** One byte position or count, refused when it is not a whole number of bytes. */
+function wholeBytes(v: number, what: string): number {
+  if (!Number.isSafeInteger(v)) {
+    throw new ValidationError(
+      `${what} must be a whole number of bytes no larger than ${Number.MAX_SAFE_INTEGER} (got ${v})`,
+    );
+  }
+  return v;
+}
+
+/**
+ * A `Range` header for a window of a guest file, or nothing for the whole file.
+ *
+ * An `offset`/`length` pair rather than a header string, so the `bytes=`
+ * spelling — and the fact that its `last-byte-pos` is inclusive, which is the
+ * off-by-one everybody writes at least once — stays this file's problem.
+ *
+ * A **negative** offset is the tail: the last `-offset` bytes, and it takes no
+ * length. That is not a shorthand for `total - N`, and the difference is the
+ * one thing about ranges worth being careful with here. A window past what one
+ * request moves is trimmed rather than refused, and which end gets trimmed
+ * follows the end that was anchored — `bytes=N-` keeps its start, `bytes=-N`
+ * keeps its **end**. So a tail longer than the ceiling comes back as the tail
+ * of the file; the same request re-derived as an offset would come back as the
+ * middle of it, with nothing to say so.
+ */
+export function rangeHeader(offset?: number, length?: number): string | undefined {
+  if (offset === undefined && length === undefined) return undefined;
+  if (offset !== undefined) wholeBytes(offset, 'offset');
+  if (length !== undefined) wholeBytes(length, 'length');
+  if (offset !== undefined && offset < 0) {
+    if (length !== undefined) {
+      throw new ValidationError(
+        'a negative offset asks for the last bytes of the file and cannot also take a ' +
+          `length (got offset ${offset}, length ${length})`,
+      );
+    }
+    // `offset` carries its own minus, which is the whole of the suffix form.
+    return `bytes=${offset}`;
+  }
+  const start = offset ?? 0;
+  if (length === undefined) return `bytes=${start}-`;
+  // A zero-length window names no byte, which is a 416 rather than an empty
+  // answer — refused here so it is a stack trace at the call site instead.
+  if (length < 1) {
+    throw new ValidationError(`length must be at least one byte (got ${length})`);
+  }
+  // The sum rather than the last position, because the two differ by one and
+  // only the sum overflows where it should: `MAX_SAFE_INTEGER + 2 - 1` is
+  // evaluated left to right and lands back on a safe integer, so a window that
+  // ran past the end of the number line would have been let through.
+  wholeBytes(start + length, 'offset + length');
+  return `bytes=${start}-${start + length - 1}`;
+}
+
+/** The `Range` header, or no headers at all — never a header set to nothing. */
+export function rangeHeaders(offset?: number, length?: number): Record<string, string> | undefined {
+  const range = rangeHeader(offset, length);
+  return range === undefined ? undefined : { Range: range };
+}
+
 // --- input ----------------------------------------------------------------
 //
 // The verb set is Anthropic's computer tool, in full. The platform accepts both

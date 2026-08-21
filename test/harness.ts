@@ -95,6 +95,92 @@ export const bytes = (data: string, contentType = 'image/png'): Response =>
     headers: { 'content-type': contentType },
   });
 
+/**
+ * The download route, with the platform's own range rules.
+ *
+ * Modelled rather than stubbed because the rules are the thing under test: a
+ * window past the ceiling is trimmed rather than refused, which end gets
+ * trimmed follows the end the caller anchored, an empty file refuses every
+ * range, and a file whose length the guest cannot report ignores them. A
+ * responder that simply handed back slices would agree with a paging loop that
+ * had all four of those wrong.
+ *
+ * Mirrors `resolve` and `openGuestRead` in the platform's `server/guestfile.go`.
+ */
+export function guestFile(
+  contents: Uint8Array,
+  opts: { max?: number; measurable?: boolean } = {},
+): Responder {
+  const max = opts.max ?? 64 << 20;
+  const measurable = opts.measurable ?? true;
+  const size = contents.length;
+  const whole = (acceptRanges: string): Response =>
+    new Response(contents, {
+      status: 200,
+      headers: {
+        'content-type': 'application/octet-stream',
+        'accept-ranges': acceptRanges,
+      },
+    });
+  const unsatisfiable = (): Response =>
+    new Response(
+      JSON.stringify({ error: `that range is outside the file, which is ${size} bytes` }),
+      {
+        status: 416,
+        headers: {
+          'content-type': 'application/json',
+          'accept-ranges': 'bytes',
+          'content-range': `bytes */${size}`,
+        },
+      },
+    );
+
+  return (call) => {
+    if (!call.path.endsWith('/files')) return anyRoute(call);
+    if (call.method !== 'GET') return json({ bytes: 0 });
+    const header = call.headers.Range;
+    // A file the seek could not measure has no positions to name, so the range
+    // is ignored and the whole thing goes with a 200 — the status is how a
+    // caller tells. Same for an empty file, which is the same case: its length
+    // was never established up front.
+    if (!measurable) return whole('none');
+    if (!header) {
+      return size > max
+        ? errorJson(413, `that file is ${size} bytes; this endpoint moves at most ${max}`, {
+            'accept-ranges': 'bytes',
+          })
+        : whole('bytes');
+    }
+    if (size === 0) return unsatisfiable();
+    const m = /^bytes=(\d*)-(\d*)$/.exec(header);
+    if (!m) return errorJson(400, `Range: ${header} is not a byte range this endpoint can read`);
+    let off: number;
+    let n: number;
+    if (m[1] === '') {
+      // A suffix is anchored at its END, so an over-long one is trimmed at the
+      // near end — a tail longer than one request moves is still the tail.
+      const want = Number(m[2]);
+      if (want === 0) return unsatisfiable();
+      off = Math.max(0, size - want);
+      if (size - off > max) off = size - max;
+      n = size - off;
+    } else {
+      off = Number(m[1]);
+      if (off >= size) return unsatisfiable();
+      const end = m[2] === '' ? size - 1 : Math.min(Number(m[2]), size - 1);
+      n = Math.min(end - off + 1, max);
+    }
+    return new Response(contents.slice(off, off + n), {
+      status: 206,
+      headers: {
+        'content-type': 'application/octet-stream',
+        'accept-ranges': 'bytes',
+        'content-range': `bytes ${off}-${off + n - 1}/${size}`,
+      },
+    });
+  };
+}
+
 export const errorJson = (
   status: number,
   error: string,
