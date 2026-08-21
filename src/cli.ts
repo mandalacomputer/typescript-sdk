@@ -25,7 +25,7 @@
  */
 
 import { realpathSync } from 'node:fs';
-import { readFile, stat, writeFile } from 'node:fs/promises';
+import { open, readFile, stat } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import process from 'node:process';
 import { pathToFileURL } from 'node:url';
@@ -458,6 +458,44 @@ export function uploadSize(sent: number, written?: number): string {
   return written === undefined ? `${sent} bytes sent` : `${written} bytes`;
 }
 
+/**
+ * Copy one guest file to a local path, however large it is.
+ *
+ * Paged and written chunk by chunk rather than read whole: a single read is
+ * capped at what one request moves — 64 MiB — so `mandala scp vm:/big.bin .`
+ * used to fail outright on exactly the files worth copying with a command
+ * rather than a browser. Nothing is held in memory but the chunk in hand, which
+ * is the other half of it: a 2 GB build output is not a Buffer anybody wants.
+ *
+ * A failure part-way leaves what arrived on disk, as scp and curl do. The bytes
+ * that landed are the file's own first bytes and the message says what stopped,
+ * which is more use than deleting the evidence.
+ *
+ * @returns how many bytes were written.
+ */
+export async function download(
+  computer: Pick<Computer, 'readFileChunks'>,
+  remotePath: string,
+  local: string,
+): Promise<number> {
+  const out = await open(local, 'w');
+  let written = 0;
+  try {
+    for await (const chunk of computer.readFileChunks(remotePath, {
+      timeoutMs: SCP_TRANSFER_TIMEOUT_MS,
+    })) {
+      // Sequential, and it is the paging helper that makes that safe: it
+      // refuses an answer that does not start where it asked, so the chunks are
+      // end to end or there are no chunks at all.
+      await out.write(chunk.bytes);
+      written += chunk.bytes.length;
+    }
+  } finally {
+    await out.close();
+  }
+  return written;
+}
+
 async function cmdScp(srcArg: string, dstArg: string): Promise<number> {
   const src = remoteSide(srcArg);
   const dst = remoteSide(dstArg);
@@ -469,15 +507,13 @@ async function cmdScp(srcArg: string, dstArg: string): Promise<number> {
 
   if (src) {
     if (!src.path) die(`say which file: ${src.target}:/absolute/path`);
-    const data = await (await resolve(client, src.target)).readFile(src.path, {
-      timeoutMs: SCP_TRANSFER_TIMEOUT_MS,
-    });
+    const computer = await resolve(client, src.target);
     let local = dstArg;
     // A directory destination takes the source's own basename, like scp.
     const info = await stat(local).catch(() => undefined);
     if (info?.isDirectory()) local = join(local, guestBasename(src.path));
-    await writeFile(local, data);
-    process.stderr.write(`${src.target}:${src.path} -> ${local} (${data.length} bytes)\n`);
+    const size = await download(computer, src.path, local);
+    process.stderr.write(`${src.target}:${src.path} -> ${local} (${size} bytes)\n`);
     return 0;
   }
 

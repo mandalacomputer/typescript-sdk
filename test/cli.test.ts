@@ -7,8 +7,12 @@
  * is the guest, and what the argument parser does with what it was handed.
  */
 
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import {
+  download,
   finishInteraction,
   flushOutput,
   guestBasename,
@@ -20,6 +24,7 @@ import {
   uploadSize,
   waitForWebSocketOpen,
 } from '../src/cli.js';
+import type { FileChunk } from '../src/index.js';
 
 describe('terminal lifecycle', () => {
   it('rejects a websocket that closes before its handshake opens', async () => {
@@ -297,5 +302,75 @@ describe('argument handling', () => {
     const { code, out } = await run(['ssh', 'demo', 'ls']);
     expect(code).toBe(1);
     expect(out).toContain('runs no command');
+  });
+});
+
+describe('scp download', () => {
+  /** A computer whose file arrives in as many windows as the platform sends. */
+  const paging = (windows: Uint8Array[]) => {
+    let offset = 0;
+    return {
+      async *readFileChunks(): AsyncGenerator<FileChunk> {
+        for (const bytes of windows) {
+          yield { bytes, offset, total: 99, partial: true, seekable: true };
+          offset += bytes.length;
+        }
+      },
+    };
+  };
+
+  const inTempDir = async (body: (dir: string) => Promise<void>): Promise<void> => {
+    const dir = await mkdtemp(join(tmpdir(), 'mandala-scp-'));
+    try {
+      await body(dir);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  };
+
+  it('writes every window end to end, so a paged file lands whole', async () => {
+    // The copy a single read could not make: over the ceiling, so it arrives in
+    // windows, and nothing but the window in hand is ever held.
+    await inTempDir(async (dir) => {
+      const local = join(dir, 'big.bin');
+      const windows = [Uint8Array.from([1, 2, 3]), Uint8Array.from([4, 5]), Uint8Array.from([6])];
+      const written = await download(paging(windows), '/tmp/big.bin', local);
+      expect(written).toBe(6);
+      expect(new Uint8Array(await readFile(local))).toEqual(Uint8Array.from([1, 2, 3, 4, 5, 6]));
+    });
+  });
+
+  it('leaves what arrived on disk when the transfer stops part-way', async () => {
+    // scp's and curl's own behaviour: the bytes that landed are the file's own
+    // first bytes, and the message says what stopped. Deleting them would throw
+    // away the only evidence of how far it got.
+    await inTempDir(async (dir) => {
+      const local = join(dir, 'part.bin');
+      const computer = {
+        async *readFileChunks(): AsyncGenerator<FileChunk> {
+          yield {
+            bytes: Uint8Array.from([1, 2, 3]),
+            offset: 0,
+            total: 99,
+            partial: true,
+            seekable: true,
+          };
+          throw new Error('the guest stopped answering');
+        },
+      };
+      await expect(download(computer, '/tmp/part.bin', local)).rejects.toThrow(/stopped answering/);
+      expect(new Uint8Array(await readFile(local))).toEqual(Uint8Array.from([1, 2, 3]));
+    });
+  });
+
+  it('writes an empty file for a file with nothing in it', async () => {
+    // An empty file pages to no windows at all, and the copy still has to
+    // produce something: `scp vm:/empty .` that leaves no file is a copy that
+    // silently did not happen.
+    await inTempDir(async (dir) => {
+      const local = join(dir, 'empty.bin');
+      expect(await download(paging([]), '/tmp/empty.bin', local)).toBe(0);
+      expect(await readFile(local)).toHaveLength(0);
+    });
   });
 });

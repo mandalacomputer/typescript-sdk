@@ -267,6 +267,53 @@ Paths are absolute, inside the guest. There is no shell and no working directory
 behind a transfer, so a relative path is refused before the request is made.
 Works while the computer is running or suspended.
 
+#### Files bigger than one request
+
+One transfer moves at most **64 MiB** — the bytes cross the guest agent in
+chunks and a single request holds that channel for as long as it takes. A whole
+file past that is refused with a `TooLargeError`, and a range is the way through
+it: the ceiling then applies to the *window* you asked for rather than to the
+file, so a 2 GB build output is something to page rather than something you
+cannot fetch.
+
+```ts
+const out = await open('./build.tar', 'w');
+for await (const chunk of c.readFileChunks('/home/user/build.tar')) {
+  await out.write(chunk.bytes);                 // in order, end to end
+}
+await out.close();
+```
+
+`readFileChunks` is that loop. Chunks arrive in order and contiguously, and
+nothing is held but the chunk in hand. `offset` and `length` narrow it to part
+of the file, and `chunkBytes` caps how much any one request asks for.
+
+For a single window there is `readFilePart`:
+
+```ts
+const tail = await c.readFilePart('/var/log/app.log', { offset: -4096 });
+console.log(`${tail.bytes.length} of ${tail.total} bytes, from ${tail.offset}`);
+```
+
+A **negative** offset is the tail — the last N bytes — and takes no length.
+
+Two things about ranges are worth knowing before you write your own loop, which
+is why `readFileChunks` exists:
+
+**You can get fewer bytes than you asked for.** A window past the ceiling is
+trimmed rather than refused, since you cannot know the limit before you ask. So
+`chunk.offset` and what actually came back, not the numbers you passed, are
+where the next window starts.
+
+**Which end gets trimmed follows the end you anchored.** An open window keeps its
+start; a tail keeps its **end**, because a tail longer than one request moves is
+still the tail of the file rather than the middle of it. Re-deriving a tail as
+`total - N` and asking forward is how that goes quietly wrong.
+
+A file whose length the guest cannot report — a `/proc` entry — has no byte
+positions to name. The range is ignored and the whole thing arrives with
+`partial: false` and `seekable: false`; there is no total to promise.
+
 ### The agent loop
 
 One call that drives the computer until the task is done — screenshot, decide,
@@ -493,6 +540,8 @@ import {
   PermissionDeniedError,//    403 — the key's role is too low
   NotFoundError,       //     404 — no such computer, snapshot, or route
   ConflictError,       //     409 — right request, wrong moment. Retry this one.
+  TooLargeError,       //     413 — more file than one request moves
+  RangeNotSatisfiableError,// 416 — that range names no byte the file has
   RateLimitError,      //     429 — retry after retryAfterMs when present
   UnavailableError,    //     503 — a listing would have been short
   GatewayTimeoutError, //     504/524 — a proxy gave up; the work carries on
@@ -534,6 +583,14 @@ it never arrived, so nothing was started and there is nothing to account for.
 are `OriginTLSError` instead — a handshake that will fail the same way on every
 retry, so it is a deployment to fix rather than an outage to wait out.
 
+`TooLargeError` is the one with a door out of it. The 64 MiB ceiling is on a
+single transfer, not on the file, so on a download it means *ask for part of it*
+— `readFileChunks` pages a file of any size through the same route. On an upload
+there is no such door: the body **is** the file, so a write past the ceiling has
+to be split by whoever is sending it. `RangeNotSatisfiableError` carries `total`,
+the file's real length off the refusal's own `Content-Range` — which is the
+entire value of a 416, since you asked about a file whose size you did not know.
+
 `OriginResponseError` is 520 alone, and it is the trap in that range: despite the
 neighbouring number it means the platform **was** reached and its answer could
 not be read, so the work may have happened in full, in part, or not at all.
@@ -558,6 +615,11 @@ reattaches and replays recent output.
 `scp` rides the files API, so it needs no shell in the guest at all. The side
 spelled `<computer>:/path` is the guest, by scp's own rule: a colon marks the
 remote side unless a `/` comes before it, so `./odd:name` stays a local file.
+
+A download is paged and written chunk by chunk, so it is not bounded by the
+64 MiB a single transfer moves and never holds the file in memory —
+`mandala scp vm:/home/user/build.tar .` is the copy the SDK's `readFileChunks`
+exists for. A failure part-way leaves what arrived on disk, as scp and curl do.
 
 Both take a computer's name or its id, and authenticate with `MANDALA_API_KEY`.
 
