@@ -187,7 +187,7 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
 
   // The file body is the file, raw — there are no named fields to mirror.
   ['PUT computers/:id/files', ['query:path']],
-  ['GET computers/:id/files', ['query:path']],
+  ['GET computers/:id/files', ['query:path', 'header:Range']],
 
   ['GET snapshots', ['query:allow_partial', 'query:include']],
   ['GET computers/:id/snapshots', []],

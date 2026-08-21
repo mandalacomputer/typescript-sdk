@@ -5,14 +5,17 @@ import {
   APIError,
   AuthenticationError,
   Client,
+  type FileChunk,
   GatewayTimeoutError,
   isTransient,
   MandalaError,
   OriginResponseError,
   OriginTLSError,
   OriginUnreachableError,
+  RangeNotSatisfiableError,
   RateLimitError,
   TimeoutError,
+  TooLargeError,
 } from '../src/index.js';
 import {
   anyRoute,
@@ -21,6 +24,7 @@ import {
   cloudflareJson,
   EXEC_OK,
   errorJson,
+  guestFile,
   json,
   type Responder,
   recorder,
@@ -931,6 +935,252 @@ describe('files', () => {
     const { client: c } = client(anyRoute);
     const computer = await c.computers.get('vm-1');
     expect(await computer.readTextFile('/tmp/a.txt')).toBe('file');
+  });
+});
+
+/** `n` bytes whose value at every position says which position it is. */
+const filled = (n: number): Uint8Array => Uint8Array.from({ length: n }, (_, i) => i % 251);
+
+const computerOn = async (respond: Responder) => {
+  const { rec, client: c } = client(respond);
+  return { rec, computer: await c.computers.get('vm-1') };
+};
+
+/** Every `Range` header a sequence of calls carried, in order. */
+const rangesOf = (rec: ReturnType<typeof recorder>): (string | undefined)[] =>
+  rec.calls.filter((call) => call.path.endsWith('/files')).map((call) => call.headers.Range);
+
+describe('ranged reads', () => {
+  it('asks for a window as bytes= and says where the answer landed', async () => {
+    const { rec, computer } = await computerOn(guestFile(filled(1000)));
+    const part = await computer.readFilePart('/tmp/big.bin', { offset: 100, length: 50 });
+    expect(rangesOf(rec)).toEqual(['bytes=100-149']);
+    expect(part).toMatchObject({ offset: 100, total: 1000, partial: true, seekable: true });
+    expect(part.bytes).toEqual(filled(1000).slice(100, 150));
+  });
+
+  it('keeps the END of a tail that is longer than one request moves', async () => {
+    // The trimming rule, and the one worth a test of its own: `bytes=-N` is
+    // anchored at the end, so an over-long tail comes back as the tail of the
+    // file rather than as the middle of it. A helper that re-derived the offset
+    // itself would undo exactly this.
+    const { rec, computer } = await computerOn(guestFile(filled(1000), { max: 100 }));
+    const part = await computer.readFilePart('/tmp/big.bin', { offset: -400 });
+    expect(rangesOf(rec)).toEqual(['bytes=-400']);
+    expect(part.offset).toBe(900);
+    expect(part.bytes).toEqual(filled(1000).slice(900));
+  });
+
+  it('reports fewer bytes than were asked for as the window they actually are', async () => {
+    const { computer } = await computerOn(guestFile(filled(1000), { max: 64 }));
+    const part = await computer.readFilePart('/tmp/big.bin', { offset: 10, length: 500 });
+    expect(part.bytes).toHaveLength(64);
+    expect(part).toMatchObject({ offset: 10, total: 1000 });
+  });
+
+  it('reads a whole file as one window when no range is asked for', async () => {
+    const { rec, computer } = await computerOn(guestFile(filled(10)));
+    const part = await computer.readFilePart('/tmp/small.bin');
+    expect(rangesOf(rec)).toEqual([undefined]);
+    expect(part).toMatchObject({ offset: 0, total: 10, partial: false, seekable: true });
+  });
+
+  it('marks a file no range can be served out of, rather than promising a total', async () => {
+    // /proc: the guest cannot report a length, so the range is ignored and the
+    // whole thing arrives with a 200. The status is how a caller tells.
+    const { computer } = await computerOn(guestFile(filled(8), { measurable: false }));
+    const part = await computer.readFilePart('/proc/cpuinfo', { offset: 0, length: 4 });
+    expect(part).toMatchObject({ offset: 0, partial: false, seekable: false });
+    expect(part.bytes).toHaveLength(8);
+  });
+
+  it('refuses a 206 whose Content-Range did not survive the trip', async () => {
+    // These bytes are somewhere in the file and nothing left says where.
+    // Assuming zero would write them over the file's first bytes and say
+    // nothing — the silent corruption the status exists to prevent.
+    const { computer } = await computerOn((call) => {
+      if (!call.path.endsWith('/files')) return anyRoute(call);
+      return new Response(new Uint8Array([1, 2, 3]), {
+        status: 206,
+        headers: { 'content-type': 'application/octet-stream', 'accept-ranges': 'bytes' },
+      });
+    });
+    await expect(computer.readFilePart('/tmp/big.bin', { offset: 100 })).rejects.toThrow(
+      /206 .* without a readable Content-Range/,
+    );
+  });
+
+  it('carries the file real length on a range that named no byte it has', async () => {
+    const { computer } = await computerOn(guestFile(filled(1000)));
+    const err = await computer.readFilePart('/tmp/big.bin', { offset: 5000 }).catch((e) => e);
+    expect(err).toBeInstanceOf(RangeNotSatisfiableError);
+    expect(err.status).toBe(416);
+    expect(err.total).toBe(1000);
+  });
+
+  it('names the methods that page, on the refusal that is where you find out', async () => {
+    // The platform's message names the `Range` header, which is the right
+    // sentence for its own curl example and useless to somebody holding this
+    // SDK. Both halves survive: the size and ceiling are the platform's, the
+    // way out is ours.
+    const { computer } = await computerOn(guestFile(filled(1000), { max: 100 }));
+    const err = await computer.readFile('/tmp/big.bin').catch((e) => e);
+    expect(err).toBeInstanceOf(TooLargeError);
+    expect(err.message).toMatch(/that file is 1000 bytes/);
+    expect(err.message).toMatch(/readFileChunks\(path\)/);
+  });
+});
+
+describe('paging a file bigger than one request', () => {
+  const rebuilt = async (chunks: AsyncIterable<{ bytes: Uint8Array }>): Promise<Uint8Array> => {
+    const out: number[] = [];
+    for await (const chunk of chunks) out.push(...chunk.bytes);
+    return new Uint8Array(out);
+  };
+
+  it('reconstructs a file that no single request could move', async () => {
+    const contents = filled(1000);
+    const { rec, computer } = await computerOn(guestFile(contents, { max: 300 }));
+    expect(await rebuilt(computer.readFileChunks('/tmp/big.bin'))).toEqual(contents);
+    expect(rangesOf(rec)).toEqual(['bytes=0-', 'bytes=300-', 'bytes=600-', 'bytes=900-']);
+  });
+
+  it('stops at the end rather than walking off it into a 416', async () => {
+    // The last window ends exactly on the file's length, and the total off the
+    // Content-Range is the only thing that says so.
+    const { rec, computer } = await computerOn(guestFile(filled(600), { max: 300 }));
+    expect(await rebuilt(computer.readFileChunks('/tmp/big.bin'))).toHaveLength(600);
+    expect(rangesOf(rec)).toHaveLength(2);
+  });
+
+  it('holds no more than chunkBytes at a time when asked to', async () => {
+    const { rec, computer } = await computerOn(guestFile(filled(1000)));
+    const sizes: number[] = [];
+    for await (const chunk of computer.readFileChunks('/tmp/big.bin', { chunkBytes: 400 })) {
+      sizes.push(chunk.bytes.length);
+    }
+    expect(sizes).toEqual([400, 400, 200]);
+    expect(rangesOf(rec)).toEqual(['bytes=0-399', 'bytes=400-799', 'bytes=800-1199']);
+  });
+
+  it('pages a window rather than the whole file when given one', async () => {
+    const { rec, computer } = await computerOn(guestFile(filled(1000), { max: 100 }));
+    const got = await rebuilt(
+      computer.readFileChunks('/tmp/big.bin', { offset: 250, length: 250 }),
+    );
+    expect(got).toEqual(filled(1000).slice(250, 500));
+    expect(rangesOf(rec)).toEqual(['bytes=250-499', 'bytes=350-499', 'bytes=450-499']);
+  });
+
+  it('pages a tail forwards from where the tail actually starts', async () => {
+    // One byte to learn the length, and then an ordinary forward read. Asking
+    // for `bytes=-N` and paging on from it would deliver the file's LAST chunk
+    // first and the rest of the tail backwards after it.
+    const { rec, computer } = await computerOn(guestFile(filled(1000), { max: 100 }));
+    const got = await rebuilt(computer.readFileChunks('/tmp/big.bin', { offset: -250 }));
+    expect(got).toEqual(filled(1000).slice(750));
+    expect(rangesOf(rec)).toEqual(['bytes=-1', 'bytes=750-999', 'bytes=850-999', 'bytes=950-999']);
+  });
+
+  it('gives a tail longer than the file the whole file, in order', async () => {
+    const { computer } = await computerOn(guestFile(filled(50), { max: 20 }));
+    expect(await rebuilt(computer.readFileChunks('/tmp/big.bin', { offset: -900 }))).toEqual(
+      filled(50),
+    );
+  });
+
+  it('yields nothing for an empty file rather than raising its refusal', async () => {
+    // An empty file has no byte for a range to name, so every one of them is a
+    // 416. Nothing to page is not a failure — but only on the first request:
+    // further along it would mean the file shrank under the read.
+    const { computer } = await computerOn(guestFile(filled(0)));
+    const chunks: FileChunk[] = [];
+    for await (const chunk of computer.readFileChunks('/tmp/empty.bin')) chunks.push(chunk);
+    expect(chunks).toEqual([]);
+    const tail: FileChunk[] = [];
+    for await (const chunk of computer.readFileChunks('/tmp/empty.bin', { offset: -10 })) {
+      tail.push(chunk);
+    }
+    expect(tail).toEqual([]);
+  });
+
+  it('yields a file no range can be served out of exactly once', async () => {
+    const { rec, computer } = await computerOn(guestFile(filled(8), { measurable: false }));
+    const chunks: FileChunk[] = [];
+    for await (const chunk of computer.readFileChunks('/proc/cpuinfo')) chunks.push(chunk);
+    expect(chunks).toHaveLength(1);
+    expect(chunks[0]).toMatchObject({ partial: false, seekable: false });
+    expect(rangesOf(rec)).toEqual(['bytes=0-']);
+  });
+
+  it('refuses to go on from an answer that is not where it asked', async () => {
+    // A hop that rewrites the window would otherwise be reassembled into a file
+    // whose bytes are in the wrong places, with nothing saying so.
+    const { computer } = await computerOn((call) => {
+      if (!call.path.endsWith('/files')) return anyRoute(call);
+      return new Response(new Uint8Array([1, 2, 3]), {
+        status: 206,
+        headers: {
+          'content-type': 'application/octet-stream',
+          'accept-ranges': 'bytes',
+          'content-range': 'bytes 40-42/900',
+        },
+      });
+    });
+    const chunks: FileChunk[] = [];
+    await expect(
+      (async () => {
+        for await (const chunk of computer.readFileChunks('/tmp/big.bin')) chunks.push(chunk);
+      })(),
+    ).rejects.toThrow(/was answered from 40/);
+    // The first window was where it asked; it is the second that contradicts.
+    expect(chunks).toHaveLength(0);
+  });
+
+  it('refuses a 206 with no total rather than handing back a short file', async () => {
+    // Stopping would be silent truncation and asking on would walk into a 416.
+    // This platform always names the total, so this is a hop rewriting it.
+    const { computer } = await computerOn((call) => {
+      if (!call.path.endsWith('/files')) return anyRoute(call);
+      return new Response(new Uint8Array([1, 2, 3]), {
+        status: 206,
+        headers: {
+          'content-type': 'application/octet-stream',
+          'accept-ranges': 'bytes',
+          'content-range': 'bytes 0-2/*',
+        },
+      });
+    });
+    await expect(
+      (async () => {
+        for await (const _ of computer.readFileChunks('/tmp/big.bin')) {
+          // Consumed for the second request, which is where the loop gives up.
+        }
+      })(),
+    ).rejects.toThrow(/without a total/);
+  });
+
+  it('refuses a chunk size that is not a whole number of bytes', async () => {
+    const { computer } = await computerOn(guestFile(filled(10)));
+    await expect(computer.readFileChunks('/tmp/a.bin', { chunkBytes: 0 }).next()).rejects.toThrow(
+      /chunkBytes/,
+    );
+    await expect(computer.readFileChunks('/tmp/a.bin', { chunkBytes: 1.5 }).next()).rejects.toThrow(
+      /chunkBytes/,
+    );
+  });
+
+  it('judges the window against the spelling the caller used', async () => {
+    // Resolved first, a tail with a length would become a length silently
+    // dropped, and a fractional offset would be reported against a number
+    // derived from the file's size rather than the one that was passed.
+    const { computer } = await computerOn(guestFile(filled(10)));
+    await expect(
+      computer.readFileChunks('/tmp/a.bin', { offset: -100, length: 10 }).next(),
+    ).rejects.toThrow(/cannot also take a length/);
+    await expect(computer.readFileChunks('/tmp/a.bin', { offset: -1.5 }).next()).rejects.toThrow(
+      /got -1.5/,
+    );
   });
 });
 
