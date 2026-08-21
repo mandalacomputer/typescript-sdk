@@ -992,6 +992,11 @@ describe('ranged reads', () => {
     const part = await computer.readFilePart('/proc/cpuinfo', { offset: 0, length: 4 });
     expect(part).toMatchObject({ offset: 0, partial: false, seekable: false });
     expect(part.bytes).toHaveLength(8);
+    // No total, and not the eight bytes that happened to arrive. The platform
+    // declines to promise a length here because the next read is a different
+    // one, and inventing it from the body would be this SDK asserting what the
+    // platform refused to.
+    expect(part.total).toBeUndefined();
   });
 
   it('refuses a 206 whose Content-Range did not survive the trip', async () => {
@@ -1010,6 +1015,35 @@ describe('ranged reads', () => {
     );
   });
 
+  it('refuses a 206 whose body does not fill the window it names', async () => {
+    // The header and the body are two statements of one fact. An empty body
+    // reads to the paging loop as the end of the file — `scp` then reports 0
+    // bytes and exits 0 — and a body longer than its window carries the offset
+    // past the total and ends the loop as a complete file with extra bytes in
+    // it. Both are silent, so neither is allowed through.
+    const window206 =
+      (body: Uint8Array, contentRange: string): Responder =>
+      (call) => {
+        if (!call.path.endsWith('/files')) return anyRoute(call);
+        return new Response(body, {
+          status: 206,
+          headers: {
+            'content-type': 'application/octet-stream',
+            'accept-ranges': 'bytes',
+            'content-range': contentRange,
+          },
+        });
+      };
+    const short = await computerOn(window206(new Uint8Array(0), 'bytes 0-9/100'));
+    await expect(short.computer.readFilePart('/tmp/a.bin', { offset: 0 })).rejects.toThrow(
+      /0 bytes for a Content-Range naming 10/,
+    );
+    const long = await computerOn(window206(filled(20), 'bytes 0-9/100'));
+    await expect(long.computer.readFilePart('/tmp/a.bin', { offset: 0 })).rejects.toThrow(
+      /20 bytes for a Content-Range naming 10/,
+    );
+  });
+
   it('carries the file real length on a range that named no byte it has', async () => {
     const { computer } = await computerOn(guestFile(filled(1000)));
     const err = await computer.readFilePart('/tmp/big.bin', { offset: 5000 }).catch((e) => e);
@@ -1024,10 +1058,32 @@ describe('ranged reads', () => {
     // SDK. Both halves survive: the size and ceiling are the platform's, the
     // way out is ours.
     const { computer } = await computerOn(guestFile(filled(1000), { max: 100 }));
-    const err = await computer.readFile('/tmp/big.bin').catch((e) => e);
+    for (const read of [
+      () => computer.readFile('/tmp/big.bin'),
+      // The same whole-file read through the other door. readFilePart with no
+      // window earns the identical refusal and used to get none of the help.
+      () => computer.readFilePart('/tmp/big.bin'),
+    ]) {
+      const err = await read().catch((e) => e);
+      expect(err).toBeInstanceOf(TooLargeError);
+      expect(err.message).toMatch(/that file is 1000 bytes/);
+      expect(err.message).toMatch(/readFileChunks\(path\)/);
+    }
+  });
+
+  it('leaves the platform to speak for a 413 that a window earned', async () => {
+    // The rewrite says "ask for part of it", which is only an answer where no
+    // part was asked for. The platform applies the ceiling to the file when
+    // there is no range and to the window when there is, so this cannot happen
+    // against it — and where the SDK cannot know better it says nothing.
+    const { computer } = await computerOn((call) =>
+      call.path.endsWith('/files') ? errorJson(413, 'that window is too large') : anyRoute(call),
+    );
+    const err = await computer
+      .readFilePart('/tmp/big.bin', { offset: 0, length: 500 })
+      .catch((e) => e);
     expect(err).toBeInstanceOf(TooLargeError);
-    expect(err.message).toMatch(/that file is 1000 bytes/);
-    expect(err.message).toMatch(/readFileChunks\(path\)/);
+    expect(err.message).toBe('that window is too large');
   });
 });
 
@@ -1167,6 +1223,45 @@ describe('paging a file bigger than one request', () => {
     );
     await expect(computer.readFileChunks('/tmp/a.bin', { chunkBytes: 1.5 }).next()).rejects.toThrow(
       /chunkBytes/,
+    );
+  });
+
+  it('refuses a tail whose probe named no total, rather than copying one byte', async () => {
+    // The probe is the file's LAST byte, not the tail that was asked for.
+    // Yielded and returned it is a one-byte `mandala scp` reporting success —
+    // the forward loop's own failure, met one request earlier.
+    const { computer } = await computerOn((call) => {
+      if (!call.path.endsWith('/files')) return anyRoute(call);
+      return new Response(new Uint8Array([9]), {
+        status: 206,
+        headers: {
+          'content-type': 'application/octet-stream',
+          'accept-ranges': 'bytes',
+          'content-range': 'bytes 999-999/*',
+        },
+      });
+    });
+    await expect(computer.readFileChunks('/tmp/big.bin', { offset: -250 }).next()).rejects.toThrow(
+      /without a total/,
+    );
+  });
+
+  it('refuses a window wider than the one it asked for', async () => {
+    // A caller who bounded the read with `length` bounded it. Handing back more
+    // is not a smaller wrong than handing back less.
+    const { computer } = await computerOn((call) => {
+      if (!call.path.endsWith('/files')) return anyRoute(call);
+      return new Response(filled(40), {
+        status: 206,
+        headers: {
+          'content-type': 'application/octet-stream',
+          'accept-ranges': 'bytes',
+          'content-range': 'bytes 0-39/1000',
+        },
+      });
+    });
+    await expect(computer.readFileChunks('/tmp/big.bin', { length: 10 }).next()).rejects.toThrow(
+      /cannot hand back more than it asked for/,
     );
   });
 

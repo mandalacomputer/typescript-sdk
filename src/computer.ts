@@ -227,15 +227,47 @@ export type FileChunk = {
   seekable: boolean;
 };
 
+/** What a caller is told about a 206 that cannot be placed in its file. */
+const unplaceable = (path: string, why: string): MandalaError =>
+  new MandalaError(
+    `the platform answered 206 for ${path} ${why}, so where these bytes belong in the ` +
+      'file is unknown',
+  );
+
+/**
+ * A 206 that named no length to page towards.
+ *
+ * Its own sentence because both ends of a paged read can meet it, and both have
+ * the same two bad answers available: stop, and hand back a truncated file
+ * saying nothing, or ask on, and walk off the end into a 416.
+ */
+const noTotal = (path: string): MandalaError =>
+  new MandalaError(
+    `the platform answered 206 for ${path} without a total, so there is no length to page ` +
+      'towards and no way to tell a short answer from the end of the file',
+  );
+
 /** {@link Bytes} off the files route, read as a window of a file. */
 function toFileChunk(res: Bytes, path: string): FileChunk {
   const partial = res.status === 206;
   const seekable = res.acceptRanges !== 'none';
   if (!partial) {
-    // No range was honoured, so the whole file arrived and its length is the
-    // file's length. Said rather than left undefined: a caller deciding whether
-    // to page has the answer already, and it is not a guess.
-    return { bytes: res.bytes, offset: 0, total: res.bytes.length, partial, seekable };
+    // No range was honoured, so the whole file arrived. Where there is a length
+    // to state, that is it — a caller deciding whether to page has the answer
+    // already and it is not a guess.
+    //
+    // A file the guest could not measure has no such number. The platform
+    // declines to promise one precisely because the next read of a /proc entry
+    // is a different length, and manufacturing one here out of the bytes that
+    // happened to arrive would be this SDK asserting what the platform refused
+    // to. `seekable` is the signal there, as the type says.
+    return {
+      bytes: res.bytes,
+      offset: 0,
+      total: seekable ? res.bytes.length : undefined,
+      partial,
+      seekable,
+    };
   }
   if (!res.contentRange) {
     // A 206 whose Content-Range did not survive the trip — stripped by a proxy,
@@ -243,10 +275,18 @@ function toFileChunk(res: Bytes, path: string): FileChunk {
     // are somewhere in the file and nothing left says where, and a caller
     // writing them at a guessed offset corrupts the copy silently. This is the
     // one failure the status was added to prevent, so it is not papered over.
-    throw new MandalaError(
-      `the platform answered 206 for ${path} without a readable Content-Range, so where ` +
-        'these bytes belong in the file is unknown',
-    );
+    throw unplaceable(path, 'without a readable Content-Range');
+  }
+  // The header and the body have to agree about how many bytes this is. They
+  // are two statements of one fact and only the header is checked anywhere
+  // else, so a disagreement leaves the same question open as a missing header:
+  // an empty body reads to the paging loop as the end of the file — `scp` then
+  // reports 0 bytes and exits 0 — and a body longer than its window carries the
+  // offset past the total, which ends the loop as a complete file with extra
+  // bytes in it. Both are silent, and both are answered here.
+  const window = res.contentRange.end - res.contentRange.start + 1;
+  if (res.bytes.length !== window) {
+    throw unplaceable(path, `with ${res.bytes.length} bytes for a Content-Range naming ${window}`);
   }
   return {
     bytes: res.bytes,
@@ -1428,10 +1468,7 @@ export class Computer {
     path: string,
     opts: { timeoutMs?: number } & CallOptions = {},
   ): Promise<Uint8Array> {
-    const res = await this.#readFileRequest(path, opts).catch((err: unknown) => {
-      throw pointPastTheCeiling(err);
-    });
-    return res.bytes;
+    return (await this.#readFileRequest(path, opts)).bytes;
   }
 
   /** {@link readFile}, decoded as UTF-8. */
@@ -1443,17 +1480,29 @@ export class Computer {
   }
 
   /** The one request behind every read on this route. */
-  #readFileRequest(
+  async #readFileRequest(
     path: string,
     opts: { offset?: number; length?: number; timeoutMs?: number } & CallOptions,
   ): Promise<Bytes> {
-    return this.#t.bytes('GET', P.computerAction(this.id, 'files'), {
-      query: P.filesQuery(path),
-      headers: P.rangeHeaders(opts.offset, opts.length),
-      noTimeout: opts.timeoutMs === 0,
-      minTimeoutMs: opts.timeoutMs,
-      signal: opts.signal,
-    });
+    const headers = P.rangeHeaders(opts.offset, opts.length);
+    try {
+      return await this.#t.bytes('GET', P.computerAction(this.id, 'files'), {
+        query: P.filesQuery(path),
+        headers,
+        noTimeout: opts.timeoutMs === 0,
+        minTimeoutMs: opts.timeoutMs,
+        signal: opts.signal,
+      });
+    } catch (err) {
+      // Here rather than on readFile, which was the only method that had it —
+      // readFilePart with no window is the same whole-file read and earned the
+      // same refusal with none of the help. And only where no window was asked
+      // for: the platform applies the ceiling to the file when there is no
+      // range and to the WINDOW when there is, so a ranged request cannot earn
+      // a 413 at all. Which makes the rewrite unambiguous rather than a guess —
+      // wherever it fires, paging really is the answer.
+      throw headers ? err : pointPastTheCeiling(err);
+    }
   }
 
   /**
@@ -1556,12 +1605,18 @@ export class Computer {
         throw err;
       });
       if (!probe) return;
-      if (!probe.partial || probe.total === undefined) {
+      if (!probe.partial) {
         // No range could be served out of this file, so the probe brought all
         // of it. There is nothing left to page towards.
         yield probe;
         return;
       }
+      // A probe that WAS a window and named no total is the forward loop's
+      // failure met one request earlier, and it has to be answered the same
+      // way. Yielded and returned — which is what this did — it hands back the
+      // file's last byte as though it were the tail that was asked for: a
+      // one-byte `mandala scp` that reports success.
+      if (probe.total === undefined) throw noTotal(path);
       offset = Math.max(0, probe.total - wanted);
       remaining = probe.total - offset;
     }
@@ -1605,27 +1660,33 @@ export class Computer {
             'a paging read cannot go on from an answer that is not where it asked',
         );
       }
+      // A window wider than the one asked for. Not something the platform can
+      // do — it clamps to the request and then to its own ceiling — but a
+      // caller who bounded the read with `length` bounded it, and quietly
+      // handing back more than that is not a smaller wrong than handing back
+      // less. toFileChunk has already made the body and the header agree, so
+      // this is the request's own bound rather than a second check of theirs.
+      if (length !== undefined && chunk.bytes.length > length) {
+        throw new MandalaError(
+          `asked ${path} for ${length} bytes from ${offset} and was answered with ` +
+            `${chunk.bytes.length}; a paging read cannot hand back more than it asked for`,
+        );
+      }
       yield chunk;
-      // A window of nothing is not an end-of-file — the platform refuses an
-      // empty range rather than serving one — but going round again on it would
-      // be an infinite loop against the platform, which is the worse of the two
-      // wrong answers.
+      // Unreachable for a real answer: a Content-Range names at least one byte,
+      // and toFileChunk refuses a 206 whose body does not fill the window it
+      // names. Kept as the one thing standing between a future change there and
+      // an unbounded request loop against the platform, which is the worst way
+      // any of this could fail.
       if (chunk.bytes.length === 0) return;
       offset += chunk.bytes.length;
       if (remaining !== undefined) {
         remaining -= chunk.bytes.length;
         if (remaining <= 0) return;
       }
-      if (chunk.total === undefined) {
-        // A 206 with no length to page towards. Stopping here would hand back a
-        // truncated file and say nothing; asking blindly on would walk off the
-        // end into a 416. This platform always names the total, so anything
-        // that reaches this line is a hop in front of it rewriting the header.
-        throw new MandalaError(
-          `the platform answered 206 for ${path} without a total, so there is no length ` +
-            'to page towards and no way to tell a short answer from the end of the file',
-        );
-      }
+      // No length to page towards. This platform always names the total, so
+      // anything reaching here is a hop in front of it rewriting the header.
+      if (chunk.total === undefined) throw noTotal(path);
       if (offset >= chunk.total) return;
     }
   }
