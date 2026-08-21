@@ -458,6 +458,25 @@ export function uploadSize(sent: number, written?: number): string {
   return written === undefined ? `${sent} bytes sent` : `${written} bytes`;
 }
 
+interface LocalWriter {
+  write(
+    buffer: Uint8Array,
+    offset?: number,
+    length?: number,
+    position?: number | null,
+  ): Promise<{ bytesWritten: number }>;
+}
+
+/** Persist a complete chunk even when the local filesystem accepts only part of a write. */
+export async function writeFully(out: LocalWriter, bytes: Uint8Array): Promise<void> {
+  let offset = 0;
+  while (offset < bytes.length) {
+    const { bytesWritten } = await out.write(bytes, offset, bytes.length - offset);
+    if (bytesWritten <= 0) throw new Error('local file write made no progress');
+    offset += bytesWritten;
+  }
+}
+
 /**
  * Copy one guest file to a local path, however large it is.
  *
@@ -478,20 +497,28 @@ export async function download(
   remotePath: string,
   local: string,
 ): Promise<number> {
-  const out = await open(local, 'w');
+  let out: Awaited<ReturnType<typeof open>> | undefined;
   let written = 0;
   try {
     for await (const chunk of computer.readFileChunks(remotePath, {
       timeoutMs: SCP_TRANSFER_TIMEOUT_MS,
     })) {
+      // Do not truncate an existing destination until the remote read has
+      // actually produced data. A source-side failure before the first chunk
+      // must leave the local file alone.
+      out ??= await open(local, 'w');
       // Sequential, and it is the paging helper that makes that safe: it
       // refuses an answer that does not start where it asked, so the chunks are
       // end to end or there are no chunks at all.
-      await out.write(chunk.bytes);
+      await writeFully(out, chunk.bytes);
       written += chunk.bytes.length;
     }
+
+    // No chunks is a successfully confirmed empty source. Only now is it safe
+    // to create or truncate the destination.
+    out ??= await open(local, 'w');
   } finally {
-    await out.close();
+    await out?.close();
   }
   return written;
 }

@@ -7,7 +7,7 @@
  * is the guest, and what the argument parser does with what it was handed.
  */
 
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
@@ -23,6 +23,7 @@ import {
   unexpectedErrorText,
   uploadSize,
   waitForWebSocketOpen,
+  writeFully,
 } from '../src/cli.js';
 import type { FileChunk } from '../src/index.js';
 
@@ -363,12 +364,52 @@ describe('scp download', () => {
     });
   });
 
+  it('preserves an existing destination when the remote read fails before its first chunk', async () => {
+    await inTempDir(async (dir) => {
+      const local = join(dir, 'existing.bin');
+      const original = Uint8Array.from([9, 8, 7]);
+      await writeFile(local, original);
+      const computer = {
+        async *readFileChunks(): AsyncGenerator<FileChunk> {
+          yield* [];
+          throw new Error('the guest file does not exist');
+        },
+      };
+
+      await expect(download(computer, '/tmp/missing.bin', local)).rejects.toThrow(/does not exist/);
+      expect(new Uint8Array(await readFile(local))).toEqual(original);
+    });
+  });
+
+  it('retries an unwritten suffix when a local write is short', async () => {
+    const persisted: number[] = [];
+    const calls: Array<{ offset: number; length: number }> = [];
+    const out = {
+      async write(buffer: Uint8Array, offset = 0, length = buffer.length - offset) {
+        calls.push({ offset, length });
+        const bytesWritten = Math.min(2, length);
+        persisted.push(...buffer.subarray(offset, offset + bytesWritten));
+        return { bytesWritten };
+      },
+    };
+
+    await writeFully(out, Uint8Array.from([1, 2, 3, 4, 5]));
+
+    expect(persisted).toEqual([1, 2, 3, 4, 5]);
+    expect(calls).toEqual([
+      { offset: 0, length: 5 },
+      { offset: 2, length: 3 },
+      { offset: 4, length: 1 },
+    ]);
+  });
+
   it('writes an empty file for a file with nothing in it', async () => {
     // An empty file pages to no windows at all, and the copy still has to
     // produce something: `scp vm:/empty .` that leaves no file is a copy that
     // silently did not happen.
     await inTempDir(async (dir) => {
       const local = join(dir, 'empty.bin');
+      await writeFile(local, 'not empty');
       expect(await download(paging([]), '/tmp/empty.bin', local)).toBe(0);
       expect(await readFile(local)).toHaveLength(0);
     });
