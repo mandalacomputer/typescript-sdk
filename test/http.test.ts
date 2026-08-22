@@ -18,6 +18,7 @@ import {
   TooLargeError,
   UnavailableError,
 } from '../src/index.js';
+import { MAX_TIMER_MS } from '../src/transport.js';
 import { anyRoute, BASE, bytes, COMPUTER, errorJson, json, recorder, SNAPSHOT } from './harness.js';
 
 const client = (rec: ReturnType<typeof recorder>, opts = {}) =>
@@ -35,14 +36,18 @@ describe('auth', () => {
   });
 
   it('reads the key and base URL from the environment', () => {
+    const savedKey = process.env.MANDALA_API_KEY;
+    const savedBase = process.env.MANDALA_BASE_URL;
     process.env.MANDALA_API_KEY = 'com_from_env';
     process.env.MANDALA_BASE_URL = 'https://self.hosted/api/v1/';
     try {
       // The trailing slash is stripped, so paths do not double up on it.
       expect(new Client().baseUrl).toBe('https://self.hosted/api/v1');
     } finally {
-      delete process.env.MANDALA_API_KEY;
-      delete process.env.MANDALA_BASE_URL;
+      if (savedKey === undefined) delete process.env.MANDALA_API_KEY;
+      else process.env.MANDALA_API_KEY = savedKey;
+      if (savedBase === undefined) delete process.env.MANDALA_BASE_URL;
+      else process.env.MANDALA_BASE_URL = savedBase;
     }
   });
 
@@ -63,6 +68,18 @@ describe('auth', () => {
     const rec = recorder(anyRoute);
     await client(rec).computers.list();
     expect(rec.last().headers.Authorization).toBe('Bearer com_test');
+  });
+
+  it('trims a key with a trailing newline, which env files often have', async () => {
+    const rec = recorder(anyRoute);
+    await new Client({ apiKey: 'com_test\n', baseUrl: BASE, fetch: rec.fetch }).computers.list();
+    expect(rec.last().headers.Authorization).toBe('Bearer com_test');
+  });
+
+  it('names an invalid base URL rather than throwing Invalid URL later', () => {
+    expect(() => new Client({ apiKey: 'com_test', baseUrl: 'not-a-url' })).toThrow(
+      /baseUrl must be an absolute URL/,
+    );
   });
 
   it('keeps the key off the error, which is the thing that gets logged', async () => {
@@ -248,6 +265,15 @@ describe('status mapping', () => {
       .catch((e) => e);
     expect(err).toBeInstanceOf(RateLimitError);
     expect(err.retryAfterMs).toBe(1_500);
+  });
+
+  it('clamps a huge Retry-After rather than wrapping a Node timer', async () => {
+    const rec = recorder(() => errorJson(429, 'slow down', { 'Retry-After': '10000000000' }));
+    const err = await client(rec)
+      .computers.list()
+      .catch((e) => e);
+    expect(err).toBeInstanceOf(RateLimitError);
+    expect(err.retryAfterMs).toBe(MAX_TIMER_MS);
   });
 });
 

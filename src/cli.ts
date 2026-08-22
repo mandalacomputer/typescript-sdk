@@ -24,10 +24,11 @@
  * there can run.
  */
 
-import { realpathSync } from 'node:fs';
-import { open, readFile, stat } from 'node:fs/promises';
+import { createReadStream, realpathSync } from 'node:fs';
+import { open, stat } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import process from 'node:process';
+import { Readable } from 'node:stream';
 import { pathToFileURL } from 'node:url';
 
 import type { Computer } from './computer.js';
@@ -74,8 +75,24 @@ function die(message: string): never {
 
 /** A guest path's final component, regardless of which OS the guest runs. */
 export function guestBasename(path: string): string {
-  const parts = path.split(/[\\/]/);
+  const parts = path.split(/[\\/]/).filter((part) => part.length > 0);
   return parts.at(-1) ?? '';
+}
+
+/**
+ * Pause local stdin when the websocket still has this many unsent bytes.
+ *
+ * Guest→stdout already waits on `write()` returning false. The other direction
+ * has no such signal unless we watch `bufferedAmount` ourselves.
+ */
+export const STDIN_HIGH_WATER = 1 << 20;
+
+/** Whether stdin should pause for the socket to catch up. */
+export function stdinBackpressure(
+  bufferedAmount: number,
+  highWater = STDIN_HIGH_WATER,
+): 'pause' | 'resume' {
+  return bufferedAmount > highWater ? 'pause' : 'resume';
 }
 
 /** A terminal frame's wire size. Text is bounded in bytes, just like binary. */
@@ -102,6 +119,7 @@ export function flushOutput(
   stdout: NodeJS.WritableStream,
   stderr: NodeJS.WritableStream,
   done: () => void,
+  timeoutMs = EXIT_DRAIN_MS,
 ): void {
   let pending = 2;
   const drained = () => {
@@ -113,8 +131,12 @@ export function flushOutput(
     const finish = () => {
       if (settled) return;
       settled = true;
+      clearTimeout(timer);
       drained();
     };
+    const timer = setTimeout(finish, timeoutMs);
+    timer.unref?.();
+    stream.once?.('error', finish);
     try {
       stream.write('', finish);
     } catch {
@@ -272,6 +294,7 @@ async function interact(url: string): Promise<number> {
   const stdout = process.stdout;
   let raw = false;
   let exitCode: number | undefined;
+  let pump: ReturnType<typeof setInterval> | undefined;
 
   const sendSize = () => {
     if (ws.readyState !== WebSocket.OPEN || !stdout.isTTY) return;
@@ -301,7 +324,20 @@ async function interact(url: string): Promise<number> {
   };
 
   const onStdin = (chunk: Buffer) => {
-    if (ws.readyState === WebSocket.OPEN) ws.send(chunk);
+    if (ws.readyState !== WebSocket.OPEN) return;
+    ws.send(chunk);
+    if (stdinBackpressure(ws.bufferedAmount) === 'pause') {
+      stdin.pause();
+      pump ??= setInterval(() => {
+        if (ws.readyState !== WebSocket.OPEN || stdinBackpressure(ws.bufferedAmount) === 'resume') {
+          if (pump) {
+            clearInterval(pump);
+            pump = undefined;
+          }
+          if (ws.readyState === WebSocket.OPEN) stdin.resume();
+        }
+      }, 16);
+    }
   };
 
   /**
@@ -318,6 +354,10 @@ async function interact(url: string): Promise<number> {
   };
 
   const cleanup = () => {
+    if (pump) {
+      clearInterval(pump);
+      pump = undefined;
+    }
     stdin.off('data', onStdin);
     stdin.off('end', onStdinEnd);
     stdout.off('resize', sendSize);
@@ -538,7 +578,11 @@ async function cmdScp(srcArg: string, dstArg: string): Promise<number> {
     let local = dstArg;
     // A directory destination takes the source's own basename, like scp.
     const info = await stat(local).catch(() => undefined);
-    if (info?.isDirectory()) local = join(local, guestBasename(src.path));
+    if (info?.isDirectory()) {
+      const name = guestBasename(src.path);
+      if (!name) die(`say which file: ${src.target}:${src.path}`);
+      local = join(local, name);
+    }
     const size = await download(computer, src.path, local);
     process.stderr.write(`${src.target}:${src.path} -> ${local} (${size} bytes)\n`);
     return 0;
@@ -547,14 +591,19 @@ async function cmdScp(srcArg: string, dstArg: string): Promise<number> {
   const remote = dst!;
   if (!remote.path) die(`say where in the guest: ${remote.target}:/absolute/path`);
   const path = guestDestination(remote.path, srcArg);
-  const data = await readFile(srcArg);
-  const written = await (await resolve(client, remote.target)).writeFile(path, data, {
+  const info = await stat(srcArg).catch(() => undefined);
+  if (!info?.isFile()) die(`${srcArg} is not a file`);
+  // Streamed rather than `readFile`'d: a guest-bound copy of a large file is
+  // the same 2 GB the download path already refuses to hold as one Buffer.
+  const body = Readable.toWeb(createReadStream(srcArg)) as ReadableStream<Uint8Array>;
+  const written = await (await resolve(client, remote.target)).writeFile(path, body, {
     timeoutMs: SCP_TRANSFER_TIMEOUT_MS,
+    contentLength: info.size,
   });
   // What the platform said, or what was sent — labelled as which, since a
   // platform that does not report a count is not evidence that everything
   // landed.
-  const size = uploadSize(data.length, written);
+  const size = uploadSize(info.size, written);
   process.stderr.write(`${srcArg} -> ${remote.target}:${path} (${size})\n`);
   return 0;
 }
