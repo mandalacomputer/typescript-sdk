@@ -1743,8 +1743,18 @@ export class Computer {
     opts: { timeoutMs?: number; contentLength?: number } & CallOptions = {},
   ): Promise<number | undefined> {
     const bytes = typeof data === 'string' ? new TextEncoder().encode(data) : data;
-    const headers =
-      opts.contentLength != null ? { 'Content-Length': String(opts.contentLength) } : undefined;
+    // Validated before the header is formed: String(NaN) is "NaN", and Node
+    // fetch then rejects the request as a connection failure rather than a
+    // caller mistake. A custom fetch would send the malformed header.
+    let headers: Record<string, string> | undefined;
+    if (opts.contentLength != null) {
+      if (!Number.isSafeInteger(opts.contentLength) || opts.contentLength < 0) {
+        throw new ValidationError(
+          `contentLength must be a non-negative whole number of bytes no larger than ${Number.MAX_SAFE_INTEGER} (got ${opts.contentLength})`,
+        );
+      }
+      headers = { 'Content-Length': String(opts.contentLength) };
+    }
     const res = await this.#t.json<{ bytes?: number } | undefined>(
       'PUT',
       P.computerAction(this.id, 'files'),
