@@ -43,8 +43,8 @@ export type Query = Record<string, string | number | boolean | undefined>;
 export type RequestOptions = {
   query?: Query;
   body?: unknown;
-  /** Raw bytes as the request body, for the file upload. Exclusive with `body`. */
-  raw?: Uint8Array;
+  /** Raw bytes (or a stream of them) as the request body, for the file upload. Exclusive with `body`. */
+  raw?: Uint8Array | ReadableStream<Uint8Array>;
   /** Extra headers for this call only. */
   headers?: Record<string, string>;
   signal?: AbortSignal;
@@ -247,10 +247,19 @@ export function unsatisfiedTotal(header: string | null): number | undefined {
 const retryAfterMs = (header: string | null): number | undefined => {
   if (!header) return undefined;
   const seconds = Number(header);
-  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1_000;
-  const at = Date.parse(header);
-  if (!Number.isFinite(at)) return undefined;
-  return Math.max(at - Date.now(), 0);
+  const delay =
+    Number.isFinite(seconds) && seconds >= 0
+      ? seconds * 1_000
+      : (() => {
+          const at = Date.parse(header);
+          if (!Number.isFinite(at)) return undefined;
+          return Math.max(at - Date.now(), 0);
+        })();
+  // Node timers wrap a delay above MAX_TIMER_MS to 1ms. An unbounded
+  // Retry-After would then become an immediate retry of a 429, which is the
+  // opposite of what the header asked for.
+  if (delay === undefined) return undefined;
+  return Math.min(delay, MAX_TIMER_MS);
 };
 
 const env = (name: string): string | undefined =>
@@ -267,7 +276,7 @@ export class Transport {
   readonly #fetch: typeof globalThis.fetch;
 
   constructor(opts: TransportOptions = {}) {
-    const key = opts.apiKey ?? env('MANDALA_API_KEY');
+    const key = (opts.apiKey ?? env('MANDALA_API_KEY'))?.trim();
     if (!key) {
       throw new MandalaError(
         'No API key. Pass apiKey, or set MANDALA_API_KEY ' + '(create one at Settings → API keys).',
@@ -278,6 +287,14 @@ export class Transport {
     // instead of storing '' and throwing an anonymous Invalid URL on first use.
     const baseUrl = opts.baseUrl?.trim() || env('MANDALA_BASE_URL')?.trim() || DEFAULT_BASE_URL;
     this.baseUrl = baseUrl.replace(/\/+$/, '');
+    try {
+      // Named here rather than left for `new URL` on the first request: that
+      // throw is a raw TypeError ("Invalid URL") that says nothing about
+      // baseUrl, and the empty-string case above is the one we already recover.
+      void new URL(this.baseUrl);
+    } catch {
+      throw new ValidationError(`baseUrl must be an absolute URL (got ${JSON.stringify(baseUrl)})`);
+    }
     this.#headers = { Authorization: `Bearer ${key}`, Accept: 'application/json' };
     // Checked here for the reason #deadlineMs checks minTimeoutMs below — one
     // hazard with two doors into it, and only one of them was guarded. A NaN
@@ -340,7 +357,7 @@ export class Transport {
   async #fetchRaw(method: string, path: string, opts: RequestOptions = {}): Promise<Sent> {
     const timeoutMs = this.#deadlineMs(opts);
     const headers: Record<string, string> = { ...this.#headers, ...opts.headers };
-    let body: string | Uint8Array | undefined;
+    let body: string | Uint8Array | ReadableStream<Uint8Array> | undefined;
     if (opts.raw !== undefined) {
       // The file upload's body IS the file. Content-Type is deliberately
       // octet-stream rather than guessed from the path: the platform writes the
@@ -355,14 +372,24 @@ export class Transport {
 
     let resp: Response;
     try {
-      resp = await this.#fetch(this.#url(path, opts.query), {
+      // Node's fetch (undici) refuses a ReadableStream body unless the request
+      // is marked half-duplex: the stream is sent, then the response is read.
+      // Without it every streamed upload — including `mandala scp file vm:/path`
+      // — dies with "duplex option is required when sending a body" before a
+      // byte leaves the machine. The test recorder consumes the stream itself
+      // and never hits this check. Set only for streams: a string or Uint8Array
+      // body does not need it, and a custom fetch that forwarded the flag on
+      // those would be a change in the request that is not the request.
+      const init: RequestInit & { duplex?: 'half' } = {
         method,
         headers,
         // Cast because @types/node does not put Uint8Array in BodyInit even
         // though undici accepts it.
         body: body as RequestInit['body'],
         signal: this.#signal(opts.signal, timeoutMs),
-      });
+      };
+      if (body instanceof ReadableStream) init.duplex = 'half';
+      resp = await this.#fetch(this.#url(path, opts.query), init);
     } catch (cause) {
       // A caller's own signal firing is a cancellation whatever its reason is
       // named. Judged first, so a custom reason — `ac.abort(new Error(...))` —
