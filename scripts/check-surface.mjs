@@ -27,7 +27,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { balanced, stripComments, topLevelKeys } from './surface-text.mjs';
+import { balanced, stripComments, topLevelField, topLevelKeys } from './surface-text.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = resolve(here, '..');
@@ -56,20 +56,33 @@ if (!platform) {
 // Both files are read as text and matched over, so this runs with no build step
 // and no dependency. Comments are stripped from anything matched, because both
 // are heavily commented and several of those comments quote the very shapes
-// being matched — over them, the regexes invent routes and parameters.
+// being matched — over them, the regexes invent routes and parameters. See
+// scripts/surface-text.mjs, which is a copy of the same helpers in the MCP
+// server: a parser bug found in one is worth carrying to the other.
 
-/**
- * The text between the bracket at `from` and the one that balances it.
- *
- * Depth counting rather than a lazy match to the next closer, because every
- * table here nests: a route's `query` array holds objects, and a body's schema
- * holds more of them.
- */
 // --- routes -----------------------------------------------------------------
 
 const surfaceSource = readFileSync(join(platform, 'web/lib/surface.ts'), 'utf8');
 
-/** Pull one `export const NAME: Route[] = [...]` table out. */
+/**
+ * Pull one `export const NAME: Route[] = [...]` table out, entry by entry.
+ *
+ * Split by brace depth rather than matched with one regex across the whole
+ * table. A `/method:.*?pattern:/` over the flat text is correct only while
+ * every entry happens to write its method first: reorder two fields and the
+ * lazy match joins one entry's method to the next entry's pattern. What comes
+ * out is a route neither table has — and a route that is in neither is not a
+ * failure here, it is silence. A checker whose failure mode is a false
+ * all-clear is worse than no checker, which is what the brace walk is for.
+ *
+ * Slicing the entry is only half of it. Within one entry the fields are read at
+ * that entry's own depth, because a nested literal can quote a `pattern` of its
+ * own — an options bag, a `handler: {}` with a path in it — and a regex over
+ * the entry takes whichever comes first.
+ *
+ * The `!routes.size` guard below only catches a parse that found nothing at
+ * all, which is exactly what a mispaired parse is not.
+ */
 function routeTable(name) {
   const decl = `export const ${name}: Route[] = [`;
   const start = surfaceSource.indexOf(decl);
@@ -77,12 +90,23 @@ function routeTable(name) {
   // The opening bracket of the table, not the one in `Route[]` a few characters
   // earlier — which is what an indexOf('[') from the declaration finds, and
   // which closes immediately.
-  const body = balanced(surfaceSource, start + decl.length - 1, '[', ']');
-  const re = /method:\s*'([A-Z]+)'[\s\S]*?pattern:\s*'([^']+)'/g;
-  const routes = [];
-  const clean = stripComments(body);
-  for (let m = re.exec(clean); m; m = re.exec(clean)) routes.push(`${m[1]} ${m[2]}`);
-  return new Set(routes);
+  const body = stripComments(balanced(surfaceSource, start + decl.length - 1, '[', ']'));
+  const routes = new Set();
+  for (let i = 0, depth = 0, from = 0; i < body.length; i++) {
+    if (body[i] === '{') {
+      if (depth++ === 0) from = i;
+    } else if (body[i] === '}' && --depth === 0) {
+      // Both, out of ONE entry and at that entry's own depth. An entry
+      // carrying only half of the pair is not a route, and must borrow the
+      // other half neither from its neighbour nor from a literal nested in it.
+      const entry = body.slice(from + 1, i);
+      const method = topLevelField(entry, 'method');
+      const pattern = topLevelField(entry, 'pattern');
+      if (method && pattern) routes.add(`${method} ${pattern}`);
+    }
+  }
+  if (!routes.size) throw new Error(`parsed ${name} but found no routes — has its shape changed?`);
+  return routes;
 }
 
 const platformRoutes = routeTable('V1_ROUTES');
@@ -122,13 +146,6 @@ for (const m of docSource.matchAll(/^const ([A-Z_]+): Query = \{/gm)) {
   if (named) sharedQuery.set(m[1], named[1]);
 }
 
-/**
- * The keys of an object literal, at its own depth only.
- *
- * Nested schemas have keys of their own — `type`, `description`, `items` — and
- * every one of them would read as a body field. Quoted strings are skipped
- * whole, because a description is prose and prose contains colons.
- */
 /** Every query, header and body field the platform documents, by route. */
 function platformParameters() {
   const start = docSource.indexOf('export const DOCS: Record<string, Doc> = {');
