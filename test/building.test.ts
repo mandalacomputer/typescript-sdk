@@ -64,6 +64,14 @@ describe('numbers that would go out as null', () => {
     expect(() => P.updateBody({ idleSuspendMin: null })).not.toThrow();
   });
 
+  it('refuses a negative or fractional shape rather than sending it', () => {
+    expect(() => P.createBody({ cpu: -1 })).toThrow(/positive integer/);
+    expect(() => P.createBody({ ramMb: 1.5 })).toThrow(/positive integer/);
+    expect(() => P.updateBody({ diskGb: 0 })).toThrow(/positive integer/);
+    expect(() => P.updateBody({ idleSuspendMin: -1 })).toThrow(/non-negative integer/);
+    expect(() => P.updateBody({ idleSuspendMin: 1.5 })).toThrow(/non-negative integer/);
+  });
+
   it('refuses a non-positive exec timeout', () => {
     expect(() => P.execBody({ command: 'ls', timeoutS: -1 })).toThrow(/positive/);
     expect(() => P.execBody({ command: 'ls', timeoutS: Number.NaN })).toThrow(/finite/);
@@ -144,12 +152,29 @@ describe('input bodies', () => {
     expect(P.waitBody(30)).toEqual({ action: 'wait', duration: 30 });
   });
 
+  it('refuses a held key past the same cap, for the same reason', () => {
+    expect(() => P.holdKeyBody(['shift'], 31)).toThrow(/30 seconds/);
+    expect(P.holdKeyBody(['shift'], 30)).toEqual({
+      action: 'hold_key',
+      keys: ['shift'],
+      duration: 30,
+    });
+  });
+
   it('rejects a direction the platform has no verb for', () => {
     expect(() => P.scrollBody({ direction: 'sideways' as never, amount: 1 })).toThrow(/one of/);
   });
 });
 
 describe('execBody', () => {
+  it('refuses a missing or empty command rather than sending none', () => {
+    expect(() => P.execBody({ command: '' })).toThrow(/command must not be empty/);
+    expect(() => P.execBody({ command: '   ' })).toThrow(/command must not be empty/);
+    expect(() => P.execBody({ command: undefined as unknown as string })).toThrow(
+      /command must not be empty/,
+    );
+  });
+
   it('omits session unless the desktop was asked for', () => {
     expect(P.execBody({ command: 'ls' })).toEqual({ command: 'ls' });
     expect(P.execBody({ command: 'ls', desktop: true }).session).toBe('desktop');

@@ -43,8 +43,8 @@ export type Query = Record<string, string | number | boolean | undefined>;
 export type RequestOptions = {
   query?: Query;
   body?: unknown;
-  /** Raw bytes as the request body, for the file upload. Exclusive with `body`. */
-  raw?: Uint8Array;
+  /** Raw bytes (or a stream of them) as the request body, for the file upload. Exclusive with `body`. */
+  raw?: Uint8Array | ReadableStream<Uint8Array>;
   /** Extra headers for this call only. */
   headers?: Record<string, string>;
   signal?: AbortSignal;
@@ -247,10 +247,19 @@ export function unsatisfiedTotal(header: string | null): number | undefined {
 const retryAfterMs = (header: string | null): number | undefined => {
   if (!header) return undefined;
   const seconds = Number(header);
-  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1_000;
-  const at = Date.parse(header);
-  if (!Number.isFinite(at)) return undefined;
-  return Math.max(at - Date.now(), 0);
+  const delay =
+    Number.isFinite(seconds) && seconds >= 0
+      ? seconds * 1_000
+      : (() => {
+          const at = Date.parse(header);
+          if (!Number.isFinite(at)) return undefined;
+          return Math.max(at - Date.now(), 0);
+        })();
+  // Node timers wrap a delay above MAX_TIMER_MS to 1ms. An unbounded
+  // Retry-After would then become an immediate retry of a 429, which is the
+  // opposite of what the header asked for.
+  if (delay === undefined) return undefined;
+  return Math.min(delay, MAX_TIMER_MS);
 };
 
 const env = (name: string): string | undefined =>
@@ -267,7 +276,7 @@ export class Transport {
   readonly #fetch: typeof globalThis.fetch;
 
   constructor(opts: TransportOptions = {}) {
-    const key = opts.apiKey ?? env('MANDALA_API_KEY');
+    const key = (opts.apiKey ?? env('MANDALA_API_KEY'))?.trim();
     if (!key) {
       throw new MandalaError(
         'No API key. Pass apiKey, or set MANDALA_API_KEY ' + '(create one at Settings → API keys).',
@@ -278,6 +287,14 @@ export class Transport {
     // instead of storing '' and throwing an anonymous Invalid URL on first use.
     const baseUrl = opts.baseUrl?.trim() || env('MANDALA_BASE_URL')?.trim() || DEFAULT_BASE_URL;
     this.baseUrl = baseUrl.replace(/\/+$/, '');
+    try {
+      // Named here rather than left for `new URL` on the first request: that
+      // throw is a raw TypeError ("Invalid URL") that says nothing about
+      // baseUrl, and the empty-string case above is the one we already recover.
+      void new URL(this.baseUrl);
+    } catch {
+      throw new ValidationError(`baseUrl must be an absolute URL (got ${JSON.stringify(baseUrl)})`);
+    }
     this.#headers = { Authorization: `Bearer ${key}`, Accept: 'application/json' };
     // Checked here for the reason #deadlineMs checks minTimeoutMs below — one
     // hazard with two doors into it, and only one of them was guarded. A NaN
@@ -340,7 +357,7 @@ export class Transport {
   async #fetchRaw(method: string, path: string, opts: RequestOptions = {}): Promise<Sent> {
     const timeoutMs = this.#deadlineMs(opts);
     const headers: Record<string, string> = { ...this.#headers, ...opts.headers };
-    let body: string | Uint8Array | undefined;
+    let body: string | Uint8Array | ReadableStream<Uint8Array> | undefined;
     if (opts.raw !== undefined) {
       // The file upload's body IS the file. Content-Type is deliberately
       // octet-stream rather than guessed from the path: the platform writes the

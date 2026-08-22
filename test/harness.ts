@@ -49,6 +49,8 @@ export function recorder(respond: Responder): Recorder {
       }
     } else if (rawBody instanceof Uint8Array) {
       raw = rawBody;
+    } else if (typeof ReadableStream !== 'undefined' && rawBody instanceof ReadableStream) {
+      raw = new Uint8Array(await new Response(rawBody).arrayBuffer());
     }
     const call: Call = {
       method: init?.method ?? 'GET',
