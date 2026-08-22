@@ -1,9 +1,15 @@
-import { spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { balanced, stripComments, topLevelField, topLevelKeys } from '../scripts/surface-text.mjs';
+import {
+  balanced,
+  entries,
+  stripComments,
+  topLevelField,
+  topLevelKeys,
+} from '../scripts/surface-text.mjs';
 
 describe('the surface source scanner', () => {
   it('ignores brackets in quoted strings and comments', () => {
@@ -76,6 +82,40 @@ describe('the surface source scanner', () => {
       topLevelField(`description: 'takes a method: \\'GET\\' here', method: 'PUT'`, 'method'),
     ).toBe('PUT');
   });
+
+  it('reads a value in any of the three quote styles', () => {
+    expect(topLevelField(`pattern: "computers/:id"`, 'pattern')).toBe('computers/:id');
+    expect(topLevelField('pattern: `computers/:id`', 'pattern')).toBe('computers/:id');
+    expect(topLevelField(`pattern: 'computers/:id'`, 'pattern')).toBe('computers/:id');
+  });
+
+  it('declines a template literal with a hole rather than reading it raw', () => {
+    // Half of a route is not a route, and the entry is dropped as half-written.
+    // Handing back the source text of the interpolation would be a pattern the
+    // platform never serves, compared against a mirror as if it did.
+    expect(topLevelField(`pattern: \`computers/\${id}\``, 'pattern')).toBeUndefined();
+  });
+
+  it('takes a key with a regex metacharacter in it literally', () => {
+    // `name` goes into a RegExp, so unescaped it was a pattern and not a key:
+    // `.` matched any character, so `a.b` read the value out of `axb`, and the
+    // `$` of `$ref` anchored the end of the input so it matched nothing at all.
+    expect(topLevelField(`axb: 'wrong'`, 'a.b')).toBeUndefined();
+    expect(topLevelField(`$ref: 'here'`, '$ref')).toBe('here');
+  });
+
+  it('splits entries without counting braces inside literals', () => {
+    expect(entries(`{ a: 'one } two' }, { b: /[{]/ }, { c: \`three { four\` }`)).toEqual([
+      ` a: 'one } two' `,
+      ' b: /[{]/ ',
+      ' c: `three { four` ',
+    ]);
+  });
+
+  it('refuses a list body whose braces do not balance', () => {
+    expect(() => entries('{ a: 1 } }')).toThrow(/unbalanced/);
+    expect(() => entries('{ a: 1')).toThrow(/unbalanced/);
+  });
 });
 
 /**
@@ -87,7 +127,13 @@ describe('the surface source scanner', () => {
  * `!routes.size` guard cannot stand in for this: a mispaired parse finds plenty.
  */
 describe('the route table reader', () => {
-  const scanTable = (table: string) => {
+  // Spawned, not spawnSync'd. Each scan is a whole node process, and the
+  // synchronous call held this worker's event loop for the length of it —
+  // long enough that the 20ms timeout assertion in behaviour.test.ts, running
+  // in a sibling worker, missed its deadline and failed. Awaiting the child
+  // gives the loop back while the process runs, and the timing test stops
+  // depending on which files vitest happened to schedule alongside it.
+  const scanTable = async (table: string) => {
     const dir = mkdtempSync(join(tmpdir(), 'surface-fixture-'));
     mkdirSync(join(dir, 'web/lib'), { recursive: true });
     writeFileSync(
@@ -98,41 +144,76 @@ describe('the route table reader', () => {
     try {
       // Exits 1: a two-route fixture matches none of the real mirror. The `+`
       // lines are the routes it read out of the fixture, which is the subject.
-      const run = spawnSync(process.execPath, ['scripts/check-surface.mjs'], {
-        cwd: resolve(__dirname, '..'),
-        env: { ...process.env, MANDALA_PLATFORM_REPO: dir },
-        encoding: 'utf8',
+      const said = await new Promise<string>((done, fail) => {
+        const child = spawn(process.execPath, ['scripts/check-surface.mjs'], {
+          cwd: resolve(__dirname, '..'),
+          env: { ...process.env, MANDALA_PLATFORM_REPO: dir },
+        });
+        let out = '';
+        child.stdout.setEncoding('utf8');
+        child.stderr.setEncoding('utf8');
+        child.stdout.on('data', (chunk: string) => {
+          out += chunk;
+        });
+        child.stderr.on('data', (chunk: string) => {
+          out += chunk;
+        });
+        child.on('error', fail);
+        child.on('close', () => done(out));
       });
-      const said = `${run.stdout}${run.stderr}`;
       return [...said.matchAll(/^ {2}\+ ([A-Z]+ \S+)$/gm)].map((m) => m[1]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   };
 
-  it('reads a route whose entry writes pattern before method', () => {
+  it('reads a route whose entry writes pattern before method', async () => {
     // The lazy `/method:[\s\S]*?pattern:/` skipped this entry looking for a
     // `method:`, found the next one's, and paired it with the pattern after
     // that: `GET beta`, a route in neither table and so reported by neither.
     expect(
-      scanTable(`
+      await scanTable(`
         { role: 'viewer', pattern: 'alpha', method: 'GET' },
         { method: 'POST', pattern: 'beta' },
       `),
     ).toEqual(['GET alpha', 'POST beta']);
   });
 
-  it('does not let a nested literal lend its pattern to the entry above', () => {
+  it('does not let a nested literal lend its pattern to the entry above', async () => {
     expect(
-      scanTable(`
+      await scanTable(`
         { method: 'GET', handler: { fallback: { pattern: 'not-a-route' } }, pattern: 'gamma' },
       `),
     ).toEqual(['GET gamma']);
   });
 
-  it('ignores an entry that carries only half of the pair', () => {
-    expect(scanTable(`{ pattern: 'orphan' }, { method: 'PUT', pattern: 'delta' },`)).toEqual([
+  it('ignores an entry that carries only half of the pair', async () => {
+    expect(await scanTable(`{ pattern: 'orphan' }, { method: 'PUT', pattern: 'delta' },`)).toEqual([
       'PUT delta',
     ]);
+  });
+
+  it('keeps reading entries past a brace quoted inside one of them', async () => {
+    // The raw brace count this replaced went to -1 on that `}` and never came
+    // back to 0, so `from` was never re-armed: the two routes after it were
+    // dropped, `routes.size` stayed non-zero so no guard fired, and check
+    // reported them as routes the platform no longer serves.
+    expect(
+      await scanTable(`
+        { method: 'GET', pattern: 'alpha' },
+        { method: 'GET', pattern: 'beta', note: 'the } closer' },
+        { method: 'DELETE', pattern: 'gamma' },
+        { method: 'GET', pattern: 'delta' },
+      `),
+    ).toEqual(['DELETE gamma', 'GET alpha', 'GET beta', 'GET delta']);
+  });
+
+  it('reads a route the table spells with double quotes or a backtick', async () => {
+    expect(
+      await scanTable(`
+        { method: "GET", pattern: "alpha" },
+        { method: \`POST\`, pattern: \`beta\` },
+      `),
+    ).toEqual(['GET alpha', 'POST beta']);
   });
 });
