@@ -62,8 +62,13 @@ export const count = (v: unknown): number | undefined => {
  * Two credentials rather than one, and the difference is enforced by the
  * platform rather than by the client asking politely:
  *
- * - `token` — full control: keyboard, pointer, clipboard. Root-equivalent on
- *   that one machine, so it belongs on a server or in a page you trust.
+ * - `token` — full control: keyboard and pointer. Root-equivalent on that one
+ *   machine, so it belongs on a server or in a page you trust. NOT the
+ *   clipboard, whatever a noVNC client offers on it: QEMU carries cut text only
+ *   through a vdagent channel these guests are not started with, so a paste
+ *   arrives and is dropped with no error. Move text with `exec` and
+ *   `desktop: true` instead, and give the write a process that outlives the
+ *   command — an X selection belongs to one.
  * - `viewToken` — watch only. The platform drops input on a socket opened with
  *   it, so a browser holding this one cannot type even from a patched client.
  *
@@ -89,8 +94,14 @@ export type VncConnect = {
   /**
    * Websocket URL opening an interactive terminal — a PTY in the guest, carried
    * on the same controlling credential as {@link url}, so treat it as that
-   * credential. `''` on a Windows guest, which has no terminal yet, and on a
-   * platform from before the terminal existed.
+   * credential. `''` on a Windows guest, which has no terminal yet.
+   *
+   * Present and refused is the case to plan for, and it is about the COMPUTER
+   * rather than the platform: the serial channel a terminal runs over is added
+   * to a guest's hardware at COLD boot, so a computer last started before
+   * terminals shipped has a URL here that answers 409 until it is stopped and
+   * started. A restart will not do it — that resets the same QEMU, and the
+   * command line only changes on a cold boot. The refusal says as much.
    */
   terminalUrl: string;
   raw: Record<string, unknown>;
@@ -197,6 +208,18 @@ export type Snapshot = {
   name: string;
   /** `"disk"`, or `"memory"` for a live RAM+disk capture. */
   kind: string;
+  /**
+   * Where these bytes have got to, and what may be done with them.
+   *
+   * - `"capturing"` — still being taken, and NOT a snapshot yet. A listing puts
+   *   these first, their ids begin `cap-`, and restore, clone and delete all
+   *   answer 404 on one. Acting on the newest row of a fresh listing is exactly
+   *   how this is met.
+   * - `"pending"` — on its host and usable. This is the point to act from.
+   * - `"durable"` — in backup storage too. See {@link durable}.
+   * - `"deleting"` — a deletion that began and did not finish; only listed when
+   *   asked for.
+   */
   state: string;
   sizeBytes: number;
   createdAt: string;
