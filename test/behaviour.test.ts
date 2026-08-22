@@ -963,6 +963,27 @@ describe('files', () => {
     expect(rec.last().headers['Content-Length']).toBe('5');
     expect(written).toBe(5);
   });
+
+  it('refuses a contentLength that is not a whole number of bytes', async () => {
+    // String(NaN) is "NaN"; Node fetch then reports a connection failure, and a
+    // custom fetch would send the malformed header. Same class of mistake as a
+    // fractional chunkBytes — refused here, before a PUT goes out.
+    const { rec, client: c } = client(anyRoute);
+    const computer = await c.computers.get('vm-1');
+    await expect(computer.writeFile('/tmp/a.txt', 'hello', { contentLength: -1 })).rejects.toThrow(
+      /contentLength/,
+    );
+    await expect(computer.writeFile('/tmp/a.txt', 'hello', { contentLength: 1.5 })).rejects.toThrow(
+      /contentLength/,
+    );
+    await expect(
+      computer.writeFile('/tmp/a.txt', 'hello', { contentLength: Number.NaN }),
+    ).rejects.toThrow(/contentLength/);
+    await expect(
+      computer.writeFile('/tmp/a.txt', 'hello', { contentLength: Number.MAX_SAFE_INTEGER + 1 }),
+    ).rejects.toThrow(/contentLength/);
+    expect(rec.calls.filter((call) => call.method === 'PUT')).toEqual([]);
+  });
 });
 
 /** `n` bytes whose value at every position says which position it is. */
