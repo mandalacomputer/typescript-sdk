@@ -19,6 +19,8 @@ import {
   guestDestination,
   queueTerminalWrite,
   remoteSide,
+  STDIN_HIGH_WATER,
+  stdinBackpressure,
   terminalFrameByteLength,
   unexpectedErrorText,
   uploadSize,
@@ -118,6 +120,37 @@ describe('terminal lifecycle', () => {
     expect(exits).toBe(1);
   });
 
+  it('gives up flushing when a write callback never fires', async () => {
+    vi.useFakeTimers();
+    try {
+      const hung = {
+        write() {
+          return false;
+        },
+        once() {},
+      } as unknown as NodeJS.WritableStream;
+      let exits = 0;
+      flushOutput(
+        hung,
+        hung,
+        () => {
+          exits += 1;
+        },
+        10,
+      );
+      expect(exits).toBe(0);
+      await vi.advanceTimersByTimeAsync(10);
+      expect(exits).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('pauses stdin once the websocket buffer is over the water mark', () => {
+    expect(stdinBackpressure(STDIN_HIGH_WATER)).toBe('resume');
+    expect(stdinBackpressure(STDIN_HIGH_WATER + 1)).toBe('pause');
+  });
+
   it('keeps the stack for an unexpected top-level failure', () => {
     const err = new Error('unexpected');
     expect(unexpectedErrorText(err)).toBe(err.stack);
@@ -185,6 +218,11 @@ describe('guestDestination', () => {
   it('takes a guest basename using either path separator', () => {
     expect(guestBasename('/home/dev/notes.txt')).toBe('notes.txt');
     expect(guestBasename('C:\\Users\\dev\\notes.txt')).toBe('notes.txt');
+  });
+
+  it('does not treat a trailing separator as an empty name', () => {
+    expect(guestBasename('/tmp/')).toBe('tmp');
+    expect(guestBasename('C:\\Users\\dev\\')).toBe('dev');
   });
 
   it('appends the source basename to a directory, on either separator', () => {
