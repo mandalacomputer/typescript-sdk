@@ -66,6 +66,22 @@ function finiteIf(v: number | undefined, what: string): void {
   if (v !== undefined) finite(v, what);
 }
 
+/**
+ * A shape field, refused when it is not a positive integer.
+ *
+ * {@link finiteIf} only stops a NaN becoming JSON `null`. A negative or a
+ * fraction is equally knowable without a round trip, and the same class of
+ * mistake this file exists to name: `cpu: -1` is not a computer the platform
+ * can build, and learning that from a 400 is a trip that never had to happen.
+ */
+function positiveIntIf(v: number | undefined, what: string): void {
+  if (v === undefined) return;
+  finite(v, what);
+  if (!Number.isInteger(v) || v <= 0) {
+    throw new ValidationError(`${what} must be a positive integer (got ${v})`);
+  }
+}
+
 export const computer = (id: string): string => `computers/${pathId(id, 'computer id')}`;
 
 /**
@@ -187,9 +203,9 @@ export function createBody(args: CreateArgs): Json {
   // zero value: a computer built with no CPU, or — worse, on update — an idle
   // window of "follow the host" that nobody asked for. The same failure
   // {@link finite} catches on a coordinate, arriving through the create.
-  finiteIf(cpu, 'cpu');
-  finiteIf(ramMb, 'ramMb');
-  finiteIf(diskGb, 'diskGb');
+  positiveIntIf(cpu, 'cpu');
+  positiveIntIf(ramMb, 'ramMb');
+  positiveIntIf(diskGb, 'diskGb');
   if (name !== undefined && !name.trim()) {
     throw new ValidationError('name must not be empty');
   }
@@ -239,13 +255,19 @@ export type UpdateArgs = {
  * is a 400 that reads as though the request was malformed.
  */
 export function updateBody(args: UpdateArgs): Json {
-  finiteIf(args.cpu, 'cpu');
-  finiteIf(args.ramMb, 'ramMb');
-  finiteIf(args.diskGb, 'diskGb');
+  positiveIntIf(args.cpu, 'cpu');
+  positiveIntIf(args.ramMb, 'ramMb');
+  positiveIntIf(args.diskGb, 'diskGb');
   // Null is the documented "follow the host's own window". A NaN is serialized
   // as the same null and would mean it by accident, on the one field here where
-  // the wrong value is silently a legitimate request.
-  if (args.idleSuspendMin != null) finite(args.idleSuspendMin, 'idleSuspendMin');
+  // the wrong value is silently a legitimate request. A fraction or a negative
+  // is the same class of mistake as a bad cpu: knowable here, and not a window.
+  if (args.idleSuspendMin != null) {
+    const idle = finite(args.idleSuspendMin, 'idleSuspendMin');
+    if (!Number.isInteger(idle) || idle < 0) {
+      throw new ValidationError(`idleSuspendMin must be a non-negative integer (got ${idle})`);
+    }
+  }
   const body = omitUndefined({
     name: args.name,
     cpu: args.cpu,
@@ -385,6 +407,9 @@ function envObject(env: Readonly<Record<string, string>>): Json {
  * value it accepts.
  */
 export function execBody(args: ExecArgs): Json {
+  if (typeof args.command !== 'string' || !args.command.trim()) {
+    throw new ValidationError('command must not be empty');
+  }
   const body: Json = { command: args.command };
   // Checked here rather than left to the transport's own finiteness guard: that
   // one is on the request deadline, and a client whose deadline is disabled
@@ -667,6 +692,15 @@ export function holdKeyBody(keys: readonly string[], seconds: number): Json {
   if (!keys.length) throw new ValidationError('holdKey() needs at least one key');
   finite(seconds, 'seconds');
   if (seconds <= 0) throw new ValidationError('seconds must be positive');
+  // Same cap, and the same reason, as {@link waitBody}: a hold is a held HTTP
+  // request crossing a reverse proxy. 100 seconds would not return, it would
+  // fail — and the deadline computed from it would overflow Node's timer max
+  // long before that and be refused as a timeout, which is the wrong name.
+  if (seconds > 30) {
+    throw new ValidationError(
+      'the platform caps a held key at 30 seconds; call holdKey() again for longer',
+    );
+  }
   return { action: 'hold_key', keys: [...keys], duration: seconds };
 }
 

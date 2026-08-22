@@ -118,15 +118,18 @@ const deadlineSignal = (ms: number, caller?: AbortSignal): AbortSignal => {
  * mistake, and the only place it can be named is before the loop starts.
  */
 const checkWait = (timeoutMs: number, pollMs: number): void => {
-  for (const [what, v] of [
-    ['timeoutMs', timeoutMs],
-    ['pollMs', pollMs],
-  ] as const) {
-    if (!Number.isFinite(v) || v < 0 || v > MAX_TIMER_MS) {
-      throw new ValidationError(
-        `${what} must be a non-negative finite number no greater than ${MAX_TIMER_MS} (got ${v})`,
-      );
-    }
+  if (!Number.isFinite(timeoutMs) || timeoutMs < 0 || timeoutMs > MAX_TIMER_MS) {
+    throw new ValidationError(
+      `timeoutMs must be a non-negative finite number no greater than ${MAX_TIMER_MS} (got ${timeoutMs})`,
+    );
+  }
+  // 0 is the unthrottled loop `setTimeout(fn, NaN)` also is: fire at once and
+  // immediately ask again. A wait that never sleeps is a request storm, and
+  // the comment above used to name only NaN.
+  if (!Number.isFinite(pollMs) || pollMs <= 0 || pollMs > MAX_TIMER_MS) {
+    throw new ValidationError(
+      `pollMs must be a positive finite number no greater than ${MAX_TIMER_MS} (got ${pollMs})`,
+    );
   }
 };
 
@@ -135,6 +138,17 @@ const retryDelay = (pollMs: number, err: unknown): number =>
   err instanceof RateLimitError && err.retryAfterMs !== undefined
     ? Math.max(pollMs, err.retryAfterMs)
     : pollMs;
+
+/** Trim and refuse a missing Anthropic key before it becomes an empty header. */
+const requireModelKey = (key: string | undefined, what: string): string => {
+  const trimmed = key?.trim() ?? '';
+  if (!trimmed) {
+    throw new MandalaError(
+      `${what} needs your own Anthropic API key as modelKey — the platform does not store one.`,
+    );
+  }
+  return trimmed;
+};
 
 /** A poll sleep that cannot carry its loop beyond the loop's own deadline. */
 const sleepUntilNextPoll = (
@@ -1476,7 +1490,12 @@ export class Computer {
     path: string,
     opts: { timeoutMs?: number } & CallOptions = {},
   ): Promise<string> {
-    return new TextDecoder().decode(await this.readFile(path, opts));
+    const bytes = await this.readFile(path, opts);
+    try {
+      return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    } catch (cause) {
+      throw new MandalaError(`${path} is not valid UTF-8`, { cause });
+    }
   }
 
   /** The one request behind every read on this route. */
@@ -1702,9 +1721,12 @@ export class Computer {
   /**
    * Write `data` to one file inside the guest, creating it if needed.
    *
-   * A string is written as UTF-8. The path rules are {@link readFile}'s. The
-   * bytes land exactly as given — this is how a credential reaches a guest
-   * `.env` without echoing it through a shell command line.
+   * A string is written as UTF-8. A `ReadableStream` is sent as the request
+   * body so a large local file does not have to live as one Buffer first;
+   * pass `contentLength` when you know it so the platform sees the size.
+   * The path rules are {@link readFile}'s. The bytes land exactly as given —
+   * this is how a credential reaches a guest `.env` without echoing it through
+   * a shell command line.
    *
    * `timeoutMs` extends the client's per-request deadline for this one
    * transfer, as on {@link readFile}; `0` disables it.
@@ -1717,16 +1739,29 @@ export class Computer {
    */
   async writeFile(
     path: string,
-    data: Uint8Array | string,
-    opts: { timeoutMs?: number } & CallOptions = {},
+    data: Uint8Array | string | ReadableStream<Uint8Array>,
+    opts: { timeoutMs?: number; contentLength?: number } & CallOptions = {},
   ): Promise<number | undefined> {
     const bytes = typeof data === 'string' ? new TextEncoder().encode(data) : data;
+    // Validated before the header is formed: String(NaN) is "NaN", and Node
+    // fetch then rejects the request as a connection failure rather than a
+    // caller mistake. A custom fetch would send the malformed header.
+    let headers: Record<string, string> | undefined;
+    if (opts.contentLength != null) {
+      if (!Number.isSafeInteger(opts.contentLength) || opts.contentLength < 0) {
+        throw new ValidationError(
+          `contentLength must be a non-negative whole number of bytes no larger than ${Number.MAX_SAFE_INTEGER} (got ${opts.contentLength})`,
+        );
+      }
+      headers = { 'Content-Length': String(opts.contentLength) };
+    }
     const res = await this.#t.json<{ bytes?: number } | undefined>(
       'PUT',
       P.computerAction(this.id, 'files'),
       {
         query: P.filesQuery(path),
         raw: bytes,
+        headers,
         noTimeout: opts.timeoutMs === 0,
         minTimeoutMs: opts.timeoutMs,
         signal: opts.signal,
@@ -1907,11 +1942,7 @@ export class Computer {
    * one would turn a forward-compatible addition into an outage.
    */
   async *agentStream(args: AgentArgs): AsyncGenerator<AgentEvent> {
-    if (!args.modelKey) {
-      throw new MandalaError(
-        'agent() needs your own Anthropic API key as modelKey — the platform does not store one.',
-      );
-    }
+    const modelKey = requireModelKey(args.modelKey, 'agent()');
     let steps = 0;
     for await (const raw of this.#t.sse('POST', P.computerAction(this.id, 'agent'), {
       body: P.agentBody({
@@ -1921,7 +1952,7 @@ export class Computer {
         maxSteps: args.maxSteps,
         model: args.model,
       }),
-      headers: { [MODEL_KEY_HEADER]: args.modelKey },
+      headers: { [MODEL_KEY_HEADER]: modelKey },
       signal: args.signal,
     })) {
       const ev = toAgentEvent(raw.event, raw.data, steps);
@@ -1944,11 +1975,7 @@ export class Computer {
    * {@link agent} unless you specifically need a single non-streaming call.
    */
   async agentOnce(args: AgentArgs): Promise<AgentResult> {
-    if (!args.modelKey) {
-      throw new MandalaError(
-        'agentOnce() needs your own Anthropic API key as modelKey — the platform does not store one.',
-      );
-    }
+    const modelKey = requireModelKey(args.modelKey, 'agentOnce()');
     const data = await this.#t.json<Record<string, unknown>>(
       'POST',
       P.computerAction(this.id, 'agent'),
@@ -1960,7 +1987,7 @@ export class Computer {
           maxSteps: args.maxSteps,
           model: args.model,
         }),
-        headers: { [MODEL_KEY_HEADER]: args.modelKey },
+        headers: { [MODEL_KEY_HEADER]: modelKey },
         signal: args.signal,
         // One held request for a run that is minutes of clicking — the same
         // exemption the streaming route gets, for the same reason. The

@@ -1,5 +1,7 @@
 /** The transport: auth, status mapping, listings, streams. */
 
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { describe, expect, it, vi } from 'vitest';
 import {
   APIError,
@@ -18,6 +20,7 @@ import {
   TooLargeError,
   UnavailableError,
 } from '../src/index.js';
+import { MAX_TIMER_MS } from '../src/transport.js';
 import { anyRoute, BASE, bytes, COMPUTER, errorJson, json, recorder, SNAPSHOT } from './harness.js';
 
 const client = (rec: ReturnType<typeof recorder>, opts = {}) =>
@@ -35,14 +38,18 @@ describe('auth', () => {
   });
 
   it('reads the key and base URL from the environment', () => {
+    const savedKey = process.env.MANDALA_API_KEY;
+    const savedBase = process.env.MANDALA_BASE_URL;
     process.env.MANDALA_API_KEY = 'com_from_env';
     process.env.MANDALA_BASE_URL = 'https://self.hosted/api/v1/';
     try {
       // The trailing slash is stripped, so paths do not double up on it.
       expect(new Client().baseUrl).toBe('https://self.hosted/api/v1');
     } finally {
-      delete process.env.MANDALA_API_KEY;
-      delete process.env.MANDALA_BASE_URL;
+      if (savedKey === undefined) delete process.env.MANDALA_API_KEY;
+      else process.env.MANDALA_API_KEY = savedKey;
+      if (savedBase === undefined) delete process.env.MANDALA_BASE_URL;
+      else process.env.MANDALA_BASE_URL = savedBase;
     }
   });
 
@@ -63,6 +70,18 @@ describe('auth', () => {
     const rec = recorder(anyRoute);
     await client(rec).computers.list();
     expect(rec.last().headers.Authorization).toBe('Bearer com_test');
+  });
+
+  it('trims a key with a trailing newline, which env files often have', async () => {
+    const rec = recorder(anyRoute);
+    await new Client({ apiKey: 'com_test\n', baseUrl: BASE, fetch: rec.fetch }).computers.list();
+    expect(rec.last().headers.Authorization).toBe('Bearer com_test');
+  });
+
+  it('names an invalid base URL rather than throwing Invalid URL later', () => {
+    expect(() => new Client({ apiKey: 'com_test', baseUrl: 'not-a-url' })).toThrow(
+      /baseUrl must be an absolute URL/,
+    );
   });
 
   it('keeps the key off the error, which is the thing that gets logged', async () => {
@@ -249,6 +268,15 @@ describe('status mapping', () => {
     expect(err).toBeInstanceOf(RateLimitError);
     expect(err.retryAfterMs).toBe(1_500);
   });
+
+  it('clamps a huge Retry-After rather than wrapping a Node timer', async () => {
+    const rec = recorder(() => errorJson(429, 'slow down', { 'Retry-After': '10000000000' }));
+    const err = await client(rec)
+      .computers.list()
+      .catch((e) => e);
+    expect(err).toBeInstanceOf(RateLimitError);
+    expect(err.retryAfterMs).toBe(MAX_TIMER_MS);
+  });
 });
 
 describe('decoding', () => {
@@ -296,6 +324,48 @@ describe('decoding', () => {
     const computer = await client(rec, { timeoutMs: 10 }).computers.get('vm-1');
     await expect(computer.readFile('/tmp/file', { timeoutMs: 0 })).resolves.toHaveLength(4);
     await expect(computer.writeFile('/tmp/file', 'file', { timeoutMs: 0 })).resolves.toBe(4);
+  });
+
+  it('sends a streamed upload through Node fetch, which requires duplex', async () => {
+    // The recorder consumes the stream itself and never constructs a Request,
+    // so it cannot catch this: undici rejects a ReadableStream body unless
+    // RequestInit.duplex is 'half'. Every `mandala scp file vm:/path` goes
+    // through that check, against the package's default fetch.
+    let uploaded: Buffer | undefined;
+    const server = createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on('data', (chunk: Buffer) => chunks.push(chunk));
+      req.on('end', () => {
+        const body = Buffer.concat(chunks);
+        let json: unknown = COMPUTER;
+        if (req.url?.includes('/files')) {
+          uploaded = body;
+          json = { bytes: body.length };
+        }
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify(json));
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const { port } = server.address() as AddressInfo;
+      const c = new Client({ apiKey: 'com_test', baseUrl: `http://127.0.0.1:${port}/api/v1` });
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('hello'));
+          controller.close();
+        },
+      });
+      const written = await (await c.computers.get('vm-1')).writeFile('/tmp/a.txt', stream, {
+        contentLength: 5,
+      });
+      expect(written).toBe(5);
+      expect(uploaded?.toString()).toBe('hello');
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        server.close((err) => (err ? reject(err) : resolve())),
+      );
+    }
   });
 
   it("composes the caller's cancellation with the client's deadline", async () => {

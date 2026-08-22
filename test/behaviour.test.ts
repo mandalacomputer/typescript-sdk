@@ -342,6 +342,7 @@ describe('waiting', () => {
       () => computer.waitForGuest({ timeoutMs: Number.POSITIVE_INFINITY }),
       () => computer.waitUntilRunning({ timeoutMs: -1 }),
       () => computer.waitUntilBuilt({ pollMs: 2_147_483_648 }),
+      () => computer.waitUntilRunning({ pollMs: 0 }),
     ]) {
       await expect(wait()).rejects.toThrow(TypeError);
     }
@@ -936,6 +937,53 @@ describe('files', () => {
     const computer = await c.computers.get('vm-1');
     expect(await computer.readTextFile('/tmp/a.txt')).toBe('file');
   });
+
+  it('refuses a text read of bytes that are not UTF-8', async () => {
+    const { client: c } = client((call) =>
+      call.path.endsWith('/files')
+        ? new Response(Uint8Array.from([0xff, 0xfe]), { status: 200 })
+        : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    await expect(computer.readTextFile('/tmp/a.bin')).rejects.toThrow(/not valid UTF-8/);
+  });
+
+  it('streams an upload instead of holding the whole file as one Buffer', async () => {
+    const { rec, client: c } = client(anyRoute);
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('hello'));
+        controller.close();
+      },
+    });
+    const written = await (await c.computers.get('vm-1')).writeFile('/tmp/a.txt', stream, {
+      contentLength: 5,
+    });
+    expect(rec.last().raw && new TextDecoder().decode(rec.last().raw)).toBe('hello');
+    expect(rec.last().headers['Content-Length']).toBe('5');
+    expect(written).toBe(5);
+  });
+
+  it('refuses a contentLength that is not a whole number of bytes', async () => {
+    // String(NaN) is "NaN"; Node fetch then reports a connection failure, and a
+    // custom fetch would send the malformed header. Same class of mistake as a
+    // fractional chunkBytes — refused here, before a PUT goes out.
+    const { rec, client: c } = client(anyRoute);
+    const computer = await c.computers.get('vm-1');
+    await expect(computer.writeFile('/tmp/a.txt', 'hello', { contentLength: -1 })).rejects.toThrow(
+      /contentLength/,
+    );
+    await expect(computer.writeFile('/tmp/a.txt', 'hello', { contentLength: 1.5 })).rejects.toThrow(
+      /contentLength/,
+    );
+    await expect(
+      computer.writeFile('/tmp/a.txt', 'hello', { contentLength: Number.NaN }),
+    ).rejects.toThrow(/contentLength/);
+    await expect(
+      computer.writeFile('/tmp/a.txt', 'hello', { contentLength: Number.MAX_SAFE_INTEGER + 1 }),
+    ).rejects.toThrow(/contentLength/);
+    expect(rec.calls.filter((call) => call.method === 'PUT')).toEqual([]);
+  });
 });
 
 /** `n` bytes whose value at every position says which position it is. */
@@ -1497,6 +1545,14 @@ describe('the agent loop', () => {
     expect(res.finished).toBe(false);
     expect(res.stop).toBe('max_steps');
     expect(res.text).toBe('got partway');
+  });
+
+  it('refuses a whitespace-only model key rather than forwarding it', async () => {
+    const { rec, client: c } = client(anyRoute);
+    const computer = await c.computers.get('vm-1');
+    await expect(computer.agentOnce({ prompt: 'go', modelKey: '   ' })).rejects.toThrow(/modelKey/);
+    await expect(computer.agent({ prompt: 'go', modelKey: '   ' })).rejects.toThrow(/modelKey/);
+    expect(rec.calls.every((call) => !call.path.endsWith('/agent'))).toBe(true);
   });
 
   it('throws when the stream ends with no result at all', async () => {
