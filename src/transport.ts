@@ -372,14 +372,24 @@ export class Transport {
 
     let resp: Response;
     try {
-      resp = await this.#fetch(this.#url(path, opts.query), {
+      // Node's fetch (undici) refuses a ReadableStream body unless the request
+      // is marked half-duplex: the stream is sent, then the response is read.
+      // Without it every streamed upload — including `mandala scp file vm:/path`
+      // — dies with "duplex option is required when sending a body" before a
+      // byte leaves the machine. The test recorder consumes the stream itself
+      // and never hits this check. Set only for streams: a string or Uint8Array
+      // body does not need it, and a custom fetch that forwarded the flag on
+      // those would be a change in the request that is not the request.
+      const init: RequestInit & { duplex?: 'half' } = {
         method,
         headers,
         // Cast because @types/node does not put Uint8Array in BodyInit even
         // though undici accepts it.
         body: body as RequestInit['body'],
         signal: this.#signal(opts.signal, timeoutMs),
-      });
+      };
+      if (body instanceof ReadableStream) init.duplex = 'half';
+      resp = await this.#fetch(this.#url(path, opts.query), init);
     } catch (cause) {
       // A caller's own signal firing is a cancellation whatever its reason is
       // named. Judged first, so a custom reason — `ac.abort(new Error(...))` —

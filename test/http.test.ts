@@ -1,5 +1,7 @@
 /** The transport: auth, status mapping, listings, streams. */
 
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { describe, expect, it, vi } from 'vitest';
 import {
   APIError,
@@ -322,6 +324,48 @@ describe('decoding', () => {
     const computer = await client(rec, { timeoutMs: 10 }).computers.get('vm-1');
     await expect(computer.readFile('/tmp/file', { timeoutMs: 0 })).resolves.toHaveLength(4);
     await expect(computer.writeFile('/tmp/file', 'file', { timeoutMs: 0 })).resolves.toBe(4);
+  });
+
+  it('sends a streamed upload through Node fetch, which requires duplex', async () => {
+    // The recorder consumes the stream itself and never constructs a Request,
+    // so it cannot catch this: undici rejects a ReadableStream body unless
+    // RequestInit.duplex is 'half'. Every `mandala scp file vm:/path` goes
+    // through that check, against the package's default fetch.
+    let uploaded: Buffer | undefined;
+    const server = createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on('data', (chunk: Buffer) => chunks.push(chunk));
+      req.on('end', () => {
+        const body = Buffer.concat(chunks);
+        let json: unknown = COMPUTER;
+        if (req.url?.includes('/files')) {
+          uploaded = body;
+          json = { bytes: body.length };
+        }
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify(json));
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const { port } = server.address() as AddressInfo;
+      const c = new Client({ apiKey: 'com_test', baseUrl: `http://127.0.0.1:${port}/api/v1` });
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('hello'));
+          controller.close();
+        },
+      });
+      const written = await (await c.computers.get('vm-1')).writeFile('/tmp/a.txt', stream, {
+        contentLength: 5,
+      });
+      expect(written).toBe(5);
+      expect(uploaded?.toString()).toBe('hello');
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        server.close((err) => (err ? reject(err) : resolve())),
+      );
+    }
   });
 
   it("composes the caller's cancellation with the client's deadline", async () => {
