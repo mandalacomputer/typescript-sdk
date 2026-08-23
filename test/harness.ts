@@ -278,6 +278,22 @@ const isRecord = (v: unknown): v is Record<string, unknown> =>
  * came back. Collections list on GET and return a single object on POST —
  * getting that backwards is what made the first version of this fail.
  */
+export const MOVE_STARTED = {
+  computer_id: 'vm-1',
+  state: 'moving',
+  detail: '',
+  live: true,
+  cpu: 2,
+  ram_mb: 26000,
+  started_at: '2026-08-23T02:00:12.699Z',
+};
+export const MOVE_DONE = {
+  ...MOVE_STARTED,
+  state: 'done',
+  live: false,
+  finished_at: '2026-08-23T02:00:17.336Z',
+};
+
 export const anyRoute: Responder = (call) => {
   const { path, method } = call;
   const get = method === 'GET';
@@ -301,6 +317,12 @@ export const anyRoute: Responder = (call) => {
     if (get && path !== '/snapshots') return json({ count: 0, size_bytes: 0, fingerprint: 'f' });
     return json(get ? [SNAPSHOT] : SNAPSHOT);
   }
+  // The two halves of a move answer different moments of the same operation:
+  // the POST is the 202 with `live` true, and the listing is where it ended up.
+  // A stub that answered one shape for both would let a caller reading `live`
+  // off the wrong response pass.
+  if (path === '/moves') return json({ moves: [MOVE_DONE] });
+  if (path.endsWith('/move')) return json(MOVE_STARTED, { status: 202 });
   if (path === '/computers') return json(get ? [COMPUTER] : COMPUTER);
   // endsWith, because the recorder's paths keep the computer id: the real
   // route is /computers/:id/input, and an exact '/input' match never fired.
