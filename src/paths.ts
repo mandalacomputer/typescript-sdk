@@ -32,6 +32,8 @@ export const SNAPSHOTS = 'snapshots';
  * such route. {@link Computer.waitForMove} filters this by `computer_id`.
  */
 export const MOVES = 'moves';
+/** What the account has used, over a window. Account-scoped, like {@link MOVES}. */
+export const USAGE = 'usage';
 
 /**
  * One id, in a path, refused when it is empty.
@@ -837,6 +839,55 @@ export function screenshotQuery(width?: number, fresh?: boolean): Query | undefi
  * already tried once.
  */
 export const stopQuery = (force?: boolean): Query => (force ? { force: 'true' } : {});
+
+// --- usage ----------------------------------------------------------------
+
+/**
+ * An RFC 3339 timestamp WITH a time zone, which is the only kind the platform
+ * takes.
+ *
+ * A `Date` is the shape to prefer and the reason this accepts one at all:
+ * `toISOString()` is UTC by construction, so the whole class of mistake below
+ * cannot be made. A string is accepted for the caller who already has one —
+ * out of a config file, or off a previous response — and is checked here
+ * because the mistake is knowable without a round trip.
+ *
+ * The mistake being: `2026-08-01T00:00:00` has no zone. The platform refuses it
+ * rather than guessing, because the zone it would have to assume is the
+ * server's and not yours — and a window silently shifted by a few hours is the
+ * worst possible failure on the one call whose output somebody reconciles
+ * against an invoice. A local-looking string is refused here so that the reason
+ * arrives with the argument that caused it rather than as a 400 from a route.
+ */
+const RFC3339 = /^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[Zz]|[+-]\d{2}:\d{2})$/;
+
+function usageStamp(v: Date | string, what: string): string {
+  if (v instanceof Date) {
+    if (!Number.isFinite(v.getTime())) throw new ValidationError(`${what} is an Invalid Date`);
+    return v.toISOString();
+  }
+  if (!RFC3339.test(v)) {
+    throw new ValidationError(
+      `${what} must be an RFC 3339 timestamp with a time zone, e.g. 2026-08-01T00:00:00Z ` +
+        `(or pass a Date): ${JSON.stringify(v)}`,
+    );
+  }
+  return v;
+}
+
+/**
+ * The window to ask about, or nothing for the account's current billing period.
+ *
+ * Undefined rather than an empty object when neither bound is given, so the
+ * default call builds a bare URL — and, more to the point, so that "I did not
+ * name a window" and "I named an empty one" cannot look the same on the wire.
+ */
+export function usageQuery(from?: Date | string, to?: Date | string): Query | undefined {
+  const query: Query = {};
+  if (from !== undefined) query.from = usageStamp(from, 'from');
+  if (to !== undefined) query.to = usageStamp(to, 'to');
+  return Object.keys(query).length ? query : undefined;
+}
 
 // --- windows --------------------------------------------------------------
 
