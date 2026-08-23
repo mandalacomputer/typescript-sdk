@@ -428,13 +428,16 @@ answering; and the text goes over base64, whose alphabet has no quote in it, so
 an apostrophe in what you are pasting cannot end the shell word.
 
 Being granted the selection is also asynchronous, so a read straight after the
-write returns the *previous* clipboard — poll until it matches.
+write returns the *previous* clipboard — poll until it matches, and give up
+after a few seconds. Every poll is another billable exec, and the redirection
+above swallows xclip's own errors, so a guest without it never changes the
+selection at all.
 
 ```ts
 const read = await c.exec('xclip -o -selection clipboard', { desktop: true });
 
 const b64 = Buffer.from(text, 'utf8').toString('base64');
-await c.exec(`printf %s ${b64} | base64 -d | setsid xclip -selection clipboard >/dev/null 2>&1 &`, {
+await c.exec(`printf %s '${b64}' | base64 -d | setsid xclip -selection clipboard >/dev/null 2>&1 &`, {
   desktop: true,
 });
 ```
