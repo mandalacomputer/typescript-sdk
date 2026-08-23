@@ -420,18 +420,23 @@ end when the computer restarts.
 The clipboard does not cross the VNC socket, whatever a noVNC client offers on
 it: QEMU carries cut text only through a vdagent channel these guests are not
 started with, so a paste arrives and is dropped without an error. Move text with
-`exec` and `desktop: true`. A write needs two things, and both are quiet when
-missing: the holder must outlive the command, because an X selection belongs to
-a live process, and its output must be redirected, because an `xclip` left
-holding the pipe the guest agent reads keeps that pipe open and the exec then
-runs to its full timeout before answering.
+`exec` and `desktop: true`. Three things about the write are quiet when you get
+them wrong: the holder must outlive the command, because an X selection belongs
+to a live process; its output must be redirected, or the resident `xclip` holds
+the pipe the guest agent reads and the exec runs to its full timeout before
+answering; and the text goes over base64, whose alphabet has no quote in it, so
+an apostrophe in what you are pasting cannot end the shell word.
+
+Being granted the selection is also asynchronous, so a read straight after the
+write returns the *previous* clipboard — poll until it matches.
 
 ```ts
 const read = await c.exec('xclip -o -selection clipboard', { desktop: true });
-await c.exec(
-  `printf %s ${JSON.stringify(text)} | setsid xclip -selection clipboard >/dev/null 2>&1 &`,
-  { desktop: true },
-);
+
+const b64 = Buffer.from(text, 'utf8').toString('base64');
+await c.exec(`printf %s ${b64} | base64 -d | setsid xclip -selection clipboard >/dev/null 2>&1 &`, {
+  desktop: true,
+});
 ```
 
 `vnc` is `undefined` on a computer that came from `list()` — a desktop credential
