@@ -19,7 +19,7 @@
  * hypervisor daemon's own routes — see the README for why that boundary exists.
  */
 
-import { Computers, Moves, Sizes, Snapshots, Templates } from './resources.js';
+import { Computers, Moves, Sizes, Snapshots, Templates, Usage } from './resources.js';
 import { DEFAULT_BASE_URL, Transport, type TransportOptions } from './transport.js';
 
 export type ClientOptions = TransportOptions;
@@ -38,6 +38,7 @@ export class Client {
   readonly snapshots: Snapshots;
   readonly templates: Templates;
   readonly sizes: Sizes;
+  readonly usage: Usage;
   readonly #t: Transport;
 
   /**
@@ -51,6 +52,7 @@ export class Client {
     this.snapshots = new Snapshots(this.#t);
     this.templates = new Templates(this.#t);
     this.sizes = new Sizes(this.#t);
+    this.usage = new Usage(this.#t);
   }
 
   get baseUrl(): string {
@@ -98,6 +100,7 @@ export {
 } from './errors.js';
 export type {
   BackgroundExec,
+  ComputerUsage,
   ExecResult,
   GuestWindow,
   Holdings,
@@ -107,6 +110,9 @@ export type {
   Size,
   Snapshot,
   Template,
+  UsagePeriod,
+  UsageReport,
+  UsageTotals,
   VncConnect,
 } from './models.js';
 export type {
@@ -118,8 +124,8 @@ export type {
   WindowAction,
 } from './paths.js';
 export { SCROLL_DIRECTIONS, WINDOW_ACTIONS } from './paths.js';
-export type { CallOptions, ListOptions } from './resources.js';
-export { Computers, Moves, Sizes, Snapshots, Templates } from './resources.js';
+export type { CallOptions, ListOptions, UsageOptions } from './resources.js';
+export { Computers, Moves, Sizes, Snapshots, Templates, Usage } from './resources.js';
 export type { Bytes, ContentRange, Listing, SSEEvent, TransportOptions } from './transport.js';
 export { DEFAULT_BASE_URL, MODEL_KEY_HEADER } from './transport.js';
 
