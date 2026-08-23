@@ -60,6 +60,11 @@ async function exerciseEverything(client: Client): Promise<void> {
   await c.rename('renamed');
   await c.update({ cpu: 4 });
   await c.update({ name: 'resized', ramMb: 8192, diskGb: 80, idleSuspendMin: 30 });
+  // All three sizing fields in one call: the platform reads exactly these three
+  // off a move body, and the parameter sweep is what proves the SDK sends them.
+  // `move` on the class is the mouse pointer — see Computer.relocate.
+  await c.relocate({ ramMb: 26000, cpu: 2, diskGb: 40 });
+  await client.moves.list();
 
   await c.screenshot();
   await c.screenshot(320);

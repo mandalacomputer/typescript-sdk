@@ -391,6 +391,61 @@ suspended out from under itself.
 await c.update({ idleSuspendMin: 120 });      // or null to follow the host
 ```
 
+### Growing past the host
+
+A resize is refused when the size asks for more RAM than the host the computer
+happens to be on can run. That refusal is an offer rather than an ending: another
+host in the same region may be able to run it, and the computer can be moved
+there.
+
+```ts
+try {
+  await c.update({ ramMb: 32768 });
+} catch (err) {
+  if (err instanceof MoveRequiredError && err.movePossible) {
+    await c.relocate({ ramMb: 32768 });       // 202 — the copy runs behind it
+    const move = await c.waitForMove();
+    if (move.state !== 'done') console.log(move.state, move.detail);
+  } else throw err;
+}
+```
+
+**It is a separate call on purpose.** `relocate()` copies the computer's disk to
+different hardware. A resize that did that without being asked is exactly what
+neither this SDK nor the platform will do, so there is no option on `update()`
+that quietly relocates a machine.
+
+**The computer must be stopped**, and suspended is not stopped here — unlike a
+resize, which accepts it. A saved desktop only loads on the host that wrote it,
+so it cannot travel: resume and stop the computer, or discard the session, first.
+
+**`waitForMove()` does not throw for a move that ended badly**, because the ways
+it can end are not one thing:
+
+| `state` | what happened |
+|---|---|
+| `done` | on the new host, at the new size |
+| `moved` | on the new host, at its **old** size — the move landed and the resize did not. An ordinary `update()` finishes it where it now is |
+| `failed` | nothing happened; the computer is where it was, untouched |
+| `lost` | we stopped watching. It may well have completed — read the computer |
+
+`moved` is the one to read carefully: the computer really has changed hardware,
+so treating it as "the move failed" sends you looking for a machine that is no
+longer where it was.
+
+One move runs per account at a time. `client.moves.list()` is the account-wide
+view — where a move you did not start is found, and how a "another computer on
+this account is being moved right now" refusal gets a name.
+
+```ts
+for (const m of await client.moves.list()) {
+  console.log(m.computerId, m.state, m.live ? 'running' : m.finishedAt);
+}
+```
+
+The target is ours to choose and is never in the request: you are told a host in
+this region, not which one.
+
 ### Showing somebody the desktop
 
 Every response that *is* one computer carries the connect surface, so putting a
@@ -565,6 +620,7 @@ import {
   PermissionDeniedError,//    403 — the key's role is too low
   NotFoundError,       //     404 — no such computer, snapshot, or route
   ConflictError,       //     409 — right request, wrong moment. Retry this one.
+  MoveRequiredError,   //       409 — …except this one: the size needs a new host
   TooLargeError,       //     413 — more file than one request moves
   RangeNotSatisfiableError,// 416 — that range names no byte the file has
   RateLimitError,      //     429 — retry after retryAfterMs when present
@@ -590,6 +646,15 @@ try {
 `ConflictError` is the one that clears itself: a guest still booting, a disk still
 being copied, another operation holding the guest agent. The platform's own
 message survives onto `err.message` — these are written to be acted on.
+
+`MoveRequiredError` is the exception, and it is a subclass so that code matching
+on the family keeps working. It means the size you asked for is more RAM than the
+host this computer is on can run, and it does **not** clear — the host will not
+grow, so the same request answers the same way for as long as the computer is
+where it is. `isTransient` says false for it. `movePossible` is the branch: true
+means somewhere else in the region can run that size and `relocate()` takes the
+offer up, false means nowhere can and the size is the thing to change. See
+**Growing past the host**.
 
 `GatewayTimeoutError` is the one that does not clear and is not the platform's
 answer at all. The request reached it, and any work it had already started

@@ -32,6 +32,13 @@ export const ALLOWED: ReadonlySet<string> = new Set(
       ['POST', 'computers/:id/restart'],
       ['POST', 'computers/:id/clone'],
 
+      // Taking up the offer a refused resize makes, and reading how it went.
+      // `moves` is a collection rather than `computers/:id/move`, which is the
+      // platform's decision: a per-computer read could not tell a computer with
+      // no move from an id that does not exist.
+      ['POST', 'computers/:id/move'],
+      ['GET', 'moves'],
+
       // Computer use.
       ['GET', 'computers/:id/screenshot'],
       ['POST', 'computers/:id/input'],
@@ -129,6 +136,11 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
   ['POST computers/:id/suspend', []],
   ['POST computers/:id/restart', []],
   ['POST computers/:id/clone', ['body:name']],
+  // The sizing group and nothing else. The platform reads only these three off a
+  // move and ignores the rest, so a name sent here would be dropped silently —
+  // which is why MoveArgs has no room for one.
+  ['POST computers/:id/move', ['body:cpu', 'body:ram_mb', 'body:disk_gb']],
+  ['GET moves', []],
 
   // Computer use.
   ['GET computers/:id/screenshot', ['query:w', 'query:fresh']],
