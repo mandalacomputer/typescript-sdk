@@ -66,6 +66,11 @@ export const ALLOWED: ReadonlySet<string> = new Set(
       ['GET', 'computers/:id/schedule'],
       ['PUT', 'computers/:id/schedule'],
       ['DELETE', 'computers/:id/schedule'],
+
+      // What the account has used. Account-scoped like `moves`, and for a
+      // related reason: the figures include computers that have since been
+      // deleted, which is precisely the line an unexplained invoice is about.
+      ['GET', 'usage'],
     ] as Route[]
   ).map(([m, p]) => `${m} ${p}`),
 );
@@ -210,6 +215,10 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
   ['GET computers/:id/schedule', []],
   ['PUT computers/:id/schedule', ['body:enabled', 'body:hour', 'body:minute', 'body:tz']],
   ['DELETE computers/:id/schedule', []],
+
+  // Both bounds, and both optional: with neither, the platform answers over the
+  // account's current billing period.
+  ['GET usage', ['query:from', 'query:to']],
 ]);
 
 /**

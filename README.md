@@ -586,6 +586,69 @@ without one, and deliberately does **not** fetch it for you: a fingerprint read 
 millisecond before the delete binds the purge to whatever the set is *now*, which
 is precisely the race the interlock exists for.
 
+### Usage
+
+What the account has spent, in the same figures the dashboard shows and the
+invoice bills on. This is the read to build a spend check around: a loop that
+launches computers is the caller that can run up a bill without noticing.
+
+```ts
+const u = await client.usage.read();
+
+console.log(`${u.usage.vcpuHours} vCPU-hours since ${u.from}`);
+for (const c of u.usage.computers) {
+  console.log(`  ${c.name || c.id}${c.gone ? ' (deleted)' : ''}  ${c.runHours}h`);
+}
+```
+
+With no arguments the window is the account's **current billing period**, which
+is what makes the numbers comparable with an invoice. Name a window for one that
+has closed — the billing period is always the current one, and by the time an
+invoice arrives the period it covers is not:
+
+```ts
+await client.usage.read({
+  from: new Date(Date.UTC(2026, 6, 1)),
+  to: new Date(Date.UTC(2026, 7, 1)),
+});
+```
+
+Pass `Date`s rather than strings where you can. A string is accepted, but it must
+carry a time zone — `2026-08-01T00:00:00Z`, not `2026-08-01T00:00:00` — and a
+zoneless one is refused here rather than sent. The platform refuses it too, and
+for the reason that matters: the zone it would otherwise have to assume is the
+server's, and a window silently shifted by a few hours is the worst possible
+failure on the one call whose output somebody checks against a bill.
+
+**Read `degraded` and `unmetered` before you use the numbers.** Every figure is a
+sum across the hypervisors your computers are on, so a host that did not
+contribute does not leave a hole you could notice — it leaves a total that is
+quietly too small.
+
+```ts
+if (u.degraded || u.unmetered) {
+  // Short, and saying so. `degraded` clears when the host comes back;
+  // `unmetered` is a host running a daemon older than the meter and never does.
+  console.warn('these totals may be low — do not reconcile them against an invoice');
+}
+```
+
+This is why the call answers rather than throwing, unlike a partial listing
+below: the caveat travels in the same object, so it cannot be missed the way a
+missing row can — and one of the two shortfalls would never clear by retrying.
+
+Two more fields worth knowing:
+
+- `reportedThrough` — the last UTC day whose usage has settled for billing, as a
+  contiguous prefix. Not a caveat on the totals, which are live and true through
+  `to`; it is the boundary to check before comparing anything with an invoice.
+  `undefined` while none of the window has settled.
+- `breakdown` — false when the API key is scoped to a workspace. Usage is metered
+  and billed per **account**, so `usage.computers` would name computers outside
+  such a key's scope and the platform withholds it; the account-wide totals still
+  arrive. The array is empty either way, and this flag is what tells "no
+  computers ran" from "this key may not see which did".
+
 ### Partial listings
 
 `list()` on computers and snapshots fans out across every hypervisor holding

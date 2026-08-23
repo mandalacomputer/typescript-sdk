@@ -294,6 +294,36 @@ export const MOVE_DONE = {
   finished_at: '2026-08-23T02:00:17.336Z',
 };
 
+/**
+ * One usage report, in the platform's own spelling.
+ *
+ * With `computers` present and both shortfall flags false — the shape of a
+ * complete answer, which is what the routes test needs. The withheld breakdown
+ * and the two caveats are usage.test.ts's subject and are built there.
+ */
+export const USAGE = {
+  period: {
+    start: '2026-08-04T00:00:00.000Z',
+    end: '2026-09-04T00:00:00.000Z',
+    source: 'subscription',
+  },
+  from: '2026-08-04T00:00:00.000Z',
+  to: '2026-08-22T12:00:00.000Z',
+  usage: {
+    run_hours: 12.5,
+    vcpu_hours: 25,
+    ram_gb_hours: 50,
+    snapshot_gb_hours: 96,
+    snapshot_gb_months: 0.13,
+    disk_gb_hours: 480,
+    disk_gb_months: 0.66,
+    computers: [{ id: 'vm-1', name: 'scratch', run_hours: 12.5, vcpu_hours: 25, ram_gb_hours: 50 }],
+  },
+  degraded: false,
+  unmetered: false,
+  reported_through: '2026-08-20',
+};
+
 export const anyRoute: Responder = (call) => {
   const { path, method } = call;
   const get = method === 'GET';
@@ -321,6 +351,7 @@ export const anyRoute: Responder = (call) => {
   // the POST is the 202 with `live` true, and the listing is where it ended up.
   // A stub that answered one shape for both would let a caller reading `live`
   // off the wrong response pass.
+  if (path === '/usage') return json(USAGE);
   if (path === '/moves') return json({ moves: [MOVE_DONE] });
   if (path.endsWith('/move')) return json(MOVE_STARTED, { status: 202 });
   if (path === '/computers') return json(get ? [COMPUTER] : COMPUTER);
