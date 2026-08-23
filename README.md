@@ -409,13 +409,38 @@ the client asking politely:
 
 | | what it grants |
 |---|---|
-| `vnc.url` / `vnc.token` | full control — keyboard, pointer, clipboard. Root-equivalent on that machine. |
+| `vnc.url` / `vnc.token` | full control — keyboard and pointer, **not** the clipboard. Root-equivalent on that machine. |
 | `vnc.viewUrl` / `vnc.viewToken` | watch only. The platform *drops input* on this socket, so a patched client still cannot type. |
 | `vnc.embedUrl` | the hosted viewer, watch-only, for an `<iframe>`. The credential is in the URL fragment, which browsers never send to a server — so it stays out of access logs and out of `Referer`. |
-| `vnc.terminalUrl` | an interactive PTY in the guest, on the *controlling* credential. `''` on Windows. |
+| `vnc.terminalUrl` | an interactive PTY in the guest, on the *controlling* credential. `''` on Windows; present but refused on a computer that has not been cold-booted since terminals shipped. |
 
 Neither is your API key, which is every computer on the account, forever. Both
 end when the computer restarts.
+
+The clipboard does not cross the VNC socket, whatever a noVNC client offers on
+it: QEMU carries cut text only through a vdagent channel these guests are not
+started with, so a paste arrives and is dropped without an error. Move text with
+`exec` and `desktop: true`. Three things about the write are quiet when you get
+them wrong: the holder must outlive the command, because an X selection belongs
+to a live process; its output must be redirected, or the resident `xclip` holds
+the pipe the guest agent reads and the exec runs to its full timeout before
+answering; and the text goes over base64, whose alphabet has no quote in it, so
+an apostrophe in what you are pasting cannot end the shell word.
+
+Being granted the selection is also asynchronous, so a read straight after the
+write returns the *previous* clipboard — poll until it matches, and give up
+after a few seconds. Every poll is another billable exec, and the redirection
+above swallows xclip's own errors, so a guest without it never changes the
+selection at all.
+
+```ts
+const read = await c.exec('xclip -o -selection clipboard', { desktop: true });
+
+const b64 = Buffer.from(text, 'utf8').toString('base64');
+await c.exec(`printf %s '${b64}' | base64 -d | setsid xclip -selection clipboard >/dev/null 2>&1 &`, {
+  desktop: true,
+});
+```
 
 `vnc` is `undefined` on a computer that came from `list()` — a desktop credential
 in every list response is a credential in every log line that ever captured one.
