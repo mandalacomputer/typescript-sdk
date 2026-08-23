@@ -560,6 +560,22 @@ await client.snapshots.delete(snap.id);
 await c.setSchedule({ enabled: true, hour: 4, tz: 'America/New_York' });
 ```
 
+A schedule says when they are taken and not how long they survive. That is your
+plan's, account-wide, and read-only:
+
+```ts
+const r = await client.snapshots.retention();
+console.log(`keeps ${r.daily} daily, ${r.weekly} weekly, ${r.monthly} monthly`);
+```
+
+What survives is the newest automatic snapshot in each of the last `daily` days
+**that have one**, and likewise for ISO weeks and calendar months — periods that
+contain a capture, not periods on the calendar, so a computer switched off for a
+month still has the history it had. Boundaries are cut in UTC whatever timezone
+the schedule runs in. A zero turns that tier off. Only snapshots with `auto` set
+are ever aged out: one you took by hand is yours until you delete it, which is
+also how you keep something past the window.
+
 `restore` is refused on an orphaned snapshot — one whose computer is gone. Clone
 is what works there, because a restore puts the disk back on a source that no
 longer exists.
@@ -827,10 +843,14 @@ websocket library would have been this package's only runtime dependency, carrie
 by every user of the library for the sake of one CLI command.
 
 **Only `/api/v1`.** Never the hypervisor daemon's own routes. Its ops endpoints
-(`/host`, `/fleet`, `/audit`) and the plan-owned retention writes are not
-owner-scoped inside the daemon, because nothing user-facing was ever meant to
-reach them. `test/surface.test.ts` asserts the mirror stays clear of them, so
-widening it later is a deliberate act rather than a quiet one.
+(`/host`, `/fleet`, `/audit`) are not owner-scoped inside the daemon, because
+nothing user-facing was ever meant to reach them. The retention WRITES are kept
+out for a different reason worth not confusing with that one: `PUT /retention`
+is owner-scoped — it sets the calling tenant's own policy — but the plan owns
+retention, so a tenant setting its own would be granting itself history it has
+not paid for. `test/surface.test.ts` asserts the mirror stays clear of the ops
+endpoints and that `retention` is reached with `GET` and nothing else, so
+widening either is a deliberate act rather than a quiet one.
 
 ## Relationship to the other clients
 
