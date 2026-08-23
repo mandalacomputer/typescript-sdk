@@ -27,6 +27,7 @@ import type {
   ExecResult,
   GuestWindow,
   Holdings,
+  Move,
   Point,
   Schedule,
   Snapshot,
@@ -40,6 +41,7 @@ import {
   toExecResult,
   toGuestWindow,
   toHoldings,
+  toMove,
   toSchedule,
   toSnapshot,
   toVncConnect,
@@ -707,6 +709,125 @@ export class Computer {
       return this;
     }
     return this.#refreshAfterMutation(`PATCH ${P.computer(this.id)}`, opts);
+  }
+
+  /**
+   * Move this computer to another host in its region, so a resize that its
+   * current host cannot run becomes possible.
+   *
+   * THE SECOND HALF OF A REFUSED RESIZE, and only ever that. {@link update}
+   * throws {@link MoveRequiredError} when the size asked for is more RAM than
+   * the host this computer is on can run; `movePossible` on that error says
+   * whether anywhere in the region can run it, and this is how a caller agrees
+   * to go there. Calling it without having been refused first is an operation
+   * nobody needed: a size that fits where the computer already is is answered
+   * with a 409 rather than a pointless multi-gigabyte copy.
+   *
+   * A separate call rather than an option on {@link update}, deliberately, and
+   * the platform draws the same line: this copies the computer's disk to
+   * different hardware, and a resize that relocated a machine without being
+   * asked is exactly what neither side will do.
+   *
+   * THE COMPUTER MUST BE STOPPED. Suspended is not stopped here, unlike a
+   * resize — a saved desktop only loads on the host that wrote it, so it cannot
+   * travel. Resume and stop it, or discard the session, first.
+   *
+   * ANSWERS BEFORE IT FINISHES. The returned {@link Move} is the operation as it
+   * stood the moment it was accepted, with `live` true and the disk copy running
+   * behind it; {@link waitForMove} is the other half. One move runs per account
+   * at a time.
+   *
+   * Everything is decided again at the moment this runs — the plan, the state of
+   * the computer, and which host it goes to — so it can still refuse even though
+   * the resize offered it.
+   *
+   * NOT `move`, which on this class is the mouse pointer and has been since
+   * before there was anything else to move. The platform calls the operation a
+   * move and the record it returns is a {@link Move}; the verb here is
+   * `relocate` because a `move(x, y)` that sometimes migrated a virtual machine
+   * between hosts would be the worst overload in this file.
+   */
+  async relocate(args: P.MoveArgs, opts: CallOptions = {}): Promise<Move> {
+    const data = await this.#t.json('POST', P.computerAction(this.id, 'move'), {
+      body: P.moveBody(args),
+      signal: opts.signal,
+    });
+    if (!P.isRecord(data)) {
+      throw new MandalaError(`expected a move from POST ${P.computerAction(this.id, 'move')}`);
+    }
+    return toMove(data);
+  }
+
+  /**
+   * Wait for this computer's move to stop running, and answer what happened.
+   *
+   * Polls the account's moves and picks out this computer's. It does NOT throw
+   * for a move that ended badly, and that is the decision worth knowing: the
+   * three failures are three different situations with three different remedies
+   * — see {@link Move.state} — and collapsing them into one thrown error is
+   * exactly how `moved`, where the computer HAS changed hardware, gets read as
+   * "nothing happened". Read `state`.
+   *
+   * Throws {@link TimeoutError} if the move is still going when the timeout runs
+   * out. The move is not stopped by that; only the waiting is, and there is no
+   * cancelling a disk crossing between two hosts in any case.
+   *
+   * Throws {@link MandalaError} if the move stops being listed, which happens
+   * when the computer is deleted — the platform reaps the row with it.
+   *
+   * The default timeout is generous because the work is: a small overlay crosses
+   * in seconds and a full Windows disk takes minutes, plus minutes more when the
+   * target has to be sent the image this computer was built from first.
+   */
+  async waitForMove(opts: WaitOptions = {}): Promise<Move> {
+    const { timeoutMs = 900_000, pollMs = 3_000, signal } = opts;
+    checkWait(timeoutMs, pollMs);
+    const deadline = Date.now() + timeoutMs;
+    let polled = false;
+    let delayMs = pollMs;
+    let last: Move | undefined;
+    for (;;) {
+      if (Date.now() >= deadline) {
+        throw new TimeoutError(
+          last
+            ? `${this.id} was still moving after ${timeoutMs}ms (state ${last.state}; ` +
+                'the move has not stopped, only this wait has)'
+            : `${this.id}'s move could not be observed within ${timeoutMs}ms: every poll failed`,
+        );
+      }
+      // The sleep comes before every poll but the first, as waitUntilBuilt's
+      // does and for its reason: a move that finished while the caller was doing
+      // something else is one round trip from being known to have finished.
+      if (polled) await sleepUntilNextPoll(delayMs, deadline, signal);
+      polled = true;
+      delayMs = pollMs;
+      if (Date.now() >= deadline) continue;
+      try {
+        const moves = await this.#t.json(`GET`, P.MOVES, {
+          signal: deadlineSignal(deadline - Date.now(), signal),
+        });
+        const rows = P.isRecord(moves) && Array.isArray(moves.moves) ? moves.moves : [];
+        const mine = rows
+          .filter(P.isRecord)
+          .map(toMove)
+          .find((m) => m.computerId === this.id);
+        // A move that is no longer listed is one the platform reaped, and it
+        // reaps for one reason: the computer is gone. Not a state to keep
+        // polling for — and distinguishable from "not started yet" because this
+        // is only reached after a move was accepted.
+        if (!mine) {
+          throw new MandalaError(
+            `${this.id} has no move any more; the platform reaps one when its computer is deleted`,
+          );
+        }
+        last = mine;
+        if (!mine.live) return mine;
+      } catch (err) {
+        if (signal?.aborted) throw err;
+        if (Date.now() < deadline && !isTransient(err)) throw err;
+        delayMs = retryDelay(pollMs, err);
+      }
+    }
   }
 
   /** Give this computer a new name. Sugar over {@link update}. */

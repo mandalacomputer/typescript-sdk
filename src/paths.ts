@@ -23,6 +23,15 @@ export const TEMPLATES = 'templates';
 export const SIZES = 'sizes';
 export const COMPUTERS = 'computers';
 export const SNAPSHOTS = 'snapshots';
+/**
+ * Every move on the account, live and recently finished.
+ *
+ * A collection, and not `computers/:id/move` — which is the platform's own
+ * decision and worth knowing when binding to it: a per-computer read could not
+ * tell a computer with no move from an id that does not exist, so there is no
+ * such route. {@link Computer.waitForMove} filters this by `computer_id`.
+ */
+export const MOVES = 'moves';
 
 /**
  * One id, in a path, refused when it is empty.
@@ -254,6 +263,47 @@ export type UpdateArgs = {
  * from something that turned out to be empty, and the platform's answer to it
  * is a 400 that reads as though the request was malformed.
  */
+/**
+ * What a move is asked for: the same sizing group a resize takes, minus the two
+ * fields a move cannot deliver.
+ *
+ * `ramMb` is REQUIRED here and optional on {@link UpdateArgs}, and that is the
+ * one difference worth explaining. A move exists to escape a RAM ceiling: the
+ * platform fills an omitted `ram_mb` from the computer's current size and then
+ * refuses the move for not needing one, so a call without it can only ever be
+ * refused. Requiring it turns a guaranteed 409 into a type error.
+ *
+ * There is no `name` and no `idleSuspendMin`. The platform reads only these
+ * three off a move body and silently ignores the rest, so accepting either here
+ * would be a rename that copies a multi-gigabyte disk between hosts and then
+ * does not happen.
+ */
+export type MoveArgs = {
+  /** The size that did not fit. Must be MORE than the computer has now. */
+  ramMb: number;
+  /** Applied with the move. Omit to leave the count alone. */
+  cpu?: number;
+  /** Applied with the move, on the far side. Disks grow only. */
+  diskGb?: number;
+};
+
+/** The body for `POST computers/:id/move`, validated like a resize. */
+export function moveBody(args: MoveArgs): Json {
+  positiveIntIf(args.cpu, 'cpu');
+  positiveIntIf(args.ramMb, 'ramMb');
+  positiveIntIf(args.diskGb, 'diskGb');
+  // Not optional, so an omission is caught here rather than as a refusal from
+  // the platform three tiers away. positiveIntIf passes on undefined by design —
+  // it is the check for a field that MAY be absent — so absence needs its own
+  // line, and this is the one body on this surface with a required number in it.
+  if (args.ramMb === undefined) {
+    throw new ValidationError(
+      'ramMb is required: a move exists to reach a size this host cannot run',
+    );
+  }
+  return omitUndefined({ cpu: args.cpu, ram_mb: args.ramMb, disk_gb: args.diskGb });
+}
+
 export function updateBody(args: UpdateArgs): Json {
   positiveIntIf(args.cpu, 'cpu');
   positiveIntIf(args.ramMb, 'ramMb');
