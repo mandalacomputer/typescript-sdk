@@ -19,6 +19,10 @@ export const ALLOWED: ReadonlySet<string> = new Set(
   (
     [
       ['GET', 'templates'],
+      // The template document format (platform OPL-3568): the published JSON
+      // Schema, and a check of a document against it that stores nothing.
+      ['GET', 'templates/schema'],
+      ['POST', 'templates/validate'],
       ['GET', 'sizes'],
 
       ['GET', 'computers'],
@@ -93,6 +97,13 @@ export const UNIMPLEMENTED: ReadonlySet<string> = new Set([
   // here, and a second, worse OpenAI client inside this SDK would be a
   // maintenance obligation with no user.
   'POST chat/completions',
+  // The template document routes (platform OPL-3568). Listed rather than
+  // wrapped because there is nothing yet to wrap them FOR: no route publishes a
+  // document, so an SDK method that validated one would be a checker for a file
+  // this SDK gives its caller no way to use. They become worth a method with
+  // publish and launch-by-ref, and the gap stays a line somebody has to delete.
+  'GET templates/schema',
+  'POST templates/validate',
 ]);
 
 /**
