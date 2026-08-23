@@ -722,5 +722,42 @@ export function toSchedule(d: Record<string, unknown>): Schedule {
   };
 }
 
+/**
+ * How long automatic snapshots are kept, as the plan grants it.
+ *
+ * A grandfather-father-son window rather than an age: what survives is the
+ * newest automatic snapshot in each of the last `daily` days THAT HAVE ONE, the
+ * last `weekly` such ISO weeks and the last `monthly` such calendar months.
+ * Counting periods that contain a snapshot rather than periods on the calendar
+ * is what stops a computer that was switched off for a month losing the history
+ * it had — nothing ages out for the passage of time alone.
+ *
+ * Boundaries are cut in UTC, whatever `tz` the {@link Schedule} runs in. A
+ * capture at 23:30 on a Sunday in `America/Chicago` is Monday in UTC and counts
+ * toward the following ISO week.
+ *
+ * A zero turns that tier off. All three zero means the plan grants no retained
+ * automatic history at all, which is what an account with no active
+ * subscription reads.
+ *
+ * ONLY SNAPSHOTS WITH `auto` SET ARE TOUCHED. One taken by hand is yours until
+ * you delete it, whatever this says.
+ */
+export type Retention = {
+  daily: number;
+  weekly: number;
+  monthly: number;
+  raw: Record<string, unknown>;
+};
+
+export function toRetention(d: Record<string, unknown>): Retention {
+  return {
+    daily: num(d.daily),
+    weekly: num(d.weekly),
+    monthly: num(d.monthly),
+    raw: { ...d },
+  };
+}
+
 /** Where the pointer is. */
 export type Point = { x: number; y: number };

@@ -106,6 +106,7 @@ export type {
   Holdings,
   Move,
   Point,
+  Retention,
   Schedule,
   Size,
   Snapshot,
