@@ -2,8 +2,8 @@
 
 import { Computer, EphemeralComputer } from './computer.js';
 import { MandalaError, NotFoundError } from './errors.js';
-import type { Move, Size, Snapshot, Template } from './models.js';
-import { toMove, toSize, toSnapshot, toTemplate } from './models.js';
+import type { Move, Size, Snapshot, Template, UsageReport } from './models.js';
+import { toMove, toSize, toSnapshot, toTemplate, toUsageReport } from './models.js';
 import * as P from './paths.js';
 import type { Listing, Transport } from './transport.js';
 
@@ -368,5 +368,58 @@ export class Sizes {
   async list(opts: CallOptions = {}): Promise<Size[]> {
     const data = await this.#t.jsonArray('GET', P.SIZES, { signal: opts.signal });
     return data.filter(P.isRecord).map(toSize);
+  }
+}
+
+/**
+ * The window to read usage over.
+ *
+ * Both bounds accept a `Date`, which is the shape to prefer: `toISOString()` is
+ * UTC by construction, so the timestamp cannot arrive without a zone. A string
+ * is taken too and checked before it is sent — see `usageQuery` in paths.
+ */
+export type UsageOptions = { from?: Date | string; to?: Date | string; signal?: AbortSignal };
+
+/**
+ * What this account has used.
+ *
+ * Its own collection because `GET /usage` is its own route, account-scoped like
+ * `GET /moves` rather than hanging off a computer — which it could not: the
+ * figures include computers that have since been deleted, and those are exactly
+ * the ones an unexplained line on an invoice belongs to.
+ */
+export class Usage {
+  #t: Transport;
+
+  /** @internal */
+  constructor(transport: Transport) {
+    this.#t = transport;
+  }
+
+  /**
+   * Running hours weighted by cores and memory, the storage held, and the
+   * per-computer breakdown behind the totals.
+   *
+   * The read to build a spend check around: a loop that launches computers is
+   * the caller that can run up a bill without noticing, and this is the same
+   * figure the dashboard shows the person who will ask about it.
+   *
+   * With no arguments the window is the account's current billing period, which
+   * is what makes the numbers comparable with an invoice. Name `from`/`to` for a
+   * window that has CLOSED — the billing period is always the current one, and
+   * by the time an invoice arrives the period it covers is not.
+   *
+   * Check {@link UsageReport.degraded} and {@link UsageReport.unmetered} on the
+   * way out. Each figure is a sum across the fleet, so a hypervisor that did not
+   * answer leaves a total that is quietly short rather than an obviously missing
+   * row, and those two flags are the only thing that says so.
+   */
+  async read(opts: UsageOptions = {}): Promise<UsageReport> {
+    const data = await this.#t.json('GET', P.USAGE, {
+      query: P.usageQuery(opts.from, opts.to),
+      signal: opts.signal,
+    });
+    if (!P.isRecord(data)) throw new MandalaError(`expected a usage report from GET ${P.USAGE}`);
+    return toUsageReport(data);
   }
 }

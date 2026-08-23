@@ -198,6 +198,163 @@ export function toSize(d: Record<string, unknown>): Size {
   };
 }
 
+/** The period an account is billed on. */
+export type UsagePeriod = {
+  start: string;
+  end: string;
+  /**
+   * `"subscription"` when the boundary came from the plan's renewal date, which
+   * is what an invoice is anchored to. `"calendar-month"` when there is no live
+   * subscription to take it from, in which case the period is the current UTC
+   * month. Worth reading before quoting a figure at anybody: the two answer
+   * different questions about "this period".
+   */
+  source: string;
+};
+
+/** One computer's share of a window. */
+export type ComputerUsage = {
+  id: string;
+  name: string;
+  runHours: number;
+  vcpuHours: number;
+  ramGbHours: number;
+  /**
+   * This computer is no longer on the fleet. It ran during the window and was
+   * deleted, which is why it is billed for and not in `client.computers.list()`
+   * — the line is not stale, the machine is gone.
+   */
+  gone: boolean;
+};
+
+/**
+ * What an account used, with the per-computer breakdown behind the totals.
+ *
+ * The two storage figures stay separate because the remedies are: a computer's
+ * disk is provisioned at create and released at delete, and snapshots come and
+ * go under the retention policy you set. One summed number would be a figure
+ * nobody could act on.
+ */
+export type UsageTotals = {
+  runHours: number;
+  vcpuHours: number;
+  ramGbHours: number;
+  snapshotGbHours: number;
+  snapshotGbMonths: number;
+  diskGbHours: number;
+  diskGbMonths: number;
+  /**
+   * The breakdown, which is what makes a total checkable.
+   *
+   * EMPTY on a workspace-scoped API key, and empty rather than absent so that
+   * reading it never needs a null check. Usage is metered and billed per
+   * ACCOUNT, so these lines cover the whole account and would name computers
+   * outside such a key's scope; the platform withholds them and sends the
+   * account-wide totals either way. {@link UsageReport.breakdown} is how to tell
+   * "no computers ran" from "this key may not see which did".
+   */
+  computers: ComputerUsage[];
+};
+
+/**
+ * What `client.usage.read()` answers.
+ *
+ * READ {@link UsageReport.degraded} AND {@link UsageReport.unmetered} BEFORE
+ * USING THE NUMBERS. Every figure is a sum across the hypervisors this
+ * account's computers are on, so a host that did not contribute does not leave
+ * a hole anybody could notice — it leaves a total that is quietly too small.
+ * The platform answers 200 with these two flags rather than refusing, because a
+ * caveat in the same body cannot be missed the way a missing row can, and
+ * because one of the two never clears by retrying.
+ *
+ * `raw` carries the whole payload, nested objects included, so a field the
+ * platform adds later is readable without a release of this package. It is on
+ * this type only and not on the three above, which would be three more copies
+ * of the same bytes.
+ */
+export type UsageReport = {
+  /**
+   * The period this ACCOUNT is billed on — not necessarily the window that was
+   * measured. {@link UsageReport.from} and {@link UsageReport.to} are that, and
+   * they differ whenever a window was named.
+   */
+  period: UsagePeriod;
+  from: string;
+  /**
+   * The end of the measured window, and worth reading rather than assuming: a
+   * `to` in the future is answered as now, because the future holds no usage.
+   */
+  to: string;
+  usage: UsageTotals;
+  /**
+   * A hypervisor could not be reached, so every figure may be too small. This
+   * one clears on its own — retry when the host is back.
+   */
+  degraded: boolean;
+  /**
+   * The same shortfall from the other cause: a hypervisor is up and running a
+   * daemon older than the meter, so it has no hours to report. Waiting does not
+   * fix this one, which is why it is a separate flag rather than the same one.
+   */
+  unmetered: boolean;
+  /**
+   * Whether {@link UsageTotals.computers} is the real breakdown rather than a
+   * withheld one — false on a workspace-scoped key. Derived from the payload's
+   * shape (the platform omits the field rather than sending an empty array), so
+   * an empty breakdown can be told from an invisible one.
+   */
+  breakdown: boolean;
+  /**
+   * The last UTC day (`YYYY-MM-DD`) whose usage has settled for billing — a
+   * contiguous prefix, so a day still being held back stops the count where it
+   * is. `undefined` when none of the window has settled yet.
+   *
+   * NOT a caveat on the totals, which are live from the ledger and true through
+   * {@link UsageReport.to}. It answers the other question, and it is the one to
+   * check before comparing these numbers against an invoice.
+   */
+  reportedThrough?: string;
+  raw: Record<string, unknown>;
+};
+
+export function toUsageReport(d: Record<string, unknown>): UsageReport {
+  const period = isRecord(d.period) ? d.period : {};
+  const totals = isRecord(d.usage) ? d.usage : {};
+  const rows = Array.isArray(totals.computers) ? totals.computers.filter(isRecord) : [];
+  const through = d.reported_through;
+  return {
+    period: { start: str(period.start), end: str(period.end), source: str(period.source) },
+    from: str(d.from),
+    to: str(d.to),
+    usage: {
+      runHours: num(totals.run_hours),
+      vcpuHours: num(totals.vcpu_hours),
+      ramGbHours: num(totals.ram_gb_hours),
+      snapshotGbHours: num(totals.snapshot_gb_hours),
+      snapshotGbMonths: num(totals.snapshot_gb_months),
+      diskGbHours: num(totals.disk_gb_hours),
+      diskGbMonths: num(totals.disk_gb_months),
+      computers: rows.map((c) => ({
+        id: str(c.id),
+        name: str(c.name),
+        runHours: num(c.run_hours),
+        vcpuHours: num(c.vcpu_hours),
+        ramGbHours: num(c.ram_gb_hours),
+        gone: bool(c.gone),
+      })),
+    },
+    degraded: bool(d.degraded),
+    unmetered: bool(d.unmetered),
+    // Presence, not emptiness. The platform drops the key for a scoped
+    // credential and sends `[]` for an account that ran nothing, and those are
+    // different answers: one is "you may not see this", the other is "there was
+    // nothing to see".
+    breakdown: Array.isArray(totals.computers),
+    reportedThrough: through == null ? undefined : str(through),
+    raw: { ...d },
+  };
+}
+
 export type Snapshot = {
   id: string;
   computerId: string;

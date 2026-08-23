@@ -128,6 +128,11 @@ async function exerciseEverything(client: Client): Promise<void> {
     modelKey: 'sk-test',
   });
 
+  // Both bounds, because a call that names neither cannot show the parameter
+  // sweep that this SDK can send either.
+  await client.usage.read();
+  await client.usage.read({ from: new Date('2026-08-01T00:00:00Z'), to: '2026-08-22T00:00:00Z' });
+
   await client.snapshots.list();
   await client.snapshots.list({
     computerId: 'vm-1',
