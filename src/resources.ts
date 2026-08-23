@@ -2,8 +2,8 @@
 
 import { Computer, EphemeralComputer } from './computer.js';
 import { MandalaError, NotFoundError } from './errors.js';
-import type { Size, Snapshot, Template } from './models.js';
-import { toSize, toSnapshot, toTemplate } from './models.js';
+import type { Move, Size, Snapshot, Template } from './models.js';
+import { toMove, toSize, toSnapshot, toTemplate } from './models.js';
 import * as P from './paths.js';
 import type { Listing, Transport } from './transport.js';
 
@@ -308,6 +308,46 @@ export class Templates {
   async list(opts: CallOptions = {}): Promise<Template[]> {
     const data = await this.#t.jsonArray('GET', P.TEMPLATES, { signal: opts.signal });
     return data.filter(P.isRecord).map(toTemplate);
+  }
+}
+
+/**
+ * The moves on this account, live and recently finished.
+ *
+ * Its own collection because `GET /moves` is its own route, account-scoped
+ * rather than hanging off a computer — which is the platform's decision and the
+ * right one: a move is a fact about a computer that is currently on one host and
+ * about to be on another, and during the window that matters that is exactly
+ * what nobody can say.
+ */
+export class Moves {
+  #t: Transport;
+
+  /** @internal */
+  constructor(transport: Transport) {
+    this.#t = transport;
+  }
+
+  /**
+   * Every move worth reading: the ones still running, and the ones that finished
+   * within the last day and have not been dismissed.
+   *
+   * Two things to get from a listing rather than a per-computer read. A move you
+   * started is found by its `computerId` — {@link Computer.waitForMove} does
+   * exactly that. And a move you did NOT start is what the "another computer on
+   * this account is being moved right now" refusal is about: one runs per
+   * account at a time, and this is where you find out which and how far along.
+   *
+   * A finished move stays here for a day so that an outcome is still readable by
+   * somebody who went away while it ran. Read `live`, not the row's absence.
+   *
+   * An API key issued against a workspace sees the moves of computers in that
+   * workspace only.
+   */
+  async list(opts: CallOptions = {}): Promise<Move[]> {
+    const data = await this.#t.json('GET', P.MOVES, { signal: opts.signal });
+    const rows = P.isRecord(data) && Array.isArray(data.moves) ? data.moves : [];
+    return rows.filter(P.isRecord).map(toMove);
   }
 }
 

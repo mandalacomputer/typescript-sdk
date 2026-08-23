@@ -19,7 +19,7 @@
  * hypervisor daemon's own routes — see the README for why that boundary exists.
  */
 
-import { Computers, Sizes, Snapshots, Templates } from './resources.js';
+import { Computers, Moves, Sizes, Snapshots, Templates } from './resources.js';
 import { DEFAULT_BASE_URL, Transport, type TransportOptions } from './transport.js';
 
 export type ClientOptions = TransportOptions;
@@ -34,6 +34,7 @@ export type ClientOptions = TransportOptions;
  */
 export class Client {
   readonly computers: Computers;
+  readonly moves: Moves;
   readonly snapshots: Snapshots;
   readonly templates: Templates;
   readonly sizes: Sizes;
@@ -46,6 +47,7 @@ export class Client {
   constructor(opts: ClientOptions = {}) {
     this.#t = new Transport(opts);
     this.computers = new Computers(this.#t);
+    this.moves = new Moves(this.#t);
     this.snapshots = new Snapshots(this.#t);
     this.templates = new Templates(this.#t);
     this.sizes = new Sizes(this.#t);
@@ -81,6 +83,7 @@ export {
   GatewayTimeoutError,
   isTransient,
   MandalaError,
+  MoveRequiredError,
   NotFoundError,
   OriginResponseError,
   OriginTLSError,
@@ -98,6 +101,7 @@ export type {
   ExecResult,
   GuestWindow,
   Holdings,
+  Move,
   Point,
   Schedule,
   Size,
@@ -105,10 +109,17 @@ export type {
   Template,
   VncConnect,
 } from './models.js';
-export type { CreateArgs, ExecArgs, ScrollDirection, UpdateArgs, WindowAction } from './paths.js';
+export type {
+  CreateArgs,
+  ExecArgs,
+  MoveArgs,
+  ScrollDirection,
+  UpdateArgs,
+  WindowAction,
+} from './paths.js';
 export { SCROLL_DIRECTIONS, WINDOW_ACTIONS } from './paths.js';
 export type { CallOptions, ListOptions } from './resources.js';
-export { Computers, Sizes, Snapshots, Templates } from './resources.js';
+export { Computers, Moves, Sizes, Snapshots, Templates } from './resources.js';
 export type { Bytes, ContentRange, Listing, SSEEvent, TransportOptions } from './transport.js';
 export { DEFAULT_BASE_URL, MODEL_KEY_HEADER } from './transport.js';
 

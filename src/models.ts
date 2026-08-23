@@ -312,6 +312,68 @@ export function toSnapshot(d: Record<string, unknown>): Snapshot {
  * expect })` and a capture that finished after you looked cannot be swept up in
  * a decision that was never about it.
  */
+/**
+ * A move in flight, or the outcome of one that has finished.
+ *
+ * A resize past what a computer's host can run is refused with an offer (see
+ * {@link MoveRequiredError}); {@link Computer.relocate} takes it up, and the
+ * platform answers 202 with one of these while the disk copy runs behind it.
+ * `client.moves.list()` is where it is read afterwards.
+ *
+ * Two fields are deliberately absent because the platform does not send them:
+ * which host the computer is leaving and which it is going to. Both are recorded
+ * on its side for an operator; a tenant is told "another host in this region"
+ * and never which machine.
+ */
+export type Move = {
+  computerId: string;
+  /**
+   * Where it has got to. `staging`, `moving` and `resizing` are live; `done`,
+   * `moved`, `failed` and `lost` are terminal — and the three failures are three
+   * different things, which is the whole reason they are three words:
+   *
+   * - `done` — on the new host at the new size.
+   * - `moved` — on the new host at its OLD size. The move landed and the resize
+   *   did not, so the computer HAS changed hardware and an ordinary
+   *   {@link Computer.update} finishes the job where it now is. Reading this as
+   *   "the move failed" sends you looking for a machine that has moved.
+   * - `failed` — nothing happened. The computer is where it was, untouched.
+   * - `lost` — we stopped watching. It may well have completed; read the
+   *   computer.
+   */
+  state: string;
+  /** A sentence about the state, meant to be shown to a person. Empty while nothing has gone wrong. */
+  detail: string;
+  /** Still running. The flag to poll on, rather than comparing {@link state} to a list. */
+  live: boolean;
+  /** Present only where the move is applying a new value. */
+  cpu?: number;
+  ramMb?: number;
+  diskGb?: number;
+  startedAt: string;
+  /** Absent while {@link live}. */
+  finishedAt?: string;
+  raw: Record<string, unknown>;
+};
+
+export function toMove(d: Record<string, unknown>): Move {
+  return {
+    computerId: str(d.computer_id),
+    state: str(d.state),
+    detail: str(d.detail),
+    live: bool(d.live),
+    // Absent stays absent rather than becoming 0, because the platform omits a
+    // dimension the move is NOT changing — `ram_mb: 0` would read as a resize to
+    // nothing, on the field this whole operation exists to grow.
+    ...(d.cpu === undefined ? {} : { cpu: num(d.cpu) }),
+    ...(d.ram_mb === undefined ? {} : { ramMb: num(d.ram_mb) }),
+    ...(d.disk_gb === undefined ? {} : { diskGb: num(d.disk_gb) }),
+    startedAt: str(d.started_at),
+    ...(d.finished_at === undefined ? {} : { finishedAt: str(d.finished_at) }),
+    raw: { ...d },
+  };
+}
+
 export type Holdings = {
   count: number;
   sizeBytes: number;

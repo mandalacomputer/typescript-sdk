@@ -2,7 +2,10 @@
  * What the platform's status codes mean, as types.
  *
  * The distinctions here are the ones a caller has to act on and cannot infer
- * from prose. A 409 clears on its own and is worth retrying; a 400 never does.
+ * from prose. A 400 never clears and retrying it burns a request. A 409 is the
+ * one that is not uniform: most of them are a passing moment and worth
+ * retrying, and one is a decision about the size that was asked for — see
+ * {@link ConflictError} and {@link MoveRequiredError}.
  * A 402 is a plan limit, which no amount of waiting fixes and which the account
  * holder — not the code — has to resolve.
  *
@@ -87,9 +90,9 @@ export class NotFoundError extends APIError {
 /**
  * 409 — the request was fine; the moment was not.
  *
- * Every one of these clears itself without anybody doing anything, so the
- * answer is to wait and try again rather than to change the request. It means
- * something is in flight that this operation cannot run alongside:
+ * Nearly every one of these clears itself without anybody doing anything, so
+ * the answer is to wait and try again rather than to change the request. It
+ * means something is in flight that this operation cannot run alongside:
  *
  * - the computer's disk is still being copied from a snapshot or another
  *   computer (see {@link Computer.waitUntilBuilt})
@@ -106,9 +109,73 @@ export class NotFoundError extends APIError {
  * A guest agent that stays silent past its boot window stops being a conflict
  * and becomes a 502 {@link APIError}, so a retry loop on this terminates rather
  * than being told "still booting" forever.
+ *
+ * NEARLY, and the exception is {@link MoveRequiredError}. Whether a 409 clears
+ * is a property of the body rather than of the status: a refusal that clears
+ * describes a passing state, and one that does not describes a decision about
+ * the request. This class said "every one" and {@link isTransient} agreed with
+ * it, which made a resize past what a host can run retry forever.
  */
 export class ConflictError extends APIError {
   override name = 'ConflictError';
+}
+
+/**
+ * The 409 that is an OFFER: this resize needs the computer moved first.
+ *
+ * `PATCH computers/:id` growing `ramMb` past what the computer's current host
+ * can run answers 409 with a `move` object on the body rather than only a
+ * sentence. It is not a dead end — another host in the same region may be able
+ * to run that size, and {@link Computer.relocate} is how a caller agrees to go
+ * there.
+ *
+ * {@link movePossible} is the whole branch, and it is read off the body here so
+ * that no caller has to: `move.required` is true either way, and it is the
+ * second field that decides whether there is anything to do.
+ *
+ * - `true` — somewhere in the region can run it. {@link Computer.relocate} with the
+ *   same sizing arguments moves the computer and applies the size on arrival.
+ *   It copies the disk to different hardware, so it is a separate call rather
+ *   than something a resize does to you quietly, and the computer has to be
+ *   stopped.
+ * - `false` — nothing in the region can run that size at all. There is nowhere
+ *   to move to; ask for less.
+ *
+ * NOT transient either way. The host cannot run that size and will not grow, so
+ * the same request answers the same way for as long as the computer is where it
+ * is. That is why this has a class at all: it is a {@link ConflictError} by
+ * status and the opposite of one by nature.
+ */
+export class MoveRequiredError extends ConflictError {
+  override name = 'MoveRequiredError';
+  constructor(
+    message: string,
+    status: number,
+    body: unknown,
+    /** Whether a host in this region could run the size that was asked for. */
+    readonly movePossible: boolean,
+  ) {
+    super(message, status, body);
+  }
+}
+
+/**
+ * The `move` object the platform puts on that refusal, if this body has one.
+ *
+ * Shape-checked rather than trusted, because it decides both a retry policy and
+ * what a caller is told to do next: a body whose `move` is a string, or an
+ * object with no boolean `possible`, must read as "not that refusal" rather
+ * than as a move that is impossible. Absent and malformed get the same answer,
+ * and it is the conservative one — an ordinary {@link ConflictError}, which is
+ * what this was before.
+ */
+function moveOffer(body: unknown): { possible: boolean } | undefined {
+  if (!body || typeof body !== 'object') return undefined;
+  const move = (body as { move?: unknown }).move;
+  if (!move || typeof move !== 'object') return undefined;
+  const { required, possible } = move as { required?: unknown; possible?: unknown };
+  if (required !== true || typeof possible !== 'boolean') return undefined;
+  return { possible };
 }
 
 /**
@@ -436,6 +503,13 @@ export function errorForStatus(
 ): APIError {
   if (status === 429) return new RateLimitError(message, status, body, headers.retryAfterMs);
   const Cls = BY_STATUS[status] ?? APIError;
+  // The 409 that is an offer, told apart by its body. Never given a substitute
+  // message: the platform's sentence here is the whole account of what will not
+  // fit and what moving costs, written for whoever has to agree to it.
+  if (Cls === ConflictError) {
+    const offer = moveOffer(body);
+    if (offer) return new MoveRequiredError(message, status, body, offer.possible);
+  }
   if (Cls === RangeNotSatisfiableError) {
     return new RangeNotSatisfiableError(message, status, body, headers.rangeTotal);
   }
@@ -505,8 +579,17 @@ export function errorForEventStatus(status: number, message: string): APIError {
  * What the wait helpers retry on. Everything else is surfaced, because a caller
  * that can read "the guest agent is not answering yet" is better placed to
  * decide than a fixed policy is.
+ *
+ * Note that a STATUS is not enough to answer this, which is why the first check
+ * below is on a type. 409 is the case: most are a passing moment, and the move
+ * offer is a decision no retry changes.
  */
 export function isTransient(err: unknown): boolean {
+  // A move offer is a 409 and is NOT worth retrying: it is a decision about the
+  // size that was asked for, and the same request answers the same way for as
+  // long as the computer is on that host. First, because it is a subclass of the
+  // very branch below that would say yes (OPL-3773).
+  if (err instanceof MoveRequiredError) return false;
   // {@link OriginUnreachableError} is deliberately not here, though 520-523 do
   // clear on their own and mandala-computer-mcp does retry them. This SDK
   // decides transience by class and treats every other 5xx as terminal — see
