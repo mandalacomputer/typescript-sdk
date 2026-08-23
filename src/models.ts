@@ -67,8 +67,10 @@ export const count = (v: unknown): number | undefined => {
  *   clipboard, whatever a noVNC client offers on it: QEMU carries cut text only
  *   through a vdagent channel these guests are not started with, so a paste
  *   arrives and is dropped with no error. Move text with `exec` and
- *   `desktop: true` instead, and give the write a process that outlives the
- *   command — an X selection belongs to one.
+ *   `desktop: true` instead. A write needs `setsid` so the holder outlives the
+ *   command — an X selection belongs to a live process — AND `>/dev/null 2>&1`,
+ *   without which the resident xclip holds the pipe the guest agent is reading
+ *   and the exec runs to its full timeout before answering.
  * - `viewToken` — watch only. The platform drops input on a socket opened with
  *   it, so a browser holding this one cannot type even from a patched client.
  *
