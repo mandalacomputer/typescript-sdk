@@ -4,11 +4,13 @@
  * repo — the routes, and the parameters each route takes.
  *
  * The mirror is what keeps this SDK honest about what exists, and a mirror
- * nobody compares is just a comment. mandala-computer-python has the mirror and
- * not this script, which is how `computers/:id/exec/:pid` (both verbs) and
- * `GET computers/:id/snapshots` reached the platform without its surface test
- * ever noticing — the test kept passing, because "every call lands on an
- * allowlisted route" stays true when the allowlist is the stale one.
+ * nobody compares is just a comment. That is not hypothetical:
+ * `computers/:id/exec/:pid` (both verbs) and `GET computers/:id/snapshots`
+ * reached the platform without any SDK's surface test noticing, because "every
+ * call lands on an allowlisted route" stays true when the allowlist is the stale
+ * one. mandala-computer-python has since grown its own checker
+ * (`scripts/check_surface.py`) and mandala-computer-mcp has a copy of this one,
+ * so all three now say so.
  *
  * The parameter half exists because the route half was not enough. Every route
  * was reachable and four documented parameters were not: `stop?force`,

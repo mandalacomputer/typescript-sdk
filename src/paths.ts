@@ -34,6 +34,15 @@ export const SNAPSHOTS = 'snapshots';
 export const MOVES = 'moves';
 /** What the account has used, over a window. Account-scoped, like {@link MOVES}. */
 export const USAGE = 'usage';
+/**
+ * How long automatic snapshots are kept — the plan's retention window.
+ *
+ * Account-scoped like {@link USAGE} and {@link MOVES}, and answered by the
+ * control plane rather than by a hypervisor, so it cannot come back short the
+ * way a fleet listing can. Read-only: the plan owns retention, and there is no
+ * write on any surface.
+ */
+export const RETENTION = 'retention';
 
 /**
  * One id, in a path, refused when it is empty.

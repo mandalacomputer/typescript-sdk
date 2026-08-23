@@ -144,6 +144,10 @@ async function exerciseEverything(client: Client): Promise<void> {
   await client.snapshots.clone('snap-1', 'from-snapshot');
   await client.snapshots.delete('snap-1');
 
+  // The other half of the schedule: when they are taken is a computer's, how
+  // long they are kept is the account's.
+  await client.snapshots.retention();
+
   // Last, and both shapes: the purge is what `expect` binds, and a delete that
   // keeps the snapshots sends neither key.
   await (await client.computers.get('vm-2')).delete({ deleteSnapshots: true, expect: 'abc123' });
@@ -266,13 +270,34 @@ describe('surface', () => {
   });
 
   it('does not reach the daemon internal routes', async () => {
-    // The ops and plan-owned endpoints are not tenant API and never should be.
-    // The test above proves the SDK stays inside ALLOWED; this proves ALLOWED
-    // itself stays honest, so widening it later is a deliberate act rather than
-    // a quiet one. These routes are not owner-scoped in the daemon.
-    const internal = new Set(['audit', 'host', 'fleet', 'retention']);
+    // The ops endpoints are not tenant API and never should be. The test above
+    // proves the SDK stays inside ALLOWED; this proves ALLOWED itself stays
+    // honest, so widening it later is a deliberate act rather than a quiet one.
+    //
+    // `retention` WAS in this set and came out of it deliberately (OPL-3767,
+    // OPL-3783), which is the act this test exists to force. Two things had to
+    // be true first. The platform put `GET retention` on its public allowlist —
+    // so the READ is tenant API now, answered by the control plane from the plan
+    // catalogue rather than forwarded to a daemon at all. And the reason written
+    // here for withholding it was wrong: `PUT /retention` IS owner-scoped, it
+    // sets the calling tenant's own policy. What keeps the WRITE off every
+    // surface is that the plan owns retention, so a tenant setting its own would
+    // be granting itself history it has not paid for — a different argument, and
+    // one this SDK cannot violate, since a head-segment check cannot tell a GET
+    // from a PUT. The verb check below is what holds that line.
+    const internal = new Set(['audit', 'host', 'fleet']);
     const heads = new Set([...ALLOWED].map((r) => r.split(' ')[1]!.split('/')[0]!));
     expect([...heads].filter((h) => internal.has(h))).toEqual([]);
+  });
+
+  it('reaches retention only to read it', async () => {
+    // What the head-segment check above can no longer say, now that `retention`
+    // is a route this SDK may call: the plan owns the window, so a write to it
+    // is a tenant granting itself a longer history than it pays for. The
+    // platform refuses one on both its surfaces; this is the mirror of that
+    // refusal, so a PUT could not be added here without deleting a test.
+    const verbs = [...ALLOWED].filter((r) => r.endsWith(' retention')).map((r) => r.split(' ')[0]);
+    expect(verbs).toEqual(['GET']);
   });
 
   it('patternFor treats ids as ids', () => {

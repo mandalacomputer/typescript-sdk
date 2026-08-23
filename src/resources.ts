@@ -2,8 +2,8 @@
 
 import { Computer, EphemeralComputer } from './computer.js';
 import { MandalaError, NotFoundError } from './errors.js';
-import type { Move, Size, Snapshot, Template, UsageReport } from './models.js';
-import { toMove, toSize, toSnapshot, toTemplate, toUsageReport } from './models.js';
+import type { Move, Retention, Size, Snapshot, Template, UsageReport } from './models.js';
+import { toMove, toRetention, toSize, toSnapshot, toTemplate, toUsageReport } from './models.js';
 import * as P from './paths.js';
 import type { Listing, Transport } from './transport.js';
 
@@ -293,6 +293,31 @@ export class Snapshots {
   /** Remove a snapshot permanently. Later snapshots in the same chain are unaffected. */
   async delete(snapshotId: string, opts: CallOptions = {}): Promise<void> {
     await this.#t.json('DELETE', P.snapshot(snapshotId), { signal: opts.signal });
+  }
+
+  /**
+   * How long the automatic ones are kept — your plan's retention window.
+   *
+   * The other half of {@link Computer.setSchedule}, which decides when they are
+   * TAKEN and deliberately has no field for how long they survive. Without this
+   * a caller setting a daily schedule had to hardcode a number per plan tier or
+   * infer one by watching `auto` snapshots disappear.
+   *
+   * On this collection rather than on a `Computer` because the window belongs to
+   * the ACCOUNT — every computer you own is aged out on the same one, though
+   * each keeps its own set, so two computers on `7/4/12` keep up to twenty-three
+   * snapshots each rather than twenty-three between them.
+   *
+   * Read-only, and there is no write anywhere: the plan owns retention, so
+   * setting it would be granting yourself history you have not paid for. It
+   * changes when the subscription does. See {@link Retention} for what the three
+   * numbers select.
+   */
+  async retention(opts: CallOptions = {}): Promise<Retention> {
+    const data = await this.#t.json('GET', P.RETENTION, { signal: opts.signal });
+    if (!P.isRecord(data))
+      throw new MandalaError(`expected a retention window from GET ${P.RETENTION}`);
+    return toRetention(data);
   }
 }
 
