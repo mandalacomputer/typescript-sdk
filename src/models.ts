@@ -160,6 +160,272 @@ export function toTemplate(d: Record<string, unknown>): Template {
 }
 
 /**
+ * A template document this account published, from `POST` or `GET /templates/{ns}/{name}`.
+ *
+ * {@link Template} is what a LISTING answers — a name, a size, enough to launch
+ * it. This is what a template IS, and the two are different shapes on purpose:
+ * the listing has to stay small enough to render a picker from, and the document
+ * carries build steps that can run to pages.
+ */
+export type PublishedTemplate = {
+  /** `namespace/name@version`. What you pass as `template` to create a computer. */
+  ref: string;
+  /**
+   * `sha256:…` of the document. Two publishes of the same digest are the same
+   * template, which is what makes republishing an unchanged document a no-op
+   * rather than a conflict.
+   */
+  docDigest: string;
+  /**
+   * The document itself, in its canonical form — the bytes {@link docDigest} is
+   * over. Key order and whitespace may differ from what was sent; nothing else
+   * does.
+   */
+  document: Record<string, unknown>;
+  /** The catalogue row this document describes. */
+  template: Template;
+  /** Every version of this name, newest first. Read one with `version`. */
+  versions: string[];
+  /** Absent on a template the platform publishes — nobody published it. */
+  publishedAt?: string;
+  raw: Record<string, unknown>;
+};
+
+export function toPublishedTemplate(d: Record<string, unknown>): PublishedTemplate {
+  const doc = d.document;
+  const tpl = d.template;
+  return {
+    ref: str(d.ref),
+    docDigest: str(d.doc_digest),
+    document: isRecord(doc) ? { ...doc } : {},
+    template: toTemplate(isRecord(tpl) ? tpl : {}),
+    versions: Array.isArray(d.versions) ? d.versions.map((v) => str(v)) : [],
+    // Absent stays absent rather than becoming '': a shipped template was not
+    // published by anybody, and an empty timestamp reads as one that is known
+    // and blank rather than one that does not apply.
+    ...(d.published_at == null ? {} : { publishedAt: str(d.published_at) }),
+    raw: { ...d },
+  };
+}
+
+/**
+ * What `POST /templates/validate` said about a document.
+ *
+ * Both outcomes are a 200 — an invalid document is an answer to the question,
+ * not a failed request — so this never throws for {@link valid} being false.
+ * That is the point of validating: {@link problems} lists EVERY problem at once,
+ * where publishing reports the first thing that stops it.
+ */
+export type TemplateCheck = {
+  valid: boolean;
+  /** Every problem with the document, not just the first. Empty when valid. */
+  problems: string[];
+  /** The ref the document claims. Present only when it parsed far enough to have one. */
+  ref?: string;
+  /** `sha256:…` of the whole document. Changes with any edit at all, a label included. */
+  docDigest?: string;
+  /**
+   * `sha256:…` of only what decides the IMAGE.
+   *
+   * A new label or a version bump leaves it alone, so comparing it against a
+   * previous run is how you tell whether an edit means a rebuild. Absent for a
+   * document naming a parent in `spec.from`, which cannot be computed without
+   * the parent's.
+   */
+  buildDigest?: string;
+  raw: Record<string, unknown>;
+};
+
+export function toTemplateCheck(d: Record<string, unknown>): TemplateCheck {
+  return {
+    valid: bool(d.valid),
+    problems: Array.isArray(d.problems) ? d.problems.map((p) => str(p)) : [],
+    ...(d.ref == null ? {} : { ref: str(d.ref) }),
+    ...(d.doc_digest == null ? {} : { docDigest: str(d.doc_digest) }),
+    ...(d.build_digest == null ? {} : { buildDigest: str(d.build_digest) }),
+    raw: { ...d },
+  };
+}
+
+/**
+ * What a retire took away, from `DELETE /templates/{ns}/{name}`.
+ *
+ * Not a {@link PublishedTemplate} with a flag on it: the document is gone, so
+ * there is nothing of that shape left to answer with.
+ *
+ * WHAT A RETIRE COSTS is worth knowing before calling it. It breaks RESOLUTION
+ * and nothing else — a computer is built from the image the ref resolved to and
+ * holds no reference to the document, so anything already running, stopped or
+ * suspended is untouched. What it does not give back is the NAME: a retired ref
+ * is refused for ever, identical bytes included, and {@link refsClaimed} does
+ * not go down.
+ */
+export type RetiredTemplates = {
+  /** The refs that were retired, newest version first. Never empty — an empty retire is a 404. */
+  retired: string[];
+  /** One value: everything in {@link retired} went in the same write. */
+  retiredAt: string;
+  /** The versions of this name still published, newest first. Empty means the name is gone. */
+  versions: string[];
+  /** How many templates the account holds now — the number the per-account ceiling is against. */
+  templates: number;
+  /**
+   * How many refs this account has ever claimed, live and retired together.
+   *
+   * It does NOT go down when you retire, and there is a much larger ceiling on
+   * it than on {@link templates}. The two move differently, and somebody
+   * watching only the first would conclude that retiring is free.
+   */
+  refsClaimed: number;
+  raw: Record<string, unknown>;
+};
+
+export function toRetiredTemplates(d: Record<string, unknown>): RetiredTemplates {
+  return {
+    retired: Array.isArray(d.retired) ? d.retired.map((r) => str(r)) : [],
+    retiredAt: str(d.retired_at),
+    versions: Array.isArray(d.versions) ? d.versions.map((v) => str(v)) : [],
+    templates: num(d.templates),
+    refsClaimed: num(d.refs_claimed),
+    raw: { ...d },
+  };
+}
+
+/**
+ * A template build (platform OPL-3791) — compiling a document into an image.
+ *
+ * Not to be confused with a computer's disk copy, which the platform also calls
+ * a build. This one is minutes long: `POST /builds` answers immediately with a
+ * job, and {@link Builds.wait} is what watches it.
+ */
+export type TemplateBuild = {
+  /** `bld-a1b2c3d4e5f6`-shaped. */
+  id: string;
+  /** The document this was built from, as `namespace/name@version`. */
+  ref: string;
+  /** `running`, `succeeded` or `failed`. */
+  status: string;
+  /** Why it failed, when it did. For a failing `run:` step, the end of that step's own output. */
+  error: string;
+  startedAt: string;
+  /** Absent while it is still running. */
+  finishedAt?: string;
+  raw: Record<string, unknown>;
+};
+
+export function toTemplateBuild(d: Record<string, unknown>): TemplateBuild {
+  return {
+    id: str(d.id),
+    ref: str(d.ref),
+    status: str(d.status),
+    error: str(d.error),
+    startedAt: str(d.started_at),
+    ...(d.finished_at == null ? {} : { finishedAt: str(d.finished_at) }),
+    raw: { ...d },
+  };
+}
+
+/** One step of a build, in the order the document declares them. */
+export type BuildStep = {
+  /** Its position, 1-based. */
+  n: number;
+  /** `apt`, `run`, `file`, `mkdir`, `env`, or `finish` for the cleanup every build ends with. */
+  kind: string;
+  /** What the step does, from the document — the packages, the path, or the first real line of the script. */
+  label: string;
+  /** `pending`, `running`, `done`, `failed`, or `skipped` for one an earlier failure meant we never reached. */
+  status: string;
+  startedAt?: string;
+  finishedAt?: string;
+  raw: Record<string, unknown>;
+};
+
+export function toBuildStep(d: Record<string, unknown>): BuildStep {
+  return {
+    n: num(d.n),
+    kind: str(d.kind),
+    label: str(d.label),
+    status: str(d.status),
+    ...(d.started_at == null ? {} : { startedAt: str(d.started_at) }),
+    ...(d.finished_at == null ? {} : { finishedAt: str(d.finished_at) }),
+    raw: { ...d },
+  };
+}
+
+/**
+ * What a build is DOING, as against what became of it (platform OPL-3794).
+ *
+ * A build is minutes long — most of them spent copying a multi-gigabyte base
+ * image and then running the document's steps — so this says which step of how
+ * many is running, and which one failed. It stays readable after the build has
+ * finished, so a program that was not attached at the time can still see where
+ * it stopped.
+ */
+export type BuildProgress = {
+  id: string;
+  /** The job's own status, restated so one poll answers both questions. */
+  status: string;
+  /**
+   * Whether to stop polling.
+   *
+   * Derived from {@link status} and not from {@link phase}: a phase is read out
+   * of the build's log, which the document's own `run:` steps write into, and
+   * only the job decides whether a build worked.
+   */
+  done: boolean;
+  /**
+   * Where the build is in itself: `planning`, `staging`, `copying`, `building`,
+   * `publishing`, and then `published`, `reused` or `failed`.
+   *
+   * `unknown` means the build finished without keeping a step-by-step record —
+   * every build from before the endpoint existed is one. It is not reported as
+   * `published` because a build that REUSED an existing image succeeds too, and
+   * that distinction lived in the record that is missing. {@link status} is
+   * still the answer.
+   */
+  phase: string;
+  /** Which step is running, 1-based, or the one that failed. `0` before the first. */
+  step: number;
+  /** How many steps there are. */
+  of: number;
+  /** Every step, in order, whatever its status — so the whole list renders from the first read. */
+  steps: BuildStep[];
+  /** One line about the phase, or why a failed build failed. */
+  note: string;
+  /** Why it failed, when it did. The same value `GET /builds/{id}` gives. */
+  error: string;
+  /**
+   * When the build last MOVED, and not when this was last read — a build whose
+   * steps have stopped advancing is one whose `updatedAt` stops advancing.
+   */
+  updatedAt: string;
+  /**
+   * True only where the fleet could not recognise its own build tool's output,
+   * so the per-step position is unavailable. The build itself is unaffected and
+   * {@link status} is still the answer.
+   */
+  unmatched: boolean;
+  raw: Record<string, unknown>;
+};
+
+export function toBuildProgress(d: Record<string, unknown>): BuildProgress {
+  return {
+    id: str(d.id),
+    status: str(d.status),
+    done: bool(d.done),
+    phase: str(d.phase),
+    step: num(d.step),
+    of: num(d.of),
+    steps: Array.isArray(d.steps) ? d.steps.filter(isRecord).map(toBuildStep) : [],
+    note: str(d.note),
+    error: str(d.error),
+    updatedAt: str(d.updated_at),
+    unmatched: bool(d.unmatched),
+    raw: { ...d },
+  };
+}
+
+/**
  * A named size: a template plus a CPU/RAM/disk shape, from `GET /sizes`.
  *
  * These are the shapes the platform keeps pre-booted, so a create that passes

@@ -20,6 +20,18 @@ import type { Query } from './transport.js';
 // --- paths ----------------------------------------------------------------
 
 export const TEMPLATES = 'templates';
+/** The JSON Schema for a `mandala/v1` document (platform OPL-3568). */
+export const TEMPLATE_SCHEMA = 'templates/schema';
+/** Check a document without publishing it. Side-effect free, and claims no ref. */
+export const TEMPLATE_VALIDATE = 'templates/validate';
+/**
+ * Every build this account has started (platform OPL-3791).
+ *
+ * A collection, like {@link MOVES} and for the same reason: a build is a job
+ * rather than a property of a computer, and it outlives the request that
+ * started it.
+ */
+export const BUILDS = 'builds';
 export const SIZES = 'sizes';
 export const COMPUTERS = 'computers';
 export const SNAPSHOTS = 'snapshots';
@@ -127,6 +139,63 @@ export const execHandle = (id: string, pid: number): string => {
 /** One window on the desktop (OPL-3583). The id is `0x2600003`-shaped. */
 export const windowPath = (id: string, windowId: string): string =>
   `${computer(id)}/windows/${pathId(windowId, 'window id')}`;
+
+/**
+ * One published template, by the two halves of its ref.
+ *
+ * Two segments and not one, because that is the shape of the route: the
+ * platform reduces `templates/<a>/<b>` to `templates/:namespace/:name`, so a
+ * ref handed over whole — `acc-1/devbox@1.0.0` — would be percent-encoded into
+ * a single segment and reach a route that does not exist. The version is a
+ * QUERY parameter on this path, not part of it; see {@link templateVersion}.
+ */
+export const templateRef = (namespace: string, name: string): string =>
+  `${TEMPLATES}/${pathId(namespace, 'namespace')}/${pathId(name, 'template name')}`;
+
+/**
+ * The `version` query parameter, refused when it is not a version.
+ *
+ * The platform answers 400 for one that is empty or malformed rather than
+ * defaulting, and that refusal exists because of a real defect: `?version=` —
+ * which is what most clients serialise for an unset optional string — read as
+ * "no version was named" and retired an entire template. This SDK cannot send
+ * that: `undefined` omits the parameter, and anything else has to be a version.
+ *
+ * Checked here rather than left to the platform because the two answers are not
+ * interchangeable on a retire. Omitting the parameter means EVERY version; a
+ * caller who meant one version and passed an empty string would, without the
+ * platform's refusal, have retired the lot.
+ */
+export function templateVersion(version: string | undefined): Query {
+  if (version === undefined) return {};
+  if (!/^(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})$/.test(version)) {
+    throw new ValidationError(
+      `version must be MAJOR.MINOR.PATCH with no leading zeros (got ${JSON.stringify(version)}). ` +
+        `Omit it entirely to name the whole template.`,
+    );
+  }
+  return { version };
+}
+
+/**
+ * The document a publish, a validate or a build sends.
+ *
+ * Raw bytes, not a JSON envelope: the platform reads JSON or YAML off the body
+ * itself, so a wrapper would be a document the validator never sees. Refused
+ * when empty for the reason {@link pathId} refuses an empty id — the platform
+ * answers 400 for it, and that is a round trip that never had to happen.
+ */
+export function templateDocument(document: string): string {
+  if (typeof document !== 'string' || !document.trim()) {
+    throw new ValidationError('document must be a non-empty template document, as JSON or YAML');
+  }
+  return document;
+}
+
+export const build = (id: string): string => `${BUILDS}/${pathId(id, 'build id')}`;
+
+/** progress | events */
+export const buildAction = (id: string, action: string): string => `${build(id)}/${action}`;
 
 export const snapshot = (id: string): string => `snapshots/${pathId(id, 'snapshot id')}`;
 

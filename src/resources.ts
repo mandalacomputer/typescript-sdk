@@ -1,11 +1,43 @@
 /** Resource collections hanging off the client. */
 
 import { Computer, EphemeralComputer } from './computer.js';
-import { MandalaError, NotFoundError } from './errors.js';
-import type { Move, Retention, Size, Snapshot, Template, UsageReport } from './models.js';
-import { toMove, toRetention, toSize, toSnapshot, toTemplate, toUsageReport } from './models.js';
+import { MandalaError, NotFoundError, TimeoutError } from './errors.js';
+import type {
+  BuildProgress,
+  Move,
+  PublishedTemplate,
+  Retention,
+  RetiredTemplates,
+  Size,
+  Snapshot,
+  Template,
+  TemplateBuild,
+  TemplateCheck,
+  UsageReport,
+} from './models.js';
+import {
+  toBuildProgress,
+  toMove,
+  toPublishedTemplate,
+  toRetention,
+  toRetiredTemplates,
+  toSize,
+  toSnapshot,
+  toTemplate,
+  toTemplateBuild,
+  toTemplateCheck,
+  toUsageReport,
+} from './models.js';
 import * as P from './paths.js';
-import type { Listing, Transport } from './transport.js';
+import type { Listing, SSEEvent, Transport } from './transport.js';
+import {
+  checkWait,
+  deadlineSignal,
+  isPermanent,
+  retryDelay,
+  sleepUntilNextPoll,
+  type WaitOptions,
+} from './wait.js';
 
 /**
  * Options for the two reads that fan out across the fleet.
@@ -333,6 +365,324 @@ export class Templates {
   async list(opts: CallOptions = {}): Promise<Template[]> {
     const data = await this.#t.jsonArray('GET', P.TEMPLATES, { signal: opts.signal });
     return data.filter(P.isRecord).map(toTemplate);
+  }
+
+  /**
+   * The JSON Schema for a `mandala/v1` document.
+   *
+   * Returned rather than wrapped in a type, because it is a schema: what a
+   * caller does with it is point an editor or a validator at it, and a shape of
+   * our own over the top would be a second, worse description of the same
+   * thing. Its `$id` is the URL it came from, so a `$ref` to it resolves.
+   */
+  async schema(opts: CallOptions = {}): Promise<Record<string, unknown>> {
+    const data = await this.#t.json('GET', P.TEMPLATE_SCHEMA, { signal: opts.signal });
+    if (!P.isRecord(data))
+      throw new MandalaError(`expected a schema from GET ${P.TEMPLATE_SCHEMA}`);
+    return data;
+  }
+
+  /**
+   * Check a document without publishing it.
+   *
+   * Side-effect free and claims no ref, so it is safe on a draft and safe to
+   * call repeatedly. Worth doing while iterating: a document that is wrong
+   * comes back with EVERY problem at once, where {@link publish} reports the
+   * first thing that stops it.
+   *
+   * Does not throw for an invalid document. That is not leniency — an invalid
+   * document is the answer to the question this method asks, and the platform
+   * says so with a 200. Read {@link TemplateCheck.valid}.
+   *
+   * The document goes as raw bytes, JSON or YAML, exactly as written. There is
+   * no envelope to build and none to get wrong.
+   */
+  async validate(document: string, opts: CallOptions = {}): Promise<TemplateCheck> {
+    const data = await this.#t.json('POST', P.TEMPLATE_VALIDATE, {
+      raw: new TextEncoder().encode(P.templateDocument(document)),
+      signal: opts.signal,
+    });
+    if (!P.isRecord(data)) {
+      throw new MandalaError(`expected a check from POST ${P.TEMPLATE_VALIDATE}`);
+    }
+    return toTemplateCheck(data);
+  }
+
+  /**
+   * Publish a document under a ref of your own, so a create can launch it by name.
+   *
+   * THE NAMESPACE IS YOUR ACCOUNT. `metadata.namespace` has to be your account
+   * id — anything else is a 403, `system` included — and this SDK does not
+   * rewrite it, because silently relocating somebody's document would publish a
+   * ref that is not the one in the file they submitted.
+   *
+   * A REF IS IMMUTABLE. Publishing the identical document again succeeds and
+   * changes nothing, so a pipeline that republishes on every commit is safe.
+   * Publishing a DIFFERENT document under the same ref is a
+   * {@link ConflictError}, and the fix is to bump `metadata.version`. What
+   * counts as different is the digest, so a changed label is a change.
+   *
+   * A ref you have RETIRED stays spoken for and cannot be republished, identical
+   * bytes included. See {@link retire}.
+   */
+  async publish(document: string, opts: CallOptions = {}): Promise<PublishedTemplate> {
+    const data = await this.#t.json('POST', P.TEMPLATES, {
+      raw: new TextEncoder().encode(P.templateDocument(document)),
+      signal: opts.signal,
+    });
+    if (!P.isRecord(data)) throw new MandalaError(`expected a template from POST ${P.TEMPLATES}`);
+    return toPublishedTemplate(data);
+  }
+
+  /**
+   * Read one template back, as the document it was written as.
+   *
+   * Works for your own namespace and for `system`, so you can read what you are
+   * layering onto. Another account's namespace is a {@link NotFoundError}, the
+   * same answer a name that does not exist gets.
+   *
+   * Without `version` this is the newest published version of that name — which
+   * is also what a create naming the unpinned `namespace/name` resolves to.
+   * {@link PublishedTemplate.versions} lists the rest.
+   *
+   * A ref you retired is a {@link NotFoundError} whose message names the date it
+   * went, rather than claiming the template never existed. Read the message
+   * before concluding you mistyped something.
+   */
+  async get(
+    namespace: string,
+    name: string,
+    opts: CallOptions & { version?: string } = {},
+  ): Promise<PublishedTemplate> {
+    const path = P.templateRef(namespace, name);
+    const data = await this.#t.json('GET', path, {
+      query: P.templateVersion(opts.version),
+      signal: opts.signal,
+    });
+    if (!P.isRecord(data)) throw new MandalaError(`expected a template from GET ${path}`);
+    return toPublishedTemplate(data);
+  }
+
+  /**
+   * Retire a template you published, so it stops resolving and stops counting
+   * against your ceiling.
+   *
+   * WITH `version` this retires that one version. WITHOUT it, this retires EVERY
+   * version of the name — which is what "retire this template" means, and is
+   * deliberately not {@link get}'s "the newest": a delete that quietly took the
+   * latest one would let a loop walk backwards through a history it never asked
+   * about. An empty string is refused here rather than sent, for the same
+   * reason.
+   *
+   * COMPUTERS ARE NOT AFFECTED. A computer is built from the IMAGE the ref
+   * resolved to and holds no reference to the document, so anything already
+   * running, stopped or suspended is untouched. What a retire breaks is
+   * resolution: a NEW create naming the ref is refused.
+   *
+   * THE REF IS STILL SPOKEN FOR, AND STILL COUNTS ONCE. Publishing it again
+   * afterwards is a {@link ConflictError}, identical bytes included, and
+   * {@link RetiredTemplates.refsClaimed} does not go down. Publish the next
+   * version instead.
+   */
+  async retire(
+    namespace: string,
+    name: string,
+    opts: CallOptions & { version?: string } = {},
+  ): Promise<RetiredTemplates> {
+    const path = P.templateRef(namespace, name);
+    const data = await this.#t.json('DELETE', path, {
+      query: P.templateVersion(opts.version),
+      signal: opts.signal,
+    });
+    if (!P.isRecord(data)) throw new MandalaError(`expected a result from DELETE ${path}`);
+    return toRetiredTemplates(data);
+  }
+}
+
+/**
+ * Compiling template documents into images.
+ *
+ * Its own collection rather than methods on {@link Templates}, because a build
+ * is not a property of a published template: `POST /builds` takes a DOCUMENT,
+ * not a ref, and the job it answers with outlives the request and is read back
+ * by its own id. Publishing and building are separate acts with very different
+ * costs, and the platform keeps them apart for that reason.
+ */
+export class Builds {
+  #t: Transport;
+
+  /** @internal */
+  constructor(transport: Transport) {
+    this.#t = transport;
+  }
+
+  /**
+   * Compile a document into a golden image, and return immediately with a job.
+   *
+   * A build takes minutes — an agent image is roughly fifteen — so this never
+   * blocks. {@link wait} is what watches one, {@link progress} is the poll and
+   * {@link events} is the stream.
+   *
+   * THE NAMESPACE AND THE FAMILY BOTH HAVE TO BE YOURS, and either one is a
+   * {@link PermissionDeniedError}. `spec.family` is what the built image is
+   * CALLED on a hypervisor, in a directory shared with every computer on that
+   * machine, so a build may only write into `golden-<your account id>` or that
+   * and a `-` and a name of your choosing.
+   *
+   * A {@link ConflictError} means a hypervisor is busy — one build runs per host
+   * at a time — rather than that anything is wrong with the document, and is
+   * worth retrying.
+   *
+   * `noReuse` builds again even when an image already carries this document's
+   * build digest. Identical documents normally share an image, which is what
+   * makes a repeated build cheap.
+   */
+  async start(
+    document: string,
+    opts: CallOptions & { noReuse?: boolean } = {},
+  ): Promise<TemplateBuild> {
+    const data = await this.#t.json('POST', P.BUILDS, {
+      raw: new TextEncoder().encode(P.templateDocument(document)),
+      // Sent only when true. The platform reads the presence of `no_reuse`
+      // rather than its value, so `no_reuse=false` would ask for the opposite of
+      // what it says.
+      query: opts.noReuse ? { no_reuse: 'true' } : {},
+      signal: opts.signal,
+    });
+    if (!P.isRecord(data)) throw new MandalaError(`expected a build from POST ${P.BUILDS}`);
+    return toTemplateBuild(data);
+  }
+
+  /** Every build this account has started that the fleet still holds a record of, newest first. */
+  async list(opts: CallOptions = {}): Promise<TemplateBuild[]> {
+    const data = await this.#t.jsonArray('GET', P.BUILDS, { signal: opts.signal });
+    return data.filter(P.isRecord).map(toTemplateBuild);
+  }
+
+  /** What became of one build. `error` says why a failed one failed. */
+  async get(id: string, opts: CallOptions = {}): Promise<TemplateBuild> {
+    const path = P.build(id);
+    const data = await this.#t.json('GET', path, { signal: opts.signal });
+    if (!P.isRecord(data)) throw new MandalaError(`expected a build from GET ${path}`);
+    return toTemplateBuild(data);
+  }
+
+  /**
+   * What a build is DOING, as against what became of it.
+   *
+   * The polling half; {@link events} is the same record as a stream. Use this
+   * for anything that reconnects, restarts, or cannot hold a socket open. It
+   * stays readable after the build has finished, so a program that was not
+   * attached at the time can still see which step failed.
+   */
+  async progress(id: string, opts: CallOptions = {}): Promise<BuildProgress> {
+    const path = P.buildAction(id, 'progress');
+    const data = await this.#t.json('GET', path, { signal: opts.signal });
+    if (!P.isRecord(data)) throw new MandalaError(`expected progress from GET ${path}`);
+    return toBuildProgress(data);
+  }
+
+  /**
+   * The same record as {@link progress}, as an event stream, for as long as the
+   * build runs.
+   *
+   * Yields every `progress` and the final `done`. A `progress` is sent only when
+   * something actually moved, so every one of them is news; the `done` is the
+   * last event of a build that finished, INCLUDING one that failed — a failed
+   * build is a `done` whose `status` says `failed`, not an `error` event.
+   *
+   * An `error` event means the STREAM could not go on and says nothing about the
+   * build; it is thrown, because a caller who kept reading would be told nothing
+   * more and a build they still care about needs {@link progress}. Attaching to
+   * a build that has already finished is not an error — one `progress` and one
+   * `done` arrive immediately.
+   *
+   * An account may hold eight of these open at once; the ninth is a
+   * {@link RateLimitError}.
+   */
+  async *events(id: string, opts: CallOptions = {}): AsyncGenerator<BuildProgress> {
+    const path = P.buildAction(id, 'events');
+    for await (const ev of this.#t.sse('GET', path, {
+      signal: opts.signal,
+    }) as AsyncGenerator<SSEEvent>) {
+      if (ev.event === 'error') {
+        // The stream's own failure, not the build's. Named as such, because a
+        // caller told "the build failed" would go and read a document that is
+        // fine.
+        const detail = P.isRecord(ev.data) ? String(ev.data.error ?? '') : String(ev.data ?? '');
+        throw new MandalaError(
+          `the build event stream for ${id} ended: ${detail || 'no reason given'} ` +
+            `(this says nothing about the build itself — read builds.progress(${JSON.stringify(id)}))`,
+        );
+      }
+      if (ev.event !== 'progress' && ev.event !== 'done') continue;
+      if (!P.isRecord(ev.data)) continue;
+      yield toBuildProgress(ev.data);
+      if (ev.event === 'done') return;
+    }
+  }
+
+  /**
+   * Wait for a build to stop running, and answer where it got to.
+   *
+   * Polls {@link progress} rather than holding the stream open, because a wait
+   * is the case the stream is worst at: it reconnects badly, it is bounded to
+   * eight per account, and a caller who only wants the outcome has no use for
+   * the events in between.
+   *
+   * It does NOT throw for a build that failed. `succeeded` and `failed` are two
+   * situations with two remedies — one has an image and the other has a step to
+   * fix — and an exception flattens them into "something went wrong", which is
+   * the mistake the move work established the rule about. Read `status`, and
+   * `error`, and `steps` to see which step stopped it.
+   *
+   * Throws {@link TimeoutError} if the build is still going when the timeout
+   * runs out. The build is not stopped by that; only the waiting is.
+   *
+   * The default timeout is generous because the work is: most of a build is
+   * copying a multi-gigabyte base image before a single step of the document
+   * runs, and an agent image is roughly fifteen minutes in total.
+   */
+  async wait(id: string, opts: WaitOptions = {}): Promise<BuildProgress> {
+    const { timeoutMs = 1_800_000, pollMs = 5_000, signal } = opts;
+    checkWait(timeoutMs, pollMs);
+    const deadline = Date.now() + timeoutMs;
+    let polled = false;
+    let delayMs = pollMs;
+    let last: BuildProgress | undefined;
+    for (;;) {
+      if (Date.now() >= deadline) {
+        throw new TimeoutError(
+          last
+            ? `build ${id} was still running after ${timeoutMs}ms (phase ${last.phase}, ` +
+                `step ${last.step} of ${last.of}; the build has not stopped, only this wait has)`
+            : `build ${id} could not be observed within ${timeoutMs}ms: every poll failed`,
+        );
+      }
+      // The sleep comes before every poll but the first: a build that finished
+      // while the caller was doing something else is one round trip from being
+      // known to have finished.
+      if (polled) await sleepUntilNextPoll(delayMs, deadline, signal);
+      polled = true;
+      delayMs = pollMs;
+      if (Date.now() >= deadline) continue;
+      try {
+        const now = await this.progress(id, {
+          signal: deadlineSignal(deadline - Date.now(), signal),
+        });
+        last = now;
+        // `done` and not a comparison against a list of statuses: the platform
+        // derives it from the JOB rather than from the phase, and the phase is
+        // read out of a log the document's own steps write into.
+        if (now.done) return now;
+      } catch (err) {
+        // A build that does not exist, a key that does not work and a plan that
+        // does not permit this are not going to start working; everything else
+        // is what a poll loop is for.
+        if (isPermanent(err)) throw err;
+        delayMs = retryDelay(pollMs, err);
+      }
+    }
   }
 }
 
