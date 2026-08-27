@@ -16,10 +16,10 @@
  */
 
 import {
-  AuthenticationError,
-  NotFoundError,
-  PermissionDeniedError,
-  PlanLimitError,
+  APIError,
+  ConnectionError,
+  MoveRequiredError,
+  OriginTLSError,
   RateLimitError,
   ValidationError,
 } from './errors.js';
@@ -35,18 +35,91 @@ export type WaitOptions = {
 };
 
 /**
- * A failure that polling again cannot fix.
+ * Whether a poll is worth making again.
  *
- * A wait swallows the transient ones — a hypervisor briefly away is exactly
- * what a poll loop is for — and must not swallow these, or a wait against a
- * deleted id, an expired key or a plan that does not permit the operation
- * spends its whole timeout discovering it.
+ * The other half of {@link isTransient}, and the point of having two: they read
+ * as the same question and are not one. `isTransient` is exported, so its
+ * caller is a host application wrapping an arbitrary call — possibly a
+ * `create` — in `if (isTransient(err)) retry()`, and it can only name failures
+ * that are safe to replay blind. This one is asked by the waits in this SDK,
+ * which replay a `GET computers/:id`, a `GET moves`, a build read or an
+ * `exec 'exit 0'` probe: idempotent, every one of them, and every one under a
+ * deadline the caller set. That pair of properties is a fact about what those
+ * calls DO rather than about the error, which is why this cannot be published
+ * as the same `true`.
+ *
+ * DENY-LIST, where `isTransient` is an allow-list, and the inversion is
+ * deliberate (OPL-3724). The polarity follows from who pays for a wrong answer.
+ * Retrying something unretryable costs one poll interval and at worst the
+ * deadline the caller chose. NOT retrying something that would have cleared
+ * costs a wait that reports a machine as unreachable while it was coming up —
+ * and under an allow-list every status the edge invents next lands in that
+ * second category, silently, until somebody notices and adds a class.
+ *
+ * The line is REQUEST versus MOMENT. A failure describing the request answers
+ * the same way forever and is fatal here; a failure describing the moment is
+ * what a poll exists to outlast.
+ *
+ * Fatal, therefore:
+ *
+ * - anything that is not a failed REQUEST. That is the floor, and a deny-list
+ *   needs one: only {@link APIError} and {@link ConnectionError} describe an
+ *   exchange with the platform that did not work, and only those can be worth
+ *   making again. A `TypeError` from a bug in this file is not the platform
+ *   being slow, and riding one out spends the caller's deadline before
+ *   reporting the wrong cause; {@link ValidationError} is a `TypeError` by
+ *   design and lands here for free.
+ *
+ *   A bare {@link MandalaError} is caught by the same floor, and that is the
+ *   half worth spelling out, because every poll loop here raises them: "this
+ *   move is no longer listed", "this build says done beside a running status".
+ *   Those are VERDICTS this SDK reached about a poll that succeeded, thrown
+ *   from inside the same try that wraps the request. Polling through one is an
+ *   infinite loop with a deadline on it, which is what the test suite said the
+ *   first time this predicate did not draw the line here.
+ * - {@link MoveRequiredError} — a decision about the size that was asked for.
+ * - {@link OriginTLSError} (525, 526) — a certificate the edge and the platform
+ *   cannot agree on fails identically on every retry, so waiting one out spends
+ *   the whole deadline to report the wrong cause.
+ * - 524 — reached only by holding a request open past the edge's ceiling, so an
+ *   identical retry reproduces it at the same place. It shares
+ *   {@link GatewayTimeoutError} with 504, which is worth another poll, and that
+ *   is why this one status is matched by NUMBER: the type cannot separate them.
+ * - anything below 500 that is not named. A 4xx is the request — a bad body, a
+ *   revoked key, a plan limit, a deleted id, an offset past the end of a file —
+ *   and repeating it unchanged cannot change the answer. Three describe the
+ *   moment instead and are named: 409, 429, and 408, which RFC 9110 defines as a
+ *   request the client may repeat unchanged and which the edge does emit.
+ *
+ *   A 3xx goes with the 4xx, which is why the test is `>= 500` rather than "not
+ *   a 4xx". The transport does not follow redirects and treats every non-2xx as
+ *   an error, so a baseUrl missing its trailing path answers 301 — polled to the
+ *   deadline under a 4xx-only rule, ending in a timeout naming nothing about the
+ *   redirect. mandala-computer-python found that one.
+ *
+ * 5xx has an upper bound as well as a lower one, and it is not decoration: the
+ * HTTP parser under `fetch` accepts any three digits, so a broken or hostile
+ * origin can answer 700 — which `>= 500` alone called a passing moment and
+ * polled until the caller's deadline (Codex adversarial review, OPL-3724).
+ *
+ * Everything at 5xx polls through, which is the behaviour change: 502 and 520-523
+ * mean the outcome is unknown, and a read whose outcome is unknown can simply
+ * be read again. {@link Computer.waitForGuest} already knew this about 502 and
+ * carried its own `|| err.status === 502` beside this predicate to say so; the
+ * rest of the waits poll the control plane, where a 502 is edge noise and was
+ * being reported to callers as a machine that never came up.
  */
-export const isPermanent = (err: unknown): boolean =>
-  err instanceof AuthenticationError ||
-  err instanceof PermissionDeniedError ||
-  err instanceof NotFoundError ||
-  err instanceof PlanLimitError;
+export const isTransientForPoll = (err: unknown): boolean => {
+  if (!(err instanceof APIError) && !(err instanceof ConnectionError)) return false;
+  if (err instanceof MoveRequiredError) return false;
+  if (err instanceof OriginTLSError) return false;
+  if (err instanceof APIError) {
+    if (err.status === 524) return false;
+    if (err.status === 408 || err.status === 409 || err.status === 429) return true;
+    return err.status >= 500 && err.status < 600;
+  }
+  return true;
+};
 
 /**
  * A signal that fires when the caller's does, or when `ms` have passed.

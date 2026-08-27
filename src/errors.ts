@@ -107,8 +107,16 @@ export class NotFoundError extends APIError {
  *   one that is not running
  *
  * A guest agent that stays silent past its boot window stops being a conflict
- * and becomes a 502 {@link APIError}, so a retry loop on this terminates rather
- * than being told "still booting" forever.
+ * and becomes a 502. That used to be load-bearing here — the note said a retry
+ * loop on this "terminates rather than being told still booting forever", and
+ * it was the strongest argument for treating 502 as fatal.
+ *
+ * It does not survive reading the loop it describes.
+ * {@link Computer.waitForGuest} is the only wait that ever sees a guest 502,
+ * and it retried one all along, because an agent that is merely slow answers
+ * 502 for its first seconds too. The two claims were never about the same
+ * request. What actually terminates a guest wait is its DEADLINE, which every
+ * wait here has and which no status can extend (OPL-3724).
  *
  * NEARLY, and the exception is {@link MoveRequiredError}. Whether a 409 clears
  * is a property of the body rather than of the status: a refusal that clears
@@ -576,9 +584,23 @@ export function errorForEventStatus(status: number, message: string): APIError {
 /**
  * Whether an error is worth trying again without changing the request.
  *
- * What the wait helpers retry on. Everything else is surfaced, because a caller
- * that can read "the guest agent is not answering yet" is better placed to
- * decide than a fixed policy is.
+ * The PUBLIC answer, exported from the package, and therefore a contract with
+ * whoever embeds this SDK rather than a private note to this file. Its caller
+ * is a host application wrapping an arbitrary call in
+ * `if (isTransient(err)) retry()` — possibly a `create` — so it names only
+ * failures that both clear on their own AND are safe to replay blind.
+ *
+ * NOT what the wait helpers ask, which is the OPL-3724 change: they ask
+ * {@link isTransientForPoll}, because they replay idempotent reads under a
+ * deadline and can afford to be generous where an embedder cannot. This
+ * docstring used to say "what the wait helpers retry on" and that was the whole
+ * defect — one predicate answering to two audiences, so every argument about
+ * widening it had a right answer for one of them and a wrong answer for the
+ * other.
+ *
+ * Unchanged in content, and now identical in all three clients: the MCP server
+ * matched these classes plus a list of status numbers and has dropped the list;
+ * the Python SDK had no public predicate at all and has grown this one.
  *
  * Note that a STATUS is not enough to answer this, which is why the first check
  * below is on a type. 409 is the case: most are a passing moment, and the move
@@ -590,13 +612,18 @@ export function isTransient(err: unknown): boolean {
   // long as the computer is on that host. First, because it is a subclass of the
   // very branch below that would say yes (OPL-3773).
   if (err instanceof MoveRequiredError) return false;
-  // {@link OriginUnreachableError} is deliberately not here, though 520-523 do
-  // clear on their own and mandala-computer-mcp does retry them. This SDK
-  // decides transience by class and treats every other 5xx as terminal — see
-  // {@link ConflictError}, which documents a guest agent past its boot window
-  // becoming a 502 precisely so that a retry loop STOPS. Adding a retrying
-  // status here would be a change to retry policy smuggled into a change about
-  // what errors are called, and the two deserve to be argued separately.
+  // {@link OriginUnreachableError} is deliberately not here, and 502 and 504
+  // are not either. All of them mean the outcome is unknown, which is exactly
+  // what an embedder replaying a create cannot afford — one computer becomes
+  // two behind a failure that read as nothing having happened.
+  //
+  // They ARE polled through, by {@link isTransientForPoll}. That is the answer
+  // this comment used to defer: it said adding a retrying status here would be
+  // retry policy smuggled into a change about what errors are called, and the
+  // two deserved to be argued separately. Argued, in OPL-3724 — and the
+  // conclusion was that neither client had to give anything up, because the
+  // disagreement was never about a status. It was two questions wearing one
+  // name.
   return (
     err instanceof ConflictError ||
     err instanceof RateLimitError ||
