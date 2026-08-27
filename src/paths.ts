@@ -67,6 +67,15 @@ export const RETENTION = 'retention';
  * it. Nothing in either case says the id was missing.
  */
 function pathId(id: string, what: string): string {
+  // A PRIMITIVE string, checked before anything else. Every guard below compares
+  // or encodes, and both let a boxed String through: `new String('..') === '..'`
+  // is false, so the dot check misses, and `encodeURIComponent` then emits `..`
+  // — the exact traversal this function exists to stop. These types are erased
+  // at runtime and this package is called from JavaScript, so the annotation is
+  // not the check (adversarial review, OPL-3835).
+  if (typeof id !== 'string') {
+    throw new ValidationError(`${what} must be a string (got ${typeof id})`);
+  }
   if (!id) throw new ValidationError(`${what} must not be empty`);
   // URL parsers normalise both raw and percent-encoded dot segments before a
   // request is sent. Letting either through can therefore turn, for example,
@@ -168,13 +177,28 @@ export const templateRef = (namespace: string, name: string): string =>
  */
 export function templateVersion(version: string | undefined): Query {
   if (version === undefined) return {};
+  // A PRIMITIVE string, and the validated value is what goes on. Validating a
+  // value and then returning the ORIGINAL is a hole wherever coercion happens
+  // twice: `RegExp.test` coerces, and so does the transport's
+  // `searchParams.set(k, String(v))`. An object whose `toString()` answers
+  // `1.2.3` and then `''` therefore passes this check and sends `?version=` —
+  // which on a retire is the whole-name, irreversible branch this function
+  // exists to make unreachable (adversarial review, OPL-3835).
+  if (typeof version !== 'string') {
+    throw new ValidationError(
+      `version must be a string (got ${typeof version}). Omit it entirely to name the whole template.`,
+    );
+  }
   if (!/^(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})$/.test(version)) {
     throw new ValidationError(
       `version must be MAJOR.MINOR.PATCH with no leading zeros (got ${JSON.stringify(version)}). ` +
         `Omit it entirely to name the whole template.`,
     );
   }
-  return { version };
+  // The checked primitive, not the argument. `${version}` is what makes that
+  // true even if the argument was a boxed String that passed `typeof` — it
+  // cannot, but the value that leaves here should not depend on that.
+  return { version: `${version}` };
 }
 
 /**

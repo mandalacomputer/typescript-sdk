@@ -1,7 +1,7 @@
 /** Resource collections hanging off the client. */
 
 import { Computer, EphemeralComputer } from './computer.js';
-import { MandalaError, NotFoundError, TimeoutError } from './errors.js';
+import { isTransient, MandalaError, NotFoundError, TimeoutError } from './errors.js';
 import type {
   BuildProgress,
   Move,
@@ -33,7 +33,6 @@ import type { Listing, SSEEvent, Transport } from './transport.js';
 import {
   checkWait,
   deadlineSignal,
-  isPermanent,
   retryDelay,
   sleepUntilNextPoll,
   type WaitOptions,
@@ -602,6 +601,7 @@ export class Builds {
    */
   async *events(id: string, opts: CallOptions = {}): AsyncGenerator<BuildProgress> {
     const path = P.buildAction(id, 'events');
+    let sawEvent = false;
     for await (const ev of this.#t.sse('GET', path, {
       signal: opts.signal,
     }) as AsyncGenerator<SSEEvent>) {
@@ -616,10 +616,34 @@ export class Builds {
         );
       }
       if (ev.event !== 'progress' && ev.event !== 'done') continue;
-      if (!P.isRecord(ev.data)) continue;
+      if (!P.isRecord(ev.data)) {
+        // A `done` whose payload is not a record is the end of the stream with
+        // the answer missing, and skipping it was worse than either half of that
+        // (adversarial review, OPL-3835). The loop would keep waiting on a
+        // connection the platform has finished with — `sse` deliberately has no
+        // deadline — holding one of the account's eight slots until the socket
+        // happens to close. A `progress` is different: it is news, not an
+        // answer, so one that is malformed is skipped and the next one is read.
+        if (ev.event === 'done') {
+          throw new MandalaError(
+            `the build event stream for ${id} ended with a malformed final event; ` +
+              `read builds.progress(${JSON.stringify(id)}) for the outcome`,
+          );
+        }
+        continue;
+      }
+      sawEvent = true;
       yield toBuildProgress(ev.data);
       if (ev.event === 'done') return;
     }
+    // The stream ended without saying so. A generator that simply returns here
+    // is indistinguishable from one that finished, so a caller looping over
+    // these would report a build it stopped watching as a build that ended.
+    throw new MandalaError(
+      `the build event stream for ${id} ended without a final event` +
+        (sawEvent ? '' : ', and sent nothing at all') +
+        `; the build is probably still running — read builds.progress(${JSON.stringify(id)})`,
+    );
   }
 
   /**
@@ -650,13 +674,22 @@ export class Builds {
     let polled = false;
     let delayMs = pollMs;
     let last: BuildProgress | undefined;
+    // Whether the MOST RECENT poll answered, as against whether any ever did.
+    // Without it the timeout quotes a stale `last` and says the build "was still
+    // running" — a claim about the present tense, made from an observation that
+    // may be half an hour old and followed by nothing but failures.
+    let observed = false;
     for (;;) {
       if (Date.now() >= deadline) {
         throw new TimeoutError(
-          last
+          last && observed
             ? `build ${id} was still running after ${timeoutMs}ms (phase ${last.phase}, ` +
                 `step ${last.step} of ${last.of}; the build has not stopped, only this wait has)`
-            : `build ${id} could not be observed within ${timeoutMs}ms: every poll failed`,
+            : last
+              ? `build ${id} could not be reached for the last part of ${timeoutMs}ms; when it last ` +
+                `answered it was in phase ${last.phase}, step ${last.step} of ${last.of}. The build ` +
+                `has not stopped, only this wait has — read builds.progress for where it got to.`
+              : `build ${id} could not be observed within ${timeoutMs}ms: every poll failed`,
         );
       }
       // The sleep comes before every poll but the first: a build that finished
@@ -671,15 +704,23 @@ export class Builds {
           signal: deadlineSignal(deadline - Date.now(), signal),
         });
         last = now;
+        observed = true;
         // `done` and not a comparison against a list of statuses: the platform
         // derives it from the JOB rather than from the phase, and the phase is
         // read out of a log the document's own steps write into.
         if (now.done) return now;
       } catch (err) {
-        // A build that does not exist, a key that does not work and a plan that
-        // does not permit this are not going to start working; everything else
-        // is what a poll loop is for.
-        if (isPermanent(err)) throw err;
+        observed = false;
+        // waitForMove's policy, verbatim, and NOT the guest probe's (adversarial
+        // review, OPL-3835). This SDK has two, for two different things: the
+        // probe loop in waitForGuest retries everything but a handful of
+        // permanent classes, because a booting guest agent legitimately answers
+        // 409, 502 and 503 for its first seconds. This poll reads the CONTROL
+        // PLANE, exactly as waitForMove does — so a 400, a malformed body or a
+        // TLS failure is a defect, not a phase, and swallowing it burns the
+        // whole half-hour default before saying anything.
+        if (signal?.aborted) throw err;
+        if (Date.now() < deadline && !isTransient(err)) throw err;
         delayMs = retryDelay(pollMs, err);
       }
     }

@@ -210,6 +210,59 @@ describe('retiring one', () => {
   });
 });
 
+describe('what a type annotation does not check', () => {
+  /**
+   * Found by adversarial review, and confirmed by running it.
+   *
+   * `templateVersion` validated by coercing through `RegExp.test` and then
+   * returned the ORIGINAL value, which the transport coerces a SECOND time in
+   * `searchParams.set(k, String(v))`. An object whose `toString()` answers
+   * `1.2.3` and then `''` therefore passed the check and put `?version=` on the
+   * wire — the empty-version branch, which on a retire means every version of
+   * the name and cannot be undone.
+   *
+   * These types are erased at runtime and this package is called from
+   * JavaScript, so the annotation is not the check.
+   */
+  it('refuses a version whose toString changes between coercions', async () => {
+    const { rec, client: c } = client();
+    let n = 0;
+    const shifty = {
+      toString() {
+        return n++ === 0 ? '1.2.3' : '';
+      },
+    } as unknown as string;
+    await expect(c.templates.retire('acc-1', 'devbox', { version: shifty })).rejects.toBeInstanceOf(
+      REFUSED_LOCALLY,
+    );
+    expect(rec.calls).toHaveLength(0);
+  });
+
+  it('refuses a version that is not a string at all', async () => {
+    const { rec, client: c } = client();
+    for (const bad of [null, 1, {}, [], true] as unknown[]) {
+      await expect(
+        c.templates.get('acc-1', 'devbox', { version: bad as string }),
+      ).rejects.toBeInstanceOf(REFUSED_LOCALLY);
+    }
+    expect(rec.calls).toHaveLength(0);
+  });
+
+  /**
+   * The same hole in the path guard, which is older than this branch and which
+   * templateRef now depends on: `new String('..') === '..'` is false, so the dot
+   * check missed it, and `encodeURIComponent` then emitted `..` — a request
+   * aimed at a route nobody named.
+   */
+  it('refuses a boxed String in a path segment', async () => {
+    const { rec, client: c } = client();
+    const boxed = new String('..') as unknown as string;
+    await expect(c.templates.get(boxed, 'devbox')).rejects.toBeInstanceOf(REFUSED_LOCALLY);
+    await expect(c.templates.retire('acc-1', boxed)).rejects.toBeInstanceOf(REFUSED_LOCALLY);
+    expect(rec.calls).toHaveLength(0);
+  });
+});
+
 describe('starting a build', () => {
   it('sends the document as bytes and takes the 202', async () => {
     const { rec, client: c } = client();
@@ -337,6 +390,104 @@ describe('watching a build', () => {
     const out = await c.builds.wait('bld-1', { pollMs: 1 });
     expect(out.status).toBe('succeeded');
     expect(n).toBe(2);
+  });
+
+  /**
+   * The control plane's policy, not the guest probe's (adversarial review).
+   *
+   * This SDK has two, for two different things. waitForGuest retries all but a
+   * few permanent classes, because a booting guest agent legitimately answers
+   * 409, 502 and 503 for its first seconds. This poll reads the control plane
+   * like waitForMove does, so a 400 is a defect rather than a phase — and
+   * swallowing it spent the whole half-hour default before saying anything.
+   */
+  it('gives up at once on a failure that is not transient', async () => {
+    const { rec, client: c } = client((call) =>
+      call.path.endsWith('/progress') ? errorJson(400, 'that is not a build id') : anyRoute(call),
+    );
+    await expect(c.builds.wait('bld-1', { timeoutMs: 5_000, pollMs: 1 })).rejects.toThrow(
+      /not a build id/,
+    );
+    expect(rec.calls).toHaveLength(1);
+  });
+
+  it('gives the caller back their own cancellation, not a timeout', async () => {
+    const ctl = new AbortController();
+    const { client: c } = client((call) => {
+      if (!call.path.endsWith('/progress')) return anyRoute(call);
+      ctl.abort();
+      return errorJson(503, 'no hypervisor could answer');
+    });
+    const err = await c.builds
+      .wait('bld-1', { timeoutMs: 5_000, pollMs: 1, signal: ctl.signal })
+      .catch((e) => e);
+    expect(err).not.toBeInstanceOf(TimeoutError);
+  });
+
+  /**
+   * The timeout must not quote a stale observation in the present tense.
+   *
+   * One poll answers, then every later one fails. Saying the build "was still
+   * running" is a claim about now, made from a reading that is by then as old as
+   * the wait itself.
+   */
+  it('does not claim a build is still running from a stale reading', async () => {
+    let n = 0;
+    const { client: c } = client((call) => {
+      if (!call.path.endsWith('/progress')) return anyRoute(call);
+      n += 1;
+      return n === 1
+        ? json({ ...BUILD_PROGRESS, done: false, status: 'running', phase: 'copying' })
+        : errorJson(503, 'no hypervisor could answer');
+    });
+    const err = await c.builds.wait('bld-1', { timeoutMs: 40, pollMs: 5 }).catch((e) => e);
+    expect(err).toBeInstanceOf(TimeoutError);
+    expect((err as Error).message).toContain('could not be reached');
+    expect((err as Error).message).toContain('when it last answered');
+    expect((err as Error).message).not.toContain('was still running');
+  });
+
+  /**
+   * A stream that stops without a `done` must not read as one that finished.
+   *
+   * `sse` deliberately has no deadline, so a malformed final event left the
+   * generator waiting on a connection the platform had finished with — holding
+   * one of the account's eight slots. And a stream that simply ended returned
+   * normally, so a caller looping over it reported a build it had stopped
+   * watching as a build that ended.
+   */
+  it('throws when the stream ends without a final event', async () => {
+    const { client: c } = client((call) =>
+      call.path.endsWith('/events')
+        ? new Response(`event: progress\ndata: ${JSON.stringify(BUILD_PROGRESS)}\n\n`, {
+            status: 200,
+            headers: { 'content-type': 'text/event-stream' },
+          })
+        : anyRoute(call),
+    );
+    const read = async () => {
+      for await (const _ of c.builds.events('bld-1')) {
+        // drain
+      }
+    };
+    await expect(read()).rejects.toThrow(/ended without a final event/);
+  });
+
+  it('throws when the final event is malformed rather than waiting on the socket', async () => {
+    const { client: c } = client((call) =>
+      call.path.endsWith('/events')
+        ? new Response('event: done\ndata: "not a record"\n\n', {
+            status: 200,
+            headers: { 'content-type': 'text/event-stream' },
+          })
+        : anyRoute(call),
+    );
+    const read = async () => {
+      for await (const _ of c.builds.events('bld-1')) {
+        // drain
+      }
+    };
+    await expect(read()).rejects.toThrow(/malformed final event/);
   });
 
   it('refuses wait numbers that would make it never return', async () => {
