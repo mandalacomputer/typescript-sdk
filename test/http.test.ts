@@ -803,6 +803,41 @@ describe('answers that are not what the route promised', () => {
     );
   });
 
+  /**
+   * The sweep the build-flag defect prompted: `noReuse` was not the only option
+   * on this surface read by truthiness, and it was not the worst one.
+   *
+   * `allowPartial` turns OFF the fail-closed guarantee `list` documents. Read by
+   * truthiness, `allowPartial: "false"` — three characters a JavaScript caller
+   * or an `any` can produce, and which say NO — sent `allow_partial=1` and
+   * handed back part of the fleet as though it were all of it. That is the
+   * failure the header, the `incomplete` count and the 503 all exist to prevent,
+   * reached through the one door none of them watches.
+   *
+   * Asserted as no request at all: a refusal that still sent one would have
+   * listed the wrong thing.
+   */
+  it('refuses a non-boolean flag rather than reading it as true', async () => {
+    for (const bad of ['false', 'true', 0, 1, null, new Boolean(false)]) {
+      const v = bad as unknown as boolean;
+      const rec = recorder(anyRoute);
+      const c = client(rec);
+      const before = rec.calls.length;
+      await expect(c.computers.list({ allowPartial: v })).rejects.toThrow(TypeError);
+      await expect(c.computers.listWithStatus({ allowPartial: v })).rejects.toThrow(TypeError);
+      await expect(c.snapshots.list({ includeUnfinished: v })).rejects.toThrow(TypeError);
+      await expect(c.snapshots.list({ allowPartial: v })).rejects.toThrow(TypeError);
+      expect(rec.calls.length).toBe(before);
+    }
+    // The values that ARE booleans still work, including the false that means
+    // "leave the guarantee on".
+    const rec = recorder(anyRoute);
+    await client(rec).computers.list({ allowPartial: false });
+    expect(rec.calls[0]?.query).not.toHaveProperty('allow_partial');
+    await client(rec).computers.list({ allowPartial: true });
+    expect(rec.calls[1]?.query.allow_partial).toBe('1');
+  });
+
   it('drops a non-record element from a listing rather than decoding it', async () => {
     // toSnapshot reads d.id off every element, so one null in the array threw
     // "cannot read properties of null" from inside the decoder. The same
