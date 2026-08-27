@@ -318,10 +318,10 @@ describe('starting a build', () => {
 
 describe('a validation verdict has to be given', () => {
   /**
-   * `valid` is the whole answer, so `bool(undefined)` answering `false` reads
-   * as "the platform examined your document and rejected it" — a sentence
-   * nobody said. Drift that looks like a rejection is worse than drift that
-   * says so (adversarial review, second pass, OPL-3835).
+   * `valid` is the whole answer, so a decoder answering `false` for an absent
+   * one reads as "the platform examined your document and rejected it" — a
+   * sentence nobody said. Drift that looks like a rejection is worse than
+   * drift that says so (adversarial review, second pass, OPL-3835).
    */
   it('refuses a check whose payload carries no verdict', async () => {
     const { client: c } = client((call) =>
