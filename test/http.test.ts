@@ -1133,20 +1133,60 @@ describe('a connection failure after the request was sent (OPL-3855)', () => {
       .catch((e: unknown) => e);
 
   it('says the request never left only when it can prove that', async () => {
-    const probe = createSocketServer();
-    await new Promise<void>((resolve) => probe.listen(0, '127.0.0.1', resolve));
-    const { port } = probe.address() as AddressInfo;
-    await new Promise<void>((resolve) => probe.close(() => resolve()));
-
-    for (const url of [
-      `http://127.0.0.1:${port}/api/v1`,
-      'http://no-such-host-xyzzy.invalid/api/v1',
-    ]) {
+    // Port 2 rather than an ephemeral one bound and closed here: the OS is free
+    // to hand a just-released ephemeral port to another listener, and this file
+    // binds dozens of them — a collision would dispatch the request and fail
+    // below, pointing at the classifier rather than at the port. Not port 1,
+    // which fetch refuses outright as a bad port, so it never reaches a connect.
+    for (const url of ['http://127.0.0.1:2/api/v1', 'http://no-such-host-xyzzy.invalid/api/v1']) {
       const err = await failureFrom(url);
       expect(err, url).toBeInstanceOf(ConnectionError);
       expect(err, url).not.toBeInstanceOf(ConnectionInterruptedError);
       expect(isTransient(err), url).toBe(true);
       expect(isTransientForPoll(err), url).toBe(true);
+    }
+  });
+
+  it('does not read a TLS alert after the handshake as a connect failure', async () => {
+    // The prefix that used to be here — `ERR_SSL_` — is how Node spells every
+    // OpenSSL reason, fatal alerts included, and an alert can arrive on any
+    // record. A TLS-terminating proxy that dies while the response is being
+    // read answers one of these with the request long since on the wire, so the
+    // prefix put a possibly-dispatched failure into the class that says nothing
+    // was sent. That is the bug this describe block is about, reintroduced by
+    // the first fix for it.
+    const failing = (code: string) =>
+      new Client({
+        apiKey: 'com_test',
+        baseUrl: BASE,
+        fetch: (async () => {
+          throw Object.assign(new TypeError('fetch failed'), {
+            cause: Object.assign(new Error(code), { code }),
+          });
+        }) as typeof globalThis.fetch,
+      }).computers
+        .list()
+        .catch((e: unknown) => e);
+
+    for (const code of [
+      'ERR_SSL_TLSV1_ALERT_INTERNAL_ERROR',
+      'ERR_SSL_SSLV3_ALERT_BAD_RECORD_MAC',
+      'ERR_SSL_DECRYPTION_FAILED_OR_BAD_RECORD_MAC',
+      // Node's own prefix is no safer, which is why neither survived:
+      // renegotiation is by definition mid-connection.
+      'ERR_TLS_RENEGOTIATION_DISABLED',
+    ]) {
+      const err = await failing(code);
+      expect(err, code).toBeInstanceOf(ConnectionInterruptedError);
+      expect(isTransient(err), code).toBe(false);
+    }
+    // And the handshake codes that ARE named still answer the other way, so
+    // this is a narrowing rather than a surrender.
+    for (const code of ['ERR_SSL_WRONG_VERSION_NUMBER', 'CERT_HAS_EXPIRED']) {
+      const err = await failing(code);
+      expect(err, code).toBeInstanceOf(ConnectionError);
+      expect(err, code).not.toBeInstanceOf(ConnectionInterruptedError);
+      expect(isTransient(err), code).toBe(true);
     }
   });
 
