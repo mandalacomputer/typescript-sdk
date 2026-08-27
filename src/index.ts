@@ -84,6 +84,7 @@ export {
   AuthenticationError,
   ConflictError,
   ConnectionError,
+  ConnectionInterruptedError,
   GatewayTimeoutError,
   isTransient,
   MandalaError,

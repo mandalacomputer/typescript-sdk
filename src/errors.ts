@@ -38,9 +38,72 @@ export class MandalaError extends Error {
   override name = 'MandalaError';
 }
 
-/** The platform could not be reached. Safe to retry without changing the request. */
+/**
+ * The request never left. Nothing was dispatched, so anything may be replayed.
+ *
+ * NARROWER than it used to be, and the narrowing is the point. This class once
+ * wrapped every rejection the transport produced, which meant it also carried
+ * the failures that happen AFTER the request reached the platform — a socket
+ * reset while the response body was being read, a per-request deadline that
+ * fired with the request already on the wire. Those wear the opposite outcome:
+ * the platform may well have acted, and the answer is what was lost. They now
+ * get {@link ConnectionInterruptedError}, which is a subclass, so
+ * `catch (e) { if (e instanceof ConnectionError) }` still sees both.
+ *
+ * What is left here is what the name always claimed: DNS that did not resolve,
+ * a socket that was refused, a connect that timed out, a TLS handshake that
+ * failed. Not one byte of the request was written, so {@link isTransient} can
+ * say yes to it even for a caller replaying a `create`.
+ *
+ * The transport raises this one only for a cause it can positively identify as
+ * connect-phase; see `neverDispatched` in `src/transport.ts`. Everything it
+ * cannot identify is the subclass, because the cost of the two wrong answers is
+ * not symmetric — see there.
+ */
 export class ConnectionError extends MandalaError {
   override name = 'ConnectionError';
+}
+
+/**
+ * The request was dispatched and the answer was lost. Outcome unknown.
+ *
+ * A socket that resets while the response body is being read, an HTTP parser
+ * error on the way back, a per-request deadline that fired after the request
+ * went out, a connection failure this SDK cannot place in either phase. The
+ * shared property is the one that matters: the platform may have received the
+ * request and acted on it, and nothing in the error says whether it did.
+ *
+ * So this is FATAL to {@link isTransient} and transparent to
+ * `isTransientForPoll`, and the split is the same one OPL-3724 made for 502 and
+ * 504. Its reasoning applies here unchanged, and this case had escaped it only
+ * because it wears a class whose name says the request never left.
+ * `computers.create()` reaches the platform, the platform builds the computer,
+ * the socket dies mid-response: an embedder asking {@link isTransient} used to
+ * be told yes, replayed the create, and paid for two computers.
+ *
+ * The per-request TIMEOUT is the case worth naming separately, because it was
+ * not obviously this bug and is. `timeout_ms` firing produced a
+ * `ConnectionError` reading "timed out after 30000ms", and a timeout is the
+ * shape where the request has most likely gone out and the platform is most
+ * likely still working on it. It said "safe to replay blind" about the one
+ * failure where that is least true.
+ *
+ * A SUBCLASS rather than a sibling, which is what keeps this from breaking
+ * anyone. `instanceof ConnectionError` still matches, so existing catch blocks
+ * and `isTransientForPoll`'s floor need no change; only the one predicate that
+ * promises blind replay had to learn the difference. It is the same shape
+ * {@link MoveRequiredError} has under {@link ConflictError}, for the same
+ * reason: a case that is genuinely a kind of its parent and genuinely answers
+ * one question the other way.
+ *
+ * The poll predicate still rides it out, and that is not an oversight. The wait
+ * helpers replay reads — a `GET computers/:id`, an `exec 'exit 0'` probe — and a
+ * read whose outcome was lost can simply be read again. Only a caller who might
+ * be replaying a WRITE needs the distinction, which is exactly the caller
+ * {@link isTransient} is exported for.
+ */
+export class ConnectionInterruptedError extends ConnectionError {
+  override name = 'ConnectionInterruptedError';
 }
 
 /** The API returned an unsuccessful response. */
@@ -612,6 +675,12 @@ export function isTransient(err: unknown): boolean {
   // long as the computer is on that host. First, because it is a subclass of the
   // very branch below that would say yes (OPL-3773).
   if (err instanceof MoveRequiredError) return false;
+  // A lost RESPONSE is not a request that never left, and only one of the two
+  // is safe to replay blind. Same shape as the line above and the same reason:
+  // a subclass of a branch below that would otherwise say yes (OPL-3855). It
+  // also carries the per-request timeout, which used to be a plain
+  // ConnectionError and so used to be told it was safe to replay a create.
+  if (err instanceof ConnectionInterruptedError) return false;
   // {@link OriginUnreachableError} is deliberately not here, and 502 and 504
   // are not either. All of them mean the outcome is unknown, which is exactly
   // what an embedder replaying a create cannot afford — one computer becomes
