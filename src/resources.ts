@@ -1,7 +1,7 @@
 /** Resource collections hanging off the client. */
 
 import { Computer, EphemeralComputer } from './computer.js';
-import { isTransient, MandalaError, NotFoundError, TimeoutError } from './errors.js';
+import { MandalaError, NotFoundError, TimeoutError } from './errors.js';
 import type {
   BuildProgress,
   Move,
@@ -38,6 +38,7 @@ import {
   checkWait,
   deadlineSignal,
   isDeadlineAbort,
+  isTransientForPoll,
   retryDelay,
   sleepUntilNextPoll,
   type WaitOptions,
@@ -798,20 +799,23 @@ export class Builds {
         // poll of which had succeeded as one that could not be reached, on the
         // ordinary path where the last poll is slower than what is left.
         if (isDeadlineAbort(err)) continue;
-        // waitForMove's policy, and NOT the guest probe's (adversarial review).
-        // This SDK has two, for two different things: waitForGuest retries all
-        // but a handful of permanent classes, because a booting guest agent
-        // legitimately answers 409, 502 and 503 for its first seconds. This poll
-        // reads the CONTROL PLANE, exactly as waitForMove does — so a 400, a
-        // malformed body or a TLS failure is a defect, not a phase, and
-        // swallowing it burns the whole half-hour default before saying
-        // anything.
+        // The one policy every poll in this SDK now shares. This comment used to
+        // name two — waitForGuest's, which retried all but a handful of
+        // permanent classes, and this one, which retried only a named few —
+        // and observed that the difference was the guest agent versus the
+        // CONTROL PLANE. That was the right observation and the wrong
+        // conclusion: what the two loops have in common is that both replay an
+        // idempotent read under a deadline, and that is what decides the
+        // policy. The distinction it was reaching for survives intact, because
+        // a 400, a malformed body or a TLS failure is a defect rather than a
+        // phase in isTransientForPoll too, and swallowing one still burns the
+        // whole half-hour default before saying anything (OPL-3724).
         //
         // Judged with no `Date.now() < deadline` clause, unlike the loop this
         // was copied from: with the abort above handled by name, a real 401
         // arriving on the last poll is a real 401 and reaches the caller,
         // instead of being replaced by a timeout.
-        if (!isTransient(err)) throw err;
+        if (!isTransientForPoll(err)) throw err;
         observed = false;
         delayMs = retryDelay(pollMs, err);
       }
