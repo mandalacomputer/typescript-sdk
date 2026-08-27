@@ -555,25 +555,23 @@ export class Builds {
   /**
    * Every build the fleet still holds a record of, newest first.
    *
-   * A build lives on the hypervisor that ran it, so this is a fan-out — and it
-   * does NOT fail closed the way the computer and snapshot listings do
-   * (adversarial review, OPL-3835). There is no `allow_partial` to opt into and
-   * no 503 to stop you: the platform answers a short list with a 200 and
-   * `X-GC-Incomplete`, so the only thing that says a hypervisor was away is the
-   * header. Read through the body alone, an outage looked like an account with
-   * fewer builds.
+   * A build lives on the hypervisor that ran it, so this is a fan-out — and
+   * like every other fan-out on this surface it FAILS CLOSED. `forward` in the
+   * platform's lib/surface applies its strict-inventory check to every v1 route
+   * generically, not only to computers and snapshots: a response carrying
+   * `X-GC-Incomplete` becomes a 503 unless the request passed `allow_partial`,
+   * which `GET /builds` does not document and this method does not send. So a
+   * hypervisor being away arrives as an {@link UnavailableError}, and there is
+   * no short list for a caller to detect.
    *
-   * {@link listWithStatus} is where that shows. This returns the rows, like the
-   * other two listings' `list`.
+   * Worth stating because a previous version of this file said the opposite and
+   * grew a `listWithStatus` to read a header the surface never lets through.
+   * lib/hvproxy does set it; the tier above turns that response into the 503
+   * before any client sees it.
    */
   async list(opts: CallOptions = {}): Promise<TemplateBuild[]> {
-    return (await this.listWithStatus(opts)).items;
-  }
-
-  /** {@link list}, plus whether the platform could answer it in full. */
-  async listWithStatus(opts: CallOptions = {}): Promise<Listing<TemplateBuild>> {
-    const { items, incomplete } = await this.#t.listing(P.BUILDS, { signal: opts.signal });
-    return { items: items.map(toTemplateBuild), incomplete };
+    const data = await this.#t.jsonArray('GET', P.BUILDS, { signal: opts.signal });
+    return data.filter(P.isRecord).map(toTemplateBuild);
   }
 
   /** What became of one build. `error` says why a failed one failed. */

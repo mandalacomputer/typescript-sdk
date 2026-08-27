@@ -114,8 +114,12 @@ a change.
 Read one back — yours or `system`, so you can see what you are layering onto:
 
 ```ts
+// The namespace is your account id — the same one your document's
+// `metadata.namespace` names. `ref` is where to read it back off a publish.
+const [namespace] = t.ref.split('/');
+
 const base = await client.templates.get('system', 'base');
-const pinned = await client.templates.get(t.template.name, 'devbox', { version: '1.0.0' });
+const pinned = await client.templates.get(namespace, 'devbox', { version: '1.0.0' });
 ```
 
 Without `version` you get the newest, which is also what a create naming the

@@ -9,15 +9,11 @@ import {
 } from './agent.js';
 import {
   APIError,
-  AuthenticationError,
   errorForEventStatus,
   isTransient,
   MandalaError,
   NotFoundError,
-  PermissionDeniedError,
-  PlanLimitError,
   RangeNotSatisfiableError,
-  RateLimitError,
   TimeoutError,
   TooLargeError,
   ValidationError,
@@ -48,19 +44,12 @@ import {
 } from './models.js';
 import * as P from './paths.js';
 import type { CallOptions } from './resources.js';
-import {
-  type Bytes,
-  MAX_TIMER_MS,
-  MODEL_KEY_HEADER,
-  type Query,
-  type Transport,
-} from './transport.js';
+import { type Bytes, MODEL_KEY_HEADER, type Query, type Transport } from './transport.js';
 import {
   checkWait,
   deadlineSignal,
   isPermanent,
   retryDelay,
-  sleep,
   sleepUntilNextPoll,
   type WaitOptions,
 } from './wait.js';

@@ -510,30 +510,31 @@ describe('the retired fixture', () => {
 
 describe('a short build listing', () => {
   /**
-   * `GET /builds` fans out and does NOT fail closed the way the computer and
-   * snapshot listings do: no `allow_partial` to opt into, no 503 to stop you,
-   * just a 200 and a header. Read through the body alone, a hypervisor being
-   * away looked like an account with fewer builds.
+   * It never reaches a caller, and that is the point.
+   *
+   * lib/hvproxy does set X-GC-Incomplete on a short build listing, but `forward`
+   * in lib/surface applies its strict-inventory check to every v1 route
+   * generically — so the response becomes a 503 before any client sees it,
+   * unless the request passed `allow_partial`, which this route does not
+   * document. A previous version of this file believed the opposite and grew a
+   * `listWithStatus` to read a header that cannot arrive.
    */
-  it('carries the incomplete signal off the header', async () => {
+  it('arrives as a refusal, not as a short list', async () => {
     const { client: c } = client((call) =>
       call.path === '/builds'
-        ? new Response(JSON.stringify([{ id: 'bld-1', status: 'running' }]), {
-            status: 200,
-            headers: { 'content-type': 'application/json', 'x-gc-incomplete': '0' },
-          })
+        ? errorJson(
+            503,
+            'Right now a hypervisor cannot be reached, so this list would be incomplete. ' +
+              'Retry, or pass allow_partial=1 to accept a partial answer.',
+            { 'x-gc-incomplete': '0' },
+          )
         : anyRoute(call),
     );
-    const short = await c.builds.listWithStatus();
-    expect(short.items).toHaveLength(1);
-    // Presence is the signal and 0 is a legitimate count — there is no placement
-    // cache for builds to say what a silent host was holding.
-    expect(short.incomplete).toBe(0);
+    await expect(c.builds.list()).rejects.toThrow(/would be incomplete/);
   });
 
-  it('is null when the fleet answered in full', async () => {
+  it('is an ordinary list when the fleet answered in full', async () => {
     const { client: c } = client();
-    expect((await c.builds.listWithStatus()).incomplete).toBeNull();
     expect(await c.builds.list()).toHaveLength(1);
   });
 });
