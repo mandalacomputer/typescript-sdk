@@ -542,9 +542,14 @@ export class Builds {
   ): Promise<TemplateBuild> {
     const data = await this.#t.json('POST', P.BUILDS, {
       raw: new TextEncoder().encode(P.templateDocument(document)),
-      // Sent only when true. The platform reads the presence of `no_reuse`
-      // rather than its value, so `no_reuse=false` would ask for the opposite of
-      // what it says.
+      // Sent only when true, and the reason is the documented schema rather
+      // than a claim about the parser: lib/apidoc gives this parameter
+      // `enum: ['true']`, so `true` is the only value the reference admits and a
+      // client sending `false` is sending something undocumented.
+      //
+      // This said the platform reads the key's PRESENCE, which is false —
+      // server/buildjob.go reads `Get("no_reuse") == "true"`. The request was
+      // right either way; the stated reason was not (/code-review, OPL-3835).
       query: opts.noReuse ? { no_reuse: 'true' } : {},
       signal: opts.signal,
     });

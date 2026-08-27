@@ -139,6 +139,17 @@ export function toVncConnect(d: unknown): VncConnect | undefined {
 
 export type Template = {
   name: string;
+  /**
+   * The pinned `namespace/name@version`, when the platform sent one.
+   *
+   * Absent only from a host too old to advertise refs. It matters more than it
+   * looks: since OPL-3789 a template an account PUBLISHED is named by its ref
+   * and by nothing else — the short `name` still resolves to the platform's own
+   * catalogue — so a listing without this cannot tell a caller how to launch
+   * their own template. `publicTemplate` in the platform's lib/projection
+   * publishes it for exactly that reason, and this model was dropping it.
+   */
+  ref?: string;
   label: string;
   os: string;
   cpu: number;
@@ -150,6 +161,7 @@ export type Template = {
 export function toTemplate(d: Record<string, unknown>): Template {
   return {
     name: str(d.name),
+    ...(d.ref == null ? {} : { ref: str(d.ref) }),
     label: str(d.label),
     os: str(d.os),
     cpu: num(d.cpu),

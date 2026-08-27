@@ -274,8 +274,11 @@ describe('starting a build', () => {
   });
 
   /**
-   * The platform reads the PRESENCE of `no_reuse`, not its value, so
-   * `no_reuse=false` would ask for the opposite of what it says.
+   * Omitted rather than sent as `false`, because lib/apidoc gives this parameter
+   * `enum: ['true']` — so `true` is the only value the reference admits.
+   *
+   * This docstring used to claim the platform reads the key's presence, which is
+   * false: server/buildjob.go compares it to `"true"`.
    */
   it('sends no_reuse only when it is asked for', async () => {
     const { rec, client: c } = client();
@@ -536,5 +539,31 @@ describe('a short build listing', () => {
   it('is an ordinary list when the fleet answered in full', async () => {
     const { client: c } = client();
     expect(await c.builds.list()).toHaveLength(1);
+  });
+});
+
+describe('a template row carries its ref', () => {
+  /**
+   * Since OPL-3789 a template an account published is named by its ref and by
+   * nothing else — the short `name` still resolves to the platform's own
+   * catalogue. A listing that drops it cannot tell a caller how to launch their
+   * own template, which is what `publicTemplate` publishes it for. Found by
+   * /code-review on the Python SDK; the same model was dropping it here.
+   */
+  it('keeps the pinned ref off a published template', async () => {
+    const { client: c } = client();
+    const t = await c.templates.publish('apiVersion: mandala/v1');
+    expect(t.template.ref).toBe('acc-1/devbox@1.0.0');
+  });
+
+  it('leaves it absent for a host too old to advertise one', async () => {
+    const { client: c } = client((call) =>
+      call.path === '/templates'
+        ? json([{ name: 'base', label: 'Base', os: 'linux', cpu: 2, ram_mb: 2048, disk_gb: 20 }])
+        : anyRoute(call),
+    );
+    const [row] = await c.templates.list();
+    expect(row.ref).toBeUndefined();
+    expect('ref' in row).toBe(false);
   });
 });
