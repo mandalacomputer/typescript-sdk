@@ -48,6 +48,7 @@ import { type Bytes, MODEL_KEY_HEADER, type Query, type Transport } from './tran
 import {
   checkWait,
   deadlineSignal,
+  isDeadlineAbort,
   isPermanent,
   retryDelay,
   sleepUntilNextPoll,
@@ -737,7 +738,11 @@ export class Computer {
         if (!mine.live) return mine;
       } catch (err) {
         if (signal?.aborted) throw err;
-        if (Date.now() < deadline && !isTransient(err)) throw err;
+        // Named rather than inferred from the clock. See the note in
+        // waitUntilRunning: `AbortSignal.timeout` can fire a millisecond before
+        // `Date.now()` reaches the deadline, and this loop then rethrew its own
+        // deadline as if the platform had failed.
+        if (!isDeadlineAbort(err) && !isTransient(err)) throw err;
         delayMs = retryDelay(pollMs, err);
       }
     }
@@ -855,12 +860,13 @@ export class Computer {
           // A caller who cancelled leaves now, whatever their reason is named.
           if (signal?.aborted) throw err;
           // This wait's own deadline firing inside a poll is this wait ending
-          // rather than a failure of the poll, and the loop's own check names
-          // it. Short of that: a 503 from a host busy doing exactly the disk
+          // rather than a failure of the poll, and `isDeadlineAbort` is what
+          // names it — the clock is not, for the reason waitUntilRunning's note
+          // gives. Short of that: a 503 from a host busy doing exactly the disk
           // copy being waited on is the ordinary weather of a build, not a
           // verdict on it — the same rule waitUntilRunning applies. Anything
           // else is not weather.
-          if (Date.now() < deadline && !isTransient(err)) throw err;
+          if (!isDeadlineAbort(err) && !isTransient(err)) throw err;
           delayMs = retryDelay(pollMs, err);
         }
       }
@@ -911,12 +917,26 @@ export class Computer {
           // A caller who cancelled leaves now, whatever their reason is named.
           if (signal?.aborted) throw err;
           // This wait's own deadline firing inside the poll is this wait
-          // ending, and the check below names it. Short of that: a host that
-          // cannot be reached answers 503, which is the ordinary weather of a
-          // machine still coming up, and letting it out would abort the one
-          // method whose whole job is to keep asking. Anything else — a revoked
-          // key, a computer that is gone — is not weather.
-          if (Date.now() < deadline && !isTransient(err)) throw err;
+          // ending, and `isDeadlineAbort` names it FROM THE ERROR. It used to be
+          // inferred from the clock — `Date.now() < deadline &&` — and that is a
+          // race this suite caught in CI rather than a tidier spelling of the
+          // same test: `AbortSignal.timeout(n)` fires up to a millisecond before
+          // `Date.now()` has advanced `n`, measured here at 3.3% of short waits.
+          // On those, the wait's own deadline read as a platform failure and the
+          // raw `TimeoutError` DOMException reached the caller in place of this
+          // SDK's `TimeoutError` — the documented type, and the one the caller
+          // catches. `builds.wait` already judged it by name for this reason.
+          //
+          // Dropping the clock half also stops a real 401 arriving on the last
+          // poll from being swallowed and reported as a timeout: past the
+          // deadline every error used to be discarded, whatever it was.
+          //
+          // Short of that: a host that cannot be reached answers 503, which is
+          // the ordinary weather of a machine still coming up, and letting it
+          // out would abort the one method whose whole job is to keep asking.
+          // Anything else — a revoked key, a computer that is gone — is not
+          // weather.
+          if (!isDeadlineAbort(err) && !isTransient(err)) throw err;
           delayMs = retryDelay(pollMs, err);
         }
       }
