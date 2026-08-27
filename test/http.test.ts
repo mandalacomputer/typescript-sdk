@@ -3,6 +3,7 @@
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { describe, expect, it, vi } from 'vitest';
+import { errorForStatus, MoveRequiredError, TimeoutError, ValidationError } from '../src/errors.js';
 import {
   APIError,
   AuthenticationError,
@@ -21,6 +22,7 @@ import {
   UnavailableError,
 } from '../src/index.js';
 import { MAX_TIMER_MS } from '../src/transport.js';
+import { isTransientForPoll } from '../src/wait.js';
 import { anyRoute, BASE, bytes, COMPUTER, errorJson, json, recorder, SNAPSHOT } from './harness.js';
 
 const client = (rec: ReturnType<typeof recorder>, opts = {}) =>
@@ -258,6 +260,73 @@ describe('status mapping', () => {
     expect(isTransient(new ConnectionError('offline'))).toBe(true);
     expect(isTransient(new PlanLimitError('', 402))).toBe(false);
     expect(isTransient(new Error('boom'))).toBe(false);
+  });
+
+  it('publishes only what is safe to replay blind, and polls through the rest', () => {
+    // The two questions, per status (OPL-3724). isTransient is exported, so its
+    // caller may be wrapping a `create` — and every status below means the
+    // outcome is unknown, which is how one computer becomes two. The waits ask
+    // the other predicate and ride all of them out, because they only ever
+    // replay a read, under a deadline the caller chose.
+    for (const status of [502, 504, 520, 521, 522, 523]) {
+      const err = errorForStatus(status, `HTTP ${status}`);
+      expect(isTransient(err)).toBe(false);
+      expect(isTransientForPoll(err)).toBe(true);
+    }
+  });
+
+  it('polls through a status nobody has mapped, and stops on a bad request', () => {
+    // Why the poll predicate is a deny-list rather than a wider allow-list.
+    // Under an allow-list every status the edge invents next is fatal to a wait
+    // until somebody notices and adds a class; a 5xx is a moment, and outlasting
+    // one is what a poll loop is. The line is REQUEST versus MOMENT, written as
+    // a range so an unmapped 4xx lands on the right side too.
+    expect(isTransientForPoll(errorForStatus(500, 'HTTP 500'))).toBe(true);
+    expect(isTransientForPoll(errorForStatus(507, 'HTTP 507'))).toBe(true);
+    expect(isTransientForPoll(errorForStatus(400, 'HTTP 400'))).toBe(false);
+    expect(isTransientForPoll(errorForStatus(405, 'HTTP 405'))).toBe(false);
+    // 408 is the third 4xx that describes a moment: RFC 9110 defines it as a
+    // request the client may repeat unchanged, and the edge does emit it.
+    expect(isTransientForPoll(errorForStatus(408, 'HTTP 408'))).toBe(true);
+    // A 3xx goes with the 4xx — hence `>= 500` rather than "not a 4xx". The
+    // transport does not follow redirects and treats every non-2xx as an error,
+    // so a baseUrl missing its trailing path answers 301.
+    for (const status of [301, 302, 303, 307, 308]) {
+      expect(isTransientForPoll(errorForStatus(status, `HTTP ${status}`))).toBe(false);
+    }
+    // 5xx has an upper bound too: the HTTP parser accepts any three digits, so
+    // a broken origin answering 700 was polled to the caller's deadline.
+    for (const status of [600, 700, 999]) {
+      expect(isTransientForPoll(errorForStatus(status, `HTTP ${status}`))).toBe(false);
+    }
+    // 524 is the one status still matched by number: it shares
+    // GatewayTimeoutError with 504, which IS worth another poll, and a type
+    // cannot separate two statuses that share it.
+    expect(isTransientForPoll(errorForStatus(504, 'HTTP 504'))).toBe(true);
+    expect(isTransientForPoll(errorForStatus(524, 'HTTP 524'))).toBe(false);
+    // A certificate fails identically on every retry, so waiting one out spends
+    // the whole deadline to report the wrong cause.
+    expect(isTransientForPoll(errorForStatus(525, 'HTTP 525'))).toBe(false);
+    expect(isTransientForPoll(errorForStatus(526, 'HTTP 526'))).toBe(false);
+  });
+
+  it('does not poll through anything that is not a failed request', () => {
+    // The floor a deny-list needs, and it is narrower than "our error": only an
+    // APIError or a ConnectionError describes an exchange that did not work.
+    //
+    // The bare MandalaError is the case that actually bit. Every poll loop here
+    // raises them as verdicts about a poll that SUCCEEDED — "this move is no
+    // longer listed", "this build says done beside a running status" — thrown
+    // from inside the same try that wraps the request. Polling through a verdict
+    // is an infinite loop with a deadline on it, and three tests stopped
+    // terminating when this predicate first used MandalaError as its floor.
+    expect(isTransientForPoll(new MandalaError('that move is no longer listed'))).toBe(false);
+    expect(isTransientForPoll(new TimeoutError('gave up'))).toBe(false);
+    expect(isTransientForPoll(new TypeError('boom'))).toBe(false);
+    expect(isTransientForPoll(new ValidationError('id must not be empty'))).toBe(false);
+    // And a move offer, which is a 409 by status and a decision by nature.
+    expect(isTransientForPoll(new MoveRequiredError('needs a move', 409, {}, true))).toBe(false);
+    expect(isTransientForPoll(new ConflictError('the agent is not up yet', 409))).toBe(true);
   });
 
   it('keeps the rate limit retry interval', async () => {
