@@ -158,6 +158,13 @@ describe('a claim needs the wire to have made it', () => {
       [12, [34]],
       [[], []],
       [true, false],
+      // And a string of nothing but space, which is the empty string one
+      // keystroke away: `Number('  ')` is 0 too, so catching only `''` left the
+      // same corner reachable (Codex review, third pass).
+      [' ', ' '],
+      ['\t', '\n'],
+      [' ', 12],
+      [12, '  '],
     ] as const) {
       const { client: c } = client((call) =>
         call.path.endsWith('/input') ? json({ known: true, x, y }) : anyRoute(call),
@@ -312,6 +319,16 @@ describe('more is a switch, not a caveat', () => {
       [{ pid: 42, running: 'maybe', exit_code: 0 }, false],
       [{ pid: 42, running: 'maybe', exit_code: 137 }, false],
       [{ pid: 42, running: {}, exit_code: 0 }, false],
+      // A COERCIBLE exit code is not an exit code. `Number([])` is 0 and
+      // `Number([7])` is 7, so these ended the poll and reported a clean exit
+      // on a value nobody read — the earlier cases covered strings and objects
+      // and stopped short of the arrays and booleans that coerce (Codex review,
+      // third pass, OPL-3850).
+      [{ pid: 42, running: 'maybe', exit_code: [] }, true],
+      [{ pid: 42, running: 'maybe', exit_code: [0] }, true],
+      [{ pid: 42, running: 'maybe', exit_code: false }, true],
+      [{ pid: 42, running: 'maybe', exit_code: true }, true],
+      [{ pid: 42, running: 'maybe', exit_code: ' ' }, true],
       // A readable `running` still wins over the exit code either way: the
       // fallback is for the values that said nothing, not for every value.
       [{ pid: 42, running: true, exit_code: 0 }, true],
@@ -528,5 +545,83 @@ describe('the two fields whose answer needs a second one', () => {
     );
     const listed = await c.snapshots.list();
     expect([listed[0]?.unreachable, listed[0]?.state]).toEqual([false, 'pending']);
+  });
+});
+
+describe('a coerced value is not the value', () => {
+  /**
+   * `ok` is the field a caller branches on, and it is a claim: the command ran
+   * and exited zero. `Number([])` is 0, so an exit code nobody could read
+   * decoded as a clean exit and `ok` affirmed a command that may never have run
+   * (Codex review, third pass, OPL-3850). -1 is what "nobody sent one this
+   * client can read" has always decoded as here; the coercible values simply
+   * never reached it.
+   */
+  it('does not report success on an exit code it could not read', async () => {
+    for (const code of [[], [0], false, true, ' ', {}, 'killed', 'signal:9']) {
+      const { client: c } = client((call) =>
+        call.path.endsWith('/exec')
+          ? json({ exit_code: code, stdout: '', stderr: '', timed_out: false })
+          : anyRoute(call),
+      );
+      const computer = await c.computers.get('vm-1');
+      const result = await computer.exec('x');
+      expect(`${JSON.stringify(code)}: ${result.exitCode}/${result.ok}`).toBe(
+        `${JSON.stringify(code)}: -1/false`,
+      );
+    }
+  });
+
+  it('still reads an exit code the platform did send', async () => {
+    for (const [code, expected] of [
+      [0, 0],
+      [137, 137],
+      ['0', 0],
+      ['137', 137],
+    ] as const) {
+      const { client: c } = client((call) =>
+        call.path.endsWith('/exec')
+          ? json({ exit_code: code, stdout: '', stderr: '', timed_out: false })
+          : anyRoute(call),
+      );
+      const computer = await c.computers.get('vm-1');
+      const result = await computer.exec('x');
+      expect(`${JSON.stringify(code)}: ${result.exitCode}/${result.ok}`).toBe(
+        `${JSON.stringify(code)}: ${expected}/${expected === 0}`,
+      );
+    }
+  });
+
+  /**
+   * The same identity invariant the snapshot filter enforces, on the caller that
+   * did not get it the first time. `waitForMove` picks this computer's row out
+   * of an ACCOUNT-WIDE listing, so a coerced match returns somebody else's move
+   * as this one's outcome — or polls it as this one's live move.
+   */
+  it('does not pick a move whose computer id only coerces to this one', async () => {
+    const { client: c } = client((call) =>
+      call.path === '/moves'
+        ? json({ moves: [{ ...MOVE_DONE, computer_id: ['vm-1'], state: 'done', live: false }] })
+        : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    // No row belongs to this computer, so the wait says the move is gone rather
+    // than handing back a row it cannot attribute.
+    await expect(computer.waitForMove({ pollMs: 1 })).rejects.toThrow(/has no move any more/);
+  });
+
+  it('still picks the move the platform did attribute to this computer', async () => {
+    const { client: c } = client((call) =>
+      call.path === '/moves'
+        ? json({
+            moves: [
+              { ...MOVE_DONE, computer_id: 'vm-other', state: 'moving', live: true },
+              { ...MOVE_DONE, computer_id: 'vm-1', state: 'done', live: false },
+            ],
+          })
+        : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    expect((await computer.waitForMove({ pollMs: 1 })).state).toBe('done');
   });
 });

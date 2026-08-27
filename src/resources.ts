@@ -16,10 +16,10 @@ import type {
   UsageReport,
 } from './models.js';
 import {
+  belongsToComputer,
   buildContradiction,
   isBuildTerminal,
   isUnreachableStub,
-  snapshotBelongsTo,
   toBuildProgress,
   toMove,
   toPublishedTemplate,
@@ -302,7 +302,7 @@ export class Snapshots {
       // (OPL-3850). Only the row's shape tells the two apart, and only the raw
       // `computer_id` decides which computer it is: the decoded one has been
       // through `str()`, and `String(['vm-1'])` is `'vm-1'`.
-      items: id ? all.filter((s) => snapshotBelongsTo(s.raw, id) || isUnreachableStub(s.raw)) : all,
+      items: id ? all.filter((s) => belongsToComputer(s.raw, id) || isUnreachableStub(s.raw)) : all,
       incomplete,
     };
   }

@@ -30,6 +30,7 @@ import type {
   VncConnect,
 } from './models.js';
 import {
+  belongsToComputer,
   count,
   num,
   said,
@@ -724,7 +725,11 @@ export class Computer {
         const mine = rows
           .filter(P.isRecord)
           .map(toMove)
-          .find((m) => m.computerId === this.id);
+          // THE RAW row, for the reason the snapshot filter gives: `str()` is a
+          // coercion and `String(['vm-1'])` is `'vm-1'`, so a malformed row was
+          // picked out of this account-wide listing and returned as this
+          // computer's move (Codex review, third pass, OPL-3850).
+          .find((m) => belongsToComputer(m.raw, this.id));
         // A move that is no longer listed is one the platform reaped, and it
         // reaps for one reason: the computer is gone. Not a state to keep
         // polling for — and distinguishable from "not started yet" because this

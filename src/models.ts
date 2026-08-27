@@ -39,8 +39,15 @@ const str = (v: unknown, fallback = ''): string => {
  * fields off the same records: a bare `Number()` there answers NaN where this
  * answers the fallback, and the two disagreeing about one payload is worse than
  * either rule on its own.
+ *
+ * A NUMBER OR THE TEXT OF ONE, and the same guard {@link count} carries for the
+ * same reason: `Number()` is a coercion and not a parser, so `Number([7])` is 7
+ * and `Number([])` and `Number('  ')` are both 0. Every one of those is a value
+ * this client invented rather than read, and the fallback is what it is for.
  */
 export const num = (v: unknown, fallback = 0): number => {
+  if (typeof v !== 'number' && typeof v !== 'string') return fallback;
+  if (typeof v === 'string' && v.trim() === '') return fallback;
   const n = Number(v);
   return Number.isFinite(n) ? n : fallback;
 };
@@ -158,10 +165,16 @@ export const caveat = (v: unknown): boolean => {
  * out the far side as a coordinate — `{known: true, x: [], y: [7]}` reported the
  * pointer at `(0, 7)` (Codex adversarial review, OPL-3850). Python raises on
  * `int([])` and answers nothing, which is the same answer this now gives.
+ *
+ * A string of nothing but SPACE is the same non-answer as the empty one, and
+ * catching only `''` left the same zero one keystroke away: `Number('  ')` is 0,
+ * so `{known: true, x: ' '}` still reported the corner of the screen (Codex
+ * review, third pass, OPL-3850).
  */
 export const count = (v: unknown): number | undefined => {
-  if (v == null || v === '') return undefined;
+  if (v == null) return undefined;
   if (typeof v !== 'number' && typeof v !== 'string') return undefined;
+  if (typeof v === 'string' && v.trim() === '') return undefined;
   const n = Number(v);
   return Number.isFinite(n) ? n : undefined;
 };
@@ -950,7 +963,7 @@ export type Snapshot = {
  * out drops precisely the markers saying an answer is short.
  */
 /**
- * Whether a snapshot ROW belongs to the computer named.
+ * Whether a ROW off the wire belongs to the computer named.
  *
  * The raw field against the id, rather than the decoded `computerId`, for the
  * reason {@link terminalStatus} gives about a status: `str()` is a coercion and
@@ -961,8 +974,14 @@ export type Snapshot = {
  * irreversible delete (Codex adversarial review, OPL-3850). Python is safe from
  * this by accident of formatting: `str(["vm-1"])` is `"['vm-1']"` and matches
  * nothing. Accident is not agreement, so this is explicit.
+ *
+ * Shared with `waitForMove`, which had the identical hole and did not get the
+ * identical fix the first time: it picks this computer's row out of an
+ * account-wide listing, so a malformed `computer_id` there returns somebody
+ * else's move as this one's outcome — or polls it as this one's live move
+ * (Codex review, third pass, OPL-3850). One invariant, one function.
  */
-export const snapshotBelongsTo = (d: Record<string, unknown>, id: string): boolean =>
+export const belongsToComputer = (d: Record<string, unknown>, id: string): boolean =>
   d.computer_id === id;
 
 export const isUnreachableStub = (d: Record<string, unknown>): boolean => {
@@ -1176,12 +1195,16 @@ export type ExecResult = {
 };
 
 export function toExecResult(d: Record<string, unknown>): ExecResult {
-  // -1 when the platform did not send one, not 0: a response with no exit code
-  // is not evidence the command succeeded, and `ok` must not affirm what
-  // nobody said. Same reasoning as delete()'s undefined snapshot count.
-  // "Did not send one" includes null and the empty string, both of which
-  // Number() coerces to exactly the 0 this must not invent.
-  const exitCode = d.exit_code == null || d.exit_code === '' ? -1 : num(d.exit_code, -1);
+  // -1 when the platform did not send one this client can read, not 0: such a
+  // response is not evidence the command succeeded, and `ok` must not affirm
+  // what nobody said. Same reasoning as delete()'s undefined snapshot count.
+  //
+  // Through `count`, which is the only test that catches every way of not
+  // sending one. Null and the empty string were checked by hand and the
+  // coercible values were not, so `exit_code: []` decoded as a clean exit and
+  // `ok` reported a command that never ran as successful (Codex review, third
+  // pass, OPL-3850).
+  const exitCode = count(d.exit_code) ?? -1;
   // Caveats, all three. `timed_out` reading false on a value nobody can read
   // makes `ok` affirm a command that never finished, and a truncation flag
   // reading false hands back the first 16 MiB of an answer with nothing saying
@@ -1245,7 +1268,12 @@ const stillRunning = (d: Record<string, unknown>): boolean => {
   const w = wire(d.running);
   if (w === WIRE.TRUE) return true;
   if (w === WIRE.FALSE) return false;
-  return d.exit_code == null || d.exit_code === '';
+  // A READABLE one. An exit code is the affirmative evidence standing in for the
+  // flag here, and a value nobody can read is not evidence of anything — testing
+  // only for absence let `{running: "maybe", exit_code: []}` end the poll and
+  // report a clean exit, which is the fabricated success this whole branch is
+  // about (Codex review, third pass, OPL-3850).
+  return count(d.exit_code) === undefined;
 };
 
 export function toBackgroundExec(d: Record<string, unknown>): BackgroundExec {
@@ -1263,13 +1291,12 @@ export function toBackgroundExec(d: Record<string, unknown>): BackgroundExec {
   return {
     pid,
     running: stillRunning(d),
-    // The empty string counts as "did not send one", for toExecResult's reason
-    // about the same field: Number('') is 0, and a command still running
-    // reported as having exited successfully is the one wrong answer here that
-    // reads as fine. A value that is not a number at all — `"killed"`,
-    // `"signal:9"`, an object — is that same wrong answer by another route, so
-    // it gets toExecResult's -1 rather than num()'s implicit 0.
-    exitCode: d.exit_code == null || d.exit_code === '' ? undefined : num(d.exit_code, -1),
+    // Absent, null and the empty string are "did not send one" and read
+    // `undefined`; a value present and unreadable — `"killed"`, `"signal:9"`, an
+    // object, an array — gets toExecResult's -1, because something arrived and
+    // it was not an exit code. Both through `count`, which is what tells the two
+    // apart: `Number('')` and `Number([])` are both the 0 this must not invent.
+    exitCode: d.exit_code == null || d.exit_code === '' ? undefined : (count(d.exit_code) ?? -1),
     stdout: str(d.stdout),
     stderr: str(d.stderr),
     // FALSE on anything unreadable, and this is the counter-example worth
