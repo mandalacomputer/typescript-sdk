@@ -507,3 +507,33 @@ describe('the retired fixture', () => {
     expect(RETIRED_TEMPLATES.templates).not.toBe(RETIRED_TEMPLATES.refs_claimed);
   });
 });
+
+describe('a short build listing', () => {
+  /**
+   * `GET /builds` fans out and does NOT fail closed the way the computer and
+   * snapshot listings do: no `allow_partial` to opt into, no 503 to stop you,
+   * just a 200 and a header. Read through the body alone, a hypervisor being
+   * away looked like an account with fewer builds.
+   */
+  it('carries the incomplete signal off the header', async () => {
+    const { client: c } = client((call) =>
+      call.path === '/builds'
+        ? new Response(JSON.stringify([{ id: 'bld-1', status: 'running' }]), {
+            status: 200,
+            headers: { 'content-type': 'application/json', 'x-gc-incomplete': '0' },
+          })
+        : anyRoute(call),
+    );
+    const short = await c.builds.listWithStatus();
+    expect(short.items).toHaveLength(1);
+    // Presence is the signal and 0 is a legitimate count — there is no placement
+    // cache for builds to say what a silent host was holding.
+    expect(short.incomplete).toBe(0);
+  });
+
+  it('is null when the fleet answered in full', async () => {
+    const { client: c } = client();
+    expect((await c.builds.listWithStatus()).incomplete).toBeNull();
+    expect(await c.builds.list()).toHaveLength(1);
+  });
+});

@@ -552,10 +552,28 @@ export class Builds {
     return toTemplateBuild(data);
   }
 
-  /** Every build this account has started that the fleet still holds a record of, newest first. */
+  /**
+   * Every build the fleet still holds a record of, newest first.
+   *
+   * A build lives on the hypervisor that ran it, so this is a fan-out — and it
+   * does NOT fail closed the way the computer and snapshot listings do
+   * (adversarial review, OPL-3835). There is no `allow_partial` to opt into and
+   * no 503 to stop you: the platform answers a short list with a 200 and
+   * `X-GC-Incomplete`, so the only thing that says a hypervisor was away is the
+   * header. Read through the body alone, an outage looked like an account with
+   * fewer builds.
+   *
+   * {@link listWithStatus} is where that shows. This returns the rows, like the
+   * other two listings' `list`.
+   */
   async list(opts: CallOptions = {}): Promise<TemplateBuild[]> {
-    const data = await this.#t.jsonArray('GET', P.BUILDS, { signal: opts.signal });
-    return data.filter(P.isRecord).map(toTemplateBuild);
+    return (await this.listWithStatus(opts)).items;
+  }
+
+  /** {@link list}, plus whether the platform could answer it in full. */
+  async listWithStatus(opts: CallOptions = {}): Promise<Listing<TemplateBuild>> {
+    const { items, incomplete } = await this.#t.listing(P.BUILDS, { signal: opts.signal });
+    return { items: items.map(toTemplateBuild), incomplete };
   }
 
   /** What became of one build. `error` says why a failed one failed. */
