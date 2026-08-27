@@ -97,6 +97,11 @@ export type WaitOptions = {
  *   deadline under a 4xx-only rule, ending in a timeout naming nothing about the
  *   redirect. mandala-computer-python found that one.
  *
+ * 5xx has an upper bound as well as a lower one, and it is not decoration: the
+ * HTTP parser under `fetch` accepts any three digits, so a broken or hostile
+ * origin can answer 700 — which `>= 500` alone called a passing moment and
+ * polled until the caller's deadline (Codex adversarial review, OPL-3724).
+ *
  * Everything at 5xx polls through, which is the behaviour change: 502 and 520-523
  * mean the outcome is unknown, and a read whose outcome is unknown can simply
  * be read again. {@link Computer.waitForGuest} already knew this about 502 and
@@ -111,7 +116,7 @@ export const isTransientForPoll = (err: unknown): boolean => {
   if (err instanceof APIError) {
     if (err.status === 524) return false;
     if (err.status === 408 || err.status === 409 || err.status === 429) return true;
-    return err.status >= 500;
+    return err.status >= 500 && err.status < 600;
   }
   return true;
 };

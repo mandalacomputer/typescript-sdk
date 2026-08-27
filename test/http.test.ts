@@ -294,6 +294,11 @@ describe('status mapping', () => {
     for (const status of [301, 302, 303, 307, 308]) {
       expect(isTransientForPoll(errorForStatus(status, `HTTP ${status}`))).toBe(false);
     }
+    // 5xx has an upper bound too: the HTTP parser accepts any three digits, so
+    // a broken origin answering 700 was polled to the caller's deadline.
+    for (const status of [600, 700, 999]) {
+      expect(isTransientForPoll(errorForStatus(status, `HTTP ${status}`))).toBe(false);
+    }
     // 524 is the one status still matched by number: it shares
     // GatewayTimeoutError with 504, which IS worth another poll, and a type
     // cannot separate two statuses that share it.

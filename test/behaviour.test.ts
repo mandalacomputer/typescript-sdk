@@ -269,6 +269,61 @@ describe('waiting', () => {
     expect(gets).toBe(3);
   });
 
+  /**
+   * The regression the first cut of OPL-3724 introduced, caught by Codex's
+   * adversarial review of the PR.
+   *
+   * `waitForGuest` used to run `isPermanent(err)` unconditionally, so a revoked
+   * key reached the caller whenever it arrived. Collapsing that into the gated
+   * check below it — `Date.now() < deadline && !isTransientForPoll(err)` —
+   * quietly made a 401 conditional on the clock, and the condition fails
+   * exactly when a probe outlives what was left of the wait. The caller then
+   * got "guest did not respond within 5000ms" about a key that had been revoked
+   * for a week.
+   *
+   * Pinned with the clock trick the deadline-race test below uses, for its
+   * reason: the state is a probe that STARTED before the deadline and whose
+   * answer arrives after it, and skewing the clock while the request is in
+   * flight writes that down instead of waiting for it. Real time is untouched.
+   */
+  it('surfaces a permanent refusal from the guest probe however late it lands', async () => {
+    for (const [status, name] of [
+      [401, 'AuthenticationError'],
+      [402, 'PlanLimitError'],
+      [403, 'PermissionDeniedError'],
+      [404, 'NotFoundError'],
+    ] as const) {
+      let skewMs = 0;
+      const realNow = Date.now.bind(Date);
+      // Restored in the `finally` rather than an afterEach: a lying clock left
+      // behind by a failing test is every other test failing for a reason none
+      // of them names.
+      const clock = vi.spyOn(Date, 'now').mockImplementation(() => realNow() + skewMs);
+      try {
+        const { client: c } = client((call) => {
+          if (call.path.endsWith('/exec')) {
+            // The deadline passes while this probe is in flight. The abort
+            // signal was built from the real interval and does not fire, so the
+            // refusal arrives intact — which is the race, not a simulation of
+            // one: a response and a timeout can both win.
+            skewMs = 60_000;
+            return errorJson(status, 'no');
+          }
+          return anyRoute(call);
+        });
+        const computer = await c.computers.get('vm-1');
+        const err = await computer.waitForGuest({ timeoutMs: 5_000, pollMs: 1 }).catch((e) => e);
+        // The status decides this, not the clock.
+        expect(err).toBeInstanceOf(APIError);
+        expect((err as APIError).status).toBe(status);
+        expect(err.constructor.name).toBe(name);
+        expect(err).not.toBeInstanceOf(TimeoutError);
+      } finally {
+        clock.mockRestore();
+      }
+    }
+  });
+
   it('rides out an edge blip on the control plane instead of failing the wait', async () => {
     // The user-visible half of OPL-3724. waitUntilRunning polls
     // `GET computers/:id`, where a 502 or a 522 is a proxy having a moment —

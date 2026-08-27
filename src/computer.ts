@@ -1065,7 +1065,26 @@ export class Computer {
           // plus an inline `|| status === 502` (OPL-3724). All three said the
           // same thing badly: this loop retries by exception rather than by
           // permission, which is what isTransientForPoll is.
-          if (Date.now() < deadline && !isTransientForPoll(err)) throw err;
+          //
+          // Judged with NO `Date.now() < deadline` clause, which the first cut
+          // of this kept from the code it replaced and which was a regression
+          // (Codex adversarial review). `isPermanent` ran unconditionally, so a
+          // revoked key reached the caller whenever it arrived. Folded behind
+          // the clock it stopped doing that: a probe that takes longer than
+          // what is left of the wait — which is every probe on the last poll,
+          // and any probe at all against a slow edge — has its 401 replaced by
+          // "guest did not respond", the least useful thing this method can say
+          // about a 401. Builds.wait had already made exactly this correction.
+          //
+          // Which leaves the deadline to be named rather than inferred, as the
+          // other four loops here do. deadlineSignal composes
+          // AbortSignal.timeout, whose DOMException can fire a millisecond
+          // before Date.now() reaches the deadline, and it is this wait ending
+          // rather than a failure of the platform — so a predicate that has
+          // never heard of it must not be the thing asked. That race is
+          // documented and deterministically tested for waitUntilRunning; this
+          // loop was the one still exposed to it.
+          if (!isDeadlineAbort(err) && !isTransientForPoll(err)) throw err;
           delayMs = retryDelay(pollMs, err);
         }
       }
