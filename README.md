@@ -82,6 +82,117 @@ against the plan's pools.
 It cannot be combined with `template`, `cpu`, `ramMb` or `diskGb`. Sending both
 throws before any request is made.
 
+### Your own templates
+
+A template is a `mandala/v1` document — the image family it resolves to, what it
+is layered onto, and the shape a computer gets when the create names no numbers.
+Publishing one gives it a ref you can launch by name.
+
+```ts
+const doc = await readFile('devbox.yaml', 'utf8');
+
+// Worth doing while you iterate: this reports EVERY problem at once, and claims
+// no ref. It does not throw for an invalid document — that is the answer.
+const check = await client.templates.validate(doc);
+if (!check.valid) throw new Error(check.problems.join('\n'));
+
+const t = await client.templates.publish(doc);
+const c = await client.computers.create({ template: t.ref });
+```
+
+**The namespace is your account.** `metadata.namespace` has to be your account
+id — anything else is a `403`, `system` included — and this SDK does not rewrite
+it, because publishing a ref that is not the one in your file would be worse than
+refusing.
+
+**A ref is immutable.** Publishing the identical document again succeeds and
+changes nothing, so a pipeline that republishes on every commit is safe.
+Publishing a *different* document under the same ref is a `ConflictError`; bump
+`metadata.version`. What counts as different is the digest, so a changed label is
+a change.
+
+Read one back — yours or `system`, so you can see what you are layering onto:
+
+```ts
+// The namespace is your account id — the same one your document's
+// `metadata.namespace` names. `ref` is where to read it back off a publish.
+const namespace = t.ref.split('/')[0] ?? '';
+
+const base = await client.templates.get('system', 'base');
+const pinned = await client.templates.get(namespace, 'devbox', { version: '1.0.0' });
+```
+
+Without `version` you get the newest, which is also what a create naming the
+unpinned `namespace/name` resolves to.
+
+#### Retiring one
+
+```ts
+await client.templates.retire(namespace, 'devbox', { version: '1.0.4' }); // one version
+await client.templates.retire(namespace, 'devbox');                      // every version
+```
+
+Omitting `version` retires the **whole name** — deliberately not `get`'s "the
+newest", which on a delete would let a loop walk backwards through a history it
+never asked about. An empty string is refused before it is sent, for the same
+reason.
+
+**Computers are not affected.** A computer is built from the image the ref
+resolved to and holds no reference to the document, so anything already running,
+stopped or suspended is untouched. What a retire breaks is resolution: a *new*
+create naming the ref is refused.
+
+**The ref stays spoken for, and still counts once.** Publishing it again is a
+`ConflictError`, identical bytes included, and `refsClaimed` on the result does
+not go down — it is the count against a much larger, separate ceiling than
+`templates`. A ref you retired is a `NotFoundError` whose message names the date
+it went, rather than claiming the template never existed; read the message before
+concluding you mistyped something.
+
+### Building one
+
+A document that declares `spec.build` steps has to be compiled into an image
+before anything can launch it. That is minutes of work — an agent image is
+roughly fifteen — so it never blocks:
+
+```ts
+const build = await client.builds.start(doc);
+const out = await client.builds.wait(build.id);
+
+if (out.status !== 'succeeded') {
+  const failed = out.steps.find((s) => s.status === 'failed');
+  console.error(`step ${failed?.n} (${failed?.kind} ${failed?.label}) failed: ${out.error}`);
+}
+```
+
+`wait` does **not** throw for a build that failed. `succeeded` and `failed` are
+two situations with two remedies — one has an image, the other has a step to fix
+— and an exception flattens them into "something went wrong". Read `status`.
+
+For a terminal, stream it instead of polling:
+
+```ts
+for await (const p of client.builds.events(build.id)) {
+  console.log(`${p.phase} ${p.step}/${p.of} ${p.note}`);
+}
+```
+
+Each event is news — the platform sends one only when something moved — and the
+last one is the `done`, **including for a build that failed**.
+
+The loop above throws for three reasons, all of them about the stream rather than
+the build: an `error` event, a final event whose payload is malformed, and a
+stream that ends without a final event at all. The last two matter because
+returning quietly would make a cut stream indistinguishable from a finished
+build. All three say the build is probably still running and point at
+`builds.progress`. Breaking out early is not one of them — that closes the stream
+and throws nothing. An account may hold eight streams open at once.
+
+**A build that declares its own family is not launchable yet.** The fleet does
+not advertise a family it built rather than shipped, so a create naming such a
+ref is still refused with a `503`. Publishing the document is worth doing anyway
+— it claims the ref, and it is what `builds.start` takes.
+
 ### Resolution
 
 Create-time, and **only** create-time: the screen is part of the machine QEMU
