@@ -16,6 +16,7 @@ import type {
   UsageReport,
 } from './models.js';
 import {
+  buildContradiction,
   isBuildTerminal,
   toBuildProgress,
   toMove,
@@ -679,6 +680,8 @@ export class Builds {
         // is judged on what it meant. Thrown BEFORE the yield, for the same
         // reason the non-record case above throws: half an answer handed over as
         // a whole one is the thing being prevented.
+        const bad = buildContradiction(now);
+        if (bad !== null) throw new MandalaError(bad);
         if (!isBuildTerminal(now)) {
           throw new MandalaError(
             `the build event stream for ${id} ended with a final event that does not say the ` +
@@ -766,16 +769,9 @@ export class Builds {
         // be finished while its status still says `running` contradicts itself,
         // and returning it reports an active build as a settled one. Terminal
         // means both (adversarial review, second pass, OPL-3835).
-        if (now.done) {
-          if (!isBuildTerminal(now)) {
-            throw new MandalaError(
-              `build ${id} reports done with status ${JSON.stringify(now.status)}, which is ` +
-                `neither "succeeded" nor "failed"; the fleet's answer for this build is ` +
-                `inconsistent and nothing here can say what became of it`,
-            );
-          }
-          return now;
-        }
+        const contradiction = buildContradiction(now);
+        if (contradiction !== null) throw new MandalaError(contradiction);
+        if (now.done) return now;
       } catch (err) {
         if (signal?.aborted) throw err;
         // This wait's own timer firing inside a poll, which is not a failed

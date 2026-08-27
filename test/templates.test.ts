@@ -617,10 +617,71 @@ describe('watching a build', () => {
         // drain
       }
     };
-    await expect(read()).rejects.toThrow(/does not say the build finished/);
+    // One message for one defect now, and the same sentence the Python SDK
+    // raises: the two clients disagreed about this payload and no longer do
+    // (OPL-3835).
+    await expect(read()).rejects.toThrow(/contradicts itself/);
     await expect(c.builds.wait('bld-1', { timeoutMs: 5_000 })).rejects.toThrow(
-      /neither "succeeded" nor "failed"/,
+      /contradicts itself/,
     );
+  });
+
+  /**
+   * The half this SDK was missing, and the Python one had.
+   *
+   * A host too old to send `done` said NOTHING, and the status has to answer
+   * for it. Reading that as `false` polled a finished build until the wait
+   * expired — which is what the Python review caught and this one did not
+   * (OPL-3835).
+   */
+  it('ends a wait on a terminal status when done is absent, null or unreadable', async () => {
+    for (const done of [undefined, null, 'maybe', {}]) {
+      const payload: Record<string, unknown> = { ...BUILD_PROGRESS, status: 'succeeded' };
+      if (done === undefined) delete payload.done;
+      else payload.done = done;
+      const { client: c } = client((call) =>
+        call.path.endsWith('/progress') ? json(payload) : anyRoute(call),
+      );
+      const got = await c.builds.wait('bld-1', { timeoutMs: 5_000, pollMs: 1 });
+      expect(got.status, JSON.stringify(done)).toBe('succeeded');
+      expect(got.done, JSON.stringify(done)).toBe(true);
+    }
+  });
+
+  /** And a running build with no `done` is still not finished. */
+  it('does not end a wait on a running status when done is absent', async () => {
+    const payload: Record<string, unknown> = { ...BUILD_PROGRESS, status: 'running' };
+    delete payload.done;
+    const { client: c } = client((call) =>
+      call.path.endsWith('/progress') ? json(payload) : anyRoute(call),
+    );
+    await expect(c.builds.wait('bld-1', { timeoutMs: 60, pollMs: 1 })).rejects.toThrow(
+      /still running|could not be/,
+    );
+  });
+
+  /** The table both SDKs now implement, asserted directly on the decoder. */
+  it('agrees with the Python SDK on when a build has stopped', async () => {
+    const { toBuildProgress, buildContradiction } = await import('../src/models.js');
+    const cases: Array<[Record<string, unknown>, boolean, boolean]> = [
+      [{ status: 'succeeded', done: true }, true, false],
+      [{ status: 'failed', done: true }, true, false],
+      [{ status: 'running', done: false }, false, false],
+      [{ status: 'succeeded' }, true, false],
+      [{ status: 'succeeded', done: null }, true, false],
+      [{ status: 'succeeded', done: 'maybe' }, true, false],
+      [{ status: 'running' }, false, false],
+      [{ status: 'running', done: null }, false, false],
+      [{ status: 'running', done: 'maybe' }, false, false],
+      [{ status: 'running', done: true }, false, true],
+      [{ status: '', done: true }, false, true],
+      [{ status: 'queued', done: true }, false, true],
+    ];
+    for (const [raw, done, contradicts] of cases) {
+      const p = toBuildProgress({ id: 'bld-1', ...raw });
+      expect(p.done, JSON.stringify(raw)).toBe(done);
+      expect(buildContradiction(p) !== null, JSON.stringify(raw)).toBe(contradicts);
+    }
   });
 
   /** The other half of the check above: a real `done` still ends the stream. */

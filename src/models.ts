@@ -451,28 +451,80 @@ export type BuildProgress = {
   raw: Record<string, unknown>;
 };
 
+/** The statuses a build stops on. `server/buildjob.go` declares exactly three. */
+const BUILD_TERMINAL = ['succeeded', 'failed'];
+
+/**
+ * A wire boolean, or `undefined` where the payload did not say.
+ *
+ * `bool` cannot answer this: it maps absent, null and `false` all to `false`,
+ * and those are different things. A host too old to send `done` said NOTHING,
+ * and the status has to answer for it — reading that as `false` polled a
+ * finished build until the wait expired, which is what the Python SDK's own
+ * review of this surface caught and this one did not (OPL-3835).
+ *
+ * Narrow on purpose. `bool` stays as it is for every other field; widening it
+ * would change twenty decode sites to fix one.
+ */
+const wireBool = (v: unknown): boolean | undefined => {
+  if (typeof v === 'boolean') return v;
+  if (v === 0 || v === 1) return v === 1;
+  if (typeof v === 'string') {
+    const s = v.trim().toLowerCase();
+    if (s === 'true' || s === '1') return true;
+    if (s === 'false' || s === '0') return false;
+  }
+  return undefined;
+};
+
 /**
  * Whether this progress record says the build has STOPPED.
  *
- * Both halves, because either alone is a claim the other can contradict.
- * server/buildjob.go declares exactly three statuses — `running`, `succeeded`,
- * `failed`, and the comment above them says the shortness is deliberate — so
- * terminal is `succeeded` or `failed` and nothing else.
+ * THE SAME RULE THE PYTHON SDK USES, and getting there took both. The two
+ * clients shipped this surface hours apart, each had its own adversarial review,
+ * and each review found a real defect the other did not:
  *
- * `done` on its own was the first version of this check and it was too weak: a
- * payload of `{id, done: true, status: "running"}` contradicts itself, and
- * taking `done` at its word turns that into a finished build with a status that
- * says otherwise. A truthy `done` with an unrecognised status is drift, and the
- * one thing it must not do is end a wait (adversarial review, second pass).
+ * - This one caught the contradiction. `{id, done: true, status: "running"}`
+ *   claims to be finished while its status says otherwise, and taking `done` at
+ *   its word turns an active build into a settled one. Python trusted the flag.
+ * - Python caught the omission. A recognised `done` is authoritative, but an
+ *   ABSENT or null one is a host that said nothing, and the status answers for
+ *   it. This one read that as `false` and polled a finished build to its
+ *   deadline.
+ *
+ * Neither had both halves, so the same payload ended a wait in one client and
+ * not the other. A recognised TRUE is terminal only against a terminal status;
+ * a recognised FALSE is not terminal; anything else falls back to the status.
  */
-export const isBuildTerminal = (p: BuildProgress): boolean =>
-  p.done && (p.status === 'succeeded' || p.status === 'failed');
+export const isBuildTerminal = (p: BuildProgress): boolean => p.done;
+
+/**
+ * Why this record cannot be believed, or `null` if it can.
+ *
+ * Only one shape qualifies: a `done` the wire actually said was true, against a
+ * status a build does not stop on. Absent, null and unreadable are NOT
+ * contradictions — they are a host that said nothing, and `isBuildTerminal`
+ * answers them from the status.
+ */
+export function buildContradiction(p: BuildProgress): string | null {
+  if (wireBool(p.raw.done) !== true) return null;
+  if (BUILD_TERMINAL.includes(p.status)) return null;
+  return (
+    `build ${p.id || '?'} reports done with status ${JSON.stringify(p.status)}, which is ` +
+    `not one a build stops on (${BUILD_TERMINAL.join(' or ')}). The record contradicts ` +
+    `itself, so neither half of it can be trusted — read builds.progress for the outcome`
+  );
+}
 
 export function toBuildProgress(d: Record<string, unknown>): BuildProgress {
   return {
     id: buildId(d, 'build progress'),
     status: str(d.status),
-    done: bool(d.done),
+    // A recognised FALSE is not terminal; everything else — a recognised TRUE,
+    // an absent, null or unreadable one — is answered by the status. That makes
+    // a `done` of true against a running status read FALSE, and
+    // `buildContradiction` reports it (OPL-3835).
+    done: wireBool(d.done) === false ? false : BUILD_TERMINAL.includes(str(d.status)),
     phase: str(d.phase),
     step: num(d.step),
     of: num(d.of),
