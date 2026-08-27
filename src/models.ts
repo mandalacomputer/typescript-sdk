@@ -466,8 +466,7 @@ const BUILD_TERMINAL = ['succeeded', 'failed'];
  * `str(["succeeded"])` is `"['succeeded']"` and matches nothing. Accident is
  * not agreement, so this is explicit on both sides.
  */
-const terminalStatus = (v: unknown): boolean =>
-  typeof v === 'string' && BUILD_TERMINAL.includes(v);
+const terminalStatus = (v: unknown): boolean => typeof v === 'string' && BUILD_TERMINAL.includes(v);
 
 /**
  * A wire boolean, or `undefined` where the payload did not say.
