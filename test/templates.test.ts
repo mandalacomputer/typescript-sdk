@@ -745,10 +745,39 @@ describe('what the second review pass found', () => {
    */
   it('treats only a real abort as the deadline, never a platform answer', () => {
     expect(isDeadlineAbort(new DOMException('timed out', 'TimeoutError'))).toBe(true);
-    expect(isDeadlineAbort(new DOMException('aborted', 'AbortError'))).toBe(true);
+    // NOT AbortError, though this asserted that it was until the second review
+    // pass argued that a name is a proxy for ownership. It is — and the fix was
+    // to drop the name that never meant us, rather than to rebuild how a wait
+    // tracks its signals.
+    //
+    // Measured on node 22+: a deadline is AbortSignal.timeout's reason, which is
+    // a DOMException named `TimeoutError`; AbortSignal.any carries that reason
+    // through; and fetch rejects with the reason itself. A CALLER's abort is
+    // named `AbortError` and leaves their own signal reading `aborted`, which
+    // the loops check first. So nothing that arrives here is a deadline called
+    // `AbortError`, and accepting the name only swallowed other people's aborts.
+    expect(isDeadlineAbort(new DOMException('aborted', 'AbortError'))).toBe(false);
     // Everything the platform can answer with stays judgeable.
     expect(isDeadlineAbort(new MandalaError('body did not parse'))).toBe(false);
     expect(isDeadlineAbort(new NotFoundError('no such build', 404, {}))).toBe(false);
+  });
+
+  /**
+   * The behaviour that narrowing buys: an abort this wait did not cause reaches
+   * the caller instead of being polled over until the wait expires. Told "the
+   * build could not be observed within 30000ms", a reader goes looking for a
+   * fleet outage; the actual sentence is the one the abort carried.
+   */
+  it('hands back an abort that is not its own instead of timing out over it', async () => {
+    const { client: c } = client((call) =>
+      call.path.endsWith('/progress')
+        ? Promise.reject(new DOMException('the body stream was released', 'AbortError'))
+        : anyRoute(call),
+    );
+    const err = await c.builds.wait('bld-1', { timeoutMs: 5_000, pollMs: 1 }).catch((e) => e);
+    expect(err).toBeInstanceOf(DOMException);
+    expect((err as Error).message).toContain('body stream');
+    expect(err).not.toBeInstanceOf(TimeoutError);
   });
 
   /** A stream whose frames were all skipped had still sent something. */

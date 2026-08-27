@@ -76,9 +76,28 @@ export const deadlineSignal = (ms: number, caller?: AbortSignal): AbortSignal =>
  *
  * The caller's own abort is NOT this: it is checked before this is reached, and
  * belongs to the caller rather than to the wait.
+ *
+ * `TimeoutError` ALONE, and the missing name is the point. `AbortError` was
+ * accepted here too, defensively, and it turns out to be exactly the hole a
+ * name-based test is accused of having (adversarial review, second pass):
+ * nothing that reaches this is a deadline named `AbortError`, so the only
+ * errors the extra name could match are other people's.
+ *
+ * Measured on node 22+, which is what this package supports. A deadline fires
+ * as `AbortSignal.timeout`'s reason, which is spec'd as — and observed to be —
+ * a DOMException named `TimeoutError`; `AbortSignal.any` carries that reason
+ * through unchanged; and `fetch` rejects with the reason itself rather than a
+ * generic abort. When the CALLER aborts, the reason is named `AbortError` and
+ * their own signal reads `aborted`, so the check above this one has already
+ * returned. The two cases never collide.
+ *
+ * What accepting `AbortError` cost: an abort from anywhere else — a body
+ * stream, an injected `fetch` — was read as this wait's deadline, swallowed,
+ * and polled over until the wait timed out. The caller was then told the wait
+ * expired rather than what actually stopped it.
  */
 export const isDeadlineAbort = (err: unknown): boolean =>
-  err instanceof DOMException && (err.name === 'TimeoutError' || err.name === 'AbortError');
+  err instanceof DOMException && err.name === 'TimeoutError';
 
 /**
  * A wait's own numbers, refused when they are not finite.
