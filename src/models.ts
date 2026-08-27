@@ -12,7 +12,26 @@
 import { MandalaError } from './errors.js';
 import { isRecord } from './paths.js';
 
-const str = (v: unknown, fallback = ''): string => (v == null ? fallback : String(v));
+/**
+ * A string from a payload, with a fallback for an absent one.
+ *
+ * `String()` THROWS rather than coercing on a value with no primitive
+ * conversion — `{"toString": "x"}` off the wire is an object whose `toString`
+ * is not callable, and `Object.create(null)` has none at all. Both are
+ * `TypeError` out of the middle of a decode, which is a crash where this file's
+ * whole contract is that a payload nobody checked is preserved rather than
+ * rejected: one such field on one row of a listing took down the listing
+ * (OPL-3850, found while testing the coercion fixes). The fallback answers
+ * instead, and `raw` still carries the value that could not be read.
+ */
+export const str = (v: unknown, fallback = ''): string => {
+  if (v == null) return fallback;
+  try {
+    return String(v);
+  } catch {
+    return fallback;
+  }
+};
 /**
  * A number from a payload, with a fallback for anything that is not one.
  *
@@ -20,25 +39,115 @@ const str = (v: unknown, fallback = ''): string => (v == null ? fallback : Strin
  * fields off the same records: a bare `Number()` there answers NaN where this
  * answers the fallback, and the two disagreeing about one payload is worse than
  * either rule on its own.
+ *
+ * A NUMBER OR THE TEXT OF ONE, and the same guard {@link count} carries for the
+ * same reason: `Number()` is a coercion and not a parser, so `Number([7])` is 7
+ * and `Number([])` and `Number('  ')` are both 0. Every one of those is a value
+ * this client invented rather than read, and the fallback is what it is for.
  */
 export const num = (v: unknown, fallback = 0): number => {
+  if (typeof v !== 'number' && typeof v !== 'string') return fallback;
+  if (typeof v === 'string' && v.trim() === '') return fallback;
   const n = Number(v);
   return Number.isFinite(n) ? n : fallback;
 };
-// Not Boolean() alone. A platform that ever stringifies one of these sends
-// `"false"`, which is a non-empty string and therefore true — the one coercion
-// in this file that inverts a field's meaning rather than blurring it, and
-// `timed_out: "false"` reading as timed out is a worse answer than any missing
-// number here can produce.
-export const bool = (v: unknown): boolean => {
-  // Lowercased before the compare, because the platform this mirrors is the one
-  // whose own SDK is Python: `str(False)` is `'False'`, capital F, and that is
-  // by some distance the stringified boolean most likely to actually arrive.
+/**
+ * What a boolean field on the wire actually WAS, before anything decides what it
+ * MEANS.
+ *
+ * Five states, because five is how many there are. The decoder this replaces
+ * returned a `boolean` and fell through to `Boolean(v)`, so a value it could NOT
+ * read came back true — and true is the wrong direction on the two fields here
+ * that are a control rather than a caveat (OPL-3850). `valid` reported an
+ * unreadable verdict as publishable, on the field whose whole job is to say
+ * whether a document is fit to publish; `more` is a backoff switch, and the poll
+ * loop printed in this package's own README polls again immediately while it is
+ * set, so an unreadable one is an unbounded zero-delay poll against a metered
+ * endpoint.
+ *
+ * No single fallback fixes that, because every fallback boolean is wrong
+ * somewhere: the right answer needs context a one-field decoder cannot see. So
+ * this classifies and decides nothing, and each call site below says what an
+ * unreadable value means for ITS field.
+ *
+ * THE SAME FIVE THE PYTHON SDK CLASSIFIES INTO (`_Wire`), so a payload neither
+ * client can read decodes the same way in both.
+ */
+export const WIRE = {
+  /** The key was not there. An older host that never heard of the field. */
+  ABSENT: 'absent',
+  /**
+   * `null`. NOT APPLICABLE in this API's own convention — `cpu`, `finished_at`
+   * and `exit_code` all use it that way — rather than "cannot tell".
+   */
+  NULL: 'null',
+  TRUE: 'true',
+  FALSE: 'false',
+  /** Present, and not anything this client can read. */
+  MALFORMED: 'malformed',
+} as const;
+export type Wire = (typeof WIRE)[keyof typeof WIRE];
+
+/**
+ * Classify one boolean field. It decides nothing.
+ *
+ * `true`/`false` and `1`/`0` are recognised however they are spelled — as JSON
+ * booleans, as numbers, or as strings. The defect this comes from was
+ * TRUTHINESS, not recognition: `Boolean("false")` is true, which is wrong, but
+ * `"false"` still plainly means false, and a backend that encodes its booleans
+ * that way must not be told that every flag it sends is unreadable. Strings are
+ * lowercased first because the platform this mirrors is the one whose own SDK is
+ * Python, where `str(False)` is `'False'`, capital F.
+ *
+ * Takes the VALUE where the Python classifier takes the record and the key:
+ * `JSON.parse` never produces `undefined`, so absent and null stay
+ * distinguishable here without passing the record around. That stops holding for
+ * a record built in JavaScript rather than decoded from a response, and nothing
+ * in this file reads one.
+ */
+export const wire = (v: unknown): Wire => {
+  if (typeof v === 'boolean') return v ? WIRE.TRUE : WIRE.FALSE;
+  if (v === undefined) return WIRE.ABSENT;
+  if (v === null) return WIRE.NULL;
+  // 1 and 0 exactly, rather than `Number(v)` over everything else: a coercing
+  // test reads `[]`, `''` and `false` as 0, which is how truthiness got in here
+  // in the first place. `1.0` is `1` in JavaScript, which is the agreement the
+  // Python classifier has to accept integral floats explicitly to reach.
+  if (typeof v === 'number') return v === 1 ? WIRE.TRUE : v === 0 ? WIRE.FALSE : WIRE.MALFORMED;
   if (typeof v === 'string') {
-    const s = v.toLowerCase();
-    return s !== '' && s !== 'false' && s !== '0';
+    const s = v.trim().toLowerCase();
+    if (s === 'true' || s === '1') return WIRE.TRUE;
+    if (s === 'false' || s === '0') return WIRE.FALSE;
   }
-  return Boolean(v);
+  return WIRE.MALFORMED;
+};
+
+/**
+ * True only where the wire SAID so.
+ *
+ * The reading for a field whose true is a claim about the world — `valid`,
+ * `allowed`, `killed`, `gone`, `auto`. Absent, null and unreadable are all
+ * "nobody said that", and asserting it on the platform's behalf is exactly the
+ * failure the old decoder produced.
+ */
+export const said = (v: unknown): boolean => wire(v) === WIRE.TRUE;
+
+/**
+ * True where the wire said so, AND where it sent something unreadable.
+ *
+ * The reading for a caveat — `degraded`, `unmatched`, `timed_out`, the
+ * truncation flags. Every one of them means "there is more to this than you can
+ * see", so over-reporting costs a caller a little time and under-reporting hands
+ * back a short answer as though it were whole. A field present and unreadable is
+ * itself a reason to doubt the payload carrying it.
+ *
+ * ABSENT and NULL are NOT caveats. A host too old to send the field is not
+ * reporting a problem, and reading it as one would put a caveat on every
+ * response such a host ever gives.
+ */
+export const caveat = (v: unknown): boolean => {
+  const w = wire(v);
+  return w === WIRE.TRUE || w === WIRE.MALFORMED;
 };
 
 /**
@@ -49,9 +158,23 @@ export const bool = (v: unknown): boolean => {
  * raw field hands back `null` too, against a type that says it cannot, and the
  * `=== undefined` check the caller wrote to find out whether the platform
  * answered is false for it.
+ *
+ * A NUMBER OR THE TEXT OF ONE, and nothing else. `Number()` is a coercion
+ * rather than a parser: `Number([])` is 0 and `Number([7])` is 7, so an array
+ * walked straight through the finiteness test written to catch garbage and came
+ * out the far side as a coordinate — `{known: true, x: [], y: [7]}` reported the
+ * pointer at `(0, 7)` (Codex adversarial review, OPL-3850). Python raises on
+ * `int([])` and answers nothing, which is the same answer this now gives.
+ *
+ * A string of nothing but SPACE is the same non-answer as the empty one, and
+ * catching only `''` left the same zero one keystroke away: `Number('  ')` is 0,
+ * so `{known: true, x: ' '}` still reported the corner of the screen (Codex
+ * review, third pass, OPL-3850).
  */
 export const count = (v: unknown): number | undefined => {
-  if (v == null || v === '') return undefined;
+  if (v == null) return undefined;
+  if (typeof v !== 'number' && typeof v !== 'string') return undefined;
+  if (typeof v === 'string' && v.trim() === '') return undefined;
   const n = Number(v);
   return Number.isFinite(n) ? n : undefined;
 };
@@ -249,7 +372,7 @@ export type TemplateCheck = {
 };
 
 export function toTemplateCheck(d: Record<string, unknown>): TemplateCheck {
-  // The verdict is the whole answer, so it has to have been GIVEN. `bool`
+  // The verdict is the whole answer, so it has to have been GIVEN. A decoder
   // turns an absent field into `false`, which here reads as "the platform
   // examined your document and rejected it" — a sentence nobody said. A
   // response that carries no verdict is drift, and drift that looks like a
@@ -259,7 +382,10 @@ export function toTemplateCheck(d: Record<string, unknown>): TemplateCheck {
     throw new MandalaError('expected a validation verdict to say whether the document is valid');
   }
   return {
-    valid: bool(d.valid),
+    // TRUE ONLY. An unreadable verdict is not a verdict, and this is the field
+    // whose whole job is to say whether a document is fit to publish — the one
+    // direction a decoder must never guess in (OPL-3850).
+    valid: said(d.valid),
     problems: Array.isArray(d.problems) ? d.problems.map((p) => str(p)) : [],
     ...(d.ref == null ? {} : { ref: str(d.ref) }),
     ...(d.doc_digest == null ? {} : { docDigest: str(d.doc_digest) }),
@@ -469,29 +595,6 @@ const BUILD_TERMINAL = ['succeeded', 'failed'];
 const terminalStatus = (v: unknown): boolean => typeof v === 'string' && BUILD_TERMINAL.includes(v);
 
 /**
- * A wire boolean, or `undefined` where the payload did not say.
- *
- * `bool` cannot answer this: it maps absent, null and `false` all to `false`,
- * and those are different things. A host too old to send `done` said NOTHING,
- * and the status has to answer for it — reading that as `false` polled a
- * finished build until the wait expired, which is what the Python SDK's own
- * review of this surface caught and this one did not (OPL-3835).
- *
- * Narrow on purpose. `bool` stays as it is for every other field; widening it
- * would change twenty decode sites to fix one.
- */
-const wireBool = (v: unknown): boolean | undefined => {
-  if (typeof v === 'boolean') return v;
-  if (v === 0 || v === 1) return v === 1;
-  if (typeof v === 'string') {
-    const s = v.trim().toLowerCase();
-    if (s === 'true' || s === '1') return true;
-    if (s === 'false' || s === '0') return false;
-  }
-  return undefined;
-};
-
-/**
  * Whether this progress record says the build has STOPPED.
  *
  * THE SAME RULE THE PYTHON SDK USES, and getting there took both. The two
@@ -521,7 +624,7 @@ export const isBuildTerminal = (p: BuildProgress): boolean => p.done;
  * answers them from the status.
  */
 export function buildContradiction(p: BuildProgress): string | null {
-  if (wireBool(p.raw.done) !== true) return null;
+  if (wire(p.raw.done) !== WIRE.TRUE) return null;
   // The RAW status, for the reason `terminalStatus` gives: `p.status` has been
   // through `str()` and a coerced value cannot be trusted to classify.
   if (terminalStatus(p.raw.status)) return null;
@@ -540,7 +643,7 @@ export function toBuildProgress(d: Record<string, unknown>): BuildProgress {
     // an absent, null or unreadable one — is answered by the status. That makes
     // a `done` of true against a running status read FALSE, and
     // `buildContradiction` reports it (OPL-3835).
-    done: wireBool(d.done) === false ? false : terminalStatus(d.status),
+    done: wire(d.done) === WIRE.FALSE ? false : terminalStatus(d.status),
     phase: str(d.phase),
     step: num(d.step),
     of: num(d.of),
@@ -548,7 +651,9 @@ export function toBuildProgress(d: Record<string, unknown>): BuildProgress {
     note: str(d.note),
     error: str(d.error),
     updatedAt: str(d.updated_at),
-    unmatched: bool(d.unmatched),
+    // A caveat: it says the per-step position is unavailable, never that the
+    // build is in trouble. Over-reporting it costs a caller the step counter.
+    unmatched: caveat(d.unmatched),
     raw: { ...d },
   };
 }
@@ -586,7 +691,9 @@ export function toSize(d: Record<string, unknown>): Size {
     cpu: num(d.cpu),
     ramMb: num(d.ram_mb),
     diskGb: num(d.disk_gb),
-    allowed: bool(d.allowed),
+    // TRUE only. A permission nobody granted is not granted, and the caller
+    // reads this to decide whether to offer the row at all.
+    allowed: said(d.allowed),
     cheapestPlan: cheapest == null ? undefined : str(cheapest),
     raw: { ...d },
   };
@@ -734,11 +841,15 @@ export function toUsageReport(d: Record<string, unknown>): UsageReport {
         runHours: num(c.run_hours),
         vcpuHours: num(c.vcpu_hours),
         ramGbHours: num(c.ram_gb_hours),
-        gone: bool(c.gone),
+        // TRUE only: a line is not about a deleted computer unless it says so.
+        gone: said(c.gone),
       })),
     },
-    degraded: bool(d.degraded),
-    unmetered: bool(d.unmetered),
+    // Caveats on every figure above, and the reason this type tells callers to
+    // read them first. An unreadable one leaves the totals unexplained, which is
+    // the state these two exist to make impossible.
+    degraded: caveat(d.degraded),
+    unmetered: caveat(d.unmetered),
     // Presence, not emptiness. The platform drops the key for a scoped
     // credential and sends `[]` for an account that ran nothing, and those are
     // different answers: one is "you may not see this", the other is "there was
@@ -825,6 +936,81 @@ export type Snapshot = {
   raw: Record<string, unknown>;
 };
 
+/**
+ * Whether a snapshot ROW stands in for one nobody could read.
+ *
+ * The documented placeholder is an id and this flag and nothing more:
+ * `computer_id` is absent because there was no host to say what the snapshot
+ * belonged to, and `state` is what every real snapshot carries and no
+ * placeholder does. Key PRESENCE decides both, not truthiness — a row carrying
+ * `"computer_id": null` is a full row that failed to fill the field in, and
+ * reading it as a stub admits it into every computer's filtered list.
+ *
+ * THE SHAPE IS REQUIRED WHATEVER THE FLAG SAYS. `unreachable` means opposite
+ * things on the two rows it can appear on, and this is the reason a filtered
+ * listing tests the row rather than the decoded flag: on a stub the flag is the
+ * marker saying the listing is short, and dropping it reports a confident count
+ * over an incomplete answer; on a FULL row belonging to another computer,
+ * believing it hands somebody else's snapshots to a caller who filtered for
+ * their own — from a listing often read just before an irreversible delete.
+ * Applying the shape test only to the values this client cannot read left
+ * exactly that hole one branch over (Codex review, OPL-3850), which is the same
+ * hole the Python SDK's own review of this surface found.
+ *
+ * A tolerant test rather than an exact whitelist, for the reason Python gives:
+ * `Object.keys(d)` against `{id, unreachable}` stops recognising a stub the
+ * moment the platform adds a `created_at` or a `kind` to it, and filtering those
+ * out drops precisely the markers saying an answer is short.
+ */
+/**
+ * Whether a ROW off the wire belongs to the computer named.
+ *
+ * The raw field against the id, rather than the decoded `computerId`, for the
+ * reason {@link terminalStatus} gives about a status: `str()` is a coercion and
+ * a coercion cannot decide identity. `String(['vm-1'])` is `'vm-1'`, because an
+ * array of one joins to its element — so a row whose `computer_id` arrived as
+ * `["vm-1"]` matched a filter for `vm-1` and was handed to a caller who asked
+ * for their own snapshots, on a listing usually read just before an
+ * irreversible delete (Codex adversarial review, OPL-3850). Python is safe from
+ * this by accident of formatting: `str(["vm-1"])` is `"['vm-1']"` and matches
+ * nothing. Accident is not agreement, so this is explicit.
+ *
+ * Shared with `waitForMove`, which had the identical hole and did not get the
+ * identical fix the first time: it picks this computer's row out of an
+ * account-wide listing, so a malformed `computer_id` there returns somebody
+ * else's move as this one's outcome — or polls it as this one's live move
+ * (Codex review, third pass, OPL-3850). One invariant, one function.
+ */
+export const belongsToComputer = (d: Record<string, unknown>, id: string): boolean =>
+  d.computer_id === id;
+
+export const isUnreachableStub = (d: Record<string, unknown>): boolean => {
+  if ('computer_id' in d) return false;
+  const w = wire(d.unreachable);
+  if (w === WIRE.FALSE || w === WIRE.ABSENT) return false;
+  return !('state' in d);
+};
+
+/**
+ * Whether a snapshot's `unreachable` FIELD should read true.
+ *
+ * Not the same question as {@link isUnreachableStub}, and deliberately so: a
+ * flag the wire actually said was true is reported as given, whatever row it
+ * came on, because the field's contract is that malformed input is preserved
+ * rather than rejected. It is the FILTER that needs the row shape, because that
+ * is where believing a full row costs a caller somebody else's snapshots.
+ *
+ * An unreadable or null flag is believed only on a row that could not be
+ * anything but a placeholder — otherwise a caller told to check this before
+ * believing anything else on the row stops believing valid data. Python's
+ * reading, field for field.
+ */
+const snapshotUnreachable = (d: Record<string, unknown>): boolean => {
+  const w = wire(d.unreachable);
+  if (w === WIRE.TRUE) return true;
+  return (w === WIRE.NULL || w === WIRE.MALFORMED) && isUnreachableStub(d);
+};
+
 export function toSnapshot(d: Record<string, unknown>): Snapshot {
   return {
     id: str(d.id),
@@ -835,12 +1021,22 @@ export function toSnapshot(d: Record<string, unknown>): Snapshot {
     state: str(d.state),
     sizeBytes: num(d.size_bytes),
     createdAt: str(d.created_at),
-    incremental: bool(d.incremental),
-    auto: bool(d.auto),
-    durable: str(d.state) === 'durable',
-    memory: str(d.kind, 'disk') === 'memory',
-    orphaned: bool(d.orphaned),
-    unreachable: bool(d.unreachable),
+    // TRUE only, all three. Each is a claim about how this snapshot came to be
+    // or what is left of it, and none of them is safe to assert unasked:
+    // `orphaned` in particular is what tells a caller a restore cannot work.
+    incremental: said(d.incremental),
+    auto: said(d.auto),
+    // THE RAW state and kind, for the reason `terminalStatus` gives: `str()` is
+    // a coercion and a coercion cannot classify. `String(['durable'])` is
+    // `'durable'`, so a malformed row claimed its bytes were replicated to
+    // backup storage — the field a caller reads before believing a snapshot
+    // outlives the host holding it (Codex review, fourth pass, OPL-3850). The
+    // coerced `state` and `kind` above are still what gets REPORTED; they are
+    // not what gets decided on.
+    durable: d.state === 'durable',
+    memory: d.kind === 'memory',
+    orphaned: said(d.orphaned),
+    unreachable: snapshotUnreachable(d),
     os: str(d.os),
     template: str(d.template),
     cpu: num(d.cpu),
@@ -907,12 +1103,41 @@ export type Move = {
   raw: Record<string, unknown>;
 };
 
+/** The move states a disk copy is still running in. */
+const MOVE_LIVE = ['staging', 'moving', 'resizing'];
+
+/**
+ * Whether a move is still running, where the flag alone cannot say.
+ *
+ * Reads the RAW state and requires a string, for the reason
+ * {@link terminalStatus} gives one route over: `String(['moving'])` is
+ * `'moving'`, so a state that arrived as an array of one was classified as a
+ * live move and `waitForMove` polled the garbage to its deadline (Codex
+ * adversarial review, OPL-3850). The coerced `state` is fine to REPORT and not
+ * to decide on — which is the distinction this file already draws for a build
+ * status and did not draw here.
+ */
+const liveMove = (v: unknown, state: unknown): boolean => {
+  const w = wire(v);
+  if (w === WIRE.TRUE || w === WIRE.FALSE) return w === WIRE.TRUE;
+  return typeof state === 'string' && MOVE_LIVE.includes(state);
+};
+
 export function toMove(d: Record<string, unknown>): Move {
+  const state = str(d.state);
   return {
     computerId: str(d.computer_id),
-    state: str(d.state),
+    state,
     detail: str(d.detail),
-    live: bool(d.live),
+    // `live` needs `state`, which is why this cannot be a decoder call on its
+    // own. `waitForMove` returns the moment this is false, so reading an
+    // unreadable or absent one as false ends the wait on a computer whose state
+    // says `moving` and hands back a half-copied disk as a finished move;
+    // reading it as true polls a FINISHED move to its deadline. Neither is
+    // answerable without the other field, so only a value the wire actually gave
+    // overrides the state — the Python SDK's reading, and its review found the
+    // absent case the hard way.
+    live: liveMove(d.live, d.state),
     // Absent stays absent rather than becoming 0, because the platform omits a
     // dimension the move is NOT changing — `ram_mb: 0` would read as a resize to
     // nothing, on the field this whole operation exists to grow.
@@ -977,15 +1202,23 @@ export type ExecResult = {
 };
 
 export function toExecResult(d: Record<string, unknown>): ExecResult {
-  // -1 when the platform did not send one, not 0: a response with no exit code
-  // is not evidence the command succeeded, and `ok` must not affirm what
-  // nobody said. Same reasoning as delete()'s undefined snapshot count.
-  // "Did not send one" includes null and the empty string, both of which
-  // Number() coerces to exactly the 0 this must not invent.
-  const exitCode = d.exit_code == null || d.exit_code === '' ? -1 : num(d.exit_code, -1);
-  const timedOut = bool(d.timed_out);
-  const outTruncated = bool(d.out_truncated);
-  const errTruncated = bool(d.err_truncated);
+  // -1 when the platform did not send one this client can read, not 0: such a
+  // response is not evidence the command succeeded, and `ok` must not affirm
+  // what nobody said. Same reasoning as delete()'s undefined snapshot count.
+  //
+  // Through `count`, which is the only test that catches every way of not
+  // sending one. Null and the empty string were checked by hand and the
+  // coercible values were not, so `exit_code: []` decoded as a clean exit and
+  // `ok` reported a command that never ran as successful (Codex review, third
+  // pass, OPL-3850).
+  const exitCode = count(d.exit_code) ?? -1;
+  // Caveats, all three. `timed_out` reading false on a value nobody can read
+  // makes `ok` affirm a command that never finished, and a truncation flag
+  // reading false hands back the first 16 MiB of an answer with nothing saying
+  // there was more — which is the whole reason these fields exist.
+  const timedOut = caveat(d.timed_out);
+  const outTruncated = caveat(d.out_truncated);
+  const errTruncated = caveat(d.err_truncated);
   return {
     exitCode,
     stdout: str(d.stdout),
@@ -1021,6 +1254,35 @@ export type BackgroundExec = {
   raw: Record<string, unknown>;
 };
 
+/**
+ * Whether a background command is still going.
+ *
+ * AFFIRMATIVE EVIDENCE TO STOP. `false` here is the claim that the command has
+ * exited, and the README's loop breaks on it — so an absent, null or unreadable
+ * flag must not make that claim on the platform's behalf.
+ *
+ * All three fall back to the EXIT CODE instead, which is what "running" means in
+ * the first place. An unreadable flag was read as running outright at first, and
+ * that is the one reading that can never end: `{running: "maybe", exit_code: 0}`
+ * is a command that has plainly exited, reported as running forever, and the
+ * loop in this package's README breaks on `running` and so never breaks (Codex
+ * adversarial review, OPL-3850). With no exit code the fallback still answers
+ * running, which is the property the first reading was reaching for — a poll is
+ * not ended on a field nobody could read, abandoning a command with its output
+ * still queued.
+ */
+const stillRunning = (d: Record<string, unknown>): boolean => {
+  const w = wire(d.running);
+  if (w === WIRE.TRUE) return true;
+  if (w === WIRE.FALSE) return false;
+  // A READABLE one. An exit code is the affirmative evidence standing in for the
+  // flag here, and a value nobody can read is not evidence of anything — testing
+  // only for absence let `{running: "maybe", exit_code: []}` end the poll and
+  // report a clean exit, which is the fabricated success this whole branch is
+  // about (Codex review, third pass, OPL-3850).
+  return count(d.exit_code) === undefined;
+};
+
 export function toBackgroundExec(d: Record<string, unknown>): BackgroundExec {
   const pid = num(d.pid);
   // The pid is the handle: every poll and every kill is aimed at it, and 0 is
@@ -1035,24 +1297,27 @@ export function toBackgroundExec(d: Record<string, unknown>): BackgroundExec {
   }
   return {
     pid,
-    // Absent is not false. `false` here is the claim that the command has
-    // exited, which is the same finished-job answer the pid check above
-    // refuses, so an absent field falls back to whether an exit code arrived —
-    // which is what "running" means in the first place.
-    running: d.running == null ? d.exit_code == null || d.exit_code === '' : bool(d.running),
-    // The empty string counts as "did not send one", for toExecResult's reason
-    // about the same field: Number('') is 0, and a command still running
-    // reported as having exited successfully is the one wrong answer here that
-    // reads as fine. A value that is not a number at all — `"killed"`,
-    // `"signal:9"`, an object — is that same wrong answer by another route, so
-    // it gets toExecResult's -1 rather than num()'s implicit 0.
-    exitCode: d.exit_code == null || d.exit_code === '' ? undefined : num(d.exit_code, -1),
+    running: stillRunning(d),
+    // Absent, null and the empty string are "did not send one" and read
+    // `undefined`; a value present and unreadable — `"killed"`, `"signal:9"`, an
+    // object, an array — gets toExecResult's -1, because something arrived and
+    // it was not an exit code. Both through `count`, which is what tells the two
+    // apart: `Number('')` and `Number([])` are both the 0 this must not invent.
+    exitCode: d.exit_code == null || d.exit_code === '' ? undefined : (count(d.exit_code) ?? -1),
     stdout: str(d.stdout),
     stderr: str(d.stderr),
-    more: bool(d.more),
-    killed: bool(d.killed),
-    outTruncated: bool(d.out_truncated),
-    errTruncated: bool(d.err_truncated),
+    // FALSE on anything unreadable, and this is the counter-example worth
+    // keeping: `more` reads like a caveat and behaves like a SWITCH. The loop in
+    // this package's README polls again with no sleep while it is set, so the
+    // caveat reading — true when in doubt — turns a poll every second into a
+    // poll as fast as the network allows, against a metered endpoint (OPL-3850).
+    // Sleeping a second longer than necessary costs a caller nothing: `running`
+    // ends that loop, not this, so no output is dropped by waiting.
+    more: said(d.more),
+    // A claim that something killed the command. Nobody said it.
+    killed: said(d.killed),
+    outTruncated: caveat(d.out_truncated),
+    errTruncated: caveat(d.err_truncated),
     raw: { ...d },
   };
 }
@@ -1091,8 +1356,10 @@ export function toGuestWindow(d: Record<string, unknown>): GuestWindow {
     y: num(d.y),
     width: num(d.width),
     height: num(d.height),
-    focused: bool(d.focused),
-    minimized: bool(d.minimized),
+    // TRUE only. Both are claims about one window against every other, and a
+    // caller matching on them is picking which window to type into.
+    focused: said(d.focused),
+    minimized: said(d.minimized),
     raw: { ...d },
   };
 }
@@ -1108,7 +1375,9 @@ export type Schedule = {
 
 export function toSchedule(d: Record<string, unknown>): Schedule {
   return {
-    enabled: bool(d.enabled),
+    // TRUE only: a schedule nobody said was on is off, and reporting one that
+    // is not running is how a caller stops taking snapshots by hand.
+    enabled: said(d.enabled),
     hour: num(d.hour),
     minute: num(d.minute),
     tz: str(d.tz, 'UTC'),
