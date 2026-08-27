@@ -34,6 +34,7 @@ import {
   count,
   num,
   said,
+  str,
   toBackgroundExec,
   toExecResult,
   toGuestWindow,
@@ -281,7 +282,22 @@ export class Computer {
    * and becomes `"build-failed"` if that copy never finished.
    */
   get status(): string {
-    return String(this.#data.status ?? '');
+    return str(this.#data.status);
+  }
+
+  /**
+   * Whether the platform SAID this computer is in the state named.
+   *
+   * Every decision below reads this rather than {@link status}, which is
+   * coerced and therefore cannot classify: `String(['running'])` is `'running'`,
+   * because an array of one joins to its element, so a malformed payload ended
+   * `waitUntilRunning` on a machine nobody said was up. The same distinction
+   * `terminalStatus` draws for a build and `liveMove` for a move — the coerced
+   * value is what gets reported, not what gets decided on (OPL-3850, found
+   * while fixing the same shape on a snapshot's `durable`).
+   */
+  #statusIs(name: string): boolean {
+    return this.#data.status === name;
   }
 
   /**
@@ -298,7 +314,7 @@ export class Computer {
    * polls the screen can be suspended out from under itself.
    */
   get isSuspended(): boolean {
-    return this.status === 'suspended';
+    return this.#statusIs('suspended');
   }
 
   /** When this computer's session was saved, or `''` if it is not saved. */
@@ -331,7 +347,7 @@ export class Computer {
    * {@link waitUntilBuilt}.
    */
   get isBuilding(): boolean {
-    return this.status === 'building';
+    return this.#statusIs('building');
   }
 
   /**
@@ -341,7 +357,7 @@ export class Computer {
    * disk. Nothing will fix it on its own: delete it and clone again.
    */
   get buildFailed(): boolean {
-    return this.status === 'build-failed';
+    return this.#statusIs('build-failed');
   }
 
   /**
@@ -945,7 +961,7 @@ export class Computer {
           delayMs = retryDelay(pollMs, err);
         }
       }
-      if (observed && this.status === 'running') return this;
+      if (observed && this.#statusIs('running')) return this;
       // A computer with no disk will never start on its own, and waiting out
       // the full timeout to say so helps nobody.
       if (this.buildFailed) throw this.#buildFailure();
@@ -953,7 +969,7 @@ export class Computer {
       // running without a start request. In particular, a create that returned
       // start_error used to lose that explanation on refresh and poll until the
       // full timeout while repeatedly observing the same stopped state.
-      if (this.status === 'stopped') {
+      if (this.#statusIs('stopped')) {
         const reason = this.startError || initialStartError;
         throw new MandalaError(
           reason

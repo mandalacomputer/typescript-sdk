@@ -24,7 +24,7 @@ import { isRecord } from './paths.js';
  * (OPL-3850, found while testing the coercion fixes). The fallback answers
  * instead, and `raw` still carries the value that could not be read.
  */
-const str = (v: unknown, fallback = ''): string => {
+export const str = (v: unknown, fallback = ''): string => {
   if (v == null) return fallback;
   try {
     return String(v);
@@ -1026,8 +1026,15 @@ export function toSnapshot(d: Record<string, unknown>): Snapshot {
     // `orphaned` in particular is what tells a caller a restore cannot work.
     incremental: said(d.incremental),
     auto: said(d.auto),
-    durable: str(d.state) === 'durable',
-    memory: str(d.kind, 'disk') === 'memory',
+    // THE RAW state and kind, for the reason `terminalStatus` gives: `str()` is
+    // a coercion and a coercion cannot classify. `String(['durable'])` is
+    // `'durable'`, so a malformed row claimed its bytes were replicated to
+    // backup storage — the field a caller reads before believing a snapshot
+    // outlives the host holding it (Codex review, fourth pass, OPL-3850). The
+    // coerced `state` and `kind` above are still what gets REPORTED; they are
+    // not what gets decided on.
+    durable: d.state === 'durable',
+    memory: d.kind === 'memory',
     orphaned: said(d.orphaned),
     unreachable: snapshotUnreachable(d),
     os: str(d.os),

@@ -625,3 +625,91 @@ describe('a coerced value is not the value', () => {
     expect((await computer.waitForMove({ pollMs: 1 })).state).toBe('done');
   });
 });
+
+describe('a coerced value cannot classify, on the fields it still decided', () => {
+  /**
+   * `durable` is the field a caller reads before believing a snapshot outlives
+   * the host holding it, and `memory` decides whether a clone boots or resumes.
+   * Both were tested against the COERCED state, and `String(['durable'])` is
+   * `'durable'` (Codex review, fourth pass, OPL-3850).
+   */
+  it('does not claim backup durability from a state it cannot classify', async () => {
+    for (const [state, kind] of [
+      [['durable'], ['memory']],
+      [[['durable']], [['memory']]],
+      [{ toString: 'x' }, { toString: 'y' }],
+      [null, null],
+      [42, 42],
+    ] as const) {
+      const { client: c } = client((call) =>
+        call.path === '/snapshots' ? json([{ ...SNAPSHOT, state, kind }]) : anyRoute(call),
+      );
+      const snap = (await c.snapshots.list())[0];
+      expect(`${JSON.stringify([state, kind])}: ${snap?.durable}/${snap?.memory}`).toBe(
+        `${JSON.stringify([state, kind])}: false/false`,
+      );
+    }
+  });
+
+  it('still reads the state and kind the platform did send', async () => {
+    const { client: c } = client((call) =>
+      call.path === '/snapshots'
+        ? json([
+            { ...SNAPSHOT, id: 'a', state: 'durable', kind: 'memory' },
+            { ...SNAPSHOT, id: 'b', state: 'pending', kind: 'disk' },
+          ])
+        : anyRoute(call),
+    );
+    const [a, b] = await c.snapshots.list();
+    expect([a?.durable, a?.memory, b?.durable, b?.memory]).toEqual([true, true, false, false]);
+  });
+
+  /**
+   * The same shape one file over, on a computer's status — which is what
+   * `waitUntilRunning` returns on, and what tells a stopped machine from a
+   * suspended one. Not reported by the review; found by looking for siblings of
+   * the finding above.
+   */
+  it('does not read a status it cannot classify as a running computer', async () => {
+    for (const status of [['running'], ['stopped'], ['suspended'], ['building'], 42, {}]) {
+      const { client: c } = client((call) =>
+        call.path === '/computers' && call.method === 'GET'
+          ? json([{ id: 'vm-1', name: 'demo', status }])
+          : anyRoute(call),
+      );
+      const computer = (await c.computers.list())[0];
+      expect(
+        `${JSON.stringify(status)}: ${computer?.isSuspended}/${computer?.isBuilding}/${computer?.buildFailed}`,
+      ).toBe(`${JSON.stringify(status)}: false/false/false`);
+    }
+  });
+
+  it('still reads the status the platform did send', async () => {
+    for (const [status, flags] of [
+      ['suspended', [true, false, false]],
+      ['building', [false, true, false]],
+      ['build-failed', [false, false, true]],
+      ['running', [false, false, false]],
+    ] as const) {
+      const { client: c } = client((call) =>
+        call.path === '/computers' && call.method === 'GET'
+          ? json([{ id: 'vm-1', name: 'demo', status }])
+          : anyRoute(call),
+      );
+      const computer = (await c.computers.list())[0];
+      expect(
+        `${status}: ${[computer?.isSuspended, computer?.isBuilding, computer?.buildFailed]}`,
+      ).toBe(`${status}: ${flags}`);
+    }
+  });
+
+  it('does not end a readiness wait on a status nobody sent', async () => {
+    // The consequence, and the reason this is not cosmetic: `waitUntilRunning`
+    // returns the moment the status reads `running`.
+    const { client: c } = client((call) => json({ id: 'vm-1', name: 'demo', status: ['running'] }));
+    const computer = await c.computers.get('vm-1');
+    await expect(computer.waitUntilRunning({ timeoutMs: 60, pollMs: 10 })).rejects.toThrow(
+      /still \["running"\]|was still/,
+    );
+  });
+});

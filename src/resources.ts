@@ -695,8 +695,8 @@ export class Builds {
         // otherwise (adversarial review, OPL-3835).
         //
         // Checked on the decoded record and not on the frame, so a platform
-        // that stringifies the field — `"false"`, which `bool` reads correctly —
-        // is judged on what it meant. Thrown BEFORE the yield, for the same
+        // that stringifies the field — `"false"`, which `wire` classifies as
+        // FALSE — is judged on what it meant. Thrown BEFORE the yield, for the same
         // reason the non-record case above throws: half an answer handed over as
         // a whole one is the thing being prevented.
         if (!isBuildTerminal(now)) {
