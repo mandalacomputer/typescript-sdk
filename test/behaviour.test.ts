@@ -415,6 +415,50 @@ describe('waiting', () => {
     expect(err).not.toBeInstanceOf(DOMException);
   });
 
+  /**
+   * The second sweep, after the first one missed these.
+   *
+   * The first pass swept `opts.X ?` in resources.ts and computer.ts and fixed
+   * four options. It never looked in paths.ts, which is where the QUERIES are
+   * built and where the two flags that matter most live — so it graded itself
+   * clean while `deleteSnapshots` was still read by `!` (adversarial review,
+   * second pass, OPL-3835).
+   *
+   * `background` is not in the list below because no caller can reach it:
+   * execBackground passes the literal `true`. It is validated anyway, so that
+   * the rule holds if that ever changes.
+   *
+   * `deleteSnapshots: "false"` is the worst value on this surface. `!"false"`
+   * is false, so a caller who wrote the word FALSE, with a fingerprint in hand
+   * because they pass one every time, sent `snapshots=delete` and destroyed
+   * every snapshot the computer had. Nothing undoes that. `force: "false"`
+   * pulls the power on a machine whose caller asked for the graceful stop.
+   *
+   * Asserted as no request AT ALL, which is the only assertion worth making
+   * about an irreversible call: a refusal that still sent it would have
+   * destroyed the snapshots and then complained.
+   */
+  it('refuses a non-boolean flag on every destructive option', async () => {
+    for (const bad of ['false', 'true', 0, 1, null, new Boolean(false)]) {
+      const v = bad as unknown as boolean;
+      const { rec, client: c } = client(anyRoute);
+      const computer = await c.computers.get('vm-1');
+      const before = rec.calls.length;
+      for (const call of [
+        () => computer.delete({ deleteSnapshots: v, expect: 'fp-1' }),
+        () => computer.stop({ force: v }),
+        () => computer.snapshot({ memory: v }),
+        () => computer.windows({ includeAll: v }),
+        () => computer.screenshot(undefined, { fresh: v }),
+        () => computer.exec('ls', { desktop: v }),
+        () => computer.execBackground('ls', { desktop: v }),
+      ]) {
+        await expect(call()).rejects.toThrow(TypeError);
+      }
+      expect(rec.calls.length).toBe(before);
+    }
+  });
+
   it('does not let a poll outlive the wait it belongs to', async () => {
     // The transport's deadline is the client's — 60 seconds by default — and a
     // refresh made under it runs on long past the moment the wait was told to

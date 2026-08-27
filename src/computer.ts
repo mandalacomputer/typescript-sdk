@@ -1843,7 +1843,7 @@ export class Computer {
   async snapshot(opts: { memory?: boolean; name?: string } & CallOptions = {}): Promise<Snapshot> {
     const path = P.computerAction(this.id, 'snapshots');
     const data = await this.#t.json<Record<string, unknown>>('POST', path, {
-      body: P.snapshotBody(Boolean(opts.memory), opts.name),
+      body: P.snapshotBody(opts.memory, opts.name),
       signal: opts.signal,
     });
     if (!P.isRecord(data) || !data.id) {

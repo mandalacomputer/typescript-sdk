@@ -16,6 +16,7 @@ import type {
   UsageReport,
 } from './models.js';
 import {
+  isBuildTerminal,
   toBuildProgress,
   toMove,
   toPublishedTemplate,
@@ -678,7 +679,7 @@ export class Builds {
         // is judged on what it meant. Thrown BEFORE the yield, for the same
         // reason the non-record case above throws: half an answer handed over as
         // a whole one is the thing being prevented.
-        if (!now.done || !now.status) {
+        if (!isBuildTerminal(now)) {
           throw new MandalaError(
             `the build event stream for ${id} ended with a final event that does not say the ` +
               `build finished (done ${now.done}, status ${JSON.stringify(now.status)}); ` +
@@ -759,10 +760,22 @@ export class Builds {
         });
         last = now;
         observed = true;
-        // `done` and not a comparison against a list of statuses: the platform
-        // derives it from the JOB rather than from the phase, and the phase is
-        // read out of a log the document's own steps write into.
-        if (now.done) return now;
+        // `done` and not the PHASE: the platform derives `done` from the job,
+        // and the phase is read out of a log the document's own steps write
+        // into. But `done` is not the whole test either — a record claiming to
+        // be finished while its status still says `running` contradicts itself,
+        // and returning it reports an active build as a settled one. Terminal
+        // means both (adversarial review, second pass, OPL-3835).
+        if (now.done) {
+          if (!isBuildTerminal(now)) {
+            throw new MandalaError(
+              `build ${id} reports done with status ${JSON.stringify(now.status)}, which is ` +
+                `neither "succeeded" nor "failed"; the fleet's answer for this build is ` +
+                `inconsistent and nothing here can say what became of it`,
+            );
+          }
+          return now;
+        }
       } catch (err) {
         if (signal?.aborted) throw err;
         // This wait's own timer firing inside a poll, which is not a failed

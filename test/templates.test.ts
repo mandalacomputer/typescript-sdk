@@ -316,6 +316,23 @@ describe('starting a build', () => {
   });
 });
 
+describe('a validation verdict has to be given', () => {
+  /**
+   * `valid` is the whole answer, so `bool(undefined)` answering `false` reads
+   * as "the platform examined your document and rejected it" — a sentence
+   * nobody said. Drift that looks like a rejection is worse than drift that
+   * says so (adversarial review, second pass, OPL-3835).
+   */
+  it('refuses a check whose payload carries no verdict', async () => {
+    const { client: c } = client((call) =>
+      call.path === '/templates/validate' ? json({ problems: [] }) : anyRoute(call),
+    );
+    await expect(c.templates.validate('apiVersion: mandala/v1')).rejects.toThrow(
+      /whether the document is valid/,
+    );
+  });
+});
+
 describe('watching a build', () => {
   it('reads the steps out of progress, in order', async () => {
     const { client: c } = client();
@@ -573,6 +590,37 @@ describe('watching a build', () => {
       }
     };
     await expect(read()).rejects.toThrow(/to carry an id/);
+  });
+
+  /**
+   * `done` alone was too weak a test, and the first version of this check used
+   * it. server/buildjob.go declares three statuses and no more — running,
+   * succeeded, failed — so a record saying `done: true, status: "running"`
+   * contradicts itself. Taking `done` at its word turned that into a finished
+   * build whose own status said otherwise, in the two places a caller learns
+   * the outcome (adversarial review, second pass, OPL-3835).
+   */
+  it('refuses a done that contradicts its own status, in events and in wait', async () => {
+    const contradictory = { ...BUILD_PROGRESS, done: true, status: 'running' };
+    const { client: c } = client((call) =>
+      call.path.endsWith('/events')
+        ? new Response(`event: done\ndata: ${JSON.stringify(contradictory)}\n\n`, {
+            status: 200,
+            headers: { 'content-type': 'text/event-stream' },
+          })
+        : call.path.endsWith('/progress')
+          ? json(contradictory)
+          : anyRoute(call),
+    );
+    const read = async () => {
+      for await (const _ of c.builds.events('bld-1')) {
+        // drain
+      }
+    };
+    await expect(read()).rejects.toThrow(/does not say the build finished/);
+    await expect(c.builds.wait('bld-1', { timeoutMs: 5_000 })).rejects.toThrow(
+      /neither "succeeded" nor "failed"/,
+    );
   });
 
   /** The other half of the check above: a real `done` still ends the stream. */

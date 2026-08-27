@@ -25,19 +25,37 @@
  * `reused`, which is the cheap path and the one an omitted `no_reuse` is
  * supposed to reach.
  *
- * It publishes nothing. `builds.start` compiles a document without claiming its
- * ref — verified, not assumed: after a build of `<account>/sdksmoke@1.0.0` the
- * ref is still a 404 from `templates.get`. What it does leave behind is a build
- * record and a published image family, both of which are ordinary history.
+ * It never publishes a TEMPLATE, retires one, or deletes anything: no call here
+ * reaches `templates.publish`, `templates.retire`, or any DELETE. `builds.start`
+ * compiles a document without claiming its ref — verified, not assumed: after a
+ * build of `<account>/sdksmoke@1.0.0` the ref is still a 404 from
+ * `templates.get`.
+ *
+ * `--build` DOES publish an image family, and saying "it publishes nothing" was
+ * wrong of this comment rather than of the flag (adversarial review, second
+ * pass). A build's whole product is a published image; that is what a build is.
+ * It is behind a flag, off by default, and the read-only path — everything up to
+ * the `--build` check — mutates nothing at all.
  */
-
-import { Client, MandalaError, NotFoundError } from '../dist/index.js';
 
 const key = process.env.MANDALA_API_KEY?.trim();
 if (!key) {
   console.log('smoke-live — no MANDALA_API_KEY, so nothing to call. Skipped.');
   process.exit(0);
 }
+
+// Imported AFTER the key check, and dynamically, because `dist` is gitignored:
+// a static import made the promised skip unreachable on a clean checkout — the
+// module failed to resolve before this file ran a line. `npm run smoke:live`
+// builds first for the same reason, so what runs is the working tree rather
+// than whatever dist happened to be left behind (adversarial review, second
+// pass, OPL-3835).
+const { Client, MandalaError, NotFoundError } = await import('../dist/index.js').catch(() => {
+  console.error(
+    'smoke-live — no build to test. Run `npm run build` first, or `npm run smoke:live`.',
+  );
+  process.exit(1);
+});
 
 const wantBuild = process.argv.includes('--build');
 const c = new Client({ apiKey: key });

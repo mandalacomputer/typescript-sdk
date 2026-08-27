@@ -249,6 +249,15 @@ export type TemplateCheck = {
 };
 
 export function toTemplateCheck(d: Record<string, unknown>): TemplateCheck {
+  // The verdict is the whole answer, so it has to have been GIVEN. `bool`
+  // turns an absent field into `false`, which here reads as "the platform
+  // examined your document and rejected it" — a sentence nobody said. A
+  // response that carries no verdict is drift, and drift that looks like a
+  // rejection is worse than drift that says so (adversarial review, second
+  // pass, OPL-3835).
+  if (d.valid == null) {
+    throw new MandalaError('expected a validation verdict to say whether the document is valid');
+  }
   return {
     valid: bool(d.valid),
     problems: Array.isArray(d.problems) ? d.problems.map((p) => str(p)) : [],
@@ -441,6 +450,23 @@ export type BuildProgress = {
   unmatched: boolean;
   raw: Record<string, unknown>;
 };
+
+/**
+ * Whether this progress record says the build has STOPPED.
+ *
+ * Both halves, because either alone is a claim the other can contradict.
+ * server/buildjob.go declares exactly three statuses — `running`, `succeeded`,
+ * `failed`, and the comment above them says the shortness is deliberate — so
+ * terminal is `succeeded` or `failed` and nothing else.
+ *
+ * `done` on its own was the first version of this check and it was too weak: a
+ * payload of `{id, done: true, status: "running"}` contradicts itself, and
+ * taking `done` at its word turns that into a finished build with a status that
+ * says otherwise. A truthy `done` with an unrecognised status is drift, and the
+ * one thing it must not do is end a wait (adversarial review, second pass).
+ */
+export const isBuildTerminal = (p: BuildProgress): boolean =>
+  p.done && (p.status === 'succeeded' || p.status === 'failed');
 
 export function toBuildProgress(d: Record<string, unknown>): BuildProgress {
   return {

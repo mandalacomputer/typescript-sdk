@@ -46,7 +46,7 @@
     "lint": "biome check .",
     "format": "biome check --write .",
     "check:surface": "node scripts/check-surface.mjs",
-    "smoke:live": "node scripts/smoke-live.mjs",
+    "smoke:live": "npm run build && node scripts/smoke-live.mjs",
     "prepublishOnly": "npm run build"
   },
   "devDependencies": {

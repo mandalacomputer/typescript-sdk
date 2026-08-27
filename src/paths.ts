@@ -350,7 +350,11 @@ export type CreateArgs = {
  * the four it stands in for is refused here.
  */
 export function createBody(args: CreateArgs): Json {
-  const { start = true, size, template, cpu, ramMb, diskGb, name, resolution } = args;
+  const { size, template, cpu, ramMb, diskGb, name, resolution } = args;
+  // Defaulted after validation, not by destructuring: `start = true` fills in
+  // only for `undefined`, so a `"false"` kept its own shape and went onto the
+  // wire as a string where the platform expects a boolean.
+  const start = flag(args.start, 'start') ?? true;
   if (size !== undefined && [template, cpu, ramMb, diskGb].some((v) => v !== undefined)) {
     throw new ValidationError(
       'size already names a template and a shape; send size alone, ' +
@@ -623,8 +627,11 @@ export function execBody(args: ExecArgs): Json {
     }
     body.timeout_s = args.timeoutS;
   }
-  if (args.desktop) body.session = 'desktop';
-  if (args.background) body.background = true;
+  // `background` decides whether this call ANSWERS with the command's output or
+  // with a pid, and `desktop` decides which session it runs in. Both change what
+  // the caller gets back, so neither is read by truthiness.
+  if (flag(args.desktop, 'desktop')) body.session = 'desktop';
+  if (flag(args.background, 'background')) body.background = true;
   if (args.cwd !== undefined) body.cwd = absoluteGuestPath(args.cwd, 'cwd');
   // An empty object is omitted rather than sent: the platform reads no `env`
   // and an empty one the same way, and sending it puts a key on the wire that
@@ -952,7 +959,7 @@ export function screenshotQuery(width?: number, fresh?: boolean): Query | undefi
     }
     query.w = width;
   }
-  if (fresh) {
+  if (flag(fresh, 'fresh')) {
     // Refused rather than sent, because the platform takes it and ignores it.
     // Its handler branches on `w` first and returns the thumbnail before it
     // ever reads `fresh` — and that thumbnail is built off the *cached* frame
@@ -985,7 +992,13 @@ export function screenshotQuery(width?: number, fresh?: boolean): Query | undefi
  * being asked politely, which is the failure a caller reaching for `force`
  * already tried once.
  */
-export const stopQuery = (force?: boolean): Query => (force ? { force: 'true' } : {});
+/**
+ * `force` pulls the power rather than asking the guest to come down, so a
+ * `"false"` read as true is an ungraceful stop of a machine whose caller
+ * explicitly asked for the graceful one. Validated, like every flag here.
+ */
+export const stopQuery = (force?: boolean): Query =>
+  flag(force, 'force') ? { force: 'true' } : {};
 
 // --- usage ----------------------------------------------------------------
 
@@ -1081,9 +1094,15 @@ export function windowBody(args: {
  * one: it can only come from a caller building the name out of something that
  * turned out to be empty, and a snapshot called `"  "` is not what they meant.
  */
-export function snapshotBody(memory: boolean, name?: string): Json {
+/**
+ * `memory` captures live RAM as well as disk, which is a slower snapshot and a
+ * much larger one. Taken raw and validated here rather than `Boolean(...)`d at
+ * the call site: that coercion was the flag's whole check, and it read
+ * `"false"` as yes.
+ */
+export function snapshotBody(memory: boolean | undefined, name?: string): Json {
   if (name !== undefined && !name.trim()) throw new ValidationError('name must not be empty');
-  return omitUndefined({ memory, name });
+  return omitUndefined({ memory: flag(memory, 'memory') ?? false, name });
 }
 
 export function scheduleBody(args: {
@@ -1117,7 +1136,13 @@ export function scheduleBody(args: {
  * to — which is precisely the race the interlock exists for.
  */
 export function deleteQuery(opts: { deleteSnapshots?: boolean; expect?: string }): Query {
-  if (!opts.deleteSnapshots) return {};
+  // The worst instance of the coercion class on this surface, and the reason
+  // the sweep that missed it was not thorough enough: `deleteSnapshots:
+  // "false"` is falsy to nobody and truthy to `!`, so a caller who wrote the
+  // word FALSE — and who has a fingerprint to hand, because they pass one
+  // every time — destroyed every snapshot the computer had. There is no
+  // undoing that (adversarial review, second pass, OPL-3835).
+  if (!flag(opts.deleteSnapshots, 'deleteSnapshots')) return {};
   if (!opts.expect) {
     throw new ValidationError(
       'refusing to purge snapshots without a fingerprint: call holdings() on this computer, ' +
