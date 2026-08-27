@@ -890,8 +890,18 @@ neighbouring number it means the platform **was** reached and its answer could
 not be read, so the work may have happened in full, in part, or not at all.
 Before retrying anything that creates something, check whether the first attempt
 took effect.
-Neither is in `isTransient` — this SDK decides transience by class, and adding a
-retrying status would be a change to retry policy rather than to naming.
+Neither is in `isTransient`, and nor are 502, 504 or 521-523. That predicate is
+exported, so its caller may be wrapping a `create` — and every one of those
+statuses means the outcome is unknown, which is how one computer becomes two.
+What it names is the four classes that both clear on their own and are safe to
+replay blind: `ConflictError`, `RateLimitError`, `UnavailableError`,
+`ConnectionError`.
+
+The wait helpers do not ask it. They replay idempotent reads under a deadline
+you set, so they ride out every status above — including the ones here — and
+give up only on a failure that describes the *request* rather than the moment.
+Two audiences, two predicates; the same three classes and the same four now
+answer identically in `mandala-computer-mcp` and `mandala-computer-python`.
 
 ## The `mandala` CLI
 

@@ -269,6 +269,55 @@ describe('waiting', () => {
     expect(gets).toBe(3);
   });
 
+  it('rides out an edge blip on the control plane instead of failing the wait', async () => {
+    // The user-visible half of OPL-3724. waitUntilRunning polls
+    // `GET computers/:id`, where a 502 or a 522 is a proxy having a moment —
+    // and it used to ask isTransient, which named neither, so one blip during a
+    // boot was reported to the caller as a machine that never came up. The
+    // argument for keeping 502 fatal was about the GUEST agent going silent,
+    // and waitForGuest is the only wait that ever sees that one.
+    for (const status of [502, 504, 520, 522]) {
+      let gets = 0;
+      const { client: c } = client((call) => {
+        if (call.method === 'GET' && call.path === '/computers/vm-1') {
+          gets += 1;
+          if (gets === 1) return json({ ...COMPUTER, status: 'starting' });
+          if (gets === 2) return errorJson(status, `HTTP ${status}`);
+          return json(COMPUTER);
+        }
+        return anyRoute(call);
+      });
+      const computer = await c.computers.get('vm-1');
+      await expect(computer.waitUntilRunning({ timeoutMs: 5_000, pollMs: 1 })).resolves.toBe(
+        computer,
+      );
+      expect(gets).toBe(3);
+    }
+  });
+
+  it('still gives up on a wait whose failure describes the request', async () => {
+    // The other side of the same line, and what keeps the deny-list honest: a
+    // 401 or a 400 answers the same way on every poll, so swallowing one spends
+    // the caller's whole timeout to report the wrong cause.
+    for (const status of [400, 401, 403, 404]) {
+      let gets = 0;
+      const { client: c } = client((call) => {
+        if (call.method === 'GET' && call.path === '/computers/vm-1') {
+          gets += 1;
+          // The handle first, so the wait is what meets the refusal.
+          return gets === 1
+            ? json({ ...COMPUTER, status: 'starting' })
+            : errorJson(status, `HTTP ${status}`);
+        }
+        return anyRoute(call);
+      });
+      const computer = await c.computers.get('vm-1');
+      const err = await computer.waitUntilRunning({ timeoutMs: 60_000, pollMs: 1 }).catch((e) => e);
+      expect(err).toBeInstanceOf(APIError);
+      expect((err as APIError).status).toBe(status);
+    }
+  });
+
   it('honours Retry-After while polling through a rate limit', async () => {
     let attempts = 0;
     const { client: c } = client((call) => {

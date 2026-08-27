@@ -51,7 +51,7 @@ import {
   checkWait,
   deadlineSignal,
   isDeadlineAbort,
-  isPermanent,
+  isTransientForPoll,
   retryDelay,
   sleepUntilNextPoll,
   type WaitOptions,
@@ -763,7 +763,7 @@ export class Computer {
         // waitUntilRunning: `AbortSignal.timeout` can fire a millisecond before
         // `Date.now()` reaches the deadline, and this loop then rethrew its own
         // deadline as if the platform had failed.
-        if (!isDeadlineAbort(err) && !isTransient(err)) throw err;
+        if (!isDeadlineAbort(err) && !isTransientForPoll(err)) throw err;
         delayMs = retryDelay(pollMs, err);
       }
     }
@@ -887,7 +887,7 @@ export class Computer {
           // copy being waited on is the ordinary weather of a build, not a
           // verdict on it — the same rule waitUntilRunning applies. Anything
           // else is not weather.
-          if (!isDeadlineAbort(err) && !isTransient(err)) throw err;
+          if (!isDeadlineAbort(err) && !isTransientForPoll(err)) throw err;
           delayMs = retryDelay(pollMs, err);
         }
       }
@@ -957,7 +957,7 @@ export class Computer {
           // out would abort the one method whose whole job is to keep asking.
           // Anything else — a revoked key, a computer that is gone — is not
           // weather.
-          if (!isDeadlineAbort(err) && !isTransient(err)) throw err;
+          if (!isDeadlineAbort(err) && !isTransientForPoll(err)) throw err;
           delayMs = retryDelay(pollMs, err);
         }
       }
@@ -1051,25 +1051,21 @@ export class Computer {
           });
           if (res.ok) return this;
         } catch (err) {
-          // Everything else is polled through: a 409 means the agent is not up
-          // yet, a 503 means its host could not be reached, and a guest agent that
-          // is merely slow answers 502 for the first seconds of a boot. Those are
-          // what this loop is for. A revoked key is not.
-          if (isPermanent(err)) throw err;
-          // Nor is a caller who cancelled. The wait's own deadline firing inside
-          // a probe is not caught here — that is this loop ending, and the check
-          // below is what names it.
+          // A caller who cancelled is not a failed poll. The wait's own deadline
+          // firing inside a probe is not caught here either — that is this loop
+          // ending, and the check below is what names it.
           if (signal?.aborted) throw err;
-          // The guest can answer 502 for the first seconds of a boot. Everything
-          // else retried here is one of the same typed transient failures as the
-          // two refresh-based waits; a malformed request must not be disguised as
-          // three minutes of guest unavailability.
-          if (
-            Date.now() < deadline &&
-            !(isTransient(err) || (err instanceof APIError && err.status === 502))
-          ) {
-            throw err;
-          }
+          // Everything a booting guest legitimately answers is polled through: a
+          // 409 means the agent is not up yet, a 503 means its host could not be
+          // reached, and an agent that is merely slow answers 502 for the first
+          // seconds of a boot. A revoked key or a malformed request is not, and
+          // must not be disguised as three minutes of guest unavailability.
+          //
+          // One predicate now, where this was `isPermanent` plus `isTransient`
+          // plus an inline `|| status === 502` (OPL-3724). All three said the
+          // same thing badly: this loop retries by exception rather than by
+          // permission, which is what isTransientForPoll is.
+          if (Date.now() < deadline && !isTransientForPoll(err)) throw err;
           delayMs = retryDelay(pollMs, err);
         }
       }
