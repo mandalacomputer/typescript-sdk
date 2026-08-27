@@ -269,6 +269,110 @@ describe('waiting', () => {
     expect(gets).toBe(3);
   });
 
+  /**
+   * The regression the first cut of OPL-3724 introduced, caught by Codex's
+   * adversarial review of the PR.
+   *
+   * `waitForGuest` used to run `isPermanent(err)` unconditionally, so a revoked
+   * key reached the caller whenever it arrived. Collapsing that into the gated
+   * check below it — `Date.now() < deadline && !isTransientForPoll(err)` —
+   * quietly made a 401 conditional on the clock, and the condition fails
+   * exactly when a probe outlives what was left of the wait. The caller then
+   * got "guest did not respond within 5000ms" about a key that had been revoked
+   * for a week.
+   *
+   * Pinned with the clock trick the deadline-race test below uses, for its
+   * reason: the state is a probe that STARTED before the deadline and whose
+   * answer arrives after it, and skewing the clock while the request is in
+   * flight writes that down instead of waiting for it. Real time is untouched.
+   */
+  it('surfaces a permanent refusal from the guest probe however late it lands', async () => {
+    for (const [status, name] of [
+      [401, 'AuthenticationError'],
+      [402, 'PlanLimitError'],
+      [403, 'PermissionDeniedError'],
+      [404, 'NotFoundError'],
+    ] as const) {
+      let skewMs = 0;
+      const realNow = Date.now.bind(Date);
+      // Restored in the `finally` rather than an afterEach: a lying clock left
+      // behind by a failing test is every other test failing for a reason none
+      // of them names.
+      const clock = vi.spyOn(Date, 'now').mockImplementation(() => realNow() + skewMs);
+      try {
+        const { client: c } = client((call) => {
+          if (call.path.endsWith('/exec')) {
+            // The deadline passes while this probe is in flight. The abort
+            // signal was built from the real interval and does not fire, so the
+            // refusal arrives intact — which is the race, not a simulation of
+            // one: a response and a timeout can both win.
+            skewMs = 60_000;
+            return errorJson(status, 'no');
+          }
+          return anyRoute(call);
+        });
+        const computer = await c.computers.get('vm-1');
+        const err = await computer.waitForGuest({ timeoutMs: 5_000, pollMs: 1 }).catch((e) => e);
+        // The status decides this, not the clock.
+        expect(err).toBeInstanceOf(APIError);
+        expect((err as APIError).status).toBe(status);
+        expect(err.constructor.name).toBe(name);
+        expect(err).not.toBeInstanceOf(TimeoutError);
+      } finally {
+        clock.mockRestore();
+      }
+    }
+  });
+
+  it('rides out an edge blip on the control plane instead of failing the wait', async () => {
+    // The user-visible half of OPL-3724. waitUntilRunning polls
+    // `GET computers/:id`, where a 502 or a 522 is a proxy having a moment —
+    // and it used to ask isTransient, which named neither, so one blip during a
+    // boot was reported to the caller as a machine that never came up. The
+    // argument for keeping 502 fatal was about the GUEST agent going silent,
+    // and waitForGuest is the only wait that ever sees that one.
+    for (const status of [502, 504, 520, 522]) {
+      let gets = 0;
+      const { client: c } = client((call) => {
+        if (call.method === 'GET' && call.path === '/computers/vm-1') {
+          gets += 1;
+          if (gets === 1) return json({ ...COMPUTER, status: 'starting' });
+          if (gets === 2) return errorJson(status, `HTTP ${status}`);
+          return json(COMPUTER);
+        }
+        return anyRoute(call);
+      });
+      const computer = await c.computers.get('vm-1');
+      await expect(computer.waitUntilRunning({ timeoutMs: 5_000, pollMs: 1 })).resolves.toBe(
+        computer,
+      );
+      expect(gets).toBe(3);
+    }
+  });
+
+  it('still gives up on a wait whose failure describes the request', async () => {
+    // The other side of the same line, and what keeps the deny-list honest: a
+    // 401 or a 400 answers the same way on every poll, so swallowing one spends
+    // the caller's whole timeout to report the wrong cause.
+    for (const status of [400, 401, 403, 404]) {
+      let gets = 0;
+      const { client: c } = client((call) => {
+        if (call.method === 'GET' && call.path === '/computers/vm-1') {
+          gets += 1;
+          // The handle first, so the wait is what meets the refusal.
+          return gets === 1
+            ? json({ ...COMPUTER, status: 'starting' })
+            : errorJson(status, `HTTP ${status}`);
+        }
+        return anyRoute(call);
+      });
+      const computer = await c.computers.get('vm-1');
+      const err = await computer.waitUntilRunning({ timeoutMs: 60_000, pollMs: 1 }).catch((e) => e);
+      expect(err).toBeInstanceOf(APIError);
+      expect((err as APIError).status).toBe(status);
+    }
+  });
+
   it('honours Retry-After while polling through a rate limit', async () => {
     let attempts = 0;
     const { client: c } = client((call) => {
