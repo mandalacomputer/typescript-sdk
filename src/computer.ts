@@ -9,15 +9,11 @@ import {
 } from './agent.js';
 import {
   APIError,
-  AuthenticationError,
   errorForEventStatus,
   isTransient,
   MandalaError,
   NotFoundError,
-  PermissionDeniedError,
-  PlanLimitError,
   RangeNotSatisfiableError,
-  RateLimitError,
   TimeoutError,
   TooLargeError,
   ValidationError,
@@ -48,13 +44,16 @@ import {
 } from './models.js';
 import * as P from './paths.js';
 import type { CallOptions } from './resources.js';
+import { type Bytes, MODEL_KEY_HEADER, type Query, type Transport } from './transport.js';
 import {
-  type Bytes,
-  MAX_TIMER_MS,
-  MODEL_KEY_HEADER,
-  type Query,
-  type Transport,
-} from './transport.js';
+  checkWait,
+  deadlineSignal,
+  isDeadlineAbort,
+  isPermanent,
+  retryDelay,
+  sleepUntilNextPoll,
+  type WaitOptions,
+} from './wait.js';
 
 /**
  * What a computer renders at when its create did not ask for anything else.
@@ -87,60 +86,6 @@ export const GUEST_PROBE = 'exit 0';
  * stop at these. A revoked key is not going to become valid three minutes from
  * now, and reporting it as a timeout names the wrong problem.
  */
-const isPermanent = (err: unknown): boolean =>
-  err instanceof AuthenticationError ||
-  err instanceof PermissionDeniedError ||
-  err instanceof NotFoundError ||
-  err instanceof PlanLimitError;
-
-/**
- * A signal that fires when the caller's does, or when `ms` have passed.
- *
- * What makes a wait's own deadline binding on the request in flight. The
- * transport's per-request deadline is the client's, which can be far longer
- * than what is left of the wait, and a poll made under it runs on past the
- * moment the wait was told to give up.
- */
-const deadlineSignal = (ms: number, caller?: AbortSignal): AbortSignal => {
-  const timeout = AbortSignal.timeout(Math.ceil(Math.max(ms, 0)));
-  return caller ? AbortSignal.any([caller, timeout]) : timeout;
-};
-
-/**
- * A wait's own numbers, refused when they are not finite.
- *
- * `Date.now() >= NaN` is false, so a non-finite timeout is a deadline that
- * never arrives; `setTimeout(fn, NaN)` fires at once, so a non-finite poll
- * interval turns the wait into an unthrottled request loop against the
- * platform. Neither says anything — the wait simply never returns, which is the
- * one failure shape worse than a wrong answer.
- *
- * Refused here for the reason and in the wording {@link Transport} refuses its
- * own deadline: `timeoutMs: Number(unsetEnvVar)` is the usual spelling of the
- * mistake, and the only place it can be named is before the loop starts.
- */
-const checkWait = (timeoutMs: number, pollMs: number): void => {
-  if (!Number.isFinite(timeoutMs) || timeoutMs < 0 || timeoutMs > MAX_TIMER_MS) {
-    throw new ValidationError(
-      `timeoutMs must be a non-negative finite number no greater than ${MAX_TIMER_MS} (got ${timeoutMs})`,
-    );
-  }
-  // 0 is the unthrottled loop `setTimeout(fn, NaN)` also is: fire at once and
-  // immediately ask again. A wait that never sleeps is a request storm, and
-  // the comment above used to name only NaN.
-  if (!Number.isFinite(pollMs) || pollMs <= 0 || pollMs > MAX_TIMER_MS) {
-    throw new ValidationError(
-      `pollMs must be a positive finite number no greater than ${MAX_TIMER_MS} (got ${pollMs})`,
-    );
-  }
-};
-
-/** The ordinary polling delay, raised when the platform explicitly asks us to wait longer. */
-const retryDelay = (pollMs: number, err: unknown): number =>
-  err instanceof RateLimitError && err.retryAfterMs !== undefined
-    ? Math.max(pollMs, err.retryAfterMs)
-    : pollMs;
-
 /** Trim and refuse a missing Anthropic key before it becomes an empty header. */
 const requireModelKey = (key: string | undefined, what: string): string => {
   const trimmed = key?.trim() ?? '';
@@ -152,38 +97,7 @@ const requireModelKey = (key: string | undefined, what: string): string => {
   return trimmed;
 };
 
-/** A poll sleep that cannot carry its loop beyond the loop's own deadline. */
-const sleepUntilNextPoll = (
-  delayMs: number,
-  deadline: number,
-  signal?: AbortSignal,
-): Promise<void> => sleep(Math.min(delayMs, Math.max(deadline - Date.now(), 0)), signal);
-
-const sleep = (ms: number, signal?: AbortSignal): Promise<void> =>
-  new Promise((resolve, reject) => {
-    if (signal?.aborted) return reject(signal.reason);
-    const onAbort = () => {
-      clearTimeout(t);
-      reject(signal?.reason);
-    };
-    // The listener comes off on the ordinary path too, not only on abort. Left
-    // in place, a fifteen-minute wait adds one listener per poll to the
-    // caller's single signal — memory held for the signal's lifetime, and a
-    // MaxListenersExceededWarning about the leak Node correctly suspects.
-    const t = setTimeout(() => {
-      signal?.removeEventListener('abort', onAbort);
-      resolve();
-    }, ms);
-    signal?.addEventListener('abort', onAbort, { once: true });
-  });
-
-export type WaitOptions = {
-  /** Milliseconds before giving up. */
-  timeoutMs?: number;
-  /** Milliseconds between polls. */
-  pollMs?: number;
-  signal?: AbortSignal;
-};
+export type { WaitOptions } from './wait.js';
 
 export type ScrollOptions = CallOptions & {
   direction?: P.ScrollDirection;
@@ -824,7 +738,11 @@ export class Computer {
         if (!mine.live) return mine;
       } catch (err) {
         if (signal?.aborted) throw err;
-        if (Date.now() < deadline && !isTransient(err)) throw err;
+        // Named rather than inferred from the clock. See the note in
+        // waitUntilRunning: `AbortSignal.timeout` can fire a millisecond before
+        // `Date.now()` reaches the deadline, and this loop then rethrew its own
+        // deadline as if the platform had failed.
+        if (!isDeadlineAbort(err) && !isTransient(err)) throw err;
         delayMs = retryDelay(pollMs, err);
       }
     }
@@ -942,12 +860,13 @@ export class Computer {
           // A caller who cancelled leaves now, whatever their reason is named.
           if (signal?.aborted) throw err;
           // This wait's own deadline firing inside a poll is this wait ending
-          // rather than a failure of the poll, and the loop's own check names
-          // it. Short of that: a 503 from a host busy doing exactly the disk
+          // rather than a failure of the poll, and `isDeadlineAbort` is what
+          // names it — the clock is not, for the reason waitUntilRunning's note
+          // gives. Short of that: a 503 from a host busy doing exactly the disk
           // copy being waited on is the ordinary weather of a build, not a
           // verdict on it — the same rule waitUntilRunning applies. Anything
           // else is not weather.
-          if (Date.now() < deadline && !isTransient(err)) throw err;
+          if (!isDeadlineAbort(err) && !isTransient(err)) throw err;
           delayMs = retryDelay(pollMs, err);
         }
       }
@@ -998,12 +917,26 @@ export class Computer {
           // A caller who cancelled leaves now, whatever their reason is named.
           if (signal?.aborted) throw err;
           // This wait's own deadline firing inside the poll is this wait
-          // ending, and the check below names it. Short of that: a host that
-          // cannot be reached answers 503, which is the ordinary weather of a
-          // machine still coming up, and letting it out would abort the one
-          // method whose whole job is to keep asking. Anything else — a revoked
-          // key, a computer that is gone — is not weather.
-          if (Date.now() < deadline && !isTransient(err)) throw err;
+          // ending, and `isDeadlineAbort` names it FROM THE ERROR. It used to be
+          // inferred from the clock — `Date.now() < deadline &&` — and that is a
+          // race this suite caught in CI rather than a tidier spelling of the
+          // same test: `AbortSignal.timeout(n)` fires up to a millisecond before
+          // `Date.now()` has advanced `n`, measured here at 3.3% of short waits.
+          // On those, the wait's own deadline read as a platform failure and the
+          // raw `TimeoutError` DOMException reached the caller in place of this
+          // SDK's `TimeoutError` — the documented type, and the one the caller
+          // catches. `builds.wait` already judged it by name for this reason.
+          //
+          // Dropping the clock half also stops a real 401 arriving on the last
+          // poll from being swallowed and reported as a timeout: past the
+          // deadline every error used to be discarded, whatever it was.
+          //
+          // Short of that: a host that cannot be reached answers 503, which is
+          // the ordinary weather of a machine still coming up, and letting it
+          // out would abort the one method whose whole job is to keep asking.
+          // Anything else — a revoked key, a computer that is gone — is not
+          // weather.
+          if (!isDeadlineAbort(err) && !isTransient(err)) throw err;
           delayMs = retryDelay(pollMs, err);
         }
       }
@@ -1190,7 +1123,7 @@ export class Computer {
    */
   async windows(opts: { includeAll?: boolean } & CallOptions = {}): Promise<GuestWindow[]> {
     const data = await this.#t.jsonArray('GET', P.computerAction(this.id, 'windows'), {
-      query: { include: opts.includeAll ? 'all' : undefined },
+      query: { include: P.flag(opts.includeAll, 'includeAll') ? 'all' : undefined },
       signal: opts.signal,
     });
     return data.filter(P.isRecord).map(toGuestWindow);
@@ -1910,7 +1843,7 @@ export class Computer {
   async snapshot(opts: { memory?: boolean; name?: string } & CallOptions = {}): Promise<Snapshot> {
     const path = P.computerAction(this.id, 'snapshots');
     const data = await this.#t.json<Record<string, unknown>>('POST', path, {
-      body: P.snapshotBody(Boolean(opts.memory), opts.name),
+      body: P.snapshotBody(opts.memory, opts.name),
       signal: opts.signal,
     });
     if (!P.isRecord(data) || !data.id) {

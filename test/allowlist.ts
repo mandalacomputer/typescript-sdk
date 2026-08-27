@@ -23,6 +23,19 @@ export const ALLOWED: ReadonlySet<string> = new Set(
       // Schema, and a check of a document against it that stores nothing.
       ['GET', 'templates/schema'],
       ['POST', 'templates/validate'],
+      // The store (platform OPL-3789, OPL-3830). Publish a document under a ref
+      // of your own, read one back, retire one.
+      ['POST', 'templates'],
+      ['GET', 'templates/:namespace/:name'],
+      ['DELETE', 'templates/:namespace/:name'],
+      // Compiling a document into an image (platform OPL-3791, OPL-3794). The
+      // job, its record, and the two halves of watching it — a poll and a
+      // stream.
+      ['POST', 'builds'],
+      ['GET', 'builds'],
+      ['GET', 'builds/:id'],
+      ['GET', 'builds/:id/progress'],
+      ['GET', 'builds/:id/events'],
       ['GET', 'sizes'],
 
       ['GET', 'computers'],
@@ -97,13 +110,11 @@ export const UNIMPLEMENTED: ReadonlySet<string> = new Set([
   // here, and a second, worse OpenAI client inside this SDK would be a
   // maintenance obligation with no user.
   'POST chat/completions',
-  // The template document routes (platform OPL-3568). Listed rather than
-  // wrapped because there is nothing yet to wrap them FOR: no route publishes a
-  // document, so an SDK method that validated one would be a checker for a file
-  // this SDK gives its caller no way to use. They become worth a method with
-  // publish and launch-by-ref, and the gap stays a line somebody has to delete.
-  'GET templates/schema',
-  'POST templates/validate',
+  // The two template document routes were pinned here, behind a comment saying
+  // they "become worth a method with publish and launch-by-ref". Publish shipped
+  // in platform OPL-3789 and launch-by-ref in OPL-3788, so the line became
+  // somebody's to delete and this is it (OPL-3835). Nothing has replaced them:
+  // every route this SDK can reach, it calls.
 ]);
 
 /**
@@ -130,6 +141,21 @@ export const UNIMPLEMENTED: ReadonlySet<string> = new Set([
  */
 export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
   ['GET templates', []],
+  ['GET templates/schema', []],
+  ['POST templates/validate', []],
+  ['POST templates', []],
+  // `version` on both halves of the ref route, and the two mean different
+  // things by omission: the newest on a read, every version on a retire. An
+  // EMPTY one is refused by this SDK before it is sent — see
+  // paths.templateVersion, and the platform defect it exists to be on the right
+  // side of.
+  ['GET templates/:namespace/:name', ['query:version']],
+  ['DELETE templates/:namespace/:name', ['query:version']],
+  ['POST builds', ['query:no_reuse']],
+  ['GET builds', []],
+  ['GET builds/:id', []],
+  ['GET builds/:id/progress', []],
+  ['GET builds/:id/events', []],
   ['GET sizes', []],
 
   ['GET computers', ['query:allow_partial']],
@@ -285,13 +311,33 @@ export function patternFor(path: string): string {
     // already became a parameter is an id, and what follows an id is a literal.
     const prev = out[out.length - 1];
     if (prev === undefined || PATH_PARAMETERS.has(prev)) out.push(seg);
-    else if (prev === 'computers' || prev === 'snapshots') out.push(':id');
+    else if (prev === 'computers' || prev === 'snapshots' || prev === 'builds') out.push(':id');
     else if (prev === 'exec') out.push(':pid');
     else if (prev === 'windows') out.push(':window');
     else out.push(seg);
   }
+  // A template ref's two halves, pinned to a THREE-segment path under
+  // `templates` — which is what keeps the two-segment literals,
+  // `templates/schema` and `templates/validate`, reducing to themselves. The
+  // platform's own patternFor pins them the same way and for the same reason,
+  // and a mirror that reduced them differently would compare two different
+  // tables and call them equal.
+  //
+  // After the loop rather than inside it, because the rule is about the path's
+  // LENGTH: reading it per segment means deciding what `templates/schema` is
+  // before knowing whether a third segment follows.
+  //
+  // Two placeholders and not one: a namespace is an account id and a name is
+  // not, so a table entry reading `templates/:id/:id` would look like a typo.
+  if (out[0] === 'templates' && out.length === 3) return `templates/:namespace/:name`;
   return out.join('/');
 }
 
 /** The placeholders {@link patternFor} produces — path parameters, not request ones. */
-const PATH_PARAMETERS: ReadonlySet<string> = new Set([':id', ':pid', ':window']);
+const PATH_PARAMETERS: ReadonlySet<string> = new Set([
+  ':id',
+  ':pid',
+  ':window',
+  ':namespace',
+  ':name',
+]);

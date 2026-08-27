@@ -35,6 +35,27 @@ import { anyRoute, BASE, type Call, recorder } from './harness.js';
  */
 async function exerciseEverything(client: Client): Promise<void> {
   await client.templates.list();
+  // The document format, and the store on top of it (platform OPL-3568,
+  // OPL-3789, OPL-3830). Both spellings of the ref routes, because `version` is
+  // a parameter like any other and a call that never sends one is the gap the
+  // parameter half of this test exists to see.
+  await client.templates.schema();
+  await client.templates.validate('apiVersion: mandala/v1');
+  await client.templates.publish('apiVersion: mandala/v1');
+  await client.templates.get('acc-1', 'devbox');
+  await client.templates.get('acc-1', 'devbox', { version: '1.0.0' });
+  await client.templates.retire('acc-1', 'devbox', { version: '1.0.0' });
+  await client.templates.retire('acc-1', 'devbox');
+
+  // Compiling one (platform OPL-3791, OPL-3794). `noReuse` on one of the two,
+  // for the same reason.
+  await client.builds.start('apiVersion: mandala/v1');
+  await client.builds.start('apiVersion: mandala/v1', { noReuse: true });
+  await client.builds.list();
+  await client.builds.get('bld-1');
+  await client.builds.progress('bld-1');
+  for await (const _ of client.builds.events('bld-1')) break;
+
   await client.sizes.list();
   await client.computers.list();
   await client.computers.list({ allowPartial: true });

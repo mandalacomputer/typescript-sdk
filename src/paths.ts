@@ -20,6 +20,18 @@ import type { Query } from './transport.js';
 // --- paths ----------------------------------------------------------------
 
 export const TEMPLATES = 'templates';
+/** The JSON Schema for a `mandala/v1` document (platform OPL-3568). */
+export const TEMPLATE_SCHEMA = 'templates/schema';
+/** Check a document without publishing it. Side-effect free, and claims no ref. */
+export const TEMPLATE_VALIDATE = 'templates/validate';
+/**
+ * Every build this account has started (platform OPL-3791).
+ *
+ * A collection, like {@link MOVES} and for the same reason: a build is a job
+ * rather than a property of a computer, and it outlives the request that
+ * started it.
+ */
+export const BUILDS = 'builds';
 export const SIZES = 'sizes';
 export const COMPUTERS = 'computers';
 export const SNAPSHOTS = 'snapshots';
@@ -55,6 +67,15 @@ export const RETENTION = 'retention';
  * it. Nothing in either case says the id was missing.
  */
 function pathId(id: string, what: string): string {
+  // A PRIMITIVE string, checked before anything else. Every guard below compares
+  // or encodes, and both let a boxed String through: `new String('..') === '..'`
+  // is false, so the dot check misses, and `encodeURIComponent` then emits `..`
+  // — the exact traversal this function exists to stop. These types are erased
+  // at runtime and this package is called from JavaScript, so the annotation is
+  // not the check (adversarial review, OPL-3835).
+  if (typeof id !== 'string') {
+    throw new ValidationError(`${what} must be a string (got ${typeof id})`);
+  }
   if (!id) throw new ValidationError(`${what} must not be empty`);
   // URL parsers normalise both raw and percent-encoded dot segments before a
   // request is sent. Letting either through can therefore turn, for example,
@@ -127,6 +148,123 @@ export const execHandle = (id: string, pid: number): string => {
 /** One window on the desktop (OPL-3583). The id is `0x2600003`-shaped. */
 export const windowPath = (id: string, windowId: string): string =>
   `${computer(id)}/windows/${pathId(windowId, 'window id')}`;
+
+/**
+ * One published template, by the two halves of its ref.
+ *
+ * Two segments and not one, because that is the shape of the route: the
+ * platform reduces `templates/<a>/<b>` to `templates/:namespace/:name`, so a
+ * ref handed over whole — `acc-1/devbox@1.0.0` — would be percent-encoded into
+ * a single segment and reach a route that does not exist. The version is a
+ * QUERY parameter on this path, not part of it; see {@link templateVersion}.
+ */
+export const templateRef = (namespace: string, name: string): string =>
+  `${TEMPLATES}/${pathId(namespace, 'namespace')}/${pathId(name, 'template name')}`;
+
+/**
+ * The `version` query parameter, refused when it is not a version.
+ *
+ * The platform answers 400 for one that is empty or malformed rather than
+ * defaulting, and that refusal exists because of a real defect: `?version=` —
+ * which is what most clients serialise for an unset optional string — read as
+ * "no version was named" and retired an entire template. This SDK cannot send
+ * that: `undefined` omits the parameter, and anything else has to be a version.
+ *
+ * Checked here rather than left to the platform because the two answers are not
+ * interchangeable on a retire. Omitting the parameter means EVERY version; a
+ * caller who meant one version and passed an empty string would, without the
+ * platform's refusal, have retired the lot.
+ */
+export function templateVersion(version: string | undefined): Query {
+  if (version === undefined) return {};
+  // A PRIMITIVE string, and the validated value is what goes on. Validating a
+  // value and then returning the ORIGINAL is a hole wherever coercion happens
+  // twice: `RegExp.test` coerces, and so does the transport's
+  // `searchParams.set(k, String(v))`. An object whose `toString()` answers
+  // `1.2.3` and then `''` therefore passes this check and sends `?version=` —
+  // which on a retire is the whole-name, irreversible branch this function
+  // exists to make unreachable (adversarial review, OPL-3835).
+  if (typeof version !== 'string') {
+    throw new ValidationError(
+      `version must be a string (got ${typeof version}). Omit it entirely to name the whole template.`,
+    );
+  }
+  if (!/^(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})$/.test(version)) {
+    throw new ValidationError(
+      `version must be MAJOR.MINOR.PATCH with no leading zeros (got ${JSON.stringify(version)}). ` +
+        `Omit it entirely to name the whole template.`,
+    );
+  }
+  // The checked primitive, not the argument. `${version}` is what makes that
+  // true even if the argument was a boxed String that passed `typeof` — it
+  // cannot, but the value that leaves here should not depend on that.
+  return { version: `${version}` };
+}
+
+/**
+ * The document a publish, a validate or a build sends.
+ *
+ * Raw bytes, not a JSON envelope: the platform reads JSON or YAML off the body
+ * itself, so a wrapper would be a document the validator never sees. Refused
+ * when empty for the reason {@link pathId} refuses an empty id — the platform
+ * answers 400 for it, and that is a round trip that never had to happen.
+ */
+export function templateDocument(document: string): string {
+  if (typeof document !== 'string' || !document.trim()) {
+    throw new ValidationError('document must be a non-empty template document, as JSON or YAML');
+  }
+  return document;
+}
+
+/**
+ * One optional boolean option, refused when it is not a boolean.
+ *
+ * Truthiness is the wrong test for every flag on this surface, and the reason
+ * is that the annotation is erased: this package is called from JavaScript and
+ * through `any`, so `"false"`, `0`, `1` and `new Boolean(false)` all arrive.
+ * Three of those four are TRUTHY. `new Boolean(false)` is an object; the string
+ * `"false"` is non-empty; `1` is 1. So `opts.flag ? on : off` reads three
+ * different ways of writing "no" as "yes", and does it silently.
+ *
+ * Named `what` after the CALLER'S spelling — `allowPartial`, not
+ * `allow_partial` — because the message is read by whoever typed it.
+ *
+ * Undefined stays undefined: every one of these is genuinely optional, and
+ * "omitted" is a third state that the parameters below map to their own
+ * defaults (adversarial review and the sweep it prompted, OPL-3835).
+ */
+export function flag(v: boolean | undefined, what: string): boolean | undefined {
+  if (v === undefined) return undefined;
+  // A PRIMITIVE boolean. `typeof new Boolean(false)` is `'object'`.
+  if (typeof v !== 'boolean') {
+    throw new ValidationError(`${what} must be a boolean (got ${typeof v})`);
+  }
+  return v;
+}
+
+/**
+ * The `no_reuse` query parameter, refused when it is not a boolean.
+ *
+ * lib/apidoc gives this parameter `enum: ['true']` and server/buildjob.go
+ * compares it to `"true"`, so `true` is the only value that means anything and
+ * `false` is omitted rather than sent.
+ *
+ * Getting it wrong is expensive rather than merely wrong: `no_reuse=true` skips
+ * the image an identical document already built, so it spends minutes copying a
+ * multi-gigabyte base image again and takes another build out of the account's
+ * daily allowance — to reach the same image reuse would have handed back for
+ * free. Measured on the live platform at 14.2s against 0.3s. That is the
+ * opposite of what a caller passing `"false"` was asking for (adversarial
+ * review, OPL-3835).
+ */
+export function noReuse(v: boolean | undefined): Query {
+  return flag(v, 'noReuse') ? { no_reuse: 'true' } : {};
+}
+
+export const build = (id: string): string => `${BUILDS}/${pathId(id, 'build id')}`;
+
+/** progress | events */
+export const buildAction = (id: string, action: string): string => `${build(id)}/${action}`;
 
 export const snapshot = (id: string): string => `snapshots/${pathId(id, 'snapshot id')}`;
 
@@ -212,7 +350,11 @@ export type CreateArgs = {
  * the four it stands in for is refused here.
  */
 export function createBody(args: CreateArgs): Json {
-  const { start = true, size, template, cpu, ramMb, diskGb, name, resolution } = args;
+  const { size, template, cpu, ramMb, diskGb, name, resolution } = args;
+  // Defaulted after validation, not by destructuring: `start = true` fills in
+  // only for `undefined`, so a `"false"` kept its own shape and went onto the
+  // wire as a string where the platform expects a boolean.
+  const start = flag(args.start, 'start') ?? true;
   if (size !== undefined && [template, cpu, ramMb, diskGb].some((v) => v !== undefined)) {
     throw new ValidationError(
       'size already names a template and a shape; send size alone, ' +
@@ -485,8 +627,11 @@ export function execBody(args: ExecArgs): Json {
     }
     body.timeout_s = args.timeoutS;
   }
-  if (args.desktop) body.session = 'desktop';
-  if (args.background) body.background = true;
+  // `background` decides whether this call ANSWERS with the command's output or
+  // with a pid, and `desktop` decides which session it runs in. Both change what
+  // the caller gets back, so neither is read by truthiness.
+  if (flag(args.desktop, 'desktop')) body.session = 'desktop';
+  if (flag(args.background, 'background')) body.background = true;
   if (args.cwd !== undefined) body.cwd = absoluteGuestPath(args.cwd, 'cwd');
   // An empty object is omitted rather than sent: the platform reads no `env`
   // and an empty one the same way, and sending it puts a key on the wire that
@@ -814,7 +959,7 @@ export function screenshotQuery(width?: number, fresh?: boolean): Query | undefi
     }
     query.w = width;
   }
-  if (fresh) {
+  if (flag(fresh, 'fresh')) {
     // Refused rather than sent, because the platform takes it and ignores it.
     // Its handler branches on `w` first and returns the thumbnail before it
     // ever reads `fresh` — and that thumbnail is built off the *cached* frame
@@ -847,7 +992,13 @@ export function screenshotQuery(width?: number, fresh?: boolean): Query | undefi
  * being asked politely, which is the failure a caller reaching for `force`
  * already tried once.
  */
-export const stopQuery = (force?: boolean): Query => (force ? { force: 'true' } : {});
+/**
+ * `force` pulls the power rather than asking the guest to come down, so a
+ * `"false"` read as true is an ungraceful stop of a machine whose caller
+ * explicitly asked for the graceful one. Validated, like every flag here.
+ */
+export const stopQuery = (force?: boolean): Query =>
+  flag(force, 'force') ? { force: 'true' } : {};
 
 // --- usage ----------------------------------------------------------------
 
@@ -943,9 +1094,15 @@ export function windowBody(args: {
  * one: it can only come from a caller building the name out of something that
  * turned out to be empty, and a snapshot called `"  "` is not what they meant.
  */
-export function snapshotBody(memory: boolean, name?: string): Json {
+/**
+ * `memory` captures live RAM as well as disk, which is a slower snapshot and a
+ * much larger one. Taken raw and validated here rather than `Boolean(...)`d at
+ * the call site: that coercion was the flag's whole check, and it read
+ * `"false"` as yes.
+ */
+export function snapshotBody(memory: boolean | undefined, name?: string): Json {
   if (name !== undefined && !name.trim()) throw new ValidationError('name must not be empty');
-  return omitUndefined({ memory, name });
+  return omitUndefined({ memory: flag(memory, 'memory') ?? false, name });
 }
 
 export function scheduleBody(args: {
@@ -979,7 +1136,13 @@ export function scheduleBody(args: {
  * to — which is precisely the race the interlock exists for.
  */
 export function deleteQuery(opts: { deleteSnapshots?: boolean; expect?: string }): Query {
-  if (!opts.deleteSnapshots) return {};
+  // The worst instance of the coercion class on this surface, and the reason
+  // the sweep that missed it was not thorough enough: `deleteSnapshots:
+  // "false"` is falsy to nobody and truthy to `!`, so a caller who wrote the
+  // word FALSE — and who has a fingerprint to hand, because they pass one
+  // every time — destroyed every snapshot the computer had. There is no
+  // undoing that (adversarial review, second pass, OPL-3835).
+  if (!flag(opts.deleteSnapshots, 'deleteSnapshots')) return {};
   if (!opts.expect) {
     throw new ValidationError(
       'refusing to purge snapshots without a fingerprint: call holdings() on this computer, ' +
