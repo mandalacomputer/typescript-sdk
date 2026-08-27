@@ -12,7 +12,26 @@
 import { MandalaError } from './errors.js';
 import { isRecord } from './paths.js';
 
-const str = (v: unknown, fallback = ''): string => (v == null ? fallback : String(v));
+/**
+ * A string from a payload, with a fallback for an absent one.
+ *
+ * `String()` THROWS rather than coercing on a value with no primitive
+ * conversion — `{"toString": "x"}` off the wire is an object whose `toString`
+ * is not callable, and `Object.create(null)` has none at all. Both are
+ * `TypeError` out of the middle of a decode, which is a crash where this file's
+ * whole contract is that a payload nobody checked is preserved rather than
+ * rejected: one such field on one row of a listing took down the listing
+ * (OPL-3850, found while testing the coercion fixes). The fallback answers
+ * instead, and `raw` still carries the value that could not be read.
+ */
+const str = (v: unknown, fallback = ''): string => {
+  if (v == null) return fallback;
+  try {
+    return String(v);
+  } catch {
+    return fallback;
+  }
+};
 /**
  * A number from a payload, with a fallback for anything that is not one.
  *
@@ -132,9 +151,17 @@ export const caveat = (v: unknown): boolean => {
  * raw field hands back `null` too, against a type that says it cannot, and the
  * `=== undefined` check the caller wrote to find out whether the platform
  * answered is false for it.
+ *
+ * A NUMBER OR THE TEXT OF ONE, and nothing else. `Number()` is a coercion
+ * rather than a parser: `Number([])` is 0 and `Number([7])` is 7, so an array
+ * walked straight through the finiteness test written to catch garbage and came
+ * out the far side as a coordinate — `{known: true, x: [], y: [7]}` reported the
+ * pointer at `(0, 7)` (Codex adversarial review, OPL-3850). Python raises on
+ * `int([])` and answers nothing, which is the same answer this now gives.
  */
 export const count = (v: unknown): number | undefined => {
   if (v == null || v === '') return undefined;
+  if (typeof v !== 'number' && typeof v !== 'string') return undefined;
   const n = Number(v);
   return Number.isFinite(n) ? n : undefined;
 };
@@ -922,6 +949,22 @@ export type Snapshot = {
  * moment the platform adds a `created_at` or a `kind` to it, and filtering those
  * out drops precisely the markers saying an answer is short.
  */
+/**
+ * Whether a snapshot ROW belongs to the computer named.
+ *
+ * The raw field against the id, rather than the decoded `computerId`, for the
+ * reason {@link terminalStatus} gives about a status: `str()` is a coercion and
+ * a coercion cannot decide identity. `String(['vm-1'])` is `'vm-1'`, because an
+ * array of one joins to its element — so a row whose `computer_id` arrived as
+ * `["vm-1"]` matched a filter for `vm-1` and was handed to a caller who asked
+ * for their own snapshots, on a listing usually read just before an
+ * irreversible delete (Codex adversarial review, OPL-3850). Python is safe from
+ * this by accident of formatting: `str(["vm-1"])` is `"['vm-1']"` and matches
+ * nothing. Accident is not agreement, so this is explicit.
+ */
+export const snapshotBelongsTo = (d: Record<string, unknown>, id: string): boolean =>
+  d.computer_id === id;
+
 export const isUnreachableStub = (d: Record<string, unknown>): boolean => {
   if ('computer_id' in d) return false;
   const w = wire(d.unreachable);
@@ -1037,10 +1080,21 @@ export type Move = {
 /** The move states a disk copy is still running in. */
 const MOVE_LIVE = ['staging', 'moving', 'resizing'];
 
-const liveMove = (v: unknown, state: string): boolean => {
+/**
+ * Whether a move is still running, where the flag alone cannot say.
+ *
+ * Reads the RAW state and requires a string, for the reason
+ * {@link terminalStatus} gives one route over: `String(['moving'])` is
+ * `'moving'`, so a state that arrived as an array of one was classified as a
+ * live move and `waitForMove` polled the garbage to its deadline (Codex
+ * adversarial review, OPL-3850). The coerced `state` is fine to REPORT and not
+ * to decide on — which is the distinction this file already draws for a build
+ * status and did not draw here.
+ */
+const liveMove = (v: unknown, state: unknown): boolean => {
   const w = wire(v);
   if (w === WIRE.TRUE || w === WIRE.FALSE) return w === WIRE.TRUE;
-  return MOVE_LIVE.includes(state);
+  return typeof state === 'string' && MOVE_LIVE.includes(state);
 };
 
 export function toMove(d: Record<string, unknown>): Move {
@@ -1057,7 +1111,7 @@ export function toMove(d: Record<string, unknown>): Move {
     // answerable without the other field, so only a value the wire actually gave
     // overrides the state — the Python SDK's reading, and its review found the
     // absent case the hard way.
-    live: liveMove(d.live, state),
+    live: liveMove(d.live, d.state),
     // Absent stays absent rather than becoming 0, because the platform omits a
     // dimension the move is NOT changing — `ram_mb: 0` would read as a resize to
     // nothing, on the field this whole operation exists to grow.
@@ -1175,14 +1229,21 @@ export type BackgroundExec = {
  *
  * AFFIRMATIVE EVIDENCE TO STOP. `false` here is the claim that the command has
  * exited, and the README's loop breaks on it — so an absent, null or unreadable
- * flag must not make it. Absent and null fall back to whether an exit code
- * arrived, which is what "running" means in the first place; a value present and
- * unreadable stays running, because ending a poll on a field nobody could read
- * abandons a command with its output still queued and no way to fetch it again.
+ * flag must not make that claim on the platform's behalf.
+ *
+ * All three fall back to the EXIT CODE instead, which is what "running" means in
+ * the first place. An unreadable flag was read as running outright at first, and
+ * that is the one reading that can never end: `{running: "maybe", exit_code: 0}`
+ * is a command that has plainly exited, reported as running forever, and the
+ * loop in this package's README breaks on `running` and so never breaks (Codex
+ * adversarial review, OPL-3850). With no exit code the fallback still answers
+ * running, which is the property the first reading was reaching for — a poll is
+ * not ended on a field nobody could read, abandoning a command with its output
+ * still queued.
  */
 const stillRunning = (d: Record<string, unknown>): boolean => {
   const w = wire(d.running);
-  if (w === WIRE.TRUE || w === WIRE.MALFORMED) return true;
+  if (w === WIRE.TRUE) return true;
   if (w === WIRE.FALSE) return false;
   return d.exit_code == null || d.exit_code === '';
 };

@@ -19,6 +19,7 @@ import {
   buildContradiction,
   isBuildTerminal,
   isUnreachableStub,
+  snapshotBelongsTo,
   toBuildProgress,
   toMove,
   toPublishedTemplate,
@@ -292,14 +293,16 @@ export class Snapshots {
     const all = items.map(toSnapshot);
     const id = opts.computerId;
     return {
-      // THE ROW, not the decoded flag. `unreachable` is the marker saying this
-      // listing is short, and filtering it out reports a confident count over an
-      // incomplete answer — but a FULL row carrying the flag is a real snapshot
-      // belonging to a real computer, and admitting one hands somebody else's
-      // snapshots to a caller who asked for their own, from a listing usually
-      // read just before an irreversible delete (Codex review, OPL-3850). Only
-      // the row's shape tells the two apart.
-      items: id ? all.filter((s) => s.computerId === id || isUnreachableStub(s.raw)) : all,
+      // THE ROW on both halves, not the decoded fields. `unreachable` is the
+      // marker saying this listing is short, and filtering it out reports a
+      // confident count over an incomplete answer — but a FULL row carrying the
+      // flag is a real snapshot belonging to a real computer, and admitting one
+      // hands somebody else's snapshots to a caller who asked for their own,
+      // from a listing usually read just before an irreversible delete
+      // (OPL-3850). Only the row's shape tells the two apart, and only the raw
+      // `computer_id` decides which computer it is: the decoded one has been
+      // through `str()`, and `String(['vm-1'])` is `'vm-1'`.
+      items: id ? all.filter((s) => snapshotBelongsTo(s.raw, id) || isUnreachableStub(s.raw)) : all,
       incomplete,
     };
   }

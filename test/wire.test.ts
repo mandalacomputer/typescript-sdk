@@ -148,6 +148,16 @@ describe('a claim needs the wire to have made it', () => {
       ['left', 'top'],
       [{}, []],
       [12, undefined],
+      // Arrays ALONE and paired with a valid coordinate. An array of one
+      // coerces to its element and an empty one to zero, so `[]`/`[7]` walked
+      // through a finiteness test and came out as `(0, 7)` while a case pairing
+      // an array with an object still passed (Codex adversarial review).
+      [[], [7]],
+      [[7], []],
+      [[12], 34],
+      [12, [34]],
+      [[], []],
+      [true, false],
     ] as const) {
       const { client: c } = client((call) =>
         call.path.endsWith('/input') ? json({ known: true, x, y }) : anyRoute(call),
@@ -284,6 +294,40 @@ describe('more is a switch, not a caveat', () => {
     expect((await computer.execPoll(4242)).running).toBe(true);
   });
 
+  /**
+   * AND STOPS ANYWAY ONCE AN EXIT CODE ARRIVES. The reading above, applied
+   * without this one, is the only reading that can never end: the README's loop
+   * breaks on `running`, so `{running: "maybe", exit_code: 0}` — a command that
+   * has plainly exited — polls forever (Codex adversarial review, OPL-3850).
+   *
+   * The cross-product is the test. Varying `running` with no exit code, and the
+   * exit code against a readable `running`, both passed while the pair that
+   * matters did not exist.
+   */
+  it('lets an exit code outrank a `running` nobody can read', async () => {
+    for (const [payload, expected] of [
+      [{ pid: 42, running: 'maybe' }, true],
+      [{ pid: 42, running: 'maybe', exit_code: '' }, true],
+      [{ pid: 42, running: 'maybe', exit_code: null }, true],
+      [{ pid: 42, running: 'maybe', exit_code: 0 }, false],
+      [{ pid: 42, running: 'maybe', exit_code: 137 }, false],
+      [{ pid: 42, running: {}, exit_code: 0 }, false],
+      // A readable `running` still wins over the exit code either way: the
+      // fallback is for the values that said nothing, not for every value.
+      [{ pid: 42, running: true, exit_code: 0 }, true],
+      [{ pid: 42, running: false }, false],
+    ] as const) {
+      const { client: c } = client((call) =>
+        /\/exec\/\d+$/.test(call.path) ? json(payload) : anyRoute(call),
+      );
+      const computer = await c.computers.get('vm-1');
+      const status = await computer.execPoll(42);
+      expect(`${JSON.stringify(payload)}: ${status.running}`).toBe(
+        `${JSON.stringify(payload)}: ${expected}`,
+      );
+    }
+  });
+
   it('still falls back to the exit code where the flag was never sent', async () => {
     // Absent and null are a host that said nothing, not a host saying no, and
     // what "running" means in the first place is that no exit code has arrived.
@@ -329,6 +373,22 @@ describe('the two fields whose answer needs a second one', () => {
       );
       const move = (await c.moves.list())[0];
       expect(`${state}: ${move?.live}`).toBe(`${state}: ${expected}`);
+    }
+  });
+
+  it('does not read a state it cannot classify as a live move', async () => {
+    // `String(['moving'])` is `'moving'`, because an array of one joins to its
+    // element — so a coerced state classified as live and `waitForMove` polled
+    // the garbage to its deadline (Codex adversarial review, OPL-3850). The
+    // state is still REPORTED coerced; it is not decided on.
+    for (const state of [['moving'], ['staging'], 42, {}, null, true]) {
+      const { client: c } = client((call) =>
+        call.path === '/moves'
+          ? json({ moves: [{ computer_id: 'vm-1', state, live: 'maybe' }] })
+          : anyRoute(call),
+      );
+      const move = (await c.moves.list())[0];
+      expect(`${JSON.stringify(state)}: ${move?.live}`).toBe(`${JSON.stringify(state)}: false`);
     }
   });
 
@@ -413,6 +473,36 @@ describe('the two fields whose answer needs a second one', () => {
       true,
       'vm-other',
     ]);
+  });
+
+  it('does not match a computer id that only coerces to the one asked for', async () => {
+    // The other coercion, on the other half of the same filter. The tests above
+    // varied `unreachable` and never the type of `computer_id`, so a row whose
+    // id arrived as `["vm-1"]` was admitted into vm-1's listing — a listing
+    // usually read just before an irreversible delete (Codex adversarial
+    // review, OPL-3850).
+    for (const id of [['vm-1'], [['vm-1']], { toString: 'vm-1' }, null, 0]) {
+      const { client: c } = client((call) =>
+        call.path === '/snapshots'
+          ? json([{ ...SNAPSHOT, id: 'snap-foreign', computer_id: id, state: 'durable' }])
+          : anyRoute(call),
+      );
+      const listed = await c.snapshots.list({ computerId: 'vm-1' });
+      expect(`${JSON.stringify(id)}: ${listed.length}`).toBe(`${JSON.stringify(id)}: 0`);
+    }
+  });
+
+  it('still matches the id the platform actually sent', async () => {
+    const { client: c } = client((call) =>
+      call.path === '/snapshots'
+        ? json([
+            { ...SNAPSHOT, id: 'snap-mine', computer_id: 'vm-1' },
+            { ...SNAPSHOT, id: 'snap-theirs', computer_id: 'vm-other' },
+          ])
+        : anyRoute(call),
+    );
+    const listed = await c.snapshots.list({ computerId: 'vm-1' });
+    expect(listed.map((s) => s.id)).toEqual(['snap-mine']);
   });
 
   it('keeps a placeholder the platform added fields to', async () => {
