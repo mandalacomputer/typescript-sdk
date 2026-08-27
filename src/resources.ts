@@ -16,6 +16,7 @@ import type {
   UsageReport,
 } from './models.js';
 import {
+  buildContradiction,
   isBuildTerminal,
   toBuildProgress,
   toMove,
@@ -664,6 +665,14 @@ export class Builds {
         continue;
       }
       const now = toBuildProgress(ev.data);
+      // EVERY record, before branching on the event name. Checked only on the
+      // final frame, a `progress` carrying `{done: true, status: "running"}`
+      // was yielded to the caller and the stream then reported "ended without a
+      // final event" — a record that disagrees with itself, handed over as
+      // news. The Python half checks each event and this one did not
+      // (adversarial review, OPL-3835).
+      const contradiction = buildContradiction(now);
+      if (contradiction !== null) throw new MandalaError(contradiction);
       if (ev.event === 'done') {
         // A `done` frame has to actually BE one. The decoders in models.ts
         // coerce rather than refuse — deliberately, and everywhere on this
@@ -766,16 +775,9 @@ export class Builds {
         // be finished while its status still says `running` contradicts itself,
         // and returning it reports an active build as a settled one. Terminal
         // means both (adversarial review, second pass, OPL-3835).
-        if (now.done) {
-          if (!isBuildTerminal(now)) {
-            throw new MandalaError(
-              `build ${id} reports done with status ${JSON.stringify(now.status)}, which is ` +
-                `neither "succeeded" nor "failed"; the fleet's answer for this build is ` +
-                `inconsistent and nothing here can say what became of it`,
-            );
-          }
-          return now;
-        }
+        const contradiction = buildContradiction(now);
+        if (contradiction !== null) throw new MandalaError(contradiction);
+        if (now.done) return now;
       } catch (err) {
         if (signal?.aborted) throw err;
         // This wait's own timer firing inside a poll, which is not a failed
