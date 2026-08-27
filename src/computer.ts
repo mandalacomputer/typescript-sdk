@@ -30,9 +30,9 @@ import type {
   VncConnect,
 } from './models.js';
 import {
-  bool,
   count,
   num,
+  said,
   toBackgroundExec,
   toExecResult,
   toGuestWindow,
@@ -1350,9 +1350,19 @@ export class Computer {
     // `known` is checked rather than assumed because the coordinates are still
     // present and still zero when it is false, which is indistinguishable from
     // the corner of the screen — the exact wrong answer to give a caller about
-    // to move relative to it.
-    if (!bool(res.known)) return undefined;
-    return { x: num(res.x), y: num(res.y) };
+    // to move relative to it. TRUE only, for that same reason: a flag nobody
+    // could read is not somebody saying where the pointer is (OPL-3850).
+    if (!said(res.known)) return undefined;
+    // And a `known` of true with a coordinate missing or unusable is the same
+    // as unknown. `num`'s fallback answers 0 for a null, an empty string or an
+    // object, which is that corner of the screen again — arrived at through the
+    // other field, past the check written to prevent it (Codex review,
+    // OPL-3850). Truncated the way the Python SDK's `int()` truncates, so one
+    // payload cannot read two ways across the two clients.
+    const x = count(res.x);
+    const y = count(res.y);
+    if (x === undefined || y === undefined) return undefined;
+    return { x: Math.trunc(x), y: Math.trunc(y) };
   }
 
   // --- the guest ------------------------------------------------------

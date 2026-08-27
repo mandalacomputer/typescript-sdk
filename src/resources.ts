@@ -18,6 +18,7 @@ import type {
 import {
   buildContradiction,
   isBuildTerminal,
+  isUnreachableStub,
   toBuildProgress,
   toMove,
   toPublishedTemplate,
@@ -291,7 +292,14 @@ export class Snapshots {
     const all = items.map(toSnapshot);
     const id = opts.computerId;
     return {
-      items: id ? all.filter((s) => s.computerId === id || s.unreachable) : all,
+      // THE ROW, not the decoded flag. `unreachable` is the marker saying this
+      // listing is short, and filtering it out reports a confident count over an
+      // incomplete answer — but a FULL row carrying the flag is a real snapshot
+      // belonging to a real computer, and admitting one hands somebody else's
+      // snapshots to a caller who asked for their own, from a listing usually
+      // read just before an irreversible delete (Codex review, OPL-3850). Only
+      // the row's shape tells the two apart.
+      items: id ? all.filter((s) => s.computerId === id || isUnreachableStub(s.raw)) : all,
       incomplete,
     };
   }

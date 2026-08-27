@@ -781,12 +781,17 @@ describe('the pointer', () => {
     expect(await computer.cursorPosition()).toEqual({ x: 12, y: 34 });
   });
 
-  it('does not expose NaN when a known position contains malformed coordinates', async () => {
+  it('answers unknown when a known position contains malformed coordinates', async () => {
+    // Not NaN, and no longer `{x: 0, y: 0}` either. Zero is the corner of the
+    // screen, which is the one answer this method exists to avoid inventing —
+    // reaching it through the coordinate rather than through `known` is the same
+    // wrong answer past the check written to prevent it (Codex review,
+    // OPL-3850). The Python SDK refuses the same payload.
     const { client: c } = client((call) =>
       call.path.endsWith('/input') ? json({ known: true, x: 'left', y: {} }) : anyRoute(call),
     );
     const computer = await c.computers.get('vm-1');
-    expect(await computer.cursorPosition()).toEqual({ x: 0, y: 0 });
+    expect(await computer.cursorPosition()).toBeUndefined();
   });
 });
 
