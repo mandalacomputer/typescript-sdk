@@ -1123,7 +1123,7 @@ export class Computer {
    */
   async windows(opts: { includeAll?: boolean } & CallOptions = {}): Promise<GuestWindow[]> {
     const data = await this.#t.jsonArray('GET', P.computerAction(this.id, 'windows'), {
-      query: { include: opts.includeAll ? 'all' : undefined },
+      query: { include: P.flag(opts.includeAll, 'includeAll') ? 'all' : undefined },
       signal: opts.signal,
     });
     return data.filter(P.isRecord).map(toGuestWindow);

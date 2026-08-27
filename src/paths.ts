@@ -217,37 +217,48 @@ export function templateDocument(document: string): string {
 }
 
 /**
+ * One optional boolean option, refused when it is not a boolean.
+ *
+ * Truthiness is the wrong test for every flag on this surface, and the reason
+ * is that the annotation is erased: this package is called from JavaScript and
+ * through `any`, so `"false"`, `0`, `1` and `new Boolean(false)` all arrive.
+ * Three of those four are TRUTHY. `new Boolean(false)` is an object; the string
+ * `"false"` is non-empty; `1` is 1. So `opts.flag ? on : off` reads three
+ * different ways of writing "no" as "yes", and does it silently.
+ *
+ * Named `what` after the CALLER'S spelling — `allowPartial`, not
+ * `allow_partial` — because the message is read by whoever typed it.
+ *
+ * Undefined stays undefined: every one of these is genuinely optional, and
+ * "omitted" is a third state that the parameters below map to their own
+ * defaults (adversarial review and the sweep it prompted, OPL-3835).
+ */
+export function flag(v: boolean | undefined, what: string): boolean | undefined {
+  if (v === undefined) return undefined;
+  // A PRIMITIVE boolean. `typeof new Boolean(false)` is `'object'`.
+  if (typeof v !== 'boolean') {
+    throw new ValidationError(`${what} must be a boolean (got ${typeof v})`);
+  }
+  return v;
+}
+
+/**
  * The `no_reuse` query parameter, refused when it is not a boolean.
  *
- * Truthiness is the wrong test for this one. lib/apidoc gives the parameter
- * `enum: ['true']` and server/buildjob.go compares it to `"true"`, so `true` is
- * the only value that means anything — but a caller reaching this from
- * JavaScript, or through an `any`, can pass `"false"`, `0` or a boxed Boolean,
- * and every one of those is truthy or falsy in a way that has nothing to do
- * with what they meant. `new Boolean(false)` is truthy; the string `"false"` is
- * truthy; `1` is truthy.
+ * lib/apidoc gives this parameter `enum: ['true']` and server/buildjob.go
+ * compares it to `"true"`, so `true` is the only value that means anything and
+ * `false` is omitted rather than sent.
  *
  * Getting it wrong is expensive rather than merely wrong: `no_reuse=true` skips
  * the image an identical document already built, so it spends minutes copying a
  * multi-gigabyte base image again and takes another build out of the account's
  * daily allowance — to reach the same image reuse would have handed back for
- * free. That is the opposite of what a caller passing `"false"` was asking for
- * (adversarial review, OPL-3835).
- *
- * Omitted rather than sent as `false`, because `false` is not a value the
- * reference admits.
+ * free. Measured on the live platform at 14.2s against 0.3s. That is the
+ * opposite of what a caller passing `"false"` was asking for (adversarial
+ * review, OPL-3835).
  */
 export function noReuse(v: boolean | undefined): Query {
-  if (v === undefined) return {};
-  // A PRIMITIVE boolean. `typeof new Boolean(false)` is `'object'`, and the
-  // annotation is erased at runtime, so this is the check and not the types.
-  if (typeof v !== 'boolean') {
-    throw new ValidationError(
-      `noReuse must be a boolean (got ${typeof v}). Omit it entirely to let an identical ` +
-        `document reuse the image it already built.`,
-    );
-  }
-  return v ? { no_reuse: 'true' } : {};
+  return flag(v, 'noReuse') ? { no_reuse: 'true' } : {};
 }
 
 export const build = (id: string): string => `${BUILDS}/${pathId(id, 'build id')}`;

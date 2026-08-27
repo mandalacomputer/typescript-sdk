@@ -325,9 +325,31 @@ export type TemplateBuild = {
   raw: Record<string, unknown>;
 };
 
+/**
+ * A build's own id, refused when the record does not carry one.
+ *
+ * The tier this surface was missing. `.filter(isRecord)` drops an element that
+ * is not a record at all — deliberately, and http.test.ts pins it — but a
+ * record whose required identity is absent is the OTHER case, and the SDK
+ * already had an answer for it: `computerRecord` throws a named,
+ * route-specific error rather than letting an empty id reach a path builder and
+ * fail somewhere else entirely.
+ *
+ * The build decoders coerced instead, so `toTemplateBuild({})` answered a
+ * well-formed build with an empty id, and `builds.list` turned schema drift
+ * into a shorter inventory that looked complete (adversarial review,
+ * OPL-3835). Every build record the live platform sends carries `id`; this only
+ * fires on one that does not.
+ */
+const buildId = (d: Record<string, unknown>, what: string): string => {
+  const id = str(d.id);
+  if (!id) throw new MandalaError(`expected ${what} to carry an id`);
+  return id;
+};
+
 export function toTemplateBuild(d: Record<string, unknown>): TemplateBuild {
   return {
-    id: str(d.id),
+    id: buildId(d, 'a build'),
     ref: str(d.ref),
     status: str(d.status),
     error: str(d.error),
@@ -422,7 +444,7 @@ export type BuildProgress = {
 
 export function toBuildProgress(d: Record<string, unknown>): BuildProgress {
   return {
-    id: str(d.id),
+    id: buildId(d, 'build progress'),
     status: str(d.status),
     done: bool(d.done),
     phase: str(d.phase),

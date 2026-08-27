@@ -105,7 +105,11 @@ export class Computers {
    */
   async listWithStatus(opts: ListOptions = {}): Promise<Listing<Computer>> {
     const { items, incomplete } = await this.#t.listing(P.COMPUTERS, {
-      query: { allow_partial: opts.allowPartial ? 1 : undefined },
+      // Validated, not tested for truthiness: `allowPartial: "false"` used to
+      // send `allow_partial=1` and turn the fail-closed guarantee this method
+      // documents into a partial fleet handed over as the whole one. See
+      // {@link P.flag}.
+      query: { allow_partial: P.flag(opts.allowPartial, 'allowPartial') ? 1 : undefined },
       signal: opts.signal,
     });
     return {
@@ -277,8 +281,8 @@ export class Snapshots {
   ): Promise<Listing<Snapshot>> {
     const { items, incomplete } = await this.#t.listing(P.SNAPSHOTS, {
       query: {
-        include: opts.includeUnfinished ? 'unfinished' : undefined,
-        allow_partial: opts.allowPartial ? 1 : undefined,
+        include: P.flag(opts.includeUnfinished, 'includeUnfinished') ? 'unfinished' : undefined,
+        allow_partial: P.flag(opts.allowPartial, 'allowPartial') ? 1 : undefined,
       },
       signal: opts.signal,
     });

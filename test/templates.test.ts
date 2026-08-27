@@ -530,7 +530,7 @@ describe('watching a build', () => {
    * finished as one that had (adversarial review, OPL-3835).
    */
   it('throws when the final event is a record that does not say the build finished', async () => {
-    for (const payload of [{}, { id: 'bld-1', done: false, status: 'running' }, { id: 'bld-1' }]) {
+    for (const payload of [{ id: 'bld-1', done: false, status: 'running' }, { id: 'bld-1' }]) {
       const { client: c } = client((call) =>
         call.path.endsWith('/events')
           ? new Response(`event: done\ndata: ${JSON.stringify(payload)}\n\n`, {
@@ -548,6 +548,31 @@ describe('watching a build', () => {
       // all, or the throw is something they can ignore and still read.
       expect(seen).toHaveLength(0);
     }
+  });
+
+  /**
+   * The tier below the one above. `{}` used to reach the terminal check and be
+   * refused there for saying nothing about the outcome; it is now refused one
+   * step earlier, for not being a build at all. Both are correct and the
+   * earlier one is better — an id is what every later call needs, and
+   * `computerRecord` has always refused a computer without one. The coercing
+   * decoders were the only place on this surface that did not.
+   */
+  it('refuses a build record that carries no id', async () => {
+    const { client: c } = client((call) =>
+      call.path.endsWith('/events')
+        ? new Response(`event: done\ndata: {}\n\n`, {
+            status: 200,
+            headers: { 'content-type': 'text/event-stream' },
+          })
+        : anyRoute(call),
+    );
+    const read = async () => {
+      for await (const _ of c.builds.events('bld-1')) {
+        // drain
+      }
+    };
+    await expect(read()).rejects.toThrow(/to carry an id/);
   });
 
   /** The other half of the check above: a real `done` still ends the stream. */
