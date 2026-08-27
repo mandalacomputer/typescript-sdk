@@ -1,6 +1,6 @@
 /** What the handles do, as distinct from where they send it. */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   APIError,
   AuthenticationError,
@@ -348,6 +348,115 @@ describe('waiting', () => {
     }
     // Refused before the loop starts, so not one request went out.
     expect(rec.calls.length).toBe(before);
+  });
+
+  /**
+   * The test above catches this about one run in thirty, which is how it
+   * reached CI green four times and then failed on the fifth (Node 24, run
+   * 33033... on OPL-3835). This one catches it every time.
+   *
+   * `deadlineSignal` composes `AbortSignal.timeout`, and that fires up to a
+   * millisecond BEFORE `Date.now()` has advanced by the interval it was given —
+   * measured at 3.3% of short waits on this machine. The wait loops used to
+   * decide whether an error was their own deadline by asking the clock
+   * (`Date.now() < deadline &&`), so on those runs the wait's own abort read as
+   * a platform failure and the raw DOMException — which is *named*
+   * `TimeoutError` but is not this SDK's `TimeoutError` — reached the caller.
+   * A caller catching the documented type would not have caught it.
+   *
+   * Pinned by rejecting with that exact DOMException while the deadline is
+   * still comfortably ahead, which is the state the race produces and which no
+   * timing here has to reproduce.
+   */
+  it('reports its own deadline as a TimeoutError even when the abort beats the clock', async () => {
+    // The abort has to reach the loop as the RAW DOMException, and the transport
+    // only rethrows it verbatim when the signal it was handed is the one that
+    // fired (`opts.signal?.aborted`, judged first). So the poll below waits for
+    // that signal rather than rejecting on its own — anything else is converted
+    // to a ConnectionError, retried, and proves nothing.
+    //
+    // The clock is then made to lag five milliseconds from the moment that poll
+    // starts, which is the race written down rather than waited for: the abort
+    // arrives while `Date.now()` still reads before the deadline. Real time is
+    // untouched, so the loop still terminates once it catches up.
+    let gets = 0;
+    let skewMs = 0;
+    const realNow = Date.now.bind(Date);
+    // Restored in the `finally` below rather than in an afterEach: a lying
+    // clock left behind by a failing test is 152 other tests failing for a
+    // reason none of them names.
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => realNow() - skewMs);
+    const { client: c } = client((call) => {
+      if (call.method === 'GET' && call.path === '/computers/vm-1') {
+        gets += 1;
+        // The handle has to exist before it can wait, and it has to be waiting
+        // for something: a computer already `running` is one waitUntilRunning
+        // answers without polling at all.
+        if (gets === 1) return json({ ...COMPUTER, status: 'starting' });
+        skewMs = 5;
+        // A host that accepts the connection and then says nothing, so the
+        // harness's own race is what rejects — with `signal.reason`, which is
+        // the DOMException, exactly as a real fetch does.
+        return new Promise<Response>(() => {});
+      }
+      return anyRoute(call);
+    });
+    let err: unknown;
+    try {
+      const computer = await c.computers.get('vm-1');
+      err = await computer.waitUntilRunning({ timeoutMs: 30, pollMs: 1 }).catch((e) => e);
+    } finally {
+      clock.mockRestore();
+    }
+    // The SDK's class, and not merely something whose `name` reads the same: the
+    // DOMException is itself called `TimeoutError`, so a check on the name
+    // passes on the bug. Only the class tells them apart.
+    expect(err).toBeInstanceOf(TimeoutError);
+    expect(err).not.toBeInstanceOf(DOMException);
+  });
+
+  /**
+   * The second sweep, after the first one missed these.
+   *
+   * The first pass swept `opts.X ?` in resources.ts and computer.ts and fixed
+   * four options. It never looked in paths.ts, which is where the QUERIES are
+   * built and where the two flags that matter most live — so it graded itself
+   * clean while `deleteSnapshots` was still read by `!` (adversarial review,
+   * second pass, OPL-3835).
+   *
+   * `background` is not in the list below because no caller can reach it:
+   * execBackground passes the literal `true`. It is validated anyway, so that
+   * the rule holds if that ever changes.
+   *
+   * `deleteSnapshots: "false"` is the worst value on this surface. `!"false"`
+   * is false, so a caller who wrote the word FALSE, with a fingerprint in hand
+   * because they pass one every time, sent `snapshots=delete` and destroyed
+   * every snapshot the computer had. Nothing undoes that. `force: "false"`
+   * pulls the power on a machine whose caller asked for the graceful stop.
+   *
+   * Asserted as no request AT ALL, which is the only assertion worth making
+   * about an irreversible call: a refusal that still sent it would have
+   * destroyed the snapshots and then complained.
+   */
+  it('refuses a non-boolean flag on every destructive option', async () => {
+    for (const bad of ['false', 'true', 0, 1, null, new Boolean(false)]) {
+      const v = bad as unknown as boolean;
+      const { rec, client: c } = client(anyRoute);
+      const computer = await c.computers.get('vm-1');
+      const before = rec.calls.length;
+      for (const call of [
+        () => computer.delete({ deleteSnapshots: v, expect: 'fp-1' }),
+        () => computer.stop({ force: v }),
+        () => computer.snapshot({ memory: v }),
+        () => computer.windows({ includeAll: v }),
+        () => computer.screenshot(undefined, { fresh: v }),
+        () => computer.exec('ls', { desktop: v }),
+        () => computer.execBackground('ls', { desktop: v }),
+      ]) {
+        await expect(call()).rejects.toThrow(TypeError);
+      }
+      expect(rec.calls.length).toBe(before);
+    }
   });
 
   it('does not let a poll outlive the wait it belongs to', async () => {

@@ -324,6 +324,84 @@ export const USAGE = {
   reported_through: '2026-08-20',
 };
 
+/**
+ * One published template, in the platform's own spelling (platform OPL-3789).
+ *
+ * `document` as an OBJECT, not the canonical string the store keeps: the
+ * platform parses it back on the way out so a caller reading a template gets
+ * JSON it can address. A fixture holding the string would let a decoder that
+ * forgot to expect an object pass.
+ */
+export const PUBLISHED_TEMPLATE = {
+  ref: 'acc-1/devbox@1.0.0',
+  doc_digest: 'sha256:aaaa',
+  document: { apiVersion: 'mandala/v1', kind: 'Template' },
+  template: {
+    name: 'devbox',
+    ref: 'acc-1/devbox@1.0.0',
+    label: 'My desktop',
+    os: 'linux',
+    cpu: 2,
+    ram_mb: 4096,
+    disk_gb: 30,
+  },
+  versions: ['1.0.0'],
+  published_at: '2026-08-26T12:00:00.000Z',
+};
+
+/** What a retire took away (platform OPL-3830). */
+export const RETIRED_TEMPLATES = {
+  retired: ['acc-1/devbox@1.0.0'],
+  retired_at: '2026-08-26T13:00:00.000Z',
+  versions: [],
+  templates: 0,
+  // Deliberately not 0 while `templates` is: a retired ref still counts, and a
+  // fixture where the two agreed would let a decoder that read one field for
+  // both pass.
+  refs_claimed: 1,
+};
+
+/** A valid document, as the validator reports one. */
+export const TEMPLATE_CHECK = {
+  valid: true,
+  ref: 'acc-1/devbox@1.0.0',
+  doc_digest: 'sha256:aaaa',
+  build_digest: 'sha256:bbbb',
+};
+
+/** One build job (platform OPL-3791). */
+export const TEMPLATE_BUILD = {
+  id: 'bld-1',
+  ref: 'acc-1/devbox@1.0.0',
+  status: 'running',
+  started_at: '2026-08-26T12:00:00.000Z',
+};
+
+/** Where a build has got to (platform OPL-3794). */
+export const BUILD_PROGRESS = {
+  id: 'bld-1',
+  status: 'succeeded',
+  done: true,
+  phase: 'published',
+  step: 2,
+  of: 2,
+  steps: [
+    { n: 1, kind: 'apt', label: 'ripgrep', status: 'done' },
+    { n: 2, kind: 'finish', label: 'cleanup', status: 'done' },
+  ],
+  note: '',
+  error: '',
+  updated_at: '2026-08-26T12:15:00.000Z',
+};
+
+/** The build event stream, as `text/event-stream`. */
+export const buildEvents = (): Response =>
+  new Response(
+    `event: progress\ndata: ${JSON.stringify({ ...BUILD_PROGRESS, done: false, status: 'running' })}\n\n` +
+      `event: done\ndata: ${JSON.stringify(BUILD_PROGRESS)}\n\n`,
+    { status: 200, headers: { 'content-type': 'text/event-stream' } },
+  );
+
 export const anyRoute: Responder = (call) => {
   const { path, method } = call;
   const get = method === 'GET';
@@ -341,7 +419,20 @@ export const anyRoute: Responder = (call) => {
   if (/\/windows\/[^/]+$/.test(path)) return json({ id: '0x1', title: 'w' });
   if (path.endsWith('/schedule')) return json({ enabled: true, hour: 4, minute: 0, tz: 'UTC' });
   if (path.endsWith('/agent')) return json({ steps: 1, stop: 'end_turn', text: 'done' });
-  if (path === '/templates' || path === '/sizes') return json([]);
+  if (path === '/templates' || path === '/sizes') return json(get ? [] : PUBLISHED_TEMPLATE);
+  if (path === '/templates/schema') return json({ $id: 'https://x/templates/schema' });
+  if (path === '/templates/validate') return json(TEMPLATE_CHECK);
+  // The store's ref route, which is three segments and is therefore NOT
+  // '/templates'. DELETE and GET answer different shapes, which is the point:
+  // a retire has no document left to hand back.
+  if (/^\/templates\/[^/]+\/[^/]+$/.test(path)) {
+    return json(method === 'DELETE' ? RETIRED_TEMPLATES : PUBLISHED_TEMPLATE);
+  }
+  if (path.endsWith('/builds/bld-1/events')) return buildEvents();
+  if (path.endsWith('/progress')) return json(BUILD_PROGRESS);
+  if (path === '/builds')
+    return json(get ? [TEMPLATE_BUILD] : TEMPLATE_BUILD, get ? {} : { status: 202 });
+  if (/^\/builds\/[^/]+$/.test(path)) return json(TEMPLATE_BUILD);
   if (path.endsWith('/snapshots')) {
     // GET computers/:id/snapshots is the holdings triple, not a listing.
     if (get && path !== '/snapshots') return json({ count: 0, size_bytes: 0, fingerprint: 'f' });
