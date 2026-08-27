@@ -216,6 +216,40 @@ export function templateDocument(document: string): string {
   return document;
 }
 
+/**
+ * The `no_reuse` query parameter, refused when it is not a boolean.
+ *
+ * Truthiness is the wrong test for this one. lib/apidoc gives the parameter
+ * `enum: ['true']` and server/buildjob.go compares it to `"true"`, so `true` is
+ * the only value that means anything — but a caller reaching this from
+ * JavaScript, or through an `any`, can pass `"false"`, `0` or a boxed Boolean,
+ * and every one of those is truthy or falsy in a way that has nothing to do
+ * with what they meant. `new Boolean(false)` is truthy; the string `"false"` is
+ * truthy; `1` is truthy.
+ *
+ * Getting it wrong is expensive rather than merely wrong: `no_reuse=true` skips
+ * the image an identical document already built, so it spends minutes copying a
+ * multi-gigabyte base image again and takes another build out of the account's
+ * daily allowance — to reach the same image reuse would have handed back for
+ * free. That is the opposite of what a caller passing `"false"` was asking for
+ * (adversarial review, OPL-3835).
+ *
+ * Omitted rather than sent as `false`, because `false` is not a value the
+ * reference admits.
+ */
+export function noReuse(v: boolean | undefined): Query {
+  if (v === undefined) return {};
+  // A PRIMITIVE boolean. `typeof new Boolean(false)` is `'object'`, and the
+  // annotation is erased at runtime, so this is the check and not the types.
+  if (typeof v !== 'boolean') {
+    throw new ValidationError(
+      `noReuse must be a boolean (got ${typeof v}). Omit it entirely to let an identical ` +
+        `document reuse the image it already built.`,
+    );
+  }
+  return v ? { no_reuse: 'true' } : {};
+}
+
 export const build = (id: string): string => `${BUILDS}/${pathId(id, 'build id')}`;
 
 /** progress | events */

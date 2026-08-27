@@ -543,15 +543,10 @@ export class Builds {
   ): Promise<TemplateBuild> {
     const data = await this.#t.json('POST', P.BUILDS, {
       raw: new TextEncoder().encode(P.templateDocument(document)),
-      // Sent only when true, and the reason is the documented schema rather
-      // than a claim about the parser: lib/apidoc gives this parameter
-      // `enum: ['true']`, so `true` is the only value the reference admits and a
-      // client sending `false` is sending something undocumented.
-      //
-      // This said the platform reads the key's PRESENCE, which is false —
-      // server/buildjob.go reads `Get("no_reuse") == "true"`. The request was
-      // right either way; the stated reason was not (/code-review, OPL-3835).
-      query: opts.noReuse ? { no_reuse: 'true' } : {},
+      // Validated rather than tested for truthiness: the flag is expensive to
+      // get wrong in the direction truthiness gets it wrong. See
+      // {@link P.noReuse}.
+      query: P.noReuse(opts.noReuse),
       signal: opts.signal,
     });
     if (!P.isRecord(data)) throw new MandalaError(`expected a build from POST ${P.BUILDS}`);
@@ -618,6 +613,10 @@ export class Builds {
    * a build that has already finished is not an error — one `progress` and one
    * `done` arrive immediately.
    *
+   * A `done` that does not say the build finished is thrown too, and for the
+   * same reason a stream that stops without one is: the value this yields last
+   * is the outcome a caller reads, so it has to be an outcome.
+   *
    * An account may hold eight of these open at once; the ninth is a
    * {@link RateLimitError}.
    */
@@ -659,8 +658,33 @@ export class Builds {
         }
         continue;
       }
-      yield toBuildProgress(ev.data);
-      if (ev.event === 'done') return;
+      const now = toBuildProgress(ev.data);
+      if (ev.event === 'done') {
+        // A `done` frame has to actually BE one. The decoders in models.ts
+        // coerce rather than refuse — deliberately, and everywhere on this
+        // surface — so `toBuildProgress({})` answers a well-formed record whose
+        // `done` is false and whose `status` is the empty string. Returning on
+        // that is this generator's worst failure: a caller looping over these
+        // reads the last value it yielded as the outcome, and would report a
+        // build that never finished as one that did, with no status to say
+        // otherwise (adversarial review, OPL-3835).
+        //
+        // Checked on the decoded record and not on the frame, so a platform
+        // that stringifies the field — `"false"`, which `bool` reads correctly —
+        // is judged on what it meant. Thrown BEFORE the yield, for the same
+        // reason the non-record case above throws: half an answer handed over as
+        // a whole one is the thing being prevented.
+        if (!now.done || !now.status) {
+          throw new MandalaError(
+            `the build event stream for ${id} ended with a final event that does not say the ` +
+              `build finished (done ${now.done}, status ${JSON.stringify(now.status)}); ` +
+              `read builds.progress(${JSON.stringify(id)}) for the outcome`,
+          );
+        }
+        yield now;
+        return;
+      }
+      yield now;
     }
     // The stream ended without saying so. A generator that simply returns here
     // is indistinguishable from one that finished, so a caller looping over

@@ -287,6 +287,32 @@ describe('starting a build', () => {
     expect(rec.calls[0]?.query).not.toHaveProperty('no_reuse');
     await c.builds.start('apiVersion: mandala/v1', { noReuse: true });
     expect(rec.calls[1]?.query.no_reuse).toBe('true');
+    await c.builds.start('apiVersion: mandala/v1', { noReuse: false });
+    expect(rec.calls[2]?.query).not.toHaveProperty('no_reuse');
+  });
+
+  /**
+   * The tests above pass `true` and omit it, which is every value TypeScript
+   * admits — and neither of them touches the case that costs money. This
+   * package is called from JavaScript and through `any`, where `"false"`, `0`
+   * and `new Boolean(false)` all arrive, and truthiness read the first and the
+   * third of those as "build it again": minutes of copying a base image and one
+   * more build off the account's daily allowance, to reach the image reuse
+   * would have handed back for free (adversarial review, OPL-3835).
+   *
+   * Asserted as no call at all, and not merely as an absent parameter: a
+   * refusal that still sent the request would have started the wrong build.
+   */
+  it('refuses a noReuse that is not a boolean rather than reading it as true', async () => {
+    for (const bad of ['false', 'true', 0, 1, null, new Boolean(false)]) {
+      const { rec, client: c } = client();
+      await expect(
+        // The annotation is what this call exists to get past: it is erased at
+        // runtime, so it is not the check.
+        c.builds.start('apiVersion: mandala/v1', { noReuse: bad as unknown as boolean }),
+      ).rejects.toBeInstanceOf(REFUSED_LOCALLY);
+      expect(rec.calls).toHaveLength(0);
+    }
   });
 });
 
@@ -492,6 +518,45 @@ describe('watching a build', () => {
       }
     };
     await expect(read()).rejects.toThrow(/malformed final event/);
+  });
+
+  /**
+   * The test above sends a string, which `isRecord` catches. A `done` whose
+   * payload IS a record but says nothing gets past that check and all the way
+   * through the decoders, because the decoders on this surface coerce rather
+   * than refuse: `toBuildProgress({})` answers `done: false` and an empty
+   * status, and the generator returned on it. A caller looping over these reads
+   * the last value yielded as the outcome, so that reported a build which never
+   * finished as one that had (adversarial review, OPL-3835).
+   */
+  it('throws when the final event is a record that does not say the build finished', async () => {
+    for (const payload of [{}, { id: 'bld-1', done: false, status: 'running' }, { id: 'bld-1' }]) {
+      const { client: c } = client((call) =>
+        call.path.endsWith('/events')
+          ? new Response(`event: done\ndata: ${JSON.stringify(payload)}\n\n`, {
+              status: 200,
+              headers: { 'content-type': 'text/event-stream' },
+            })
+          : anyRoute(call),
+      );
+      const seen: unknown[] = [];
+      const read = async () => {
+        for await (const p of c.builds.events('bld-1')) seen.push(p);
+      };
+      await expect(read()).rejects.toThrow(/does not say the build finished/);
+      // Thrown BEFORE the yield: half an answer must not reach the caller at
+      // all, or the throw is something they can ignore and still read.
+      expect(seen).toHaveLength(0);
+    }
+  });
+
+  /** The other half of the check above: a real `done` still ends the stream. */
+  it('returns normally on a done that does say the build finished', async () => {
+    const { client: c } = client();
+    const seen = [];
+    for await (const p of c.builds.events('bld-1')) seen.push(p);
+    expect(seen.map((p) => p.done)).toEqual([false, true]);
+    expect(seen.at(-1)?.status).toBe('succeeded');
   });
 
   it('refuses wait numbers that would make it never return', async () => {
