@@ -199,6 +199,37 @@ describe('the client deadline', () => {
     expect(err.message).toBe('HTTP 409');
   });
 
+  it('keeps the status when a real undici body reset kills the error body', async () => {
+    // The test above this one uses a bare `Error`, which has no `code`, so it
+    // went on passing when the OPL-3855 body-read branch was added and would
+    // not have caught what that branch broke. A real reset carries a
+    // SocketError as its cause, which the branch matched — so a 409 the
+    // platform actually answered came back as a connection failure instead:
+    // less information, and the opposite retry answer, over the label on a
+    // body nobody needed.
+    const broken = (async () =>
+      new Response(
+        new ReadableStream({
+          pull(ctrl) {
+            ctrl.error(
+              Object.assign(new TypeError('terminated'), {
+                cause: Object.assign(new Error('other side closed'), { code: 'UND_ERR_SOCKET' }),
+              }),
+            );
+          },
+        }),
+        { status: 409 },
+      )) as typeof globalThis.fetch;
+    const c = new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: broken });
+    const err = await c.computers.get('vm-1').catch((e) => e);
+    expect(err).toBeInstanceOf(ConflictError);
+    expect(err).not.toBeInstanceOf(ConnectionError);
+    expect(err.message).toBe('HTTP 409');
+    // And the status is still the one a wait may poll on, which the connection
+    // class it was becoming is not.
+    expect(isTransient(err)).toBe(true);
+  });
+
   it('preserves the original network failure as the connection error cause', async () => {
     const original = new Error('certificate verify failed');
     const broken = (async () => {

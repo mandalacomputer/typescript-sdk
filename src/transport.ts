@@ -450,6 +450,22 @@ export class Transport {
     path: string,
     sent: Sent,
     caller?: AbortSignal,
+    /**
+     * Whether a dead socket becomes a {@link ConnectionInterruptedError} here.
+     *
+     * True everywhere but `#error`, where the body being read is the body of a
+     * response that ALREADY CARRIES A STATUS. A reset partway through that one
+     * loses nothing worth reporting — the platform answered, and the answer is
+     * the status — so wrapping it would throw away a `ConflictError` the caller
+     * can act on and hand back a connection failure instead, which is both less
+     * information and a different retry answer.
+     *
+     * The timeout below is not covered by this, deliberately. A deadline firing
+     * is the caller's own budget running out rather than the platform's answer
+     * being incomplete, and reporting that as an ordinary HTTP failure is what
+     * the branch was added to stop.
+     */
+    wrapTransportFailure = true,
   ): Promise<T> {
     try {
       return await read();
@@ -473,7 +489,7 @@ export class Transport {
       // list of abort names will ever have — carrying a SocketError as its
       // cause, so it left this method as a bare TypeError: neither transient
       // nor pollable, and a wait loop died on a blip it existed to outlast.
-      if (isTransportFailure(cause)) {
+      if (wrapTransportFailure && isTransportFailure(cause)) {
         throw new ConnectionInterruptedError(
           `could not finish reading ${method} ${path}: ${
             cause instanceof Error ? cause.message : String(cause)
@@ -515,6 +531,10 @@ export class Transport {
       path,
       { resp, timeoutMs },
       caller,
+      // A body that would not come says nothing the status does not. See the
+      // parameter's own note: wrapping a reset here would replace a status the
+      // platform actually sent with a connection failure (OPL-3855).
+      false,
     ).catch((cause) => {
       // Anything else is a body that would not come, which says nothing the
       // status does not. Answer with the status, as before.
