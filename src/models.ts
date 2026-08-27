@@ -455,6 +455,21 @@ export type BuildProgress = {
 const BUILD_TERMINAL = ['succeeded', 'failed'];
 
 /**
+ * Whether the wire sent a status a build STOPS on.
+ *
+ * Reads the raw value, and requires a string. `str()` coerces, and in
+ * JavaScript coercion is not a classifier: `String(['succeeded'])` is
+ * `'succeeded'`, because an array of one joins to its element. So a status of
+ * `["succeeded"]` — which is not a status at all — read as terminal, and with a
+ * `done` of true it produced a settled build and no contradiction (adversarial
+ * review, OPL-3835). Python is safe from this by accident of formatting:
+ * `str(["succeeded"])` is `"['succeeded']"` and matches nothing. Accident is
+ * not agreement, so this is explicit on both sides.
+ */
+const terminalStatus = (v: unknown): boolean =>
+  typeof v === 'string' && BUILD_TERMINAL.includes(v);
+
+/**
  * A wire boolean, or `undefined` where the payload did not say.
  *
  * `bool` cannot answer this: it maps absent, null and `false` all to `false`,
@@ -508,7 +523,9 @@ export const isBuildTerminal = (p: BuildProgress): boolean => p.done;
  */
 export function buildContradiction(p: BuildProgress): string | null {
   if (wireBool(p.raw.done) !== true) return null;
-  if (BUILD_TERMINAL.includes(p.status)) return null;
+  // The RAW status, for the reason `terminalStatus` gives: `p.status` has been
+  // through `str()` and a coerced value cannot be trusted to classify.
+  if (terminalStatus(p.raw.status)) return null;
   return (
     `build ${p.id || '?'} reports done with status ${JSON.stringify(p.status)}, which is ` +
     `not one a build stops on (${BUILD_TERMINAL.join(' or ')}). The record contradicts ` +
@@ -524,7 +541,7 @@ export function toBuildProgress(d: Record<string, unknown>): BuildProgress {
     // an absent, null or unreadable one — is answered by the status. That makes
     // a `done` of true against a running status read FALSE, and
     // `buildContradiction` reports it (OPL-3835).
-    done: wireBool(d.done) === false ? false : BUILD_TERMINAL.includes(str(d.status)),
+    done: wireBool(d.done) === false ? false : terminalStatus(d.status),
     phase: str(d.phase),
     step: num(d.step),
     of: num(d.of),

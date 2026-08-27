@@ -665,6 +665,14 @@ export class Builds {
         continue;
       }
       const now = toBuildProgress(ev.data);
+      // EVERY record, before branching on the event name. Checked only on the
+      // final frame, a `progress` carrying `{done: true, status: "running"}`
+      // was yielded to the caller and the stream then reported "ended without a
+      // final event" — a record that disagrees with itself, handed over as
+      // news. The Python half checks each event and this one did not
+      // (adversarial review, OPL-3835).
+      const contradiction = buildContradiction(now);
+      if (contradiction !== null) throw new MandalaError(contradiction);
       if (ev.event === 'done') {
         // A `done` frame has to actually BE one. The decoders in models.ts
         // coerce rather than refuse — deliberately, and everywhere on this
@@ -680,8 +688,6 @@ export class Builds {
         // is judged on what it meant. Thrown BEFORE the yield, for the same
         // reason the non-record case above throws: half an answer handed over as
         // a whole one is the thing being prevented.
-        const bad = buildContradiction(now);
-        if (bad !== null) throw new MandalaError(bad);
         if (!isBuildTerminal(now)) {
           throw new MandalaError(
             `the build event stream for ${id} ended with a final event that does not say the ` +

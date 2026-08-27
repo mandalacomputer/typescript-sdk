@@ -660,6 +660,59 @@ describe('watching a build', () => {
     );
   });
 
+  /**
+   * A coerced value cannot classify.
+   *
+   * `String(['succeeded'])` is `'succeeded'` — a JavaScript array of one joins
+   * to its element — so a status of `["succeeded"]` read as terminal here and
+   * produced a settled build with no contradiction. Python gives the right
+   * answer for the same payload only because `str(["succeeded"])` happens to be
+   * `"['succeeded']"`, an accident of formatting rather than a rule. Both
+   * clients require a string now (adversarial review, OPL-3835).
+   */
+  it('never treats a status that is not a string as terminal', async () => {
+    const { toBuildProgress, buildContradiction } = await import('../src/models.js');
+    for (const status of [['succeeded'], ['failed'], 123, { v: 'succeeded' }, null, true]) {
+      const withFlag = toBuildProgress({ id: 'bld-1', status, done: true });
+      expect(withFlag.done, JSON.stringify(status)).toBe(false);
+      expect(buildContradiction(withFlag) !== null, JSON.stringify(status)).toBe(true);
+
+      const bare = toBuildProgress({ id: 'bld-1', status });
+      expect(bare.done, JSON.stringify(status)).toBe(false);
+      expect(buildContradiction(bare), JSON.stringify(status)).toBe(null);
+    }
+    // And the ordinary case is untouched.
+    expect(toBuildProgress({ id: 'b', status: 'succeeded' }).done).toBe(true);
+    expect(toBuildProgress({ id: 'b', status: 'running' }).done).toBe(false);
+  });
+
+  /**
+   * A contradictory `progress` frame must throw before it is yielded.
+   *
+   * Checked only on the final frame, it was handed to the caller as news and
+   * the stream then reported "ended without a final event" — the wrong error
+   * for the wrong reason. The Python half checks every event (OPL-3835).
+   */
+  it('throws on a contradictory progress frame rather than yielding it', async () => {
+    const bad = { ...BUILD_PROGRESS, done: true, status: 'running' };
+    const { client: c } = client((call) =>
+      call.path.endsWith('/events')
+        ? new Response(
+            `event: progress\ndata: ${JSON.stringify(bad)}\n\n` +
+              `event: done\ndata: ${JSON.stringify({ ...BUILD_PROGRESS, done: true, status: 'succeeded' })}\n\n`,
+            { status: 200, headers: { 'content-type': 'text/event-stream' } },
+          )
+        : anyRoute(call),
+    );
+    const seen: unknown[] = [];
+    await expect(
+      (async () => {
+        for await (const p of c.builds.events('bld-1')) seen.push(p);
+      })(),
+    ).rejects.toThrow(/contradicts itself/);
+    expect(seen, 'the contradictory record must not reach the caller').toEqual([]);
+  });
+
   /** The table both SDKs now implement, asserted directly on the decoder. */
   it('agrees with the Python SDK on when a build has stopped', async () => {
     const { toBuildProgress, buildContradiction } = await import('../src/models.js');
