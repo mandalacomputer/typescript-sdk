@@ -1,7 +1,8 @@
 /** The template store and the builds that compile documents into images. */
 
 import { describe, expect, it } from 'vitest';
-import { Client, MandalaError, NotFoundError, TimeoutError } from '../src/index.js';
+import { Client, MandalaError, NotFoundError, type Template, TimeoutError } from '../src/index.js';
+import { isDeadlineAbort } from '../src/wait.js';
 
 import {
   anyRoute,
@@ -562,8 +563,73 @@ describe('a template row carries its ref', () => {
         ? json([{ name: 'base', label: 'Base', os: 'linux', cpu: 2, ram_mb: 2048, disk_gb: 20 }])
         : anyRoute(call),
     );
-    const [row] = await c.templates.list();
+    const rows = await c.templates.list();
+    // Indexed access is `Template | undefined` under this repo's
+    // noUncheckedIndexedAccess, and vitest does not typecheck — which is how
+    // this shipped red past a green test run (/code-review, OPL-3835).
+    expect(rows).toHaveLength(1);
+    const row = rows[0] as Template;
     expect(row.ref).toBeUndefined();
     expect('ref' in row).toBe(false);
+  });
+});
+
+describe('what the second review pass found', () => {
+  /**
+   * The wait's own timer firing inside a poll is not a failed poll.
+   *
+   * Every poll here succeeds; the last one is simply slower than what is left of
+   * the budget. The abort that produces is the wait ending, and counting it as a
+   * failure reported a build that had answered every time as one that could not
+   * be reached — pointing the reader at a fleet outage that did not happen.
+   */
+  it('does not blame the platform when its own deadline cuts off the last poll', async () => {
+    const { client: c } = client(async (call) => {
+      if (!call.path.endsWith('/progress')) return anyRoute(call);
+      await new Promise((r) => setTimeout(r, 15));
+      return json({ ...BUILD_PROGRESS, done: false, status: 'running', phase: 'copying' });
+    });
+    const err = await c.builds.wait('bld-1', { timeoutMs: 40, pollMs: 1 }).catch((e) => e);
+    expect(err).toBeInstanceOf(TimeoutError);
+    expect((err as Error).message).toContain('was still running');
+    expect((err as Error).message).not.toContain('could not be reached');
+  });
+
+  /**
+   * A permanent failure is judged by what it IS, not by when it arrived.
+   *
+   * The clause this was copied from reads `Date.now() < deadline && !isTransient`,
+   * so a 401 arriving once the deadline had passed was swallowed and replaced by
+   * a timeout. Handling the abort by name instead means only a real abort is
+   * swallowed — and this pins that, because the timing case itself cannot be
+   * staged: our own signal cancels a slow request, so a late answer never
+   * arrives to be judged.
+   */
+  it('treats only a real abort as the deadline, never a platform answer', () => {
+    expect(isDeadlineAbort(new DOMException('timed out', 'TimeoutError'))).toBe(true);
+    expect(isDeadlineAbort(new DOMException('aborted', 'AbortError'))).toBe(true);
+    // Everything the platform can answer with stays judgeable.
+    expect(isDeadlineAbort(new MandalaError('body did not parse'))).toBe(false);
+    expect(isDeadlineAbort(new NotFoundError('no such build', 404, {}))).toBe(false);
+  });
+
+  /** A stream whose frames were all skipped had still sent something. */
+  it('does not say a stream sent nothing when it sent unusable frames', async () => {
+    const { client: c } = client((call) =>
+      call.path.endsWith('/events')
+        ? new Response('event: progress\ndata: "starting"\n\nevent: keepalive\ndata: {}\n\n', {
+            status: 200,
+            headers: { 'content-type': 'text/event-stream' },
+          })
+        : anyRoute(call),
+    );
+    const read = async () => {
+      for await (const _ of c.builds.events('bld-1')) {
+        // drain
+      }
+    };
+    const err = await read().catch((e) => e);
+    expect((err as Error).message).toContain('ended without a final event');
+    expect((err as Error).message).not.toContain('sent nothing at all');
   });
 });

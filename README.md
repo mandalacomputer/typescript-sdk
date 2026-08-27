@@ -116,7 +116,7 @@ Read one back — yours or `system`, so you can see what you are layering onto:
 ```ts
 // The namespace is your account id — the same one your document's
 // `metadata.namespace` names. `ref` is where to read it back off a publish.
-const [namespace] = t.ref.split('/');
+const namespace = t.ref.split('/')[0] ?? '';
 
 const base = await client.templates.get('system', 'base');
 const pinned = await client.templates.get(namespace, 'devbox', { version: '1.0.0' });
@@ -178,9 +178,15 @@ for await (const p of client.builds.events(build.id)) {
 ```
 
 Each event is news — the platform sends one only when something moved — and the
-last one is the `done`, **including for a build that failed**. An `error` event
-means the *stream* could not go on and says nothing about the build; it throws,
-and says so. An account may hold eight streams open at once.
+last one is the `done`, **including for a build that failed**.
+
+The loop above throws for three reasons, all of them about the stream rather than
+the build: an `error` event, a final event whose payload is malformed, and a
+stream that ends without a final event at all. The last two matter because
+returning quietly would make a cut stream indistinguishable from a finished
+build. All three say the build is probably still running and point at
+`builds.progress`. Breaking out early is not one of them — that closes the stream
+and throws nothing. An account may hold eight streams open at once.
 
 **A build that declares its own family is not launchable yet.** The fleet does
 not advertise a family it built rather than shipped, so a create naming such a

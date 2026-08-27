@@ -62,6 +62,25 @@ export const deadlineSignal = (ms: number, caller?: AbortSignal): AbortSignal =>
 };
 
 /**
+ * Whether this failure is the wait's OWN deadline firing inside a poll.
+ *
+ * {@link deadlineSignal} composes `AbortSignal.timeout`, whose reason is a
+ * `TimeoutError` DOMException, and the transport rethrows that reason verbatim.
+ * So it arrives in a catch looking exactly like a failure of the platform, and
+ * it is not one — it is this wait ending, with a request still in flight.
+ *
+ * Telling them apart matters twice. A loop that counts it as a failed poll
+ * reports a build it was watching successfully as one it could not reach; and a
+ * loop that runs it through a transience check treats the ordinary end of a wait
+ * as a fatal error of unknown kind.
+ *
+ * The caller's own abort is NOT this: it is checked before this is reached, and
+ * belongs to the caller rather than to the wait.
+ */
+export const isDeadlineAbort = (err: unknown): boolean =>
+  err instanceof DOMException && (err.name === 'TimeoutError' || err.name === 'AbortError');
+
+/**
  * A wait's own numbers, refused when they are not finite.
  *
  * `Date.now() >= NaN` is false, so a non-finite timeout is a deadline that

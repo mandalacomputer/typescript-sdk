@@ -33,6 +33,7 @@ import type { Listing, SSEEvent, Transport } from './transport.js';
 import {
   checkWait,
   deadlineSignal,
+  isDeadlineAbort,
   retryDelay,
   sleepUntilNextPoll,
   type WaitOptions,
@@ -636,6 +637,11 @@ export class Builds {
             `(this says nothing about the build itself — read builds.progress(${JSON.stringify(id)}))`,
         );
       }
+      // Every event the stream actually delivered, not only the usable ones:
+      // the message below distinguishes "sent nothing at all" from "stopped
+      // early", and a stream whose frames were all skipped had still sent
+      // something (/code-review, OPL-3835).
+      sawEvent = true;
       if (ev.event !== 'progress' && ev.event !== 'done') continue;
       if (!P.isRecord(ev.data)) {
         // A `done` whose payload is not a record is the end of the stream with
@@ -653,7 +659,6 @@ export class Builds {
         }
         continue;
       }
-      sawEvent = true;
       yield toBuildProgress(ev.data);
       if (ev.event === 'done') return;
     }
@@ -731,17 +736,29 @@ export class Builds {
         // read out of a log the document's own steps write into.
         if (now.done) return now;
       } catch (err) {
-        observed = false;
-        // waitForMove's policy, verbatim, and NOT the guest probe's (adversarial
-        // review, OPL-3835). This SDK has two, for two different things: the
-        // probe loop in waitForGuest retries everything but a handful of
-        // permanent classes, because a booting guest agent legitimately answers
-        // 409, 502 and 503 for its first seconds. This poll reads the CONTROL
-        // PLANE, exactly as waitForMove does — so a 400, a malformed body or a
-        // TLS failure is a defect, not a phase, and swallowing it burns the
-        // whole half-hour default before saying anything.
         if (signal?.aborted) throw err;
-        if (Date.now() < deadline && !isTransient(err)) throw err;
+        // This wait's own timer firing inside a poll, which is not a failed
+        // poll (/code-review, OPL-3835). Swallowed so the check at the top
+        // composes the timeout — and `observed` is deliberately left ALONE,
+        // because the platform did not fail: counting it reported a build every
+        // poll of which had succeeded as one that could not be reached, on the
+        // ordinary path where the last poll is slower than what is left.
+        if (isDeadlineAbort(err)) continue;
+        // waitForMove's policy, and NOT the guest probe's (adversarial review).
+        // This SDK has two, for two different things: waitForGuest retries all
+        // but a handful of permanent classes, because a booting guest agent
+        // legitimately answers 409, 502 and 503 for its first seconds. This poll
+        // reads the CONTROL PLANE, exactly as waitForMove does — so a 400, a
+        // malformed body or a TLS failure is a defect, not a phase, and
+        // swallowing it burns the whole half-hour default before saying
+        // anything.
+        //
+        // Judged with no `Date.now() < deadline` clause, unlike the loop this
+        // was copied from: with the abort above handled by name, a real 401
+        // arriving on the last poll is a real 401 and reaches the caller,
+        // instead of being replaced by a timeout.
+        if (!isTransient(err)) throw err;
+        observed = false;
         delayMs = retryDelay(pollMs, err);
       }
     }
