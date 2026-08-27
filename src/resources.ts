@@ -16,8 +16,10 @@ import type {
   UsageReport,
 } from './models.js';
 import {
+  belongsToComputer,
   buildContradiction,
   isBuildTerminal,
+  isUnreachableStub,
   toBuildProgress,
   toMove,
   toPublishedTemplate,
@@ -291,7 +293,16 @@ export class Snapshots {
     const all = items.map(toSnapshot);
     const id = opts.computerId;
     return {
-      items: id ? all.filter((s) => s.computerId === id || s.unreachable) : all,
+      // THE ROW on both halves, not the decoded fields. `unreachable` is the
+      // marker saying this listing is short, and filtering it out reports a
+      // confident count over an incomplete answer — but a FULL row carrying the
+      // flag is a real snapshot belonging to a real computer, and admitting one
+      // hands somebody else's snapshots to a caller who asked for their own,
+      // from a listing usually read just before an irreversible delete
+      // (OPL-3850). Only the row's shape tells the two apart, and only the raw
+      // `computer_id` decides which computer it is: the decoded one has been
+      // through `str()`, and `String(['vm-1'])` is `'vm-1'`.
+      items: id ? all.filter((s) => belongsToComputer(s.raw, id) || isUnreachableStub(s.raw)) : all,
       incomplete,
     };
   }
@@ -684,8 +695,8 @@ export class Builds {
         // otherwise (adversarial review, OPL-3835).
         //
         // Checked on the decoded record and not on the frame, so a platform
-        // that stringifies the field — `"false"`, which `bool` reads correctly —
-        // is judged on what it meant. Thrown BEFORE the yield, for the same
+        // that stringifies the field — `"false"`, which `wire` classifies as
+        // FALSE — is judged on what it meant. Thrown BEFORE the yield, for the same
         // reason the non-record case above throws: half an answer handed over as
         // a whole one is the thing being prevented.
         if (!isBuildTerminal(now)) {

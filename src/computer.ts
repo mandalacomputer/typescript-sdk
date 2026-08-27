@@ -30,9 +30,11 @@ import type {
   VncConnect,
 } from './models.js';
 import {
-  bool,
+  belongsToComputer,
   count,
   num,
+  said,
+  str,
   toBackgroundExec,
   toExecResult,
   toGuestWindow,
@@ -280,7 +282,22 @@ export class Computer {
    * and becomes `"build-failed"` if that copy never finished.
    */
   get status(): string {
-    return String(this.#data.status ?? '');
+    return str(this.#data.status);
+  }
+
+  /**
+   * Whether the platform SAID this computer is in the state named.
+   *
+   * Every decision below reads this rather than {@link status}, which is
+   * coerced and therefore cannot classify: `String(['running'])` is `'running'`,
+   * because an array of one joins to its element, so a malformed payload ended
+   * `waitUntilRunning` on a machine nobody said was up. The same distinction
+   * `terminalStatus` draws for a build and `liveMove` for a move — the coerced
+   * value is what gets reported, not what gets decided on (OPL-3850, found
+   * while fixing the same shape on a snapshot's `durable`).
+   */
+  #statusIs(name: string): boolean {
+    return this.#data.status === name;
   }
 
   /**
@@ -297,7 +314,7 @@ export class Computer {
    * polls the screen can be suspended out from under itself.
    */
   get isSuspended(): boolean {
-    return this.status === 'suspended';
+    return this.#statusIs('suspended');
   }
 
   /** When this computer's session was saved, or `''` if it is not saved. */
@@ -330,7 +347,7 @@ export class Computer {
    * {@link waitUntilBuilt}.
    */
   get isBuilding(): boolean {
-    return this.status === 'building';
+    return this.#statusIs('building');
   }
 
   /**
@@ -340,7 +357,7 @@ export class Computer {
    * disk. Nothing will fix it on its own: delete it and clone again.
    */
   get buildFailed(): boolean {
-    return this.status === 'build-failed';
+    return this.#statusIs('build-failed');
   }
 
   /**
@@ -724,7 +741,11 @@ export class Computer {
         const mine = rows
           .filter(P.isRecord)
           .map(toMove)
-          .find((m) => m.computerId === this.id);
+          // THE RAW row, for the reason the snapshot filter gives: `str()` is a
+          // coercion and `String(['vm-1'])` is `'vm-1'`, so a malformed row was
+          // picked out of this account-wide listing and returned as this
+          // computer's move (Codex review, third pass, OPL-3850).
+          .find((m) => belongsToComputer(m.raw, this.id));
         // A move that is no longer listed is one the platform reaped, and it
         // reaps for one reason: the computer is gone. Not a state to keep
         // polling for — and distinguishable from "not started yet" because this
@@ -940,7 +961,7 @@ export class Computer {
           delayMs = retryDelay(pollMs, err);
         }
       }
-      if (observed && this.status === 'running') return this;
+      if (observed && this.#statusIs('running')) return this;
       // A computer with no disk will never start on its own, and waiting out
       // the full timeout to say so helps nobody.
       if (this.buildFailed) throw this.#buildFailure();
@@ -948,7 +969,7 @@ export class Computer {
       // running without a start request. In particular, a create that returned
       // start_error used to lose that explanation on refresh and poll until the
       // full timeout while repeatedly observing the same stopped state.
-      if (this.status === 'stopped') {
+      if (this.#statusIs('stopped')) {
         const reason = this.startError || initialStartError;
         throw new MandalaError(
           reason
@@ -1350,9 +1371,19 @@ export class Computer {
     // `known` is checked rather than assumed because the coordinates are still
     // present and still zero when it is false, which is indistinguishable from
     // the corner of the screen — the exact wrong answer to give a caller about
-    // to move relative to it.
-    if (!bool(res.known)) return undefined;
-    return { x: num(res.x), y: num(res.y) };
+    // to move relative to it. TRUE only, for that same reason: a flag nobody
+    // could read is not somebody saying where the pointer is (OPL-3850).
+    if (!said(res.known)) return undefined;
+    // And a `known` of true with a coordinate missing or unusable is the same
+    // as unknown. `num`'s fallback answers 0 for a null, an empty string or an
+    // object, which is that corner of the screen again — arrived at through the
+    // other field, past the check written to prevent it (Codex review,
+    // OPL-3850). Truncated the way the Python SDK's `int()` truncates, so one
+    // payload cannot read two ways across the two clients.
+    const x = count(res.x);
+    const y = count(res.y);
+    if (x === undefined || y === undefined) return undefined;
+    return { x: Math.trunc(x), y: Math.trunc(y) };
   }
 
   // --- the guest ------------------------------------------------------
