@@ -813,13 +813,19 @@ how many rows the placement cache could account for — legitimately `0`, becaus
 computer created during the outage was never cached against the host now holding
 it. So branch on `incomplete !== null`, never on the number.
 
-Builds are the third of these and the one where the status is all you get.
-Computers and snapshots append an `{ id, unreachable: true }` stub for each row
-they could not reach, so a partial answer is visible in the rows themselves. A
-partial build listing appends nothing — the platform keeps no record of which
-hypervisor ran which build — so the missing ones are simply not there, and
-`incomplete` is `0` rather than a count. Use `builds.listWithStatus()` rather
-than `builds.list()` whenever you pass `allowPartial`.
+Builds are the third of these and the one where the status is always all you
+get. The platform keeps no record of which hypervisor ran which build, so a
+partial build listing appends nothing: the missing ones are simply not there,
+and `incomplete` is `0` rather than a count. Use `builds.listWithStatus()`
+rather than `builds.list()` whenever you pass `allowPartial`.
+
+Computers and snapshots do append an `{ id, unreachable: true }` stub for each
+row they could not reach, so a partial answer is visible in the rows themselves
+— but only for a key that spans the account. A key scoped to one workspace gets
+no stubs from any of the three, because naming the missing ids means reading
+them out of a placement cache with no workspace column, and that would hand a
+confined credential ids from the workspaces it is confined away from. On such a
+key, read the status on every listing.
 
 ### Errors
 

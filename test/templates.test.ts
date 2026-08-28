@@ -813,13 +813,14 @@ describe('a short build listing', () => {
   });
 
   /**
-   * A short build listing has NO stub rows, unlike the other two.
+   * A short build listing has NO row marking what is gone.
    *
-   * Computers and snapshots append an `{ id, unreachable: true }` row per thing
-   * they could not reach; builds append nothing, because the platform keeps no
-   * record of which hypervisor ran which build. So the status is the only
-   * evidence a caller who opted in has — and its count is `0` for the same
-   * reason there are no stubs. Presence is the signal; see Listing.
+   * The platform keeps no record of which hypervisor ran which build, so there
+   * is nothing to append. The status is therefore the only evidence a caller
+   * who opted in has, and its count is `0` for the same reason. Computers and
+   * snapshots do append an `{ id, unreachable: true }` row per thing they could
+   * not reach — for an account-wide key; a workspace-scoped one gets none
+   * either. Presence is the signal; see Listing.
    */
   it('says it was short through the status, since no row can say so', async () => {
     const { client: c } = client((call) =>

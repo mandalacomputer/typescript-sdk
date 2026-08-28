@@ -55,8 +55,11 @@ import {
  *
  * Opting in means taking on that check yourself — {@link Listing.incomplete} is
  * how, and it is `null` exactly when the answer was complete. On
- * {@link Builds.list} it is the ONLY way: that listing has no stub rows to
- * notice, so `listWithStatus` is the spelling to reach for there.
+ * {@link Builds.list} it is the ONLY way, because that listing never carries
+ * stub rows to notice — so `listWithStatus` is the spelling to reach for there.
+ * It is the only way on the other two as well whenever the key is scoped to one
+ * workspace: the platform withholds the stubs from such a credential rather
+ * than name it ids from workspaces it cannot see.
  */
 export type ListOptions = { allowPartial?: boolean; signal?: AbortSignal };
 
@@ -588,12 +591,15 @@ export class Builds {
    * build listing being strictly less available than a computer listing: one
    * host down and this threw with no remedy.
    *
-   * A partial build listing is short in a way the other two are not. Computers
-   * and snapshots append an `{ id, unreachable: true }` stub per row they could
-   * not reach; builds append nothing, because nothing on the platform records
-   * which hypervisor ran which build. The missing ones are simply absent — so
-   * {@link listWithStatus} is the only thing that can tell you the answer was
-   * short, and its count is always `0` for the same reason.
+   * A partial build listing carries no marker of its own. Nothing on the
+   * platform records which hypervisor ran which build, so the missing ones are
+   * simply absent — {@link listWithStatus} is the only thing that can tell you
+   * the answer was short, and its count is always `0` for the same reason.
+   *
+   * Computers and snapshots do append an `{ id, unreachable: true }` stub per
+   * row they could not reach, but only for a key that spans the account: a
+   * workspace-scoped one gets none either, so on such a key all three listings
+   * are the status and nothing else.
    */
   async list(opts: ListOptions = {}): Promise<TemplateBuild[]> {
     return (await this.listWithStatus(opts)).items;
@@ -603,9 +609,9 @@ export class Builds {
    * {@link list}, plus whether the platform could answer it in full.
    *
    * The only honest shape for `allowPartial` on this route, and more so than on
-   * the other two: with no stub rows to notice, a caller who opted in and threw
-   * the status away cannot tell a fleet with a host down from a fleet that has
-   * never built anything.
+   * the other two: with nothing in the rows to notice, a caller who opted in and
+   * threw the status away cannot tell a fleet with a host down from a fleet that
+   * has never built anything.
    */
   async listWithStatus(opts: ListOptions = {}): Promise<Listing<TemplateBuild>> {
     const { items, incomplete } = await this.#t.listing(P.BUILDS, {

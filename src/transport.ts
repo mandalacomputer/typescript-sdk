@@ -605,8 +605,10 @@ export class Transport {
    * `X-GC-Incomplete` is only a warning if something reads it, and every route
    * that can set it is one whose short answer is indistinguishable from an
    * empty account. Three of them — computers, snapshots and, since OPL-3840,
-   * builds — and the build listing is the one where the header is the whole of
-   * the evidence, because it has no stub rows to fall back on.
+   * builds — and on the build listing the header is the whole of the evidence,
+   * because nothing in its rows marks what is gone. It is the whole of the
+   * evidence on the other two as well for a workspace-scoped key, which the
+   * platform deliberately hands no stub rows.
    */
   async listing(
     path: string,
