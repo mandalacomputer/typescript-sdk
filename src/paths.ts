@@ -794,7 +794,7 @@ export const MAX_CLIPBOARD_BYTES = 64 * 1024;
 /**
  * Build a clipboard payload.
  *
- * Four refusals, each of which the platform also makes. They are here because a
+ * Refusals the platform also makes are mirrored here because a
  * round trip that can only fail is worth not making, and because the NUL one is
  * otherwise mystifying: the platform confirms a write by reading the
  * selection back through a command substitution, a shell truncates that at the
@@ -814,6 +814,20 @@ export function clipboardBody(text: string): Json {
   if (!text) throw new ValidationError('clipboard text must not be empty');
   if (text.includes('\0')) {
     throw new ValidationError('clipboard text must not contain a NUL');
+  }
+  for (let i = 0; i < text.length; i++) {
+    const codeUnit = text.charCodeAt(i);
+    if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
+      const next = text.charCodeAt(i + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        i++;
+        continue;
+      }
+      throw new ValidationError('clipboard text must not contain an unpaired surrogate');
+    }
+    if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) {
+      throw new ValidationError('clipboard text must not contain an unpaired surrogate');
+    }
   }
   const bytes = utf8Length(text);
   if (bytes > MAX_CLIPBOARD_BYTES) {

@@ -30,6 +30,16 @@ describe('clipboardBody', () => {
     expect(() => P.clipboardBody('a\0b')).toThrow(/NUL/);
   });
 
+  it('refuses unpaired surrogates rather than silently replacing them', () => {
+    expect(() => P.clipboardBody('\ud800')).toThrow(/unpaired surrogate/);
+    expect(() => P.clipboardBody('\udfff')).toThrow(/unpaired surrogate/);
+    expect(() => P.clipboardBody('before\ud800after')).toThrow(/unpaired surrogate/);
+    expect(() => P.clipboardBody('before\udfffafter')).toThrow(/unpaired surrogate/);
+
+    // A valid pair is one Unicode scalar value and must still be accepted.
+    expect(P.clipboardBody('\ud83d\ude00')).toEqual({ text: '\u{1f600}' });
+  });
+
   it('counts the cap in bytes, not characters', () => {
     // An emoji is four UTF-8 bytes, so a string a quarter the cap in LENGTH is
     // exactly at it — and a `text.length` check would have let four times the

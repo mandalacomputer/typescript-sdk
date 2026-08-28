@@ -861,7 +861,7 @@ describe('what a payload cannot be allowed to mean', () => {
     // a refusal that still sent the call would have spent the round trip it
     // exists to save. What each of these refusals is FOR is in building.test.ts.
     const before = rec.calls.length;
-    for (const bad of ['', 'a\0b', 'x'.repeat(64 * 1024 + 1)]) {
+    for (const bad of ['', 'a\0b', '\ud800', '\udfff', 'x'.repeat(64 * 1024 + 1)]) {
       await expect(computer.setClipboard(bad)).rejects.toThrow(TypeError);
     }
     expect(rec.calls.length).toBe(before);
