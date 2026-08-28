@@ -938,6 +938,12 @@ describe('answers that are not what the route promised', () => {
       await expect(c.computers.listWithStatus({ allowPartial: v })).rejects.toThrow(TypeError);
       await expect(c.snapshots.list({ includeUnfinished: v })).rejects.toThrow(TypeError);
       await expect(c.snapshots.list({ allowPartial: v })).rejects.toThrow(TypeError);
+      // The third listing to take the flag, since OPL-3840. Swept in with the
+      // other two rather than left to a case of its own: what this one is about
+      // is that NO route on the surface reads the flag by truthiness, and a
+      // route that gains it without being added here is exactly the gap.
+      await expect(c.builds.list({ allowPartial: v })).rejects.toThrow(TypeError);
+      await expect(c.builds.listWithStatus({ allowPartial: v })).rejects.toThrow(TypeError);
       expect(rec.calls.length).toBe(before);
     }
     // The values that ARE booleans still work, including the false that means
@@ -947,6 +953,10 @@ describe('answers that are not what the route promised', () => {
     expect(rec.calls[0]?.query).not.toHaveProperty('allow_partial');
     await client(rec).computers.list({ allowPartial: true });
     expect(rec.calls[1]?.query.allow_partial).toBe('1');
+    await client(rec).builds.list({ allowPartial: false });
+    expect(rec.calls[2]?.query).not.toHaveProperty('allow_partial');
+    await client(rec).builds.list({ allowPartial: true });
+    expect(rec.calls[3]?.query.allow_partial).toBe('1');
   });
 
   it('drops a non-record element from a listing rather than decoding it', async () => {
