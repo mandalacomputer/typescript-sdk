@@ -685,6 +685,23 @@ describe('a chord', () => {
     expect(spread).toEqual({ action: 'key', keys: ['ctrl', 'c'] });
   });
 
+  it('refuses a trailing options object instead of sending it as a keystroke', async () => {
+    // TypeScript's overloads reject this, but JavaScript reaches it — and every
+    // other input method takes CallOptions last, so it is the natural thing to
+    // write. It used to be serialised INTO `keys` as a third keystroke while
+    // the signal it carried was dropped: not the chord asked for, and not
+    // cancellable either.
+    const { rec, client: c } = client(anyRoute);
+    const computer = await c.computers.get('vm-1');
+    const before = rec.calls.length;
+    await expect(
+      (computer.key as (...a: unknown[]) => Promise<void>)('ctrl', 'c', {
+        signal: new AbortController().signal,
+      }),
+    ).rejects.toThrow(/array form/);
+    expect(rec.calls.length).toBe(before);
+  });
+
   it('honours the signal the array form can carry', async () => {
     const { client: c } = client(anyRoute);
     const computer = await c.computers.get('vm-1');

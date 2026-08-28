@@ -1031,6 +1031,57 @@ export type Snapshot = {
  * else's move as this one's outcome — or polls it as this one's live move
  * (Codex review, third pass, OPL-3850). One invariant, one function.
  */
+/**
+ * The rows out of a `GET /moves` envelope, or a refusal naming what arrived.
+ *
+ * `{ moves: [...] }` is the shape. Anything else is the platform failing to
+ * answer, and reading it as `[]` turned one malformed 200 into two different
+ * false statements: a quiet account from {@link Moves.list}, and — in
+ * `Computer.waitForMove`, which reaches its reaped-row branch only once a move
+ * has been accepted — the claim that the computer had been DELETED. An empty
+ * array still means what it always did, which is the reaped row that branch is
+ * for.
+ */
+export function expectMoves(
+  data: unknown,
+  method: string,
+  path: string,
+): Record<string, unknown>[] {
+  if (!isRecord(data) || !Array.isArray(data.moves)) {
+    throw new MandalaError(
+      `expected a JSON object with a moves array from ${method} ${path}, got: ${JSON.stringify(data).slice(0, 200)}`,
+    );
+  }
+  return data.moves.filter(isRecord);
+}
+
+/**
+ * When a move was last heard of, for ordering an account-wide listing.
+ *
+ * `finishedAt` where there is one, `startedAt` otherwise. An unreadable stamp
+ * sorts below every readable one rather than throwing: the listing is the
+ * platform's, and one unparseable row should not decide which move a wait
+ * returns.
+ */
+const moveStamp = (m: Move): number => {
+  const t = Date.parse(m.finishedAt ?? m.startedAt ?? '');
+  return Number.isNaN(t) ? -Infinity : t;
+};
+
+/**
+ * The most recently finished move among rows already known to be one computer's.
+ *
+ * `GET /moves` carries the moves that finished in the last DAY beside the one
+ * running now, so "the first row for this computer" is not "the move this wait
+ * is watching" — see {@link Computer.waitForMove}, which is where taking the
+ * first one ended a wait on a copy that finished yesterday.
+ */
+export const latestFinishedMove = (moves: Move[]): Move | undefined =>
+  moves.reduce<Move | undefined>(
+    (best, m) => (best === undefined || moveStamp(m) > moveStamp(best) ? m : best),
+    undefined,
+  );
+
 export const belongsToComputer = (d: Record<string, unknown>, id: string): boolean =>
   d.computer_id === id;
 
@@ -1191,11 +1242,19 @@ export function toMove(d: Record<string, unknown>): Move {
     // Absent stays absent rather than becoming 0, because the platform omits a
     // dimension the move is NOT changing — `ram_mb: 0` would read as a resize to
     // nothing, on the field this whole operation exists to grow.
-    ...(d.cpu === undefined ? {} : { cpu: num(d.cpu) }),
-    ...(d.ram_mb === undefined ? {} : { ramMb: num(d.ram_mb) }),
-    ...(d.disk_gb === undefined ? {} : { diskGb: num(d.disk_gb) }),
+    //
+    // `== null` rather than `=== undefined`: JSON has a second way of saying a
+    // field is not there, and a serialiser that writes `"ram_mb": null` instead
+    // of omitting the key is the ordinary case rather than a strange one.
+    // `num(null)` is 0, so the check that exists to prevent a resize-to-nothing
+    // was passing one straight through.
+    ...(d.cpu == null ? {} : { cpu: num(d.cpu) }),
+    ...(d.ram_mb == null ? {} : { ramMb: num(d.ram_mb) }),
+    ...(d.disk_gb == null ? {} : { diskGb: num(d.disk_gb) }),
     startedAt: str(d.started_at),
-    ...(d.finished_at === undefined ? {} : { finishedAt: str(d.finished_at) }),
+    // Same reason, and the same fix: `str(null)` is `''`, so a move still
+    // running reported a finish time of the empty string rather than none.
+    ...(d.finished_at == null ? {} : { finishedAt: str(d.finished_at) }),
     raw: { ...d },
   };
 }

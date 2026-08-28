@@ -233,6 +233,22 @@ export function templateDocument(document: string): string {
  * "omitted" is a third state that the parameters below map to their own
  * defaults (adversarial review and the sweep it prompted, OPL-3835).
  */
+/**
+ * A real `string`, refused rather than coerced.
+ *
+ * The companion to {@link flag}, for the same class of reason. Every builder
+ * below reads a string and then trims, concatenates or encodes it: a non-string
+ * reaching one of those is a `TypeError` thrown from inside this SDK that names
+ * neither the argument nor the call, or — worse — a `String()` coercion that
+ * sends `"[object Object]"` to the platform as if somebody had typed it.
+ */
+function requireString(v: unknown, what: string): string {
+  if (typeof v !== 'string') {
+    throw new ValidationError(`${what} must be a string, not ${v === null ? 'null' : typeof v}`);
+  }
+  return v;
+}
+
 export function flag(v: boolean | undefined, what: string): boolean | undefined {
   if (v === undefined) return undefined;
   // A PRIMITIVE boolean. `typeof new Boolean(false)` is `'object'`.
@@ -368,7 +384,7 @@ export function createBody(args: CreateArgs): Json {
   positiveIntIf(cpu, 'cpu');
   positiveIntIf(ramMb, 'ramMb');
   positiveIntIf(diskGb, 'diskGb');
-  if (name !== undefined && !name.trim()) {
+  if (name !== undefined && !requireString(name, 'name').trim()) {
     throw new ValidationError('name must not be empty');
   }
   return {
@@ -670,6 +686,7 @@ export function shellQuote(s: string): string {
 
 /** Validate any path that the platform interprets inside a Linux or Windows guest. */
 function absoluteGuestPath(path: string, what: string): string {
+  requireString(path, what);
   if (!path.startsWith('/') && !path.startsWith('\\\\') && !/^[A-Za-z]:[\\/]/.test(path)) {
     throw new ValidationError(`${what} must be absolute: ${JSON.stringify(path)}`);
   }
@@ -942,7 +959,13 @@ export function scrollBody(args: {
   return body;
 }
 
-export const typeBody = (text: string): Json => ({ action: 'type', text });
+export const typeBody = (text: string): Json => ({
+  action: 'type',
+  // Checked the way {@link clipboardBody} checks its own text, which is the
+  // builder immediately beside this one: the two send a string to the same
+  // guest and only one of them refused a non-string locally.
+  text: requireString(text, 'type() text'),
+});
 
 export function keyBody(keys: readonly string[]): Json {
   if (!keys.length) throw new ValidationError('key() needs at least one key');
@@ -1156,7 +1179,8 @@ export function windowBody(args: {
  * `"false"` as yes.
  */
 export function snapshotBody(memory: boolean | undefined, name?: string): Json {
-  if (name !== undefined && !name.trim()) throw new ValidationError('name must not be empty');
+  if (name !== undefined && !requireString(name, 'name').trim())
+    throw new ValidationError('name must not be empty');
   return omitUndefined({ memory: flag(memory, 'memory') ?? false, name });
 }
 
@@ -1167,12 +1191,20 @@ export function scheduleBody(args: {
   tz?: string;
 }): Json {
   const { enabled, hour = 4, minute = 0, tz = 'UTC' } = args;
+  // Through {@link flag} like every other boolean this file sends. Without it a
+  // JavaScript caller's `"false"` — or a `new Boolean(false)`, which is an
+  // object and therefore truthy — went on the wire verbatim and switched the
+  // schedule ON while reading as though it had been turned off.
+  const on = flag(enabled, 'enabled');
+  if (on === undefined) {
+    throw new ValidationError('enabled must be a boolean (got undefined)');
+  }
   if (!Number.isInteger(hour) || hour < 0 || hour > 23)
     throw new ValidationError('hour must be 0-23');
   if (!Number.isInteger(minute) || minute < 0 || minute > 59) {
     throw new ValidationError('minute must be 0-59');
   }
-  return { enabled, hour, minute, tz };
+  return { enabled: on, hour, minute, tz };
 }
 
 /**

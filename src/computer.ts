@@ -32,6 +32,8 @@ import type {
 import {
   belongsToComputer,
   count,
+  expectMoves,
+  latestFinishedMove,
   num,
   said,
   str,
@@ -81,18 +83,17 @@ export const DEFAULT_RESOLUTION = `${SCREEN_WIDTH}x${SCREEN_HEIGHT}x24`;
 export const GUEST_PROBE = 'exit 0';
 
 /**
- * A failure no amount of waiting will clear.
+ * Trim and refuse a missing Anthropic key before it becomes an empty header.
  *
- * The wait helpers poll through anything that might resolve on its own — a 409
- * while the guest agent comes up, a 503 from a host that cannot be reached — and
- * stop at these. A revoked key is not going to become valid three minutes from
- * now, and reporting it as a timeout names the wrong problem.
+ * A {@link ValidationError} rather than a bare {@link MandalaError}: nothing has
+ * been sent, and this is the caller's argument being wrong — the same class
+ * every other local refusal in this SDK throws, so `catch (e) { if (e instanceof
+ * ValidationError) }` catches this one too.
  */
-/** Trim and refuse a missing Anthropic key before it becomes an empty header. */
 const requireModelKey = (key: string | undefined, what: string): string => {
   const trimmed = key?.trim() ?? '';
   if (!trimmed) {
-    throw new MandalaError(
+    throw new ValidationError(
       `${what} needs your own Anthropic API key as modelKey — the platform does not store one.`,
     );
   }
@@ -420,7 +421,20 @@ export class Computer {
    */
   get screen(): { width: number; height: number } {
     const [w, h] = this.resolution.split('x').map(Number);
-    if (!w || !h || !Number.isFinite(w) || !Number.isFinite(h)) {
+    // `> 0` rather than truthiness: `!(-100)` is false, so a resolution of
+    // `-100x-100` walked past a guard whose whole job is to hand back something
+    // a screenshot could actually be. These two numbers become
+    // `display_width_px` and `display_height_px` in a tool definition, and a
+    // negative there is a model computing coordinates against a screen that
+    // cannot exist.
+    if (
+      w === undefined ||
+      h === undefined ||
+      !(w > 0) ||
+      !(h > 0) ||
+      !Number.isFinite(w) ||
+      !Number.isFinite(h)
+    ) {
       return { width: SCREEN_WIDTH, height: SCREEN_HEIGHT };
     }
     return { width: w, height: h };
@@ -717,13 +731,23 @@ export class Computer {
     let polled = false;
     let delayMs = pollMs;
     let last: Move | undefined;
+    // Whether the MOST RECENT poll answered, as against whether any ever did —
+    // Builds.wait's `observed`, for its reason. Without it a wait whose polls
+    // all failed after the first quoted that first one and said the move "was
+    // still moving": a claim about the present tense made from an observation
+    // that may be the whole timeout old.
+    let observed = false;
     for (;;) {
       if (Date.now() >= deadline) {
         throw new TimeoutError(
-          last
+          last && observed
             ? `${this.id} was still moving after ${timeoutMs}ms (state ${last.state}; ` +
                 'the move has not stopped, only this wait has)'
-            : `${this.id}'s move could not be observed within ${timeoutMs}ms: every poll failed`,
+            : last
+              ? `${this.id}'s move could not be reached for the last part of ${timeoutMs}ms; when it ` +
+                `last answered it was in state ${last.state}. The move has not stopped, only this ` +
+                `wait has — read moves.list for where it got to.`
+              : `${this.id}'s move could not be observed within ${timeoutMs}ms: every poll failed`,
         );
       }
       // The sleep comes before every poll but the first, as waitUntilBuilt's
@@ -737,15 +761,21 @@ export class Computer {
         const moves = await this.#t.json(`GET`, P.MOVES, {
           signal: deadlineSignal(deadline - Date.now(), signal),
         });
-        const rows = P.isRecord(moves) && Array.isArray(moves.moves) ? moves.moves : [];
-        const mine = rows
-          .filter(P.isRecord)
+        const ours = expectMoves(moves, 'GET', P.MOVES)
           .map(toMove)
           // THE RAW row, for the reason the snapshot filter gives: `str()` is a
           // coercion and `String(['vm-1'])` is `'vm-1'`, so a malformed row was
           // picked out of this account-wide listing and returned as this
           // computer's move (Codex review, third pass, OPL-3850).
-          .find((m) => belongsToComputer(m.raw, this.id));
+          .filter((m) => belongsToComputer(m.raw, this.id));
+        // The listing keeps a finished move for a DAY beside the one running
+        // now, so the first row for this computer is not necessarily the move
+        // being waited on: a copy that finished yesterday satisfied `!mine.live`
+        // on the first poll and handed the caller a computer whose disk was
+        // still crossing between hosts. A live row IS the move in progress;
+        // where there is none, the newest finished row is the one this wait was
+        // started for.
+        const mine = ours.find((m) => m.live) ?? latestFinishedMove(ours);
         // A move that is no longer listed is one the platform reaped, and it
         // reaps for one reason: the computer is gone. Not a state to keep
         // polling for — and distinguishable from "not started yet" because this
@@ -756,14 +786,19 @@ export class Computer {
           );
         }
         last = mine;
+        observed = true;
         if (!mine.live) return mine;
       } catch (err) {
         if (signal?.aborted) throw err;
         // Named rather than inferred from the clock. See the note in
         // waitUntilRunning: `AbortSignal.timeout` can fire a millisecond before
         // `Date.now()` reaches the deadline, and this loop then rethrew its own
-        // deadline as if the platform had failed.
-        if (!isDeadlineAbort(err) && !isTransientForPoll(err)) throw err;
+        // deadline as if the platform had failed. `observed` is deliberately
+        // left alone for it, as in Builds.wait: this wait's own timer firing
+        // inside a poll is not the platform failing to answer.
+        if (isDeadlineAbort(err)) continue;
+        if (!isTransientForPoll(err)) throw err;
+        observed = false;
         delayMs = retryDelay(pollMs, err);
       }
     }
@@ -1030,6 +1065,11 @@ export class Computer {
         signal,
       });
     }
+    // Whether the guest was ever actually asked. A clone handed straight to
+    // this wait can spend the entire budget in the disk copy above, and the
+    // timeout then reported "guest did not respond" about a guest no probe had
+    // reached — naming the wrong phase, and pointing at the wrong fix.
+    let probed = false;
     for (;;) {
       let delayMs = pollMs;
       // Nothing inside a computer with no disk is ever going to answer, and
@@ -1040,6 +1080,7 @@ export class Computer {
       if (this.buildFailed) throw this.#buildFailure();
       if (Date.now() < deadline) {
         try {
+          probed = true;
           // The probe carries what is left of this wait, as well as the caller's
           // signal. Under the client's own per-request deadline alone a wait told
           // to give up after 180 seconds spends up to another 60 inside a request
@@ -1089,7 +1130,13 @@ export class Computer {
         }
       }
       if (Date.now() >= deadline) {
-        throw new TimeoutError(`${this.id} guest did not respond within ${timeoutMs}ms`);
+        throw new TimeoutError(
+          probed
+            ? `${this.id} guest did not respond within ${timeoutMs}ms`
+            : `${this.id}'s disk copy used the whole ${timeoutMs}ms, so its guest was never probed — ` +
+                `the copy itself finished. Call waitForGuest again with a fresh timeout to ask the ` +
+                `guest.`,
+        );
       }
       await sleepUntilNextPoll(delayMs, deadline, signal);
     }
@@ -1429,6 +1476,20 @@ export class Computer {
     // one keystroke in this SDK that no signal could cancel. The rest-args
     // spelling stays exactly as it was, because it is the one in every example.
     const spread = typeof first === 'string';
+    // A trailing options object in the rest-args spelling. TypeScript's
+    // overloads reject it, but JavaScript reaches here — and every other input
+    // method takes CallOptions last, so it is the natural thing to write. It
+    // used to be JSON-serialised INTO `keys` as a third keystroke while the
+    // signal it carried was dropped: not the chord that was asked for, and not
+    // cancellable either. Refused rather than peeled, because the array form is
+    // the documented spelling that carries options and quietly accepting a
+    // second one is how two spellings drift apart.
+    if (spread && rest.some((r) => r !== undefined && typeof r !== 'string')) {
+      throw new ValidationError(
+        'key(...) takes key names as separate strings; to pass CallOptions use the array form — ' +
+          "key(['ctrl', 'c'], { signal })",
+      );
+    }
     const keys = first == null ? [] : spread ? [first, ...(rest as string[])] : [...first];
     await this.#input(P.keyBody(keys), spread ? {} : ((rest[0] as CallOptions) ?? {}));
   }

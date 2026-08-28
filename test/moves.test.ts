@@ -193,6 +193,62 @@ describe('waitForMove', () => {
     expect(move.state).toBe('done');
   });
 
+  it('waits for the LIVE row rather than a move that finished yesterday', async () => {
+    // The listing keeps a finished move for a DAY beside the one running now,
+    // so a computer moved yesterday and moving again today has two rows. Taking
+    // the first ended the wait on the first poll and handed back a computer
+    // whose disk was still crossing between hosts.
+    const yesterday = {
+      ...MOVE_DONE,
+      computer_id: 'vm-1',
+      started_at: '2026-08-22T01:00:00.000Z',
+      finished_at: '2026-08-22T02:00:00.000Z',
+    };
+    const running = {
+      ...MOVE_DONE,
+      computer_id: 'vm-1',
+      state: 'moving',
+      live: true,
+      started_at: '2026-08-23T01:00:00.000Z',
+      finished_at: null,
+    };
+    let polls = 0;
+    const { client: c } = client((call) => {
+      if (call.path !== '/moves') return anyRoute(call);
+      polls += 1;
+      return json({
+        moves: [
+          yesterday,
+          polls === 1
+            ? running
+            : { ...running, state: 'done', live: false, finished_at: '2026-08-23T02:00:00.000Z' },
+        ],
+      });
+    });
+    const computer = await c.computers.get('vm-1');
+    const move = await computer.waitForMove({ pollMs: 1 });
+
+    expect(polls).toBeGreaterThan(1);
+    expect(move.state).toBe('done');
+    expect(move.startedAt).toBe('2026-08-23T01:00:00.000Z');
+    // `finished_at: null` is the wire saying absent, not the empty string.
+    expect(move.finishedAt).toBe('2026-08-23T02:00:00.000Z');
+  });
+
+  it('refuses a body with no moves array rather than calling the computer deleted', async () => {
+    // Read as `[]`, a malformed 200 reached the reaped-row branch — and that
+    // branch says the platform reaps a move when its computer is DELETED.
+    const { client: c } = client((call) =>
+      call.path === '/moves' ? json({ ok: true }) : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    const err = await computer.waitForMove({ pollMs: 1, timeoutMs: 200 }).catch((e) => e);
+
+    expect(err).toBeInstanceOf(MandalaError);
+    expect((err as Error).message).toContain('moves array');
+    expect((err as Error).message).not.toContain('deleted');
+  });
+
   it('does NOT throw for a move that ended badly', async () => {
     // The decision worth stating out loud. `moved`, `failed` and `lost` are
     // three situations with three remedies, and a thrown error flattens them
