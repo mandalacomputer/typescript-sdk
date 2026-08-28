@@ -761,6 +761,56 @@ export function rangeHeaders(offset?: number, length?: number): Record<string, s
 // emit has a method, because the alternative is every user of this SDK writing
 // the same seven stubs.
 
+/**
+ * The most text `PUT /computers/{id}/clipboard` carries INTO a guest, in bytes.
+ *
+ * Mirrored rather than left to the server, like the env caps above and for the
+ * same reason: it is a refusal knowable without a round trip. The number is not
+ * arbitrary and is not ours — the platform puts the text inside one argument of
+ * one command, Linux caps a single argv string at 128 KiB, and two layers of
+ * base64 stand between the text and that ceiling, so each byte costs about 1.8
+ * of it. Past the cap `execve` fails with E2BIG, which is why the platform
+ * refuses at 64 KiB rather than finding out.
+ *
+ * The READ cap is 128 KiB — a different bound, on a different channel — and it
+ * is deliberately not mirrored: nothing here can meet it, since the text comes
+ * from the guest.
+ */
+export const MAX_CLIPBOARD_BYTES = 64 * 1024;
+
+/**
+ * Build a clipboard payload.
+ *
+ * Three refusals, each of which the platform also makes. They are here because
+ * a round trip that can only fail is worth not making, and because the NUL one
+ * is otherwise mystifying: the platform confirms a write by reading the
+ * selection back through a command substitution, a shell truncates that at the
+ * first NUL, and the write would therefore land and be reported as "the desktop
+ * did not take the text" — a 409 inviting a retry at something that had already
+ * worked, forever.
+ */
+export function clipboardBody(text: string): Json {
+  if (typeof text !== 'string') {
+    throw new ValidationError(
+      `clipboard text must be a string, not ${text === null ? 'null' : typeof text}`,
+    );
+  }
+  // Empty is refused rather than sent, which matches the platform: clearing the
+  // clipboard is not what this endpoint does, and a caller who meant to clear it
+  // should hear so rather than get a 400 back.
+  if (!text) throw new ValidationError('clipboard text must not be empty');
+  if (text.includes('\0')) {
+    throw new ValidationError('clipboard text must not contain a NUL');
+  }
+  const bytes = utf8Length(text);
+  if (bytes > MAX_CLIPBOARD_BYTES) {
+    throw new ValidationError(
+      `clipboard text is ${bytes} bytes; the platform accepts at most ${MAX_CLIPBOARD_BYTES}`,
+    );
+  }
+  return { text };
+}
+
 export const MODIFIER_JOIN = '+';
 
 export const pointerBody = (action: string, x: number, y: number): Json => ({

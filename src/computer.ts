@@ -1194,6 +1194,68 @@ export class Computer {
     return toGuestWindow(data);
   }
 
+  /**
+   * What is on the desktop's clipboard (platform OPL-3743, OPL-3768). Linux
+   * only.
+   *
+   * The `CLIPBOARD` selection — what Ctrl-C writes and Ctrl-V pastes — not the
+   * X `PRIMARY` selection that middle-click uses.
+   *
+   * This is the road that works on every Linux computer with a desktop: no cold
+   * boot, no particular image, no permission from a browser. The other way text
+   * crosses is RFB extended cut text over the desktop socket, which is live and
+   * needs hardware and an image not every computer has; see the note on
+   * {@link Vnc}.
+   *
+   * A READ, not a subscription. Nothing notices a Ctrl-C in the guest on its
+   * own, and this call does NOT resume a suspended computer — what somebody
+   * copied is not worth waking a machine for, so a stopped or suspended
+   * computer answers 409 rather than starting. {@link setClipboard} is the
+   * other way round.
+   *
+   * An empty clipboard is `''`, and a failure is an exception rather than an
+   * empty string: the two are told apart here, which is the thing the `exec`
+   * recipe this replaces could not do.
+   */
+  async clipboard(opts: CallOptions = {}): Promise<string> {
+    const path = P.computerAction(this.id, 'clipboard');
+    const data = await this.#t.json<Record<string, unknown>>('GET', path, { signal: opts.signal });
+    // Checked rather than coerced. `String(undefined)` is "undefined" — a
+    // four-word clipboard nobody copied, indistinguishable from a real one, and
+    // pasted somewhere by whoever asked.
+    if (!P.isRecord(data) || typeof data.text !== 'string') {
+      throw new MandalaError(`expected clipboard text from GET ${path}`);
+    }
+    return data.text;
+  }
+
+  /**
+   * Put text on the desktop's clipboard, ready to paste (platform OPL-3768).
+   * Linux only.
+   *
+   * This leaves the text on the clipboard and touches nothing on screen. Pair
+   * it with `key(['ctrl', 'v'])` to get the text into whatever has focus.
+   *
+   * Unlike {@link clipboard}, this DRIVES the computer: a suspended one is
+   * resumed to serve it, which is a start and is charged like one.
+   *
+   * At most {@link P.MAX_CLIPBOARD_BYTES} of UTF-8 goes in — half what comes
+   * out, for the reason given there — and empty text and a NUL are refused
+   * here rather than on the wire.
+   *
+   * The platform confirms the write by reading the selection back before it
+   * answers, so this returning means the desktop is holding the text, not
+   * merely that a command ran. A 409 saying the desktop did not take it means
+   * something else claimed the selection in the same instant — a clipboard
+   * manager settling, usually — and it clears.
+   */
+  async setClipboard(text: string, opts: CallOptions = {}): Promise<void> {
+    await this.#t.json('PUT', P.computerAction(this.id, 'clipboard'), {
+      body: P.clipboardBody(text),
+      signal: opts.signal,
+    });
+  }
+
   // --- controlling ----------------------------------------------------
 
   async #input(

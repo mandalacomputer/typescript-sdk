@@ -806,6 +806,50 @@ describe('what a payload cannot be allowed to mean', () => {
     );
   });
 
+  it('reads the clipboard, and refuses an answer with no text in it', async () => {
+    // The empty string is a real clipboard and has to survive, so the guard is
+    // on the TYPE rather than on truthiness. Coercing instead would turn a
+    // malformed answer into the four-word clipboard "undefined" and paste it.
+    const { rec, client: c } = client(anyRoute);
+    const computer = await c.computers.get('vm-1');
+    expect(await computer.clipboard()).toBe('on the clipboard');
+    const read = rec.calls.at(-1)!;
+    expect(read.method).toBe('GET');
+    expect(read.path).toBe('/computers/vm-1/clipboard');
+
+    for (const bad of [{}, { text: 42 }, { text: null }]) {
+      const { client: c2 } = client((call) =>
+        call.path.endsWith('/clipboard') ? json(bad) : anyRoute(call),
+      );
+      const c2vm = await c2.computers.get('vm-1');
+      await expect(c2vm.clipboard()).rejects.toThrow(/expected clipboard text from GET/);
+    }
+
+    const { client: c3 } = client((call) =>
+      call.path.endsWith('/clipboard') ? json({ text: '' }) : anyRoute(call),
+    );
+    expect(await (await c3.computers.get('vm-1')).clipboard()).toBe('');
+  });
+
+  it('writes the clipboard, and refuses locally what the platform would refuse', async () => {
+    const { rec, client: c } = client(anyRoute);
+    const computer = await c.computers.get('vm-1');
+    await computer.setClipboard('hello');
+    const wrote = rec.calls.at(-1)!;
+    expect(wrote.method).toBe('PUT');
+    expect(wrote.path).toBe('/computers/vm-1/clipboard');
+    expect(wrote.body).toEqual({ text: 'hello' });
+
+    // Asserted as no request AT ALL, the way the destructive-flag test above is:
+    // a refusal that still sent the call would have spent the round trip it
+    // exists to save. What each of these refusals is FOR is in building.test.ts.
+    const before = rec.calls.length;
+    for (const bad of ['', 'a\0b', 'x'.repeat(64 * 1024 + 1)]) {
+      await expect(computer.setClipboard(bad)).rejects.toThrow(TypeError);
+    }
+    expect(rec.calls.length).toBe(before);
+  });
+
   it('refuses a background exec with no pid, rather than a finished job on pid 0', async () => {
     const { client: c } = client((call) =>
       call.path.endsWith('/exec') ? json({}) : anyRoute(call),
