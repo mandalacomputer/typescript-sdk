@@ -612,9 +612,12 @@ Where both halves are present the RFB clipboard path is *available* — the
 transport is open, which is not the same as a copy or a paste succeeding. The
 first paste of a session is often dropped, because the guest *pulls* the text
 and vdagent may not own the selection yet, and a browser will not hand over the
-guest's clipboard without focus and permission. Where either half is absent a
-paste reaches QEMU and stops, silently, and **no field tells you which you
-have**. Keep the route below whichever you get.
+guest's clipboard without focus and permission. A client also has to negotiate
+the extended-clipboard pseudo-encoding — that is QEMU's only door to the guest's
+clipboard, so an RFB client of your own that does not offer it receives nothing
+however the guest is configured. Where any of it is absent a paste reaches QEMU
+and stops, silently, and **no field tells you which you have**. Keep the route
+below whichever you get.
 
 `exec` with `desktop: true` is the route to build on — the reliable one, not
 merely the fallback — because it needs nothing of the hardware. It is not
@@ -636,22 +639,38 @@ selection at all.
 ```ts
 const READ = 'xclip -o -selection clipboard';
 
-const read = await c.exec(READ, { desktop: true }); // the guest's clipboard
+// Reading. `ok` matters: xclip exits non-zero when there is no display, and a
+// failed read and an empty clipboard both arrive as ''.
+const got = await c.exec(READ, { desktop: true });
+const onClipboard = got.ok ? got.stdout : undefined;
 
+// Writing.
 const b64 = Buffer.from(text, 'utf8').toString('base64'); // does not wrap; encode64 wraps at 60
 await c.exec(`printf %s '${b64}' | base64 -d | setsid xclip -selection clipboard >/dev/null 2>&1 &`, {
   desktop: true,
 });
 
 // The write answers 200 whether or not it worked, so the read-back is the check
-// rather than a courtesy. Bounded: a selection that never arrives means it did
-// not happen, and every attempt is another billable exec.
-const deadline = Date.now() + 5_000;
-while ((await c.exec(READ, { desktop: true })).stdout !== text) {
-  if (Date.now() > deadline) throw new Error('clipboard write never landed — no xclip, or no display');
-  await new Promise((r) => setTimeout(r, 250));
+// rather than a courtesy. Bounded in ATTEMPTS, not on the clock: each exec
+// carries its own timeout, so a hung guest overruns this by one of them.
+let landed = false;
+for (let i = 0; i < 20 && !landed; i++) {
+  const back = await c.exec(READ, { desktop: true });
+  landed = back.ok && back.stdout === text;
+  if (!landed) await new Promise((r) => setTimeout(r, 250));
 }
+if (!landed) throw new Error('clipboard write never landed — no xclip, no display, or no X session');
 ```
+
+One caveat on that comparison, and it is the platform's own: `desktop: true` runs
+your command in a **login shell**, so the desktop user's profile is sourced and
+anything it prints lands on the same stdout, ahead of your output. That is
+wanted for `exec` — you asked to run a command the way the user would — but it
+means an `echo` in the guest's `.profile` corrupts this read, and no framing you
+add here fixes it, since a profile that prints the frame owns everything after
+it. The default image prints nothing; if you have customised the profile of a
+guest you also want to read clipboards from, that is the interaction to know
+about.
 
 `vnc` is `undefined` on a computer that came from `list()` — a desktop credential
 in every list response is a credential in every log line that ever captured one.
