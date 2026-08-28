@@ -582,7 +582,7 @@ the client asking politely:
 
 | | what it grants |
 |---|---|
-| `vnc.url` / `vnc.token` | full control — keyboard and pointer, and the clipboard where the guest has vdagent. Root-equivalent on that machine. |
+| `vnc.url` / `vnc.token` | full control — keyboard and pointer. The clipboard too on some guests, conditionally and unreported; see below. Root-equivalent on that machine. |
 | `vnc.viewUrl` / `vnc.viewToken` | watch only. The platform *drops input* on this socket, so a patched client still cannot type — and takes the clipboard capability out of the connection as it is negotiated, so what the person at the desktop copies does not come back over it either. |
 | `vnc.embedUrl` | the hosted viewer, watch-only, for an `<iframe>`. The credential is in the URL fragment, which browsers never send to a server — so it stays out of access logs and out of `Referer`. |
 | `vnc.terminalUrl` | an interactive PTY in the guest, on the *controlling* credential. `''` on Windows; present but refused on a computer that has not been cold-booted since terminals shipped. |
@@ -601,15 +601,25 @@ agent is `spice-vdagent` inside the guest, which comes from the image, and a
 computer keeps the image it was created from; there is no operation that moves
 an existing one onto a newer one, so a computer built before the agent shipped
 needs the package installed in the guest — you have root there — or replacing
-with a newly created one. Windows guests never have it, whatever the hardware
-says. Where both are present, ordinary copy and paste in a noVNC client works in
-both directions and nothing below is needed. Where either is absent a paste
-reaches QEMU and stops, silently, and **no field tells you which you have**.
+with a newly created one. A current image *starts* it unaided; installing the
+package into a guest that is already logged in leaves that session unbridged
+until it logs in again. Windows guests never have it, whatever the hardware
+says. A resumed or snapshot-restored session keeps the topology of the capture
+it came from, so a computer that had the channel can come back without one, and
+reacquires it on its next stop and start.
 
-`exec` with `desktop: true` is the route to build on if you only want to write
-it once, because it needs nothing of the hardware — but it is not universal
-either: it drives the guest's own desktop session, so it needs a Linux guest
-with a display and `xclip`, and it is refused outright on Windows. Three things
+Where both halves are present the RFB clipboard path is *available* — the
+transport is open, which is not the same as a copy or a paste succeeding. The
+first paste of a session is often dropped, because the guest *pulls* the text
+and vdagent may not own the selection yet, and a browser will not hand over the
+guest's clipboard without focus and permission. Where either half is absent a
+paste reaches QEMU and stops, silently, and **no field tells you which you
+have**. Keep the route below whichever you get.
+
+`exec` with `desktop: true` is the route to build on — the reliable one, not
+merely the fallback — because it needs nothing of the hardware. It is not
+universal either: it drives the guest's own desktop session, so it needs a
+Linux guest with a display and `xclip`, and it is refused outright on Windows. Three things
 about the write are quiet when you get them wrong: the holder must outlive the
 command, because an X selection belongs to a live process; its output must be
 redirected, or the resident `xclip` holds the pipe the guest agent reads and the
@@ -624,12 +634,23 @@ above swallows xclip's own errors, so a guest without it never changes the
 selection at all.
 
 ```ts
-const read = await c.exec('xclip -o -selection clipboard', { desktop: true });
+const READ = 'xclip -o -selection clipboard';
 
-const b64 = Buffer.from(text, 'utf8').toString('base64');
+const read = await c.exec(READ, { desktop: true }); // the guest's clipboard
+
+const b64 = Buffer.from(text, 'utf8').toString('base64'); // does not wrap; encode64 wraps at 60
 await c.exec(`printf %s '${b64}' | base64 -d | setsid xclip -selection clipboard >/dev/null 2>&1 &`, {
   desktop: true,
 });
+
+// The write answers 200 whether or not it worked, so the read-back is the check
+// rather than a courtesy. Bounded: a selection that never arrives means it did
+// not happen, and every attempt is another billable exec.
+const deadline = Date.now() + 5_000;
+while ((await c.exec(READ, { desktop: true })).stdout !== text) {
+  if (Date.now() > deadline) throw new Error('clipboard write never landed — no xclip, or no display');
+  await new Promise((r) => setTimeout(r, 250));
+}
 ```
 
 `vnc` is `undefined` on a computer that came from `list()` — a desktop credential
