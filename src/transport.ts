@@ -602,9 +602,13 @@ export class Transport {
   /**
    * A fan-out read, with whether the platform could answer it in full.
    *
-   * `X-GC-Incomplete` is only a warning if something reads it, and the two
-   * routes that can set it are the two whose short answer is indistinguishable
-   * from an empty account.
+   * `X-GC-Incomplete` is only a warning if something reads it, and every route
+   * that can set it is one whose short answer is indistinguishable from an
+   * empty account. Three of them — computers, snapshots and, since OPL-3840,
+   * builds — and on the build listing the header is the whole of the evidence,
+   * because nothing in its rows marks what is gone. It is the whole of the
+   * evidence on the other two as well for a workspace-scoped key, which the
+   * platform deliberately hands no stub rows.
    */
   async listing(
     path: string,
@@ -615,10 +619,10 @@ export class Transport {
     const data = await this.#decode<unknown>(sent, 'GET', path, opts.signal);
     return {
       // The same check and the same element filter {@link jsonArray}'s callers
-      // get, because these are the two list routes a user actually calls. Cast
-      // to `T[]`, an object answer reached `items.map` as an anonymous
-      // TypeError, and a single null element reached toSnapshot as `d.id` of
-      // null — both of them naming neither the request nor the platform.
+      // get, because these are the list routes a user actually calls. Cast to
+      // `T[]`, an object answer reached `items.map` as an anonymous TypeError,
+      // and a single null element reached toSnapshot as `d.id` of null — both
+      // of them naming neither the request nor the platform.
       items: expectArray(data, 'GET', path).filter(isRecord),
       // A header that is not a number came from something other than the
       // platform, and Number() turns it into a NaN that poisons the first sum a

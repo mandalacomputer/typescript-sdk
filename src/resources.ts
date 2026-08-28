@@ -45,7 +45,7 @@ import {
 } from './wait.js';
 
 /**
- * Options for the two reads that fan out across the fleet.
+ * Options for the three reads that fan out across the fleet.
  *
  * `allowPartial` opts into a short answer when a hypervisor cannot be reached,
  * instead of the 503 the platform answers by default. The platform fails closed
@@ -54,7 +54,12 @@ import {
  * an account is empty when it is not.
  *
  * Opting in means taking on that check yourself — {@link Listing.incomplete} is
- * how, and it is `null` exactly when the answer was complete.
+ * how, and it is `null` exactly when the answer was complete. On
+ * {@link Builds.list} it is the ONLY way, because that listing never carries
+ * stub rows to notice — so `listWithStatus` is the spelling to reach for there.
+ * It is the only way on the other two as well whenever the key is scoped to one
+ * workspace: the platform withholds the stubs from such a credential rather
+ * than name it ids from workspaces it cannot see.
  */
 export type ListOptions = { allowPartial?: boolean; signal?: AbortSignal };
 
@@ -575,22 +580,49 @@ export class Builds {
    * Every build the fleet still holds a record of, newest first.
    *
    * A build lives on the hypervisor that ran it, so this is a fan-out — and
-   * like every other fan-out on this surface it FAILS CLOSED. `forward` in the
-   * platform's lib/surface applies its strict-inventory check to every v1 route
-   * generically, not only to computers and snapshots: a response carrying
-   * `X-GC-Incomplete` becomes a 503 unless the request passed `allow_partial`,
-   * which `GET /builds` does not document and this method does not send. So a
-   * hypervisor being away arrives as an {@link UnavailableError}, and there is
-   * no short list for a caller to detect.
+   * like every other fan-out on this surface it FAILS CLOSED. A response
+   * carrying `X-GC-Incomplete` becomes a 503, so a hypervisor being away
+   * arrives as an {@link UnavailableError} rather than as a short list.
    *
-   * Worth stating because a previous version of this file said the opposite and
-   * grew a `listWithStatus` to read a header the surface never lets through.
-   * lib/hvproxy does set it; the tier above turns that response into the 503
-   * before any client sees it.
+   * `allowPartial` is the way through, exactly as on {@link Computers.list}.
+   * The platform honoured it here all along and did not DOCUMENT it until
+   * OPL-3840, which is why this method did not send it and why a comment here
+   * used to say a build listing had no way through at all. What that cost was a
+   * build listing being strictly less available than a computer listing: one
+   * host down and this threw with no remedy.
+   *
+   * A partial build listing carries no marker of its own. Nothing on the
+   * platform records which hypervisor ran which build, so the missing ones are
+   * simply absent — {@link listWithStatus} is the only thing that can tell you
+   * the answer was short, and its count is always `0` for the same reason.
+   *
+   * Computers and snapshots do append an `{ id, unreachable: true }` stub per
+   * row they could not reach, but only for a key that spans the account: a
+   * workspace-scoped one gets none either, so on such a key all three listings
+   * are the status and nothing else.
    */
-  async list(opts: CallOptions = {}): Promise<TemplateBuild[]> {
-    const data = await this.#t.jsonArray('GET', P.BUILDS, { signal: opts.signal });
-    return data.filter(P.isRecord).map(toTemplateBuild);
+  async list(opts: ListOptions = {}): Promise<TemplateBuild[]> {
+    return (await this.listWithStatus(opts)).items;
+  }
+
+  /**
+   * {@link list}, plus whether the platform could answer it in full.
+   *
+   * The only honest shape for `allowPartial` on this route, and more so than on
+   * the other two: with nothing in the rows to notice, a caller who opted in and
+   * threw the status away cannot tell a fleet with a host down from a fleet that
+   * has never built anything.
+   */
+  async listWithStatus(opts: ListOptions = {}): Promise<Listing<TemplateBuild>> {
+    const { items, incomplete } = await this.#t.listing(P.BUILDS, {
+      // Validated, not tested for truthiness, the way the other two listings
+      // do it: `allowPartial: "false"` sending `allow_partial=1` would turn the
+      // fail-closed guarantee this method documents into a short list handed
+      // over as the whole one. See {@link P.flag}.
+      query: { allow_partial: P.flag(opts.allowPartial, 'allowPartial') ? 1 : undefined },
+      signal: opts.signal,
+    });
+    return { items: items.map(toTemplateBuild), incomplete };
   }
 
   /** What became of one build. `error` says why a failed one failed. */
