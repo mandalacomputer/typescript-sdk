@@ -1264,6 +1264,11 @@ export class Computer {
    * up yet. {@link isTransient} answers true for all of them, so a blanket
    * retry spins until your deadline against a computer that is simply stopped.
    * Read the message, or bound the loop in attempts.
+   *
+   * And two 400s here never clear at all, which matters more on this method
+   * than on the read for exactly that reason: the guest needs `xclip` in its
+   * image (see {@link clipboard}), and Windows is refused outright. Both say
+   * which they are.
    */
   async setClipboard(text: string, opts: CallOptions = {}): Promise<void> {
     await this.#t.json('PUT', P.computerAction(this.id, 'clipboard'), {
