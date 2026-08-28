@@ -14,6 +14,7 @@ import {
   RETIRED_TEMPLATES,
   type Responder,
   recorder,
+  TEMPLATE_BUILD,
 } from './harness.js';
 
 /**
@@ -766,17 +767,15 @@ describe('the retired fixture', () => {
 
 describe('a short build listing', () => {
   /**
-   * It never reaches a caller, and that is the point.
+   * The DEFAULT is still the refusal, and that is the point.
    *
-   * lib/hvproxy does set X-GC-Incomplete on a short build listing, but `forward`
-   * in lib/surface applies its strict-inventory check to every v1 route
-   * generically — so the response becomes a 503 before any client sees it,
-   * unless the request passed `allow_partial`, which this route does not
-   * document. A previous version of this file believed the opposite and grew a
-   * `listWithStatus` to read a header that cannot arrive.
+   * lib/hvproxy sets X-GC-Incomplete on a short build listing and `forward` in
+   * lib/surface turns it into a 503 for every v1 route generically, so a caller
+   * who asked no question about partial answers gets an error rather than a
+   * list that has quietly lost a hypervisor's worth of builds.
    */
-  it('arrives as a refusal, not as a short list', async () => {
-    const { client: c } = client((call) =>
+  const shortListing = () =>
+    client((call) =>
       call.path === '/builds'
         ? errorJson(
             503,
@@ -786,12 +785,63 @@ describe('a short build listing', () => {
           )
         : anyRoute(call),
     );
+
+  it('arrives as a refusal, not as a short list', async () => {
+    const { client: c } = shortListing();
     await expect(c.builds.list()).rejects.toThrow(/would be incomplete/);
+  });
+
+  /**
+   * OPL-3840. The remedy the refusal names is now one this client can take.
+   *
+   * The platform read `allow_partial` on this route from the day it started
+   * fanning out — `allowsPartial` reads the query string of whatever request it
+   * is handed — but did not document it, so the mirror in test/allowlist could
+   * not carry it and this method could not send it. A build listing was
+   * therefore strictly less available than a computer listing: one host away
+   * and there was no way through at all.
+   *
+   * What is asserted is that the parameter reaches the request. The fixture
+   * refuses whatever the query says, because the honouring is the platform's
+   * half and is tested there; a mirror listing a parameter nobody sends is this
+   * ticket's gap in the other direction.
+   */
+  it('sends the escape hatch when the caller opts in', async () => {
+    const { rec, client: c } = shortListing();
+    await expect(c.builds.list({ allowPartial: true })).rejects.toThrow(/would be incomplete/);
+    expect(rec.calls.at(-1)?.query.allow_partial).toBe('1');
+  });
+
+  /**
+   * A short build listing has NO row marking what is gone.
+   *
+   * The platform keeps no record of which hypervisor ran which build, so there
+   * is nothing to append. The status is therefore the only evidence a caller
+   * who opted in has, and its count is `0` for the same reason. Computers and
+   * snapshots do append an `{ id, unreachable: true }` row per thing they could
+   * not reach — for an account-wide key; a workspace-scoped one gets none
+   * either. Presence is the signal; see Listing.
+   */
+  it('says it was short through the status, since no row can say so', async () => {
+    const { client: c } = client((call) =>
+      call.path === '/builds'
+        ? // `content-type` restated because the init spread REPLACES the
+          // harness's headers rather than merging with them, and a listing
+          // without it decodes as no body at all.
+          json([TEMPLATE_BUILD], {
+            headers: { 'content-type': 'application/json', 'x-gc-incomplete': '0' },
+          })
+        : anyRoute(call),
+    );
+    const listing = await c.builds.listWithStatus({ allowPartial: true });
+    expect(listing.items).toHaveLength(1);
+    expect(listing.incomplete).toBe(0);
   });
 
   it('is an ordinary list when the fleet answered in full', async () => {
     const { client: c } = client();
     expect(await c.builds.list()).toHaveLength(1);
+    expect((await c.builds.listWithStatus()).incomplete).toBeNull();
   });
 });
 

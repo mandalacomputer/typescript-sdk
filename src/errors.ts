@@ -312,10 +312,14 @@ export class RateLimitError extends APIError {
 /**
  * 503 — a hypervisor could not be reached, so an inventory would be short.
  *
- * The platform fails closed about this by design: `GET /computers` and
- * `GET /snapshots` are fan-outs across the fleet, and a short list reads
- * exactly like the missing rows were deleted. Pass `allowPartial` to opt into
- * a short answer that says it is short — see {@link Listing}.
+ * The platform fails closed about this by design: `GET /computers`,
+ * `GET /snapshots` and `GET /builds` are fan-outs across the fleet, and a short
+ * list reads exactly like the missing rows were deleted. Pass `allowPartial` to
+ * opt into a short answer that says it is short — see {@link Listing}.
+ *
+ * Three listings, not two, since OPL-3840. The builds one always answered this
+ * way and until then documented no way out, which made a build listing strictly
+ * less available than a computer listing.
  */
 export class UnavailableError extends APIError {
   override name = 'UnavailableError';

@@ -52,6 +52,10 @@ async function exerciseEverything(client: Client): Promise<void> {
   await client.builds.start('apiVersion: mandala/v1');
   await client.builds.start('apiVersion: mandala/v1', { noReuse: true });
   await client.builds.list();
+  // Both spellings, the way the computer listing below is exercised: a build
+  // listing fails closed on a degraded fleet like every other fan-out, and
+  // OPL-3840 is what made the way out of it something a client can send.
+  await client.builds.list({ allowPartial: true });
   await client.builds.get('bld-1');
   await client.builds.progress('bld-1');
   for await (const _ of client.builds.events('bld-1')) break;
