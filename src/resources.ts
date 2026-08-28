@@ -45,7 +45,7 @@ import {
 } from './wait.js';
 
 /**
- * Options for the two reads that fan out across the fleet.
+ * Options for the three reads that fan out across the fleet.
  *
  * `allowPartial` opts into a short answer when a hypervisor cannot be reached,
  * instead of the 503 the platform answers by default. The platform fails closed
@@ -54,7 +54,9 @@ import {
  * an account is empty when it is not.
  *
  * Opting in means taking on that check yourself — {@link Listing.incomplete} is
- * how, and it is `null` exactly when the answer was complete.
+ * how, and it is `null` exactly when the answer was complete. On
+ * {@link Builds.list} it is the ONLY way: that listing has no stub rows to
+ * notice, so `listWithStatus` is the spelling to reach for there.
  */
 export type ListOptions = { allowPartial?: boolean; signal?: AbortSignal };
 
