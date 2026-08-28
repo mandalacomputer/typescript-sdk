@@ -296,9 +296,11 @@ managers snap to their own grid, so a move to 300,200 routinely lands at 305,229
 
 The desktop's `CLIPBOARD` selection — what Ctrl-C writes and Ctrl-V pastes — read
 and written from outside the guest. Linux only, and it needs nothing of the
-hardware: no cold boot, no particular image, no permission from a browser, which
-is what makes it the road that works on every computer. (The other road is RFB
-extended cut text over the desktop socket, which is live and conditional; see
+*hardware*: no cold boot, no permission from a browser. What it does need is
+`xclip` in the guest, which every golden built since mid-2026 carries — so in
+practice this is the road that works on every computer, and where it is not, the
+refusal says so. (The other road is RFB extended cut text over the desktop
+socket, which is live and conditional; see
 [Showing somebody the desktop](#showing-somebody-the-desktop).)
 
 ```ts
@@ -316,9 +318,20 @@ are refused here, before the request goes out.
 
 The platform confirms the write by reading the selection back before it answers,
 so `setClipboard()` returning means the desktop is *holding* the text rather
-than that a command ran. A `ConflictError` means something else claimed the
-selection in that instant — a clipboard manager settling, usually — and it
-clears.
+than that a command ran.
+
+**Not every `ConflictError` here is worth retrying, and they do not look
+different.** One is: *the desktop did not take the text* means something else
+claimed the selection in that instant — a clipboard manager settling, usually —
+and it clears on its own. The others describe a state you have to change: the
+computer is not running (`start()` it), or its X server is not up yet.
+`isTransient()` answers `true` for all of them, so a blanket retry spins until
+your deadline against a computer that is simply stopped. Read the message, or
+bound the loop in attempts.
+
+A **400** is the other one to know, because it never clears: a computer built
+from a golden that predates `xclip` is refused permanently. Install `xclip` in
+the guest — you have root there — or create a new computer.
 
 The two differ on one thing worth knowing: `setClipboard()` **resumes a
 suspended computer**, because putting text on a clipboard is the first half of
@@ -679,7 +692,9 @@ below whichever you get.
 
 [`clipboard()` and `setClipboard()`](#clipboard) are the route to build on — the
 reliable one, not merely the fallback — because they need nothing of the
-hardware: no cold boot, no particular image, no permission from a browser. Where
+*hardware*: no cold boot, no permission from a browser. They ask one thing of
+the image (`xclip`, in every golden since mid-2026) and say so in the answer
+when it is missing, which is one condition stated instead of two inferred. Where
 the socket *does* carry the clipboard the two do not fight over it: those
 methods write the same X `CLIPBOARD` selection the agent then offers onward.
 

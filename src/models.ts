@@ -216,12 +216,15 @@ export const count = (v: unknown): number | undefined => {
  *
  *   `Computer.clipboard()` and `Computer.setClipboard()` are the route to build
  *   on — the reliable one, not merely the fallback — because they need nothing
- *   of the hardware: no cold boot, no particular image, no permission from a
- *   browser. They are not universal either, and in a different way: they drive
- *   the guest's own desktop session, so they want a Linux guest with a display,
- *   and they are refused outright on Windows. Where the socket does carry the
- *   clipboard the two do not fight over it — the endpoints write the same X
- *   CLIPBOARD selection the agent then offers onward.
+ *   of the HARDWARE: no cold boot, and no permission from a browser. What they
+ *   do want is a Linux guest with a display and `xclip` in the image, since
+ *   they drive the guest's own desktop session; Windows is refused outright,
+ *   and a computer built from a golden that predates `xclip` gets a permanent
+ *   400 that says so. That is a much smaller set than the socket's two
+ *   conditions, and unlike them it is stated in the answer rather than left to
+ *   be inferred. Where the socket does carry the clipboard the two do not fight
+ *   over it — the endpoints write the same X CLIPBOARD selection the agent then
+ *   offers onward.
  *
  *   Those two methods replace what this SDK used to document here as a recipe
  *   over `exec` with `desktop: true`, and going back to it is a mistake worth

@@ -752,21 +752,17 @@ export function rangeHeaders(offset?: number, length?: number): Record<string, s
   return range === undefined ? undefined : { Range: range };
 }
 
-// --- input ----------------------------------------------------------------
-//
-// The verb set is Anthropic's computer tool, in full. The platform accepts both
-// that vocabulary and this SDK's flatter one, so these bodies use whichever is
-// unambiguous for each action — see the note on scroll, where the two genuinely
-// differ in meaning. What matters is that every verb a computer-use model can
-// emit has a method, because the alternative is every user of this SDK writing
-// the same seven stubs.
+// --- the clipboard --------------------------------------------------------
 
 /**
  * The most text `PUT /computers/{id}/clipboard` carries INTO a guest, in bytes.
  *
  * Mirrored rather than left to the server, like the env caps above and for the
- * same reason: it is a refusal knowable without a round trip. The number is not
- * arbitrary and is not ours — the platform puts the text inside one argument of
+ * same reason: it is a refusal knowable without a round trip. Unlike the routes
+ * and parameters, it is NOT machine-checked — `scripts/check-surface.mjs` reads
+ * the platform's `web/lib`, and this number lives in its `server/clipboard.go`
+ * as `clipboardWriteMax`. The number is not arbitrary and is not ours — the
+ * platform puts the text inside one argument of
  * one command, Linux caps a single argv string at 128 KiB, and two layers of
  * base64 stand between the text and that ceiling, so each byte costs about 1.8
  * of it. Past the cap `execve` fails with E2BIG, which is why the platform
@@ -781,9 +777,9 @@ export const MAX_CLIPBOARD_BYTES = 64 * 1024;
 /**
  * Build a clipboard payload.
  *
- * Three refusals, each of which the platform also makes. They are here because
- * a round trip that can only fail is worth not making, and because the NUL one
- * is otherwise mystifying: the platform confirms a write by reading the
+ * Four refusals, each of which the platform also makes. They are here because a
+ * round trip that can only fail is worth not making, and because the NUL one is
+ * otherwise mystifying: the platform confirms a write by reading the
  * selection back through a command substitution, a shell truncates that at the
  * first NUL, and the write would therefore land and be reported as "the desktop
  * did not take the text" — a 409 inviting a retry at something that had already
@@ -810,6 +806,15 @@ export function clipboardBody(text: string): Json {
   }
   return { text };
 }
+
+// --- input ----------------------------------------------------------------
+//
+// The verb set is Anthropic's computer tool, in full. The platform accepts both
+// that vocabulary and this SDK's flatter one, so these bodies use whichever is
+// unambiguous for each action — see the note on scroll, where the two genuinely
+// differ in meaning. What matters is that every verb a computer-use model can
+// emit has a method, because the alternative is every user of this SDK writing
+// the same seven stubs.
 
 export const MODIFIER_JOIN = '+';
 

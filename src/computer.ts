@@ -1201,11 +1201,19 @@ export class Computer {
    * The `CLIPBOARD` selection — what Ctrl-C writes and Ctrl-V pastes — not the
    * X `PRIMARY` selection that middle-click uses.
    *
-   * This is the road that works on every Linux computer with a desktop: no cold
-   * boot, no particular image, no permission from a browser. The other way text
-   * crosses is RFB extended cut text over the desktop socket, which is live and
-   * needs hardware and an image not every computer has; see the note on
-   * {@link Vnc}.
+   * This is the road that needs nothing of the HARDWARE — no cold boot, and no
+   * permission from a browser. The other way text crosses is RFB extended cut
+   * text over the desktop socket, which is live and needs a virtio-serial
+   * channel a computer only acquires on a cold boot; see the note on
+   * {@link VncConnect}.
+   *
+   * It does want one thing of the IMAGE, and unlike the socket's conditions it
+   * is stated in the answer rather than left to be inferred: `xclip` in the
+   * guest. Every golden built since mid-2026 carries it, so in practice this is
+   * a computer created before then — and a computer keeps the image it was
+   * created from. The refusal is a 400 that says so, and it is PERMANENT:
+   * install `xclip` in the guest, which you can do since you have root there,
+   * or create a new computer. Do not retry it.
    *
    * A READ, not a subscription. Nothing notices a Ctrl-C in the guest on its
    * own, and this call does NOT resume a suspended computer — what somebody
@@ -1239,15 +1247,23 @@ export class Computer {
    * Unlike {@link clipboard}, this DRIVES the computer: a suspended one is
    * resumed to serve it, which is a start and is charged like one.
    *
-   * At most {@link P.MAX_CLIPBOARD_BYTES} of UTF-8 goes in — half what comes
-   * out, for the reason given there — and empty text and a NUL are refused
-   * here rather than on the wire.
+   * At most 64 KiB of UTF-8 goes in — half what comes out, and the two are
+   * different bounds on different channels rather than one number rounded
+   * twice. Empty text and a NUL are refused here rather than on the wire; see
+   * `MAX_CLIPBOARD_BYTES` in paths.ts for why that is the number.
    *
    * The platform confirms the write by reading the selection back before it
    * answers, so this returning means the desktop is holding the text, not
-   * merely that a command ran. A 409 saying the desktop did not take it means
-   * something else claimed the selection in the same instant — a clipboard
-   * manager settling, usually — and it clears.
+   * merely that a command ran.
+   *
+   * NOT EVERY {@link ConflictError} HERE IS WORTH RETRYING, and they do not
+   * look different. One is: "the desktop did not take the text" means something
+   * else claimed the selection in that instant — a clipboard manager settling,
+   * usually — and it clears on its own. The others describe a state you have to
+   * change: the computer is not running (`start()` it), or its X server is not
+   * up yet. {@link isTransient} answers true for all of them, so a blanket
+   * retry spins until your deadline against a computer that is simply stopped.
+   * Read the message, or bound the loop in attempts.
    */
   async setClipboard(text: string, opts: CallOptions = {}): Promise<void> {
     await this.#t.json('PUT', P.computerAction(this.id, 'clipboard'), {
