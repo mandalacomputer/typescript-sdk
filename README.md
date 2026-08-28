@@ -792,12 +792,12 @@ Two more fields worth knowing:
 
 ### Partial listings
 
-`list()` on computers and snapshots fans out across every hypervisor holding
-something of yours. One that cannot be reached makes the answer incomplete, and
-the platform **fails closed** about it — you get `UnavailableError`, not a short
-list. A short list is not a smaller truth: it reads exactly like the missing rows
-were deleted, and the obvious next thing a script does with a computer that has
-disappeared is tidy up after it.
+`list()` on computers, snapshots and builds fans out across every hypervisor
+holding something of yours. One that cannot be reached makes the answer
+incomplete, and the platform **fails closed** about it — you get
+`UnavailableError`, not a short list. A short list is not a smaller truth: it
+reads exactly like the missing rows were deleted, and the obvious next thing a
+script does with a computer that has disappeared is tidy up after it.
 
 Take the short answer knowingly when you want it:
 
@@ -812,6 +812,14 @@ if (incomplete !== null) {
 how many rows the placement cache could account for — legitimately `0`, because a
 computer created during the outage was never cached against the host now holding
 it. So branch on `incomplete !== null`, never on the number.
+
+Builds are the third of these and the one where the status is all you get.
+Computers and snapshots append an `{ id, unreachable: true }` stub for each row
+they could not reach, so a partial answer is visible in the rows themselves. A
+partial build listing appends nothing — the platform keeps no record of which
+hypervisor ran which build — so the missing ones are simply not there, and
+`incomplete` is `0` rather than a count. Use `builds.listWithStatus()` rather
+than `builds.list()` whenever you pass `allowPartial`.
 
 ### Errors
 
