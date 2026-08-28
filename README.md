@@ -582,23 +582,40 @@ the client asking politely:
 
 | | what it grants |
 |---|---|
-| `vnc.url` / `vnc.token` | full control — keyboard and pointer, **not** the clipboard. Root-equivalent on that machine. |
-| `vnc.viewUrl` / `vnc.viewToken` | watch only. The platform *drops input* on this socket, so a patched client still cannot type. |
+| `vnc.url` / `vnc.token` | full control — keyboard and pointer, and the clipboard where the guest has vdagent. Root-equivalent on that machine. |
+| `vnc.viewUrl` / `vnc.viewToken` | watch only. The platform *drops input* on this socket, so a patched client still cannot type — and takes the clipboard capability out of the connection as it is negotiated, so what the person at the desktop copies does not come back over it either. |
 | `vnc.embedUrl` | the hosted viewer, watch-only, for an `<iframe>`. The credential is in the URL fragment, which browsers never send to a server — so it stays out of access logs and out of `Referer`. |
 | `vnc.terminalUrl` | an interactive PTY in the guest, on the *controlling* credential. `''` on Windows; present but refused on a computer that has not been cold-booted since terminals shipped. |
 
 Neither is your API key, which is every computer on the account, forever. Both
 end when the computer restarts.
 
-The clipboard does not cross the VNC socket, whatever a noVNC client offers on
-it: QEMU carries cut text only through a vdagent channel these guests are not
-started with, so a paste arrives and is dropped without an error. Move text with
-`exec` and `desktop: true`. Three things about the write are quiet when you get
-them wrong: the holder must outlive the command, because an X selection belongs
-to a live process; its output must be redirected, or the resident `xclip` holds
-the pipe the guest agent reads and the exec runs to its full timeout before
-answering; and the text goes over base64, whose alphabet has no quote in it, so
-an apostrophe in what you are pasting cannot end the shell word.
+The clipboard crosses the VNC socket on a Linux computer whose QEMU has the
+vdagent channel and whose image carries the agent, and not otherwise — so a
+client that has to work on any computer should not depend on it. The two halves
+are acquired separately and a computer needs both. The channel comes from a
+*cold* start: stop the computer and start it again, or restart one that is
+already stopped, which starts it. Restarting a *running* computer does not do it
+— that resets the guest rather than rebuilding the machine QEMU was given. The
+agent is `spice-vdagent` inside the guest, which comes from the image, and a
+computer keeps the image it was created from; there is no operation that moves
+an existing one onto a newer one, so a computer built before the agent shipped
+needs the package installed in the guest — you have root there — or replacing
+with a newly created one. Windows guests never have it, whatever the hardware
+says. Where both are present, ordinary copy and paste in a noVNC client works in
+both directions and nothing below is needed. Where either is absent a paste
+reaches QEMU and stops, silently, and **no field tells you which you have**.
+
+`exec` with `desktop: true` is the route to build on if you only want to write
+it once, because it needs nothing of the hardware — but it is not universal
+either: it drives the guest's own desktop session, so it needs a Linux guest
+with a display and `xclip`, and it is refused outright on Windows. Three things
+about the write are quiet when you get them wrong: the holder must outlive the
+command, because an X selection belongs to a live process; its output must be
+redirected, or the resident `xclip` holds the pipe the guest agent reads and the
+exec runs to its full timeout before answering; and the text goes over base64,
+whose alphabet has no quote in it, so an apostrophe in what you are pasting
+cannot end the shell word.
 
 Being granted the selection is also asynchronous, so a read straight after the
 write returns the *previous* clipboard — poll until it matches, and give up
