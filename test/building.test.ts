@@ -9,6 +9,58 @@
 import { describe, expect, it } from 'vitest';
 import * as P from '../src/paths.js';
 
+describe('clipboardBody', () => {
+  it('sends the text as the one field the platform decodes', () => {
+    expect(P.clipboardBody('hello')).toEqual({ text: 'hello' });
+  });
+
+  it('refuses empty text rather than sending a 400 to find out', () => {
+    // The platform refuses it too, and the refusal is worth making here for the
+    // reason at the top of this file plus one of its own: clearing the
+    // clipboard is not what that endpoint does, and a caller who meant to clear
+    // it should be told so rather than shown a status code.
+    expect(() => P.clipboardBody('')).toThrow(/must not be empty/);
+  });
+
+  it('refuses a NUL, which would otherwise land and be reported as a failure', () => {
+    // The platform confirms a write by reading the selection back through a
+    // command substitution, and a shell truncates one at the first NUL. So the
+    // write succeeds, the read-back disagrees, and the answer is a 409 inviting
+    // a retry at something that has already worked — forever.
+    expect(() => P.clipboardBody('a\0b')).toThrow(/NUL/);
+  });
+
+  it('refuses unpaired surrogates rather than silently replacing them', () => {
+    expect(() => P.clipboardBody('\ud800')).toThrow(/unpaired surrogate/);
+    expect(() => P.clipboardBody('\udfff')).toThrow(/unpaired surrogate/);
+    expect(() => P.clipboardBody('before\ud800after')).toThrow(/unpaired surrogate/);
+    expect(() => P.clipboardBody('before\udfffafter')).toThrow(/unpaired surrogate/);
+
+    // A valid pair is one Unicode scalar value and must still be accepted.
+    expect(P.clipboardBody('\ud83d\ude00')).toEqual({ text: '\u{1f600}' });
+  });
+
+  it('counts the cap in bytes, not characters', () => {
+    // An emoji is four UTF-8 bytes, so a string a quarter the cap in LENGTH is
+    // exactly at it — and a `text.length` check would have let four times the
+    // legal payload through to an execve that answers E2BIG.
+    expect(() => P.clipboardBody('x'.repeat(P.MAX_CLIPBOARD_BYTES))).not.toThrow();
+    expect(() => P.clipboardBody('x'.repeat(P.MAX_CLIPBOARD_BYTES + 1))).toThrow(/at most/);
+    expect(() => P.clipboardBody('\u{1F600}'.repeat(P.MAX_CLIPBOARD_BYTES / 4))).not.toThrow();
+    expect(() => P.clipboardBody('\u{1F600}'.repeat(P.MAX_CLIPBOARD_BYTES / 4 + 1))).toThrow(
+      /at most/,
+    );
+  });
+
+  it('says what it was given when it was not a string', () => {
+    // Every JS caller can hand this anything, and without the check the next
+    // line throws a bare "Cannot read properties of undefined" — the one
+    // refusal on this surface that would not say what was wrong.
+    expect(() => P.clipboardBody(undefined as unknown as string)).toThrow(/must be a string/);
+    expect(() => P.clipboardBody(null as unknown as string)).toThrow(/not null/);
+  });
+});
+
 describe('createBody', () => {
   it('omits what was not set, so template defaults survive', () => {
     expect(P.createBody({ template: 'base' })).toEqual({ template: 'base', start: true });

@@ -109,13 +109,63 @@ export class ConnectionInterruptedError extends ConnectionError {
 /** The API returned an unsuccessful response. */
 export class APIError extends MandalaError {
   override name = 'APIError';
+  /**
+   * The platform's own word for what KIND of refusal this is, where it sent one
+   * (platform OPL-3898): `contention`, `starting`, `unavailable` or
+   * `unsupported`. `undefined` for most errors, and always will be — the
+   * platform is explicit that an absent value means unclassified rather than
+   * "none of the four", which is what makes it safe to classify more later.
+   *
+   * `message` is unchanged and is still the sentence for a person. This is the
+   * part a program is allowed to depend on, and {@link isTransient} is the first
+   * thing that does.
+   *
+   * On this class rather than on {@link ConflictError}, which is the one it was
+   * filed for, because the platform keys it on the ERROR rather than on the
+   * route: the same sentinel is reached from several endpoints, and
+   * `unavailable` arrives as a 400 as well as a 409 — whoever loses the race to
+   * the running check hears the same fact the caller a moment earlier heard.
+   */
+  readonly reason?: string;
   constructor(
     message: string,
     readonly status: number,
     readonly body?: unknown,
   ) {
     super(message);
+    this.reason = refusalReason(body);
   }
+}
+
+/**
+ * The two answers {@link APIError.reason} can carry, as sets rather than types.
+ *
+ * Kept as data deliberately. The platform states that a fifth word may be added
+ * and that a client must read one it does not recognise as "no answer given" —
+ * an allow-list of classes would make the next word a breaking change, and the
+ * same word arrives on more than one status, so a subclass of any one of them
+ * could not carry it. Both memberships are tested rather than one being
+ * inferred from the other, which is what makes an unknown word fall through to
+ * the type answer instead of reading as permanent. Identical in all three
+ * clients: `_REASON_CLEARS` and `_REASON_PERMANENT` in mandala-computer-python,
+ * and the same pair in mandala-computer-mcp.
+ */
+const REASON_CLEARS: ReadonlySet<string> = new Set(['contention', 'starting']);
+const REASON_PERMANENT: ReadonlySet<string> = new Set(['unavailable', 'unsupported']);
+
+/**
+ * The platform's one-word classification off a refusal body, or `undefined`.
+ *
+ * Shape-checked in the manner of {@link moveOffer} and for its reason: this
+ * decides a retry policy, so a body whose `reason` is not a string has to read
+ * as "no answer given" and fall back to what this SDK did before the key
+ * existed. Any string is kept, unknown words included — the sets above are the
+ * contract, and the raw word belongs to whoever is embedding this.
+ */
+function refusalReason(body: unknown): string | undefined {
+  if (!body || typeof body !== 'object') return undefined;
+  const reason = (body as { reason?: unknown }).reason;
+  return typeof reason === 'string' ? reason : undefined;
 }
 
 /** 401 — the API key is missing, malformed, or revoked. */
@@ -186,6 +236,14 @@ export class NotFoundError extends APIError {
  * describes a passing state, and one that does not describes a decision about
  * the request. This class said "every one" and {@link isTransient} agreed with
  * it, which made a resize past what a host can run retry forever.
+ *
+ * The other exception could not be given a class, because it is the same
+ * refusal on several routes: a guest call against a computer that is not
+ * running. {@link APIError.reason} is how those are told apart now — the word
+ * the platform added for the purpose, and the one its reference says to switch
+ * on rather than the sentence, which is prose and is rewritten. Where no word
+ * was sent this class means what it always did, and that fallback is the
+ * contract rather than a gap.
  */
 export class ConflictError extends APIError {
   override name = 'ConflictError';
@@ -672,6 +730,16 @@ export function errorForEventStatus(status: number, message: string): APIError {
  * Note that a STATUS is not enough to answer this, which is why the first check
  * below is on a type. 409 is the case: most are a passing moment, and the move
  * offer is a decision no retry changes.
+ *
+ * One 409 could be given no class and could not be seen from here at all: a
+ * clipboard read or write against a computer that is STOPPED does not clear on
+ * its own — `start()` is the fix, not another attempt — and nothing in the body
+ * told it apart from a conflict that is merely passing. The advice was to read
+ * the message, which is prose the platform is free to reword and exactly the
+ * matching OPL-3724 got three clients out of. The platform now says which kind
+ * it is, so {@link APIError.reason} is consulted BEFORE the types below, and an
+ * absent word — or one this version does not know — leaves the type answer
+ * standing unchanged (platform OPL-3898).
  */
 export function isTransient(err: unknown): boolean {
   // A move offer is a 409 and is NOT worth retrying: it is a decision about the
@@ -685,6 +753,15 @@ export function isTransient(err: unknown): boolean {
   // also carries the per-request timeout, which used to be a plain
   // ConnectionError and so used to be told it was safe to replay a create.
   if (err instanceof ConnectionInterruptedError) return false;
+  // The platform's own word, ahead of the types below, because it is the more
+  // specific answer and it is the one that tells the 409 that never clears from
+  // the two that do (platform OPL-3898). Only an APIError carries a
+  // shape-checked one: an arbitrary exception may happen to have a `reason`
+  // property, and that is neither this protocol nor retry advice.
+  if (err instanceof APIError && err.reason !== undefined) {
+    if (REASON_CLEARS.has(err.reason)) return true;
+    if (REASON_PERMANENT.has(err.reason)) return false;
+  }
   // {@link OriginUnreachableError} is deliberately not here, and 502 and 504
   // are not either. All of them mean the outcome is unknown, which is exactly
   // what an embedder replaying a create cannot afford — one computer becomes

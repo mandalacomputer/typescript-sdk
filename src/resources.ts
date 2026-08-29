@@ -18,6 +18,7 @@ import type {
 import {
   belongsToComputer,
   buildContradiction,
+  expectMoves,
   isBuildTerminal,
   isUnreachableStub,
   toBuildProgress,
@@ -890,8 +891,7 @@ export class Moves {
    */
   async list(opts: CallOptions = {}): Promise<Move[]> {
     const data = await this.#t.json('GET', P.MOVES, { signal: opts.signal });
-    const rows = P.isRecord(data) && Array.isArray(data.moves) ? data.moves : [];
-    return rows.filter(P.isRecord).map(toMove);
+    return expectMoves(data, 'GET', P.MOVES).map(toMove);
   }
 }
 

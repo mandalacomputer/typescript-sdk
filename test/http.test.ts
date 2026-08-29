@@ -294,6 +294,73 @@ describe('status mapping', () => {
     expect(isTransient(new Error('boom'))).toBe(false);
   });
 
+  // Platform OPL-3898, and it was filed about this predicate. A clipboard read
+  // against a STOPPED computer and a write that lost the selection for an
+  // instant are both 409s; this said yes to both, so a generic retry loop spun
+  // against a stopped machine until somebody's deadline. The advice was to read
+  // the message — prose the platform is free to reword, and the matching
+  // OPL-3724 got three clients out of.
+  it('tells the 409 that never clears from the two that do', () => {
+    const stopped = errorForStatus(409, 'this computer is not running', {
+      error: 'this computer is not running, so it has no clipboard',
+      reason: 'unavailable',
+    });
+    const taken = errorForStatus(409, 'the desktop did not take the text', {
+      error: 'the desktop did not take the text (something else claimed its clipboard); try again',
+      reason: 'contention',
+    });
+    // Both ConflictError, and the answers differ — which is the whole point.
+    expect([stopped instanceof ConflictError, taken instanceof ConflictError]).toEqual([
+      true,
+      true,
+    ]);
+    expect((stopped as APIError).reason).toBe('unavailable');
+    expect(isTransient(stopped)).toBe(false);
+    expect(isTransient(taken)).toBe(true);
+    // A poll is the one caller for whom `unavailable` may still clear: a
+    // computer coming up passes through it, and a wait only ever replays a read
+    // under a deadline the caller set. The deliberate divergence of the two.
+    expect(isTransientForPoll(stopped)).toBe(true);
+  });
+
+  it('reads the word off a 400 as readily as off a 409', () => {
+    // `unavailable` arrives on both — whoever loses the race to the running
+    // check hears the same fact, answered 400 — which is why the word is read
+    // on APIError rather than on ConflictError.
+    const underfoot = errorForStatus(400, 'the computer stopped underfoot', {
+      error: 'the computer stopped underfoot',
+      reason: 'unavailable',
+    });
+    const windows = errorForStatus(400, 'not supported on Windows computers', {
+      error: 'the clipboard is not supported on Windows computers',
+      reason: 'unsupported',
+    });
+    expect([(underfoot as APIError).reason, (windows as APIError).reason]).toEqual([
+      'unavailable',
+      'unsupported',
+    ]);
+    expect([isTransient(underfoot), isTransient(windows)]).toEqual([false, false]);
+  });
+
+  it('leaves a fifth word, and a malformed one, to the answer it had before', () => {
+    // The platform states that an unrecognised value means "no classification
+    // given", which is what makes a fifth word safe to add later. Both sets are
+    // tested rather than one inferred from the other, so an unknown word falls
+    // through to the type instead of reading as permanent.
+    const fifth = errorForStatus(409, 'something new', { error: 'x', reason: 'wedged' });
+    expect((fifth as APIError).reason).toBe('wedged');
+    expect(isTransient(fifth)).toBe(true);
+    // Shape-checked like the move offer, and for its reason: this decides a
+    // retry policy, so a `reason` that is not a string reads as nothing said.
+    const wrongType = errorForStatus(409, 'x', { error: 'x', reason: 5 });
+    const unclassified = errorForStatus(409, 'x', { error: 'x' });
+    expect([(wrongType as APIError).reason, (unclassified as APIError).reason]).toEqual([
+      undefined,
+      undefined,
+    ]);
+    expect([isTransient(wrongType), isTransient(unclassified)]).toEqual([true, true]);
+  });
+
   it('publishes only what is safe to replay blind, and polls through the rest', () => {
     // The two questions, per status (OPL-3724). isTransient is exported, so its
     // caller may be wrapping a `create` — and every status below means the

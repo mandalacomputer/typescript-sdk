@@ -415,6 +415,10 @@ export const anyRoute: Responder = (call) => {
     return json(isRecord(call.body) && call.body.background ? EXEC_STARTED : EXEC_OK);
   }
   if (/\/exec\/\d+$/.test(path)) return json({ pid: 42, running: false, exit_code: 0 });
+  // Both verbs on one path, told apart by the method: the read answers text and
+  // the write answers an ack, and a mock that gave both the same shape would let
+  // a decoder that reads the wrong field pass.
+  if (path.endsWith('/clipboard')) return json(get ? { text: 'on the clipboard' } : { ok: true });
   if (path.endsWith('/windows')) return json([]);
   if (/\/windows\/[^/]+$/.test(path)) return json({ id: '0x1', title: 'w' });
   if (path.endsWith('/schedule')) return json({ enabled: true, hour: 4, minute: 0, tz: 'UTC' });

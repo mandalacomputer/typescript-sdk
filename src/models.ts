@@ -186,19 +186,57 @@ export const count = (v: unknown): number | undefined => {
  * platform rather than by the client asking politely:
  *
  * - `token` — full control: keyboard and pointer. Root-equivalent on that one
- *   machine, so it belongs on a server or in a page you trust. NOT the
- *   clipboard, whatever a noVNC client offers on it: QEMU carries cut text only
- *   through a vdagent channel these guests are not started with, so a paste
- *   arrives and is dropped with no error. Move text with `exec` and
- *   `desktop: true` instead. A write needs `setsid` so the holder outlives the
- *   command — an X selection belongs to a live process — AND `>/dev/null 2>&1`,
- *   without which the resident xclip holds the pipe the guest agent is reading
- *   and the exec runs to its full timeout before answering. Send the text
- *   base64 rather than quoted, since an apostrophe would otherwise end the
- *   shell word, and poll rather than reading straight back: being granted a
- *   selection is asynchronous, so the next read can still be the old one.
+ *   machine, so it belongs on a server or in a page you trust. The CLIPBOARD
+ *   crosses this socket where the bridge was provisioned, and
+ *   {@link VncConnect.clipboard} is the field that says whether it was on this
+ *   computer. Everything this bullet used to spend on that condition was
+ *   written so a caller could work the answer out; it is read rather than
+ *   inferred now, and what is left is what to do with it.
+ *
+ *   `true` is the transport being OPEN and not a promise that a copy or a
+ *   paste succeeds. The first paste of a session is often dropped, because the
+ *   guest PULLS the text and vdagent may not own the selection yet, and a
+ *   browser will not hand over the guest's clipboard without focus and
+ *   permission. `false` means text a client pastes reaches QEMU and stops —
+ *   silently, with no error to catch — and what to do about THAT is on the
+ *   field, because it differs by which half of the bridge is missing. Keep the
+ *   route below whichever you get.
+ *
+ *   `Computer.clipboard()` and `Computer.setClipboard()` are the route to build
+ *   on — the reliable one, not merely the fallback — because they need nothing
+ *   of the HARDWARE: no cold boot, and no permission from a browser. What they
+ *   do want is a Linux guest with a display and `xclip` in the image, since
+ *   they drive the guest's own desktop session; Windows is refused outright,
+ *   and a computer built from a golden that predates `xclip` gets a permanent
+ *   400 that says so. That is a much smaller set than the socket's two
+ *   conditions, and unlike them it is stated in the answer rather than left to
+ *   be inferred. Where the socket does carry the clipboard the two do not fight
+ *   over it — the endpoints write the same X CLIPBOARD selection the agent then
+ *   offers onward.
+ *
+ *   Those two methods replace what this SDK used to document here as a recipe
+ *   over `exec` with `desktop: true`, and going back to it is a mistake worth
+ *   naming. Public `exec` runs a LOGIN shell, which sources the desktop user's
+ *   own profile onto the same stdout your command prints to, ahead of it —
+ *   wanted when you asked to run a command the way the user would, and fatal
+ *   for reading a value, since an `echo` left in a `.profile` corrupts the
+ *   answer and a deliberate one forges it. No framing you add fixes that: a
+ *   profile that prints your frame owns everything after it. The clipboard
+ *   endpoints do not share that stream. The write was worse — an X selection
+ *   belongs to a live process, so the holder had to outlive the exec under
+ *   `setsid` and have its output redirected or the call hung to its full
+ *   timeout; the text had to be base64 and quoted or an apostrophe ended the
+ *   shell word; and the result had to be polled for in a bounded loop, each
+ *   attempt billable, because being granted a selection is asynchronous.
+ *   `setClipboard` does all of it, confirms the selection was taken before it
+ *   returns, and bills once.
  * - `viewToken` — watch only. The platform drops input on a socket opened with
  *   it, so a browser holding this one cannot type even from a patched client.
+ *   The guest's CLIPBOARD does not come back over it either, and that is
+ *   enforced rather than asked for: the daemon takes the clipboard capability
+ *   out of the connection as it is negotiated. Worth knowing if you embed this
+ *   — whatever the person using the desktop copies, including a password, is
+ *   not visible to anyone holding this URL.
  *
  * Both are scoped to a single computer, and neither is the account API key —
  * which is every computer on the account, forever, and must never reach a
@@ -232,6 +270,45 @@ export type VncConnect = {
    * command line only changes on a cold boot. The refusal says as much.
    */
   terminalUrl: string;
+  /**
+   * Whether this socket was provisioned with the platform-controlled halves of
+   * the guest clipboard bridge (platform OPL-3870): the vdagent channel QEMU
+   * was given at its last cold boot, and an original image whose capability
+   * metadata matches its content digest — that is, one verified to ship
+   * `spice-vdagent`.
+   *
+   * A PROVISIONING signal rather than current availability, and the distinction
+   * is not pedantic: somebody with root in the guest can install, remove,
+   * disable or stop the agent afterwards and this does not move. Treat it as
+   * stale after anything that modified the guest, and use
+   * {@link Computer.clipboard} / {@link Computer.setClipboard} — or your own
+   * guest check — there.
+   *
+   * Always `false` on a socket opened with {@link viewToken}, because the
+   * daemon takes the extended-clipboard pseudo-encoding out of a watch-only
+   * connection as it is negotiated. There the `false` is about the CREDENTIAL
+   * rather than about the computer.
+   *
+   * When it is false, what to do depends on which half is missing and both are
+   * needed. The CHANNEL is hardware and comes from a COLD start: stop the
+   * computer and start it again, or start one that is already stopped.
+   * Restarting a RUNNING computer will not do it — that resets the guest rather
+   * than rebuilding the machine QEMU was given — and a computer back from a
+   * suspend or a snapshot keeps whatever the capture had, so it can lose the
+   * channel and need a stop and a start to get it back. The AGENT comes from
+   * the image the computer was created from, which nothing moves it off:
+   * installing the package yourself can make the bridge work but does not
+   * change this signal, an unverified image reads `false` even where the agent
+   * is present, and Windows guests never have it whatever the hardware says.
+   *
+   * `false` when the platform does not send it at all, which is the
+   * conservative reading and deliberately not "unknown": the two ways to be
+   * wrong are not symmetric. A `false` about a working bridge costs a caller
+   * nothing but the socket, since the clipboard methods work there too, while a
+   * `true` about an absent one is the silently dropped paste this field exists
+   * to end. {@link said} is that rule — true only where the wire said so.
+   */
+  clipboard: boolean;
   raw: Record<string, unknown>;
 };
 
@@ -256,6 +333,7 @@ export function toVncConnect(d: unknown): VncConnect | undefined {
     viewToken,
     embedUrl: str(d.embed_url),
     terminalUrl: str(d.terminal_url),
+    clipboard: said(d.clipboard),
     raw: { ...d },
   };
 }
@@ -981,6 +1059,57 @@ export type Snapshot = {
  * else's move as this one's outcome — or polls it as this one's live move
  * (Codex review, third pass, OPL-3850). One invariant, one function.
  */
+/**
+ * The rows out of a `GET /moves` envelope, or a refusal naming what arrived.
+ *
+ * `{ moves: [...] }` is the shape. Anything else is the platform failing to
+ * answer, and reading it as `[]` turned one malformed 200 into two different
+ * false statements: a quiet account from {@link Moves.list}, and — in
+ * `Computer.waitForMove`, which reaches its reaped-row branch only once a move
+ * has been accepted — the claim that the computer had been DELETED. An empty
+ * array still means what it always did, which is the reaped row that branch is
+ * for.
+ */
+export function expectMoves(
+  data: unknown,
+  method: string,
+  path: string,
+): Record<string, unknown>[] {
+  if (!isRecord(data) || !Array.isArray(data.moves)) {
+    throw new MandalaError(
+      `expected a JSON object with a moves array from ${method} ${path}, got: ${`${JSON.stringify(data)}`.slice(0, 200)}`,
+    );
+  }
+  return data.moves.filter(isRecord);
+}
+
+/**
+ * When a move was last heard of, for ordering an account-wide listing.
+ *
+ * `finishedAt` where there is one, `startedAt` otherwise. An unreadable stamp
+ * sorts below every readable one rather than throwing: the listing is the
+ * platform's, and one unparseable row should not decide which move a wait
+ * returns.
+ */
+const moveStamp = (m: Move): number => {
+  const t = Date.parse(m.finishedAt ?? m.startedAt ?? '');
+  return Number.isNaN(t) ? -Infinity : t;
+};
+
+/**
+ * The most recently finished move among rows already known to be one computer's.
+ *
+ * `GET /moves` carries the moves that finished in the last DAY beside the one
+ * running now, so "the first row for this computer" is not "the move this wait
+ * is watching" — see {@link Computer.waitForMove}, which is where taking the
+ * first one ended a wait on a copy that finished yesterday.
+ */
+export const latestFinishedMove = (moves: Move[]): Move | undefined =>
+  moves.reduce<Move | undefined>(
+    (best, m) => (best === undefined || moveStamp(m) > moveStamp(best) ? m : best),
+    undefined,
+  );
+
 export const belongsToComputer = (d: Record<string, unknown>, id: string): boolean =>
   d.computer_id === id;
 
@@ -1141,11 +1270,19 @@ export function toMove(d: Record<string, unknown>): Move {
     // Absent stays absent rather than becoming 0, because the platform omits a
     // dimension the move is NOT changing — `ram_mb: 0` would read as a resize to
     // nothing, on the field this whole operation exists to grow.
-    ...(d.cpu === undefined ? {} : { cpu: num(d.cpu) }),
-    ...(d.ram_mb === undefined ? {} : { ramMb: num(d.ram_mb) }),
-    ...(d.disk_gb === undefined ? {} : { diskGb: num(d.disk_gb) }),
+    //
+    // `== null` rather than `=== undefined`: JSON has a second way of saying a
+    // field is not there, and a serialiser that writes `"ram_mb": null` instead
+    // of omitting the key is the ordinary case rather than a strange one.
+    // `num(null)` is 0, so the check that exists to prevent a resize-to-nothing
+    // was passing one straight through.
+    ...(d.cpu == null ? {} : { cpu: num(d.cpu) }),
+    ...(d.ram_mb == null ? {} : { ramMb: num(d.ram_mb) }),
+    ...(d.disk_gb == null ? {} : { diskGb: num(d.disk_gb) }),
     startedAt: str(d.started_at),
-    ...(d.finished_at === undefined ? {} : { finishedAt: str(d.finished_at) }),
+    // Same reason, and the same fix: `str(null)` is `''`, so a move still
+    // running reported a finish time of the empty string rather than none.
+    ...(d.finished_at == null ? {} : { finishedAt: str(d.finished_at) }),
     raw: { ...d },
   };
 }

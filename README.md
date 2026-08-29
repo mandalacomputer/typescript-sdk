@@ -292,6 +292,85 @@ focusing gives a window that is visibly in front and silently not receiving
 keystrokes. The reply is the window *afterwards*, not an acknowledgement: window
 managers snap to their own grid, so a move to 300,200 routinely lands at 305,229.
 
+### Clipboard
+
+The desktop's `CLIPBOARD` selection — what Ctrl-C writes and Ctrl-V pastes — read
+and written from outside the guest. Linux only, and it needs nothing of the
+*hardware*: no cold boot, no permission from a browser. What it does need is
+`xclip` in the guest, which every golden built since August 2026 carries — so in
+practice this is the road that works on every computer, and where it is not, the
+refusal says so. (The other road is RFB extended cut text over the desktop
+socket, which is live and conditional; see
+[Showing somebody the desktop](#showing-somebody-the-desktop).)
+
+```ts
+await c.setClipboard('https://mandala.computer');
+await c.key(['ctrl', 'v']);                        // into whatever has focus
+
+const onClipboard = await c.clipboard();           // '' is an empty clipboard
+```
+
+`setClipboard()` takes at most 64 KiB of UTF-8; `clipboard()` returns at most
+128 KiB. They are different bounds on different channels, and the read is
+**refused rather than truncated** past its own — half a password is not less of
+an answer, it is a wrong one that looks completely normal. Empty text and a NUL
+are refused here, before the request goes out.
+
+The platform confirms the write by reading the selection back before it answers,
+so `setClipboard()` returning means the desktop is *holding* the text rather
+than that a command ran.
+
+**Not every `ConflictError` here is worth retrying, and `err.reason` is how you
+tell.** `contention` is the one that clears by itself — *the desktop did not
+take the text* means something else claimed the selection in that instant, a
+clipboard manager settling, usually — and `starting` clears too, more slowly:
+the guest agent has not answered inside its boot window yet. `unavailable` does
+not clear at all, because the computer is not running and `start()` is the fix
+rather than another attempt. Desktop-session and X-server failures carry **no**
+`reason`, deliberately: the platform cannot tell a guest still coming up from a
+logged-out desktop or a crashed window manager, so it offers no retry advice
+there. Branch on the word, never on the sentence, which is prose and is
+rewritten.
+
+`isTransient()` reads it, so it no longer says `true` to the stopped computer —
+which is what it used to do, and what a blanket retry loop spun on until its
+deadline. An unclassified refusal falls back to the old type answer, so bound a
+loop that meets one.
+
+A **400** is the other one to know, because it never clears: a computer built
+from a golden that predates `xclip` is refused permanently. Install `xclip` in
+the guest — you have root there — or create a new computer.
+
+The two differ on one thing worth knowing: `setClipboard()` **resumes a
+suspended computer**, because putting text on a clipboard is the first half of
+pasting it and that is somebody working on the machine. `clipboard()` does not —
+what somebody copied is not worth waking a machine for — so reading a suspended
+computer is a 409 rather than a start you did not ask for.
+
+A read failure is an exception, not an empty string. That is the distinction the
+`exec` recipe these replace could not make.
+
+#### What these replace
+
+Until platform OPL-3768 the only public road was a recipe over `exec` with
+`desktop: true`, documented at length in this README. Do not go back to it.
+`exec` runs a **login shell**, so the desktop user's profile is sourced and
+anything it prints lands on the same stdout as your command's output, ahead of
+it. That is wanted when you asked to run a command the way the user would, and
+fatal when you are reading a value: an `echo` in the guest's `.profile` corrupts
+the answer and a deliberate one forges it. No framing you add fixes that — a
+profile that prints your frame owns everything after it. The clipboard endpoints
+do not share that stream.
+
+The write was worse. An X selection belongs to a live process, so the holder had
+to outlive the exec under `setsid` and have its output redirected, or the
+resident `xclip` held the pipe the guest agent reads and the call ran to its
+full timeout before answering. The text had to travel base64 and quoted, since
+an apostrophe would otherwise end the shell word. And because being granted a
+selection is asynchronous, the result had to be polled for in a loop bounded in
+*attempts* — each one a billable exec — rather than trusted. `setClipboard()`
+does all of it in one call.
+
 ### Running commands
 
 ```ts
@@ -582,38 +661,54 @@ the client asking politely:
 
 | | what it grants |
 |---|---|
-| `vnc.url` / `vnc.token` | full control — keyboard and pointer, **not** the clipboard. Root-equivalent on that machine. |
-| `vnc.viewUrl` / `vnc.viewToken` | watch only. The platform *drops input* on this socket, so a patched client still cannot type. |
+| `vnc.url` / `vnc.token` | full control — keyboard and pointer, and the clipboard where `vnc.clipboard` says the bridge was provisioned; see below. Root-equivalent on that machine. |
+| `vnc.viewUrl` / `vnc.viewToken` | watch only. The platform *drops input* on this socket, so a patched client still cannot type — and takes the clipboard capability out of the connection as it is negotiated, so what the person at the desktop copies does not come back over it either. |
 | `vnc.embedUrl` | the hosted viewer, watch-only, for an `<iframe>`. The credential is in the URL fragment, which browsers never send to a server — so it stays out of access logs and out of `Referer`. |
 | `vnc.terminalUrl` | an interactive PTY in the guest, on the *controlling* credential. `''` on Windows; present but refused on a computer that has not been cold-booted since terminals shipped. |
 
 Neither is your API key, which is every computer on the account, forever. Both
 end when the computer restarts.
 
-The clipboard does not cross the VNC socket, whatever a noVNC client offers on
-it: QEMU carries cut text only through a vdagent channel these guests are not
-started with, so a paste arrives and is dropped without an error. Move text with
-`exec` and `desktop: true`. Three things about the write are quiet when you get
-them wrong: the holder must outlive the command, because an X selection belongs
-to a live process; its output must be redirected, or the resident `xclip` holds
-the pipe the guest agent reads and the exec runs to its full timeout before
-answering; and the text goes over base64, whose alphabet has no quote in it, so
-an apostrophe in what you are pasting cannot end the shell word.
+**`vnc.clipboard` says whether the clipboard crosses this socket**, so it is
+read rather than worked out. It is true where the platform provisioned both
+halves it controls: the vdagent channel QEMU was given at the computer's last
+cold boot, and an original image verified to ship `spice-vdagent`. It is always
+false on the watch-only credential, where the daemon takes the capability out of
+the connection as it is negotiated — there it is about the credential rather
+than about the computer.
 
-Being granted the selection is also asynchronous, so a read straight after the
-write returns the *previous* clipboard — poll until it matches, and give up
-after a few seconds. Every poll is another billable exec, and the redirection
-above swallows xclip's own errors, so a guest without it never changes the
-selection at all.
+A **provisioning** signal, not a live check. Somebody with root in the guest can
+install, remove, disable or stop the agent afterwards and this does not move, so
+treat it as stale after anything that modified the guest.
 
-```ts
-const read = await c.exec('xclip -o -selection clipboard', { desktop: true });
+`true` means the transport is open, which is not the same as a copy or a paste
+succeeding. The first paste of a session is often dropped, because the guest
+*pulls* the text and vdagent may not own the selection yet, and a browser will
+not hand over the guest's clipboard without focus and permission. A client also
+has to negotiate the extended-clipboard pseudo-encoding — that is QEMU's only
+door to the guest's clipboard, so an RFB client of your own that does not offer
+it receives nothing however the guest is configured.
 
-const b64 = Buffer.from(text, 'utf8').toString('base64');
-await c.exec(`printf %s '${b64}' | base64 -d | setsid xclip -selection clipboard >/dev/null 2>&1 &`, {
-  desktop: true,
-});
-```
+`false` means a paste reaches QEMU and stops, silently, and what to do about it
+depends on which half is missing. The **channel** is hardware and comes from a
+*cold* start: stop the computer and start it again, or start one that is already
+stopped. Restarting a *running* computer does not do it — that resets the guest
+rather than rebuilding the machine QEMU was given — and a computer back from a
+suspend or a snapshot keeps whatever the capture had, so it can lose the channel
+and need a stop and a start to get it back. The **agent** comes from the image
+the computer was created from, which nothing moves it off: installing the
+package yourself can make the bridge work but does not change this field, an
+unverified image reads false even where the agent is present, and Windows guests
+never have it whatever the hardware says. Keep the route below whichever you
+get.
+
+[`clipboard()` and `setClipboard()`](#clipboard) are the route to build on — the
+reliable one, not merely the fallback — because they need nothing of the
+*hardware*: no cold boot, no permission from a browser. They ask one thing of
+the image (`xclip`, in every golden since August 2026) and say so in the answer
+when it is missing, which is one condition stated instead of two inferred. Where
+the socket *does* carry the clipboard the two do not fight over it: those
+methods write the same X `CLIPBOARD` selection the agent then offers onward.
 
 `vnc` is `undefined` on a computer that came from `list()` — a desktop credential
 in every list response is a credential in every log line that ever captured one.
@@ -837,7 +932,8 @@ import {
   PlanLimitError,      //     402 — your plan will not allow this. Not a retry.
   PermissionDeniedError,//    403 — the key's role is too low
   NotFoundError,       //     404 — no such computer, snapshot, or route
-  ConflictError,       //     409 — right request, wrong moment. Retry this one.
+  ConflictError,       //     409 — right request, wrong moment. `err.reason` says
+                       //           whether retrying it helps
   MoveRequiredError,   //       409 — …except this one: the size needs a new host
   TooLargeError,       //     413 — more file than one request moves
   RangeNotSatisfiableError,// 416 — that range names no byte the file has
@@ -861,9 +957,23 @@ try {
 }
 ```
 
-`ConflictError` is the one that clears itself: a guest still booting, a disk still
-being copied, another operation holding the guest agent. The platform's own
-message survives onto `err.message` — these are written to be acted on.
+`ConflictError` is the one that usually clears itself: a guest still booting, a
+disk still being copied, another operation holding the guest agent. The
+platform's own message survives onto `err.message` — these are written to be
+acted on.
+
+`err.reason` is what says which kind you have, where the platform sent a word
+for it, and it is the part a program is allowed to depend on — `err.message` is
+prose and is rewritten. Four words: `contention` and `starting` clear on their
+own, `unavailable` means the computer is not running and only starting it helps,
+`unsupported` means this computer cannot do it at all. `isTransient` reads it
+before it looks at the type, which is how a clipboard call against a stopped
+computer stopped being told to retry.
+
+**Absent means no classification was given**, and so does a word you do not
+recognise — not every refusal has one, and the platform reserves the right to
+add a fifth. Treat both as "no answer" and fall back to whatever you did before,
+which is exactly what `isTransient` does.
 
 `MoveRequiredError` is the exception, and it is a subclass so that code matching
 on the family keeps working. It means the size you asked for is more RAM than the

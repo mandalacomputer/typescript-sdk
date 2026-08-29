@@ -102,6 +102,16 @@ export type WaitOptions = {
  * origin can answer 700 — which `>= 500` alone called a passing moment and
  * polled until the caller's deadline (Codex adversarial review, OPL-3724).
  *
+ * {@link APIError.reason} is deliberately NOT consulted here, and that is the
+ * one place this predicate and {@link isTransient} part company (platform
+ * OPL-3898). `unavailable` means the computer is not running, which is a
+ * permanent answer to whoever asked — and a poll under a deadline is the one
+ * caller for whom it may not be, since a computer coming up passes through it.
+ * The same generosity as every unmapped 5xx above and for the same reason: this
+ * only ever replays a read, and the waits return a verdict of their own the
+ * moment the status they are watching settles. mandala-computer-python's
+ * `_is_transient_for_poll` and the MCP server's draw the line in the same place.
+ *
  * Everything at 5xx polls through, which is the behaviour change: 502 and 520-523
  * mean the outcome is unknown, and a read whose outcome is unknown can simply
  * be read again. {@link Computer.waitForGuest} already knew this about 502 and

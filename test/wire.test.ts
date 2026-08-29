@@ -5,6 +5,7 @@ import { Client } from '../src/index.js';
 import {
   anyRoute,
   BASE,
+  COMPUTER,
   EXEC_STARTED,
   json,
   MOVE_DONE,
@@ -124,6 +125,40 @@ describe('a claim needs the wire to have made it', () => {
     // `orphaned` is what tells a caller a restore cannot work, and `auto` is
     // what decides whether the retention policy may delete it.
     expect([snap?.orphaned, snap?.auto]).toEqual([false, false]);
+  });
+
+  // Platform OPL-3870. `clipboard` is a claim about a bridge, and the two ways
+  // to be wrong are not symmetric: a false about a working one costs a caller
+  // nothing but the socket, since the clipboard methods work there too, while a
+  // true about an absent one is a paste dropped silently with nothing to catch.
+  it('does not claim a clipboard bridge on a value it cannot read, or on none', async () => {
+    for (const value of [...UNREADABLE, undefined, null]) {
+      const { client: c } = client((call) =>
+        call.path === '/computers/vm-1'
+          ? json({
+              ...COMPUTER,
+              vnc: { ...COMPUTER.vnc, ...(value === undefined ? {} : { clipboard: value }) },
+            })
+          : anyRoute(call),
+      );
+      const vnc = (await c.computers.get('vm-1')).vnc;
+      expect(`${JSON.stringify(value ?? null)}: ${vnc?.clipboard}`).toBe(
+        `${JSON.stringify(value ?? null)}: false`,
+      );
+    }
+  });
+
+  it('still reports the bridge the platform did say was provisioned', async () => {
+    for (const value of READABLE_TRUE) {
+      const { client: c } = client((call) =>
+        call.path === '/computers/vm-1'
+          ? json({ ...COMPUTER, vnc: { ...COMPUTER.vnc, clipboard: value } })
+          : anyRoute(call),
+      );
+      expect(`${JSON.stringify(value)}: ${(await c.computers.get('vm-1')).vnc?.clipboard}`).toBe(
+        `${JSON.stringify(value)}: true`,
+      );
+    }
   });
 
   it('does not place the pointer on a `known` flag it cannot read', async () => {
