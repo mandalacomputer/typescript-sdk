@@ -3,3 +3,6 @@ dist/
 *.tsbuildinfo
 .DS_Store
 .claude/
+
+# Reports written by the /grok-bug-hunt skill.
+.grok-bug-hunt/
