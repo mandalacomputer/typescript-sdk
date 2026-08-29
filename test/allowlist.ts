@@ -64,6 +64,10 @@ export const ALLOWED: ReadonlySet<string> = new Set(
       ['DELETE', 'computers/:id/exec/:pid'],
       ['GET', 'computers/:id/windows'],
       ['POST', 'computers/:id/windows/:window'],
+      // The desktop's clipboard (platform OPL-3743, OPL-3768). Session-only for
+      // its first month; on v1 since the shape settled by not moving.
+      ['GET', 'computers/:id/clipboard'],
+      ['PUT', 'computers/:id/clipboard'],
 
       // The agent loop, and the same engine behind an OpenAI-shaped door.
       ['POST', 'computers/:id/agent'],
@@ -223,6 +227,8 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
     'POST computers/:id/windows/:window',
     ['body:action', 'body:x', 'body:y', 'body:width', 'body:height'],
   ],
+  ['GET computers/:id/clipboard', []],
+  ['PUT computers/:id/clipboard', ['body:text']],
 
   [
     'POST computers/:id/agent',
