@@ -1077,7 +1077,7 @@ export function expectMoves(
 ): Record<string, unknown>[] {
   if (!isRecord(data) || !Array.isArray(data.moves)) {
     throw new MandalaError(
-      `expected a JSON object with a moves array from ${method} ${path}, got: ${JSON.stringify(data).slice(0, 200)}`,
+      `expected a JSON object with a moves array from ${method} ${path}, got: ${`${JSON.stringify(data)}`.slice(0, 200)}`,
     );
   }
   return data.moves.filter(isRecord);

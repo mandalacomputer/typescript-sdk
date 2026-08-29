@@ -249,6 +249,22 @@ describe('waitForMove', () => {
     expect((err as Error).message).not.toContain('deleted');
   });
 
+  it('refuses an empty GET /moves body as MandalaError, not a stringify TypeError', async () => {
+    // Transport.json returns undefined for an empty 200/204. JSON.stringify of
+    // that is undefined, so `.slice` threw TypeError instead of naming the
+    // missing envelope.
+    const { client: c } = client((call) =>
+      call.path === '/moves' ? new Response('', { status: 200 }) : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    const err = await computer.waitForMove({ pollMs: 1, timeoutMs: 200 }).catch((e) => e);
+
+    expect(err).toBeInstanceOf(MandalaError);
+    expect((err as Error).message).toContain('moves array');
+    expect((err as Error).message).toMatch(/got: undefined/);
+    expect((err as Error).message).not.toContain('deleted');
+  });
+
   it('does NOT throw for a move that ended badly', async () => {
     // The decision worth stating out loud. `moved`, `failed` and `lost` are
     // three situations with three remedies, and a thrown error flattens them
