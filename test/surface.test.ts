@@ -100,6 +100,9 @@ async function exerciseEverything(client: Client): Promise<void> {
   await c.windowAction('0x1', 'move', { x: 10, y: 20 });
   await c.windowAction('0x1', 'resize', { width: 800, height: 600 });
 
+  await c.clipboard();
+  await c.setClipboard('on the clipboard');
+
   await c.move(1, 2);
   await c.click(1, 2);
   await c.click();
