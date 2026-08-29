@@ -187,32 +187,20 @@ export const count = (v: unknown): number | undefined => {
  *
  * - `token` — full control: keyboard and pointer. Root-equivalent on that one
  *   machine, so it belongs on a server or in a page you trust. The CLIPBOARD
- *   crosses this socket on a Linux computer whose QEMU has the vdagent channel
- *   and whose image carries the agent, and not otherwise, so a client that has
- *   to work on any computer should not depend on it. The two halves are
- *   acquired SEPARATELY and a computer needs both. The channel comes from a
- *   COLD start — stop the computer and start it again, or restart one that is
- *   already stopped, which starts it; restarting a RUNNING computer does not do
- *   it, because that resets the guest rather than rebuilding the machine QEMU
- *   was given. The agent is `spice-vdagent` inside the guest, which comes from
- *   the IMAGE, and a computer keeps the image it was created from — there is no
- *   operation that moves an existing one onto a newer one, so a computer built
- *   before the agent shipped needs it installed in the guest, which you can do
- *   yourself since you have root there, or replacing with a newly created
- *   computer — a current image STARTS it unaided, while installing the package
- *   into a guest that is already logged in leaves that session unbridged until
- *   it logs in again. Windows guests never have it, whatever the hardware says.
- *   Where
- *   both halves are present, RFB extended cut text is AVAILABLE — the transport
- *   being open, not a promise that a copy or a paste succeeds. The first paste
- *   of a session is often dropped, because the guest PULLS the text and vdagent
- *   may not own the selection yet, and a browser will not hand over the guest's
- *   clipboard without focus and permission. A resumed or snapshot-restored
- *   session also keeps the topology of the capture it came from, so a computer
- *   that had the channel can come back without one and reacquires it on its
- *   next stop and start. Where either half is absent, text a client pastes
- *   reaches QEMU and stops — silently, with no error to catch — and no field
- *   tells you which you have. Keep the route below whichever you get.
+ *   crosses this socket where the bridge was provisioned, and
+ *   {@link VncConnect.clipboard} is the field that says whether it was on this
+ *   computer. Everything this bullet used to spend on that condition was
+ *   written so a caller could work the answer out; it is read rather than
+ *   inferred now, and what is left is what to do with it.
+ *
+ *   `true` is the transport being OPEN and not a promise that a copy or a
+ *   paste succeeds. The first paste of a session is often dropped, because the
+ *   guest PULLS the text and vdagent may not own the selection yet, and a
+ *   browser will not hand over the guest's clipboard without focus and
+ *   permission. `false` means text a client pastes reaches QEMU and stops —
+ *   silently, with no error to catch — and what to do about THAT is on the
+ *   field, because it differs by which half of the bridge is missing. Keep the
+ *   route below whichever you get.
  *
  *   `Computer.clipboard()` and `Computer.setClipboard()` are the route to build
  *   on — the reliable one, not merely the fallback — because they need nothing
@@ -282,6 +270,45 @@ export type VncConnect = {
    * command line only changes on a cold boot. The refusal says as much.
    */
   terminalUrl: string;
+  /**
+   * Whether this socket was provisioned with the platform-controlled halves of
+   * the guest clipboard bridge (platform OPL-3870): the vdagent channel QEMU
+   * was given at its last cold boot, and an original image whose capability
+   * metadata matches its content digest — that is, one verified to ship
+   * `spice-vdagent`.
+   *
+   * A PROVISIONING signal rather than current availability, and the distinction
+   * is not pedantic: somebody with root in the guest can install, remove,
+   * disable or stop the agent afterwards and this does not move. Treat it as
+   * stale after anything that modified the guest, and use
+   * {@link Computer.clipboard} / {@link Computer.setClipboard} — or your own
+   * guest check — there.
+   *
+   * Always `false` on a socket opened with {@link viewToken}, because the
+   * daemon takes the extended-clipboard pseudo-encoding out of a watch-only
+   * connection as it is negotiated. There the `false` is about the CREDENTIAL
+   * rather than about the computer.
+   *
+   * When it is false, what to do depends on which half is missing and both are
+   * needed. The CHANNEL is hardware and comes from a COLD start: stop the
+   * computer and start it again, or start one that is already stopped.
+   * Restarting a RUNNING computer will not do it — that resets the guest rather
+   * than rebuilding the machine QEMU was given — and a computer back from a
+   * suspend or a snapshot keeps whatever the capture had, so it can lose the
+   * channel and need a stop and a start to get it back. The AGENT comes from
+   * the image the computer was created from, which nothing moves it off:
+   * installing the package yourself can make the bridge work but does not
+   * change this signal, an unverified image reads `false` even where the agent
+   * is present, and Windows guests never have it whatever the hardware says.
+   *
+   * `false` when the platform does not send it at all, which is the
+   * conservative reading and deliberately not "unknown": the two ways to be
+   * wrong are not symmetric. A `false` about a working bridge costs a caller
+   * nothing but the socket, since the clipboard methods work there too, while a
+   * `true` about an absent one is the silently dropped paste this field exists
+   * to end. {@link said} is that rule — true only where the wire said so.
+   */
+  clipboard: boolean;
   raw: Record<string, unknown>;
 };
 
@@ -306,6 +333,7 @@ export function toVncConnect(d: unknown): VncConnect | undefined {
     viewToken,
     embedUrl: str(d.embed_url),
     terminalUrl: str(d.terminal_url),
+    clipboard: said(d.clipboard),
     raw: { ...d },
   };
 }

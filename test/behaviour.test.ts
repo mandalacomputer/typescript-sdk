@@ -5,6 +5,7 @@ import {
   APIError,
   AuthenticationError,
   Client,
+  ConflictError,
   type FileChunk,
   GatewayTimeoutError,
   isTransient,
@@ -865,6 +866,34 @@ describe('what a payload cannot be allowed to mean', () => {
       await expect(computer.setClipboard(bad)).rejects.toThrow(TypeError);
     }
     expect(rec.calls.length).toBe(before);
+  });
+
+  it('carries the platform word off a clipboard refusal, and stops the retry', async () => {
+    // End to end, because the value of the word is that it survives the decode:
+    // the platform sends `reason` beside `error` on a body this SDK otherwise
+    // only reads a sentence out of (platform OPL-3898).
+    const refuse = (reason: string) =>
+      new Response(JSON.stringify({ error: 'this computer is not running', reason }), {
+        status: 409,
+        headers: { 'content-type': 'application/json' },
+      });
+    const { client: c } = client((call) =>
+      call.path.endsWith('/clipboard') ? refuse('unavailable') : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    const err = await computer.clipboard().catch((e) => e);
+    expect(err).toBeInstanceOf(ConflictError);
+    expect(err.reason).toBe('unavailable');
+    // The message is untouched: it is the sentence for a person, and the word
+    // is the part a program switches on.
+    expect(err.message).toBe('this computer is not running');
+    expect(isTransient(err)).toBe(false);
+
+    const { client: c2 } = client((call) =>
+      call.path.endsWith('/clipboard') ? refuse('contention') : anyRoute(call),
+    );
+    const busy = await (await c2.computers.get('vm-1')).setClipboard('x').catch((e) => e);
+    expect(isTransient(busy)).toBe(true);
   });
 
   it('refuses a background exec with no pid, rather than a finished job on pid 0', async () => {

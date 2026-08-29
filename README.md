@@ -320,14 +320,22 @@ The platform confirms the write by reading the selection back before it answers,
 so `setClipboard()` returning means the desktop is *holding* the text rather
 than that a command ran.
 
-**Not every `ConflictError` here is worth retrying, and they do not look
-different.** One is: *the desktop did not take the text* means something else
-claimed the selection in that instant — a clipboard manager settling, usually —
-and it clears on its own. The others describe a state you have to change: the
-computer is not running (`start()` it), or its X server is not up yet.
-`isTransient()` answers `true` for all of them, so a blanket retry spins until
-your deadline against a computer that is simply stopped. Read the message, or
-bound the loop in attempts.
+**Not every `ConflictError` here is worth retrying, and `err.reason` is how you
+tell.** `contention` is the one that clears by itself — *the desktop did not
+take the text* means something else claimed the selection in that instant, a
+clipboard manager settling, usually — and `starting` clears too, more slowly:
+the guest agent has not answered inside its boot window yet. `unavailable` does
+not clear at all, because the computer is not running and `start()` is the fix
+rather than another attempt. Desktop-session and X-server failures carry **no**
+`reason`, deliberately: the platform cannot tell a guest still coming up from a
+logged-out desktop or a crashed window manager, so it offers no retry advice
+there. Branch on the word, never on the sentence, which is prose and is
+rewritten.
+
+`isTransient()` reads it, so it no longer says `true` to the stopped computer —
+which is what it used to do, and what a blanket retry loop spun on until its
+deadline. An unclassified refusal falls back to the old type answer, so bound a
+loop that meets one.
 
 A **400** is the other one to know, because it never clears: a computer built
 from a golden that predates `xclip` is refused permanently. Install `xclip` in
@@ -653,7 +661,7 @@ the client asking politely:
 
 | | what it grants |
 |---|---|
-| `vnc.url` / `vnc.token` | full control — keyboard and pointer. The clipboard too on some guests, conditionally and unreported; see below. Root-equivalent on that machine. |
+| `vnc.url` / `vnc.token` | full control — keyboard and pointer, and the clipboard where `vnc.clipboard` says the bridge was provisioned; see below. Root-equivalent on that machine. |
 | `vnc.viewUrl` / `vnc.viewToken` | watch only. The platform *drops input* on this socket, so a patched client still cannot type — and takes the clipboard capability out of the connection as it is negotiated, so what the person at the desktop copies does not come back over it either. |
 | `vnc.embedUrl` | the hosted viewer, watch-only, for an `<iframe>`. The credential is in the URL fragment, which browsers never send to a server — so it stays out of access logs and out of `Referer`. |
 | `vnc.terminalUrl` | an interactive PTY in the guest, on the *controlling* credential. `''` on Windows; present but refused on a computer that has not been cold-booted since terminals shipped. |
@@ -661,34 +669,38 @@ the client asking politely:
 Neither is your API key, which is every computer on the account, forever. Both
 end when the computer restarts.
 
-The clipboard crosses the VNC socket on a Linux computer whose QEMU has the
-vdagent channel and whose image carries the agent, and not otherwise — so a
-client that has to work on any computer should not depend on it. The two halves
-are acquired separately and a computer needs both. The channel comes from a
-*cold* start: stop the computer and start it again, or restart one that is
-already stopped, which starts it. Restarting a *running* computer does not do it
-— that resets the guest rather than rebuilding the machine QEMU was given. The
-agent is `spice-vdagent` inside the guest, which comes from the image, and a
-computer keeps the image it was created from; there is no operation that moves
-an existing one onto a newer one, so a computer built before the agent shipped
-needs the package installed in the guest — you have root there — or replacing
-with a newly created one. A current image *starts* it unaided; installing the
-package into a guest that is already logged in leaves that session unbridged
-until it logs in again. Windows guests never have it, whatever the hardware
-says. A resumed or snapshot-restored session keeps the topology of the capture
-it came from, so a computer that had the channel can come back without one, and
-reacquires it on its next stop and start.
+**`vnc.clipboard` says whether the clipboard crosses this socket**, so it is
+read rather than worked out. It is true where the platform provisioned both
+halves it controls: the vdagent channel QEMU was given at the computer's last
+cold boot, and an original image verified to ship `spice-vdagent`. It is always
+false on the watch-only credential, where the daemon takes the capability out of
+the connection as it is negotiated — there it is about the credential rather
+than about the computer.
 
-Where both halves are present the RFB clipboard path is *available* — the
-transport is open, which is not the same as a copy or a paste succeeding. The
-first paste of a session is often dropped, because the guest *pulls* the text
-and vdagent may not own the selection yet, and a browser will not hand over the
-guest's clipboard without focus and permission. A client also has to negotiate
-the extended-clipboard pseudo-encoding — that is QEMU's only door to the guest's
-clipboard, so an RFB client of your own that does not offer it receives nothing
-however the guest is configured. Where any of it is absent a paste reaches QEMU
-and stops, silently, and **no field tells you which you have**. Keep the route
-below whichever you get.
+A **provisioning** signal, not a live check. Somebody with root in the guest can
+install, remove, disable or stop the agent afterwards and this does not move, so
+treat it as stale after anything that modified the guest.
+
+`true` means the transport is open, which is not the same as a copy or a paste
+succeeding. The first paste of a session is often dropped, because the guest
+*pulls* the text and vdagent may not own the selection yet, and a browser will
+not hand over the guest's clipboard without focus and permission. A client also
+has to negotiate the extended-clipboard pseudo-encoding — that is QEMU's only
+door to the guest's clipboard, so an RFB client of your own that does not offer
+it receives nothing however the guest is configured.
+
+`false` means a paste reaches QEMU and stops, silently, and what to do about it
+depends on which half is missing. The **channel** is hardware and comes from a
+*cold* start: stop the computer and start it again, or start one that is already
+stopped. Restarting a *running* computer does not do it — that resets the guest
+rather than rebuilding the machine QEMU was given — and a computer back from a
+suspend or a snapshot keeps whatever the capture had, so it can lose the channel
+and need a stop and a start to get it back. The **agent** comes from the image
+the computer was created from, which nothing moves it off: installing the
+package yourself can make the bridge work but does not change this field, an
+unverified image reads false even where the agent is present, and Windows guests
+never have it whatever the hardware says. Keep the route below whichever you
+get.
 
 [`clipboard()` and `setClipboard()`](#clipboard) are the route to build on — the
 reliable one, not merely the fallback — because they need nothing of the
@@ -920,7 +932,8 @@ import {
   PlanLimitError,      //     402 — your plan will not allow this. Not a retry.
   PermissionDeniedError,//    403 — the key's role is too low
   NotFoundError,       //     404 — no such computer, snapshot, or route
-  ConflictError,       //     409 — right request, wrong moment. Retry this one.
+  ConflictError,       //     409 — right request, wrong moment. `err.reason` says
+                       //           whether retrying it helps
   MoveRequiredError,   //       409 — …except this one: the size needs a new host
   TooLargeError,       //     413 — more file than one request moves
   RangeNotSatisfiableError,// 416 — that range names no byte the file has
@@ -944,9 +957,23 @@ try {
 }
 ```
 
-`ConflictError` is the one that clears itself: a guest still booting, a disk still
-being copied, another operation holding the guest agent. The platform's own
-message survives onto `err.message` — these are written to be acted on.
+`ConflictError` is the one that usually clears itself: a guest still booting, a
+disk still being copied, another operation holding the guest agent. The
+platform's own message survives onto `err.message` — these are written to be
+acted on.
+
+`err.reason` is what says which kind you have, where the platform sent a word
+for it, and it is the part a program is allowed to depend on — `err.message` is
+prose and is rewritten. Four words: `contention` and `starting` clear on their
+own, `unavailable` means the computer is not running and only starting it helps,
+`unsupported` means this computer cannot do it at all. `isTransient` reads it
+before it looks at the type, which is how a clipboard call against a stopped
+computer stopped being told to retry.
+
+**Absent means no classification was given**, and so does a word you do not
+recognise — not every refusal has one, and the platform reserves the right to
+add a fifth. Treat both as "no answer" and fall back to whatever you did before,
+which is exactly what `isTransient` does.
 
 `MoveRequiredError` is the exception, and it is a subclass so that code matching
 on the family keeps working. It means the size you asked for is more RAM than the

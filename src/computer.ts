@@ -1265,8 +1265,11 @@ export class Computer {
    * A READ, not a subscription. Nothing notices a Ctrl-C in the guest on its
    * own, and this call does NOT resume a suspended computer — what somebody
    * copied is not worth waking a machine for, so a stopped or suspended
-   * computer answers 409 rather than starting. {@link setClipboard} is the
-   * other way round.
+   * computer answers 409 rather than starting. That one carries
+   * {@link APIError.reason} `unavailable`: the 409 here that never clears by
+   * waiting, because `start()` is something only the caller can do. See
+   * {@link setClipboard} for the rest of them; it is the other way round on the
+   * resume.
    *
    * An empty clipboard is `''`, and a failure is an exception rather than an
    * empty string: the two are told apart here, which is the thing the `exec`
@@ -1303,14 +1306,23 @@ export class Computer {
    * answers, so this returning means the desktop is holding the text, not
    * merely that a command ran.
    *
-   * NOT EVERY {@link ConflictError} HERE IS WORTH RETRYING, and they do not
-   * look different. One is: "the desktop did not take the text" means something
-   * else claimed the selection in that instant — a clipboard manager settling,
-   * usually — and it clears on its own. The others describe a state you have to
-   * change: the computer is not running (`start()` it), or its X server is not
-   * up yet. {@link isTransient} answers true for all of them, so a blanket
-   * retry spins until your deadline against a computer that is simply stopped.
-   * Read the message, or bound the loop in attempts.
+   * NOT EVERY {@link ConflictError} HERE IS WORTH RETRYING, and
+   * {@link APIError.reason} is how they are told apart (platform OPL-3898).
+   * `contention` is the one that clears by itself — "the desktop did not take
+   * the text" means something else claimed the selection in that instant, a
+   * clipboard manager settling, usually — and `starting` clears too, more
+   * slowly: the guest agent has not answered inside its boot window yet.
+   * `unavailable` does not clear at all, because the computer is not running
+   * and `start()` is the fix rather than another attempt. Desktop-session and
+   * X-server failures carry NO word, deliberately: the platform cannot tell a
+   * guest still coming up from a logged-out desktop or a crashed window
+   * manager, so it gives no retry advice and neither does this. Switch on the
+   * word and never on the sentence, which is prose and is rewritten.
+   *
+   * {@link isTransient} reads it, so it no longer says yes to the stopped
+   * computer — which is what it used to do, and what a blanket retry loop spun
+   * on until somebody's deadline. An unclassified refusal still falls back to
+   * the type answer, so bound a loop that meets one.
    *
    * And two 400s here never clear at all, which matters more on this method
    * than on the read for exactly that reason: the guest needs `xclip` in its
