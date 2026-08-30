@@ -385,9 +385,8 @@ function readBody(body: ts.Node, file: ts.SourceFile, where: string, into: Reach
  * something on `this` or `super` that does — closed over transitively, so a
  * chain of private helpers is followed to the end, and through `extends`, so a
  * subclass method that reaches the wire only through an inherited one is still counted.
- * The inventory for a class is its OWN declarations: an inherited method is one
- * function, and exercising it once under the class that declares it is the
- * coverage, not once per subclass.
+ * An inherited entry point is also counted on the first subclass whose virtual
+ * dispatch turns its otherwise non-requesting body into a request-making one.
  *
  * Classes with none are left out entirely rather than mapped to an empty set: a
  * model or an exception is not a surface with nothing on it, it is not this kind
@@ -409,8 +408,33 @@ export function requestingMethods(
     }
   }
 
-  const found = new Map<string, Set<string>>();
-  for (const [className, info] of classes) {
+  /** The implementation selected by ordinary property lookup from `start`. */
+  const resolve = (
+    receiver: string,
+    start: string | undefined,
+    member: string,
+  ): Reaches | undefined => {
+    const seen = new Set<string>();
+    for (let name = start; name && !seen.has(name); ) {
+      seen.add(name);
+      const current = classes.get(name);
+      if (!current) {
+        throw new Error(
+          `unresolved base class ${name} while tracing ${receiver} in ${declaredIn.get(receiver)}`,
+        );
+      }
+      const body = current.bodies.get(member);
+      if (body) return body;
+      name = current.base;
+    }
+    return undefined;
+  };
+
+  const cache = new Map<string, Set<Reaches>>();
+  const requestsFor = (className: string): Set<Reaches> => {
+    const cached = cache.get(className);
+    if (cached) return cached;
+
     const bodies = new Set<Reaches>();
     const lineage = new Set<string>();
     for (let name: string | undefined = className; name && !lineage.has(name); ) {
@@ -420,24 +444,6 @@ export function requestingMethods(
       for (const reaches of current.bodies.values()) bodies.add(reaches);
       name = current.base;
     }
-
-    /** The implementation selected by ordinary property lookup from `start`. */
-    const resolve = (start: string | undefined, member: string): Reaches | undefined => {
-      const seen = new Set<string>();
-      for (let name = start; name && !seen.has(name); ) {
-        seen.add(name);
-        const current = classes.get(name);
-        if (!current) {
-          throw new Error(
-            `unresolved base class ${name} while tracing ${className} in ${declaredIn.get(className)}`,
-          );
-        }
-        const body = current.bodies.get(member);
-        if (body) return body;
-        name = current.base;
-      }
-      return undefined;
-    };
 
     const requesting = new Set([...bodies].filter((reaches) => reaches.transport));
     // Widen until nothing new is reached. Bounded by the member count, since
@@ -449,12 +455,12 @@ export function requestingMethods(
         const throughThis = [...reaches.siblings].some((member) => {
           // Private names are lexical; ordinary names dispatch on the receiver.
           const start = member.startsWith('#') ? reaches.owner : className;
-          const target = resolve(start, member);
+          const target = resolve(className, start, member);
           return target !== undefined && requesting.has(target);
         });
         const base = classes.get(reaches.owner)?.base;
         const throughSuper = [...reaches.inherited].some((member) => {
-          const target = resolve(base, member);
+          const target = resolve(className, base, member);
           return target !== undefined && requesting.has(target);
         });
         return throughThis || throughSuper;
@@ -462,20 +468,55 @@ export function requestingMethods(
       if (grown.length === 0) break;
       for (const reaches of grown) requesting.add(reaches);
     }
-    const own = new Set(
-      info.publicNames.filter((member) => {
-        const body = info.bodies.get(member);
-        return body !== undefined && requesting.has(body);
-      }),
-    );
-    const instanceField = [...own].find((member) => info.instanceFields.has(member));
+    cache.set(className, requesting);
+    return requesting;
+  };
+
+  const found = new Map<string, Set<string>>();
+  for (const [className, info] of classes) {
+    const requesting = requestsFor(className);
+    const candidates = new Set<string>();
+    const lineage = new Set<string>();
+    for (
+      let name: string | undefined = className;
+      name && !lineage.has(name);
+      name = classes.get(name)?.base
+    ) {
+      lineage.add(name);
+      const current = classes.get(name);
+      if (!current) break;
+      for (const member of current.publicNames) candidates.add(member);
+    }
+    const selected = new Map<string, Reaches>();
+    for (const member of candidates) {
+      const body = resolve(className, className, member);
+      if (!body || !requesting.has(body)) continue;
+      if (body.owner === className) {
+        selected.set(member, body);
+        continue;
+      }
+      // Ordinary inherited behavior is covered at its declaration. Keep the
+      // inherited entry point only when dispatch in this subclass is what made
+      // the body request-making.
+      const base = info.base;
+      const baseBody = resolve(className, base, member);
+      if (base && baseBody && !requestsFor(base).has(baseBody)) selected.set(member, body);
+    }
+    const own = new Set(selected.keys());
+    const instanceField = [...own].find((member) => {
+      const body = selected.get(member);
+      return body !== undefined && classes.get(body.owner)?.instanceFields.has(member);
+    });
     if (instanceField !== undefined) {
       throw new Error(
         `${className}.${instanceField} in ${declaredIn.get(className)} is a public ` +
           'request-making instance field; declare it as a prototype method so it can be recorded',
       );
     }
-    const accessor = [...own].find((member) => info.accessors.has(member));
+    const accessor = [...own].find((member) => {
+      const body = selected.get(member);
+      return body !== undefined && classes.get(body.owner)?.accessors.has(member);
+    });
     if (accessor !== undefined) {
       throw new Error(
         `${className}.${accessor} in ${declaredIn.get(className)} is a public request-making ` +
@@ -611,14 +652,12 @@ export async function recordNamedCalls(
     for (const [cls, methods] of surface) {
       for (const declared of [...methods].sort()) {
         const key = keyOf(declared);
-        // Own property, not an inherited one: rebinding an inherited method onto
-        // a subclass would leave the class permanently different from how it was
-        // found. Nothing in this inventory is inherited — it is built from each
-        // class's own declarations — and this is how to hear about the first one
-        // that is.
-        const descriptor = Object.getOwnPropertyDescriptor(cls.prototype, key);
+        const ownDescriptor = Object.getOwnPropertyDescriptor(cls.prototype, key);
+        let owner = cls.prototype;
+        while (owner && !Object.hasOwn(owner, key)) owner = Object.getPrototypeOf(owner) as object;
+        const descriptor = owner ? Object.getOwnPropertyDescriptor(owner, key) : undefined;
         if (!descriptor || typeof descriptor.value !== 'function') {
-          throw new Error(`${cls.name}.${declared} is not an own method of the prototype`);
+          throw new Error(`${cls.name}.${declared} is not a prototype method`);
         }
         const original = descriptor.value as (...a: unknown[]) => unknown;
         const label = `${cls.name}.${declared}`;
@@ -628,7 +667,10 @@ export async function recordNamedCalls(
         };
         Object.defineProperty(wrapper, 'name', { value: original.name });
         Object.defineProperty(cls.prototype, key, { ...descriptor, value: wrapper });
-        restore.push(() => Object.defineProperty(cls.prototype, key, descriptor));
+        restore.push(() => {
+          if (ownDescriptor) Object.defineProperty(cls.prototype, key, ownDescriptor);
+          else Reflect.deleteProperty(cls.prototype, key);
+        });
       }
     }
     await run();

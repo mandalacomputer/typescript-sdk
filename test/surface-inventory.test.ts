@@ -11,7 +11,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { Client, Computer, Computers, EphemeralComputer } from '../src/index.js';
+import { Client, Computer, Computers } from '../src/index.js';
 import { anyRoute, BASE, recorder } from './harness.js';
 import {
   type Ctor,
@@ -206,6 +206,20 @@ describe('the request-making rule', () => {
     expect(sorted(found, 'ViaSuper')).toEqual(['dispose']);
   });
 
+  it('counts an inherited entry point made requesting by subclass dispatch', () => {
+    const found = scan(`
+      class Base {
+        async run() { return this.hook(); }
+        async hook() {}
+      }
+      class Sub extends Base {
+        async hook() { return this.#t.json('GET', 'x'); }
+      }
+    `);
+    expect(found.has('Base')).toBe(false);
+    expect(sorted(found, 'Sub')).toEqual(['hook', 'run']);
+  });
+
   it('counts a helper named rather than called', () => {
     // A helper handed off as a callback reaches the wire exactly as much as one
     // called on the spot.
@@ -378,17 +392,19 @@ describe('recording direct calls', () => {
     ).rejects.toThrow(/distinct, non-empty name/);
   });
 
-  it('refuses a method the class does not declare itself', async () => {
-    // `delete` is Computer's, not EphemeralComputer's. Rebinding an inherited
-    // method onto a subclass would leave the class permanently different from
-    // how it was found, so it fails here instead.
+  it('records an inherited entry point and removes its temporary wrapper', async () => {
+    class Base {
+      async run(): Promise<void> {}
+    }
+    class Sub extends Base {}
+    async function exercise(): Promise<void> {
+      await new Sub().run();
+    }
     const inherited: ReadonlyMap<Ctor, ReadonlySet<string>> = new Map([
-      [EphemeralComputer as unknown as Ctor, new Set(['delete'])],
+      [Sub as unknown as Ctor, new Set(['run'])],
     ]);
-    await expect(
-      recordNamedCalls(inherited, [async function exercise() {}], async () => {}),
-    ).rejects.toThrow(/EphemeralComputer\.delete is not an own method/);
-    expect(Object.getOwnPropertyDescriptor(EphemeralComputer.prototype, 'delete')).toBeUndefined();
+    expect([...(await recordNamedCalls(inherited, [exercise], exercise))]).toEqual(['Sub.run']);
+    expect(Object.getOwnPropertyDescriptor(Sub.prototype, 'run')).toBeUndefined();
   });
 
   it('leaves the prototype indistinguishable from how it found it', async () => {
