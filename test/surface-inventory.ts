@@ -100,6 +100,8 @@ type ClassInfo = {
   bodies: Map<string, Reaches>;
   /** The name in `extends`, when it is a plain identifier. */
   base?: string;
+  /** Function-valued fields installed on instances rather than the prototype. */
+  instanceFields: Set<string>;
   /** Declared names that are addressable public API, in declaration order. */
   publicNames: string[];
 };
@@ -129,7 +131,10 @@ function bodyOf(member: ts.ClassElement): ts.Node | undefined {
   if (ts.isMethodDeclaration(member) || ts.isGetAccessor(member) || ts.isSetAccessor(member)) {
     return member.body;
   }
-  // A method written as a property holding a function is still a method.
+  // Function fields still need reading: a private one can be the helper through
+  // which an ordinary prototype method reaches the transport. Public
+  // request-making ones are rejected below because the recorder cannot wrap an
+  // instance field through the prototype.
   if (ts.isPropertyDeclaration(member) && member.initializer) {
     const init = member.initializer;
     if (ts.isArrowFunction(init) || ts.isFunctionExpression(init)) return init.body;
@@ -151,7 +156,7 @@ function scanFile(fileName: string, source: string): Map<string, ClassInfo> {
 
   const walk = (node: ts.Node): void => {
     if (ts.isClassDeclaration(node) && node.name) {
-      const info: ClassInfo = { bodies: new Map(), publicNames: [] };
+      const info: ClassInfo = { bodies: new Map(), instanceFields: new Set(), publicNames: [] };
       const heritage = node.heritageClauses?.find((h) => h.token === ts.SyntaxKind.ExtendsKeyword)
         ?.types[0]?.expression;
       if (heritage && ts.isIdentifier(heritage)) info.base = heritage.text;
@@ -172,6 +177,7 @@ function scanFile(fileName: string, source: string): Map<string, ClassInfo> {
         };
         readBody(body, file, `${node.name.text}.${name}`, reaches);
         info.bodies.set(name, reaches);
+        if (ts.isPropertyDeclaration(member)) info.instanceFields.add(name);
         if (isPublic(member, name) && !info.publicNames.includes(name)) info.publicNames.push(name);
       }
       if (found.has(node.name.text)) {
@@ -319,6 +325,13 @@ export function requestingMethods(
         return body !== undefined && requesting.has(body);
       }),
     );
+    const instanceField = [...own].find((member) => info.instanceFields.has(member));
+    if (instanceField !== undefined) {
+      throw new Error(
+        `${className}.${instanceField} in ${declaredIn.get(className)} is a public ` +
+          'request-making instance field; declare it as a prototype method so it can be recorded',
+      );
+    }
     if (own.size > 0) found.set(className, own);
   }
   return found;

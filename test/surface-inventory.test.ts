@@ -47,6 +47,20 @@ describe('the request-making rule', () => {
     expect(sorted(found, 'A')).toEqual(['click']);
   });
 
+  it('follows a private function field used by a prototype method', () => {
+    const found = scan(`class A {
+      async go() { return this.#request(); }
+      #request = () => this.#t.json('GET', 'x');
+    }`);
+    expect(sorted(found, 'A')).toEqual(['go']);
+  });
+
+  it('refuses a public request-making instance field that cannot be recorded', () => {
+    expect(() => scan(`class A { go = async () => this.#t.json('GET', 'x'); }`)).toThrow(
+      /A\.go in fake-0\.ts is a public request-making instance field; declare it as a prototype method/,
+    );
+  });
+
   it('settles on mutually recursive helpers rather than spinning', () => {
     const found = scan(`class A {
       async go() { return this.#ping(); }
