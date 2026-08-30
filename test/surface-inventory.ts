@@ -36,7 +36,7 @@
  */
 
 import { readdirSync, readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
 import * as sdk from '../src/index.js';
@@ -77,16 +77,22 @@ export type Ctor = { readonly name: string; readonly prototype: object };
 export type Inventory = ReadonlyMap<Ctor, ReadonlySet<string>>;
 
 /**
- * What one method body touches: the transport, and its own siblings.
+ * What one method body touches: the transport, and methods reached through
+ * `this` or `super`.
  *
- * Both are collected in one pass because the second is what makes the first
+ * All are collected in one pass because the latter two make the first
  * complete. `Computer.click` never names the transport — it calls `this.#input`,
  * which does — and a rule that only looked for the direct touch would call the
  * entire input surface non-requesting.
  */
 type Reaches = {
+  /** The class whose member owns this body. */
+  owner: string;
   transport: boolean;
+  /** Members reached through `this`. */
   siblings: Set<string>;
+  /** Members reached through `super`. */
+  inherited: Set<string>;
 };
 
 type ClassInfo = {
@@ -158,7 +164,12 @@ function scanFile(fileName: string, source: string): Map<string, ClassInfo> {
         // Overloads share a name with their implementation, and only the
         // implementation has a body, so this merge is for a class that genuinely
         // declares the same name twice rather than for the common case.
-        const reaches = info.bodies.get(name) ?? { transport: false, siblings: new Set() };
+        const reaches = info.bodies.get(name) ?? {
+          owner: node.name.text,
+          transport: false,
+          siblings: new Set(),
+          inherited: new Set(),
+        };
         readBody(body, file, `${node.name.text}.${name}`, reaches);
         info.bodies.set(name, reaches);
         if (isPublic(member, name) && !info.publicNames.includes(name)) info.publicNames.push(name);
@@ -197,11 +208,21 @@ function readBody(body: ts.Node, file: ts.SourceFile, where: string, into: Reach
       // is not a method of this class matches nothing.
       if (node.expression.kind === ts.SyntaxKind.ThisKeyword) {
         into.siblings.add(node.name.getText(file));
+      } else if (node.expression.kind === ts.SyntaxKind.SuperKeyword) {
+        // Kept separate from `this`: a subclass override changes the first
+        // one's target, while `super` deliberately starts lookup at the base.
+        into.inherited.add(node.name.getText(file));
       }
     }
     // `this[Symbol.asyncDispose]()`, and anything else keyed rather than named.
-    if (ts.isElementAccessExpression(node) && node.expression.kind === ts.SyntaxKind.ThisKeyword) {
-      into.siblings.add(`[${node.argumentExpression.getText(file)}]`);
+    if (
+      ts.isElementAccessExpression(node) &&
+      (node.expression.kind === ts.SyntaxKind.ThisKeyword ||
+        node.expression.kind === ts.SyntaxKind.SuperKeyword)
+    ) {
+      const member = `[${node.argumentExpression.getText(file)}]`;
+      if (node.expression.kind === ts.SyntaxKind.ThisKeyword) into.siblings.add(member);
+      else into.inherited.add(member);
     }
     ts.forEachChild(node, visit);
   };
@@ -213,9 +234,9 @@ function readBody(body: ts.Node, file: ts.SourceFile, where: string, into: Reach
  * them.
  *
  * A method is request-making when its body reaches the transport, or names
- * something on `this` that does — closed over transitively, so a chain of
- * private helpers is followed to the end, and through `extends`, so a subclass
- * method that reaches the wire only through an inherited one is still counted.
+ * something on `this` or `super` that does — closed over transitively, so a
+ * chain of private helpers is followed to the end, and through `extends`, so a
+ * subclass method that reaches the wire only through an inherited one is still counted.
  * The inventory for a class is its OWN declarations: an inherited method is one
  * function, and exercising it once under the class that declares it is the
  * coverage, not once per subclass.
@@ -232,40 +253,84 @@ export function requestingMethods(
     for (const [className, info] of scanFile(name, source)) classes.set(className, info);
   }
 
-  /** One class's bodies, with everything it inherits underneath them. */
-  const inherited = (name: string, seen = new Set<string>()): Map<string, Reaches> => {
-    const info = classes.get(name);
-    if (!info || seen.has(name)) return new Map();
-    seen.add(name);
-    const merged = info.base ? inherited(info.base, seen) : new Map<string, Reaches>();
-    for (const [member, reaches] of info.bodies) merged.set(member, reaches);
-    return merged;
-  };
-
   const found = new Map<string, Set<string>>();
   for (const [className, info] of classes) {
-    const bodies = inherited(className);
-    const requesting = new Set(
-      [...bodies].filter(([, reaches]) => reaches.transport).map(([member]) => member),
-    );
+    const bodies = new Set<Reaches>();
+    const lineage = new Set<string>();
+    for (let name: string | undefined = className; name && !lineage.has(name); ) {
+      lineage.add(name);
+      const current = classes.get(name);
+      if (!current) break;
+      for (const reaches of current.bodies.values()) bodies.add(reaches);
+      name = current.base;
+    }
+
+    /** The implementation selected by ordinary property lookup from `start`. */
+    const resolve = (start: string | undefined, member: string): Reaches | undefined => {
+      const seen = new Set<string>();
+      for (let name = start; name && !seen.has(name); ) {
+        seen.add(name);
+        const current = classes.get(name);
+        if (!current) return undefined;
+        const body = current.bodies.get(member);
+        if (body) return body;
+        name = current.base;
+      }
+      return undefined;
+    };
+
+    const requesting = new Set([...bodies].filter((reaches) => reaches.transport));
     // Widen until nothing new is reached. Bounded by the member count, since
-    // each pass either adds a name or stops, and a cycle of mutually recursive
+    // each pass either adds a body or stops, and a cycle of mutually recursive
     // helpers settles rather than spinning.
     for (;;) {
-      const grown = [...bodies].filter(
-        ([member, reaches]) =>
-          !requesting.has(member) && [...reaches.siblings].some((s) => requesting.has(s)),
-      );
+      const grown = [...bodies].filter((reaches) => {
+        if (requesting.has(reaches)) return false;
+        const throughThis = [...reaches.siblings].some((member) => {
+          // Private names are lexical; ordinary names dispatch on the receiver.
+          const start = member.startsWith('#') ? reaches.owner : className;
+          const target = resolve(start, member);
+          return target !== undefined && requesting.has(target);
+        });
+        const base = classes.get(reaches.owner)?.base;
+        const throughSuper = [...reaches.inherited].some((member) => {
+          const target = resolve(base, member);
+          return target !== undefined && requesting.has(target);
+        });
+        return throughThis || throughSuper;
+      });
       if (grown.length === 0) break;
-      for (const [member] of grown) requesting.add(member);
+      for (const reaches of grown) requesting.add(reaches);
     }
-    const own = new Set(info.publicNames.filter((member) => requesting.has(member)));
+    const own = new Set(
+      info.publicNames.filter((member) => {
+        const body = info.bodies.get(member);
+        return body !== undefined && requesting.has(body);
+      }),
+    );
     if (own.size > 0) found.set(className, own);
   }
   return found;
 }
 
 const SRC = join(dirname(fileURLToPath(import.meta.url)), '..', 'src');
+
+/** Read every TypeScript source below `root`, in a stable order. */
+export function readTypeScriptFiles(root: string): { name: string; source: string }[] {
+  const paths: string[] = [];
+  const visit = (directory: string): void => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) visit(path);
+      else if (entry.isFile() && entry.name.endsWith('.ts')) paths.push(path);
+    }
+  };
+  visit(root);
+  return paths.sort().map((path) => ({
+    name: relative(root, path).replaceAll('\\', '/'),
+    source: readFileSync(path, 'utf8'),
+  }));
+}
 
 /**
  * Every public request-making method in this SDK, by its class.
@@ -280,10 +345,7 @@ const SRC = join(dirname(fileURLToPath(import.meta.url)), '..', 'src');
  * reachable it should not be declaring public methods that call the platform.
  */
 export function inventory(): Inventory {
-  const files = readdirSync(SRC)
-    .filter((name) => name.endsWith('.ts'))
-    .sort()
-    .map((name) => ({ name, source: readFileSync(join(SRC, name), 'utf8') }));
+  const files = readTypeScriptFiles(SRC);
   const exported = sdk as unknown as Record<string, unknown>;
   const found = new Map<Ctor, ReadonlySet<string>>();
   for (const [className, methods] of requestingMethods(files)) {

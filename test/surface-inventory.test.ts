@@ -7,6 +7,9 @@
  * would make that sentence true by shrinking what it is about.
  */
 
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { Client, Computer, Computers, EphemeralComputer } from '../src/index.js';
 import { anyRoute, BASE, recorder } from './harness.js';
@@ -15,6 +18,7 @@ import {
   inventory,
   keyOf,
   names,
+  readTypeScriptFiles,
   recordNamedCalls,
   requestingMethods,
 } from './surface-inventory.js';
@@ -93,18 +97,25 @@ describe('the request-making rule', () => {
     expect(sorted(found, 'A')).toEqual(['go']);
   });
 
-  it('follows an inherited method, and lists it on the class that declares it', () => {
+  it('follows an inherited method reached through this or super', () => {
     // EphemeralComputer's disposer reaches the wire only through Computer's
     // `delete`. A scan that looked at one class body at a time would call the
     // one method whose failure strands a billable machine non-requesting.
     const found = scan(
       `class Base { async delete() { await this.#t.json('DELETE', 'x'); } }`,
-      `class Sub extends Base { async [Symbol.asyncDispose]() { await this.delete(); } }`,
+      `class ViaThis extends Base { async dispose() { await this.delete(); } }`,
+      `class ViaSuper extends Base {
+        async delete() {}
+        async dispose() { await super.delete(); }
+      }`,
     );
     expect(sorted(found, 'Base')).toEqual(['delete']);
     // Its own declarations only: an inherited method is one function, and
     // exercising it once under the class that declares it is the coverage.
-    expect(sorted(found, 'Sub')).toEqual(['[Symbol.asyncDispose]']);
+    expect(sorted(found, 'ViaThis')).toEqual(['dispose']);
+    // The override itself does not request. `super.delete()` must resolve the
+    // inherited body, not be mistaken for the non-requesting `this.delete`.
+    expect(sorted(found, 'ViaSuper')).toEqual(['dispose']);
   });
 
   it('counts a helper named rather than called', () => {
@@ -115,6 +126,25 @@ describe('the request-making rule', () => {
       #one(id) { return this.#t.json('GET', id); }
     }`);
     expect(sorted(found, 'A')).toEqual(['all']);
+  });
+});
+
+describe('source discovery', () => {
+  it('reads TypeScript files in nested directories', () => {
+    const root = mkdtempSync(join(tmpdir(), 'surface-inventory-'));
+    try {
+      mkdirSync(join(root, 'resources', 'nested'), { recursive: true });
+      writeFileSync(join(root, 'top.ts'), `class Top {}`);
+      writeFileSync(join(root, 'resources', 'nested', 'deep.ts'), `class Deep {}`);
+      writeFileSync(join(root, 'resources', 'ignored.js'), `class Ignored {}`);
+
+      expect(readTypeScriptFiles(root).map(({ name }) => name)).toEqual([
+        'resources/nested/deep.ts',
+        'top.ts',
+      ]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 
