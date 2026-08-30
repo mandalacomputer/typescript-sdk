@@ -98,6 +98,20 @@ describe('the request-making rule', () => {
     );
   });
 
+  it('refuses aliased or destructured transport access', () => {
+    for (const statement of [`const t = this.#t`, `const { json } = this.#t`]) {
+      expect(() => scan(`class A { async go() { ${statement}; } }`)).toThrow(
+        /indirect transport access in A\.go: this\.#t must be used directly/,
+      );
+    }
+  });
+
+  it('allows a classified non-request transport handoff', () => {
+    expect(scan(`class A { make(data) { return new Computer(this.#t, data); } }`).has('A')).toBe(
+      false,
+    );
+  });
+
   it('does not count a transport member that makes no request', () => {
     expect(scan(`class A { get where() { return this.#t.baseUrl; } }`).has('A')).toBe(false);
   });

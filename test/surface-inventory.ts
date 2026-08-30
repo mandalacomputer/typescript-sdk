@@ -70,6 +70,18 @@ const VERBS: ReadonlySet<string> = new Set(['json', 'jsonArray', 'listing', 'byt
  */
 const NON_REQUEST_TRANSPORT: ReadonlySet<string> = new Set(['baseUrl']);
 
+/**
+ * Exact callees that receive the transport without making a request.
+ *
+ * Every other bare use of `this.#t` is rejected. Keeping this list narrow is
+ * what prevents an alias from hiding a request from the member tables above.
+ */
+const NON_REQUEST_TRANSPORT_CONSUMERS: ReadonlySet<string> = new Set([
+  'Computer',
+  'EphemeralComputer',
+  'oneComputer',
+]);
+
 /** A class as this module addresses one: by name, and by its prototype. */
 export type Ctor = { readonly name: string; readonly prototype: object };
 
@@ -193,14 +205,16 @@ function scanFile(fileName: string, source: string): Map<string, ClassInfo> {
 
 /** Fill in one member's {@link Reaches} from its body. */
 function readBody(body: ts.Node, file: ts.SourceFile, where: string, into: Reaches): void {
+  const isTransport = (node: ts.Node): node is ts.PropertyAccessExpression =>
+    ts.isPropertyAccessExpression(node) &&
+    node.expression.kind === ts.SyntaxKind.ThisKeyword &&
+    ts.isPrivateIdentifier(node.name) &&
+    node.name.text === TRANSPORT;
+
   const visit = (node: ts.Node): void => {
     if (ts.isPropertyAccessExpression(node)) {
       const inner = node.expression;
-      const onTransport =
-        ts.isPropertyAccessExpression(inner) &&
-        inner.expression.kind === ts.SyntaxKind.ThisKeyword &&
-        ts.isPrivateIdentifier(inner.name) &&
-        inner.name.text === TRANSPORT;
+      const onTransport = isTransport(inner);
       if (onTransport) {
         const member = node.name.getText(file);
         if (VERBS.has(member)) into.transport = true;
@@ -208,6 +222,20 @@ function readBody(body: ts.Node, file: ts.SourceFile, where: string, into: Reach
           throw new Error(
             `unclassified transport member in ${where}: this.${TRANSPORT}.${member}. ` +
               'Add it to VERBS or NON_REQUEST_TRANSPORT in test/surface-inventory.ts.',
+          );
+        }
+      }
+      if (isTransport(node)) {
+        const parent = node.parent;
+        const directMember = ts.isPropertyAccessExpression(parent) && parent.expression === node;
+        const classifiedConsumer =
+          (ts.isCallExpression(parent) || ts.isNewExpression(parent)) &&
+          parent.arguments?.includes(node) === true &&
+          NON_REQUEST_TRANSPORT_CONSUMERS.has(parent.expression.getText(file));
+        if (!directMember && !classifiedConsumer) {
+          throw new Error(
+            `indirect transport access in ${where}: this.${TRANSPORT} must be used directly ` +
+              'by a classified member or non-request consumer',
           );
         }
       }
