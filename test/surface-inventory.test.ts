@@ -97,6 +97,15 @@ describe('the request-making rule', () => {
     expect(sorted(found, 'A')).toEqual(['go']);
   });
 
+  it('refuses same-named classes in independently scoped modules', () => {
+    expect(() =>
+      scan(
+        `class A { async go() { await this.#t.json('GET', 'x'); } }`,
+        `class A { get id() { return this.data.id; } }`,
+      ),
+    ).toThrow(/duplicate class name A in fake-0\.ts and fake-1\.ts/);
+  });
+
   it('follows an inherited method reached through this or super', () => {
     // EphemeralComputer's disposer reaches the wire only through Computer's
     // `delete`. A scan that looked at one class body at a time would call the

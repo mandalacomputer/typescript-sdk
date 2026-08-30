@@ -174,6 +174,9 @@ function scanFile(fileName: string, source: string): Map<string, ClassInfo> {
         info.bodies.set(name, reaches);
         if (isPublic(member, name) && !info.publicNames.includes(name)) info.publicNames.push(name);
       }
+      if (found.has(node.name.text)) {
+        throw new Error(`duplicate class name ${node.name.text} in ${fileName}`);
+      }
       found.set(node.name.text, info);
     }
     ts.forEachChild(node, walk);
@@ -249,8 +252,16 @@ export function requestingMethods(
   files: Iterable<{ name: string; source: string }>,
 ): Map<string, Set<string>> {
   const classes = new Map<string, ClassInfo>();
+  const declaredIn = new Map<string, string>();
   for (const { name, source } of files) {
-    for (const [className, info] of scanFile(name, source)) classes.set(className, info);
+    for (const [className, info] of scanFile(name, source)) {
+      const previous = declaredIn.get(className);
+      if (previous !== undefined) {
+        throw new Error(`duplicate class name ${className} in ${previous} and ${name}`);
+      }
+      classes.set(className, info);
+      declaredIn.set(className, name);
+    }
   }
 
   const found = new Map<string, Set<string>>();
