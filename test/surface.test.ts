@@ -6,6 +6,15 @@
  * lives there, but a client that calls a route the platform does not expose
  * fails at runtime in a user's hands rather than here.
  *
+ * Both halves compare this SDK to the platform. `./surface-inventory.ts` is the
+ * third dimension and points inward: every public method of this SDK is NAMED in
+ * `exerciseEverything`, not merely every route reached by one. Those are
+ * different claims wherever two methods share a route, which here is most of
+ * them — `exec`, `open` and `waitForGuest` are all `POST computers/:id/exec` —
+ * so a method added beside an existing one and left out of the exercise shipped
+ * with no coverage at all, on a suite whose whole design is that the surface is
+ * enumerable (OPL-3911).
+ *
  * The parameter half is here for a failure the route half cannot see. A route
  * this SDK reaches without the argument that made it worth reaching passes
  * every test below the first two: `stop` was reachable and `force` was not, so
@@ -16,7 +25,7 @@
 
 import { readFile } from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
-import { Client, VERSION } from '../src/index.js';
+import { Client, type Computer, VERSION } from '../src/index.js';
 import {
   ALLOWED,
   PARAMETERS,
@@ -25,6 +34,13 @@ import {
   UNIMPLEMENTED_PARAMETERS,
 } from './allowlist.js';
 import { anyRoute, BASE, type Call, recorder } from './harness.js';
+import { inventory, names, recordNamedCalls } from './surface-inventory.js';
+
+/**
+ * Every public method of this SDK that can put a request on the wire, by the
+ * class that declares it — read out of `src` rather than listed here.
+ */
+const SURFACE = inventory();
 
 /**
  * Call every method the SDK exposes that performs a request.
@@ -56,13 +72,22 @@ async function exerciseEverything(client: Client): Promise<void> {
   // listing fails closed on a degraded fleet like every other fan-out, and
   // OPL-3840 is what made the way out of it something a client can send.
   await client.builds.list({ allowPartial: true });
+  // Both spellings of a listing: `list` is the plain answer and
+  // `listWithStatus` is the one that says whether it was short. The first
+  // delegates to the second, so the route half of this file cannot tell whether
+  // the entry point was ever driven — see ./surface-inventory.ts, which can.
+  await client.builds.listWithStatus({ allowPartial: true });
   await client.builds.get('bld-1');
   await client.builds.progress('bld-1');
+  // The poll on top of progress, which shares `GET builds/:id/progress` with
+  // the call above and is therefore invisible to the route check.
+  await client.builds.wait('bld-1');
   for await (const _ of client.builds.events('bld-1')) break;
 
   await client.sizes.list();
   await client.computers.list();
   await client.computers.list({ allowPartial: true });
+  await client.computers.listWithStatus({ allowPartial: true });
   await client.computers.get('vm-1');
 
   const c = await client.computers.create({ template: 'base' });
@@ -75,7 +100,20 @@ async function exerciseEverything(client: Client): Promise<void> {
     start: false,
   });
   await client.computers.create({ template: 'base', cpu: 2, ramMb: 4096, diskGb: 40 });
+  // The create/delete pair as one scope, in both its shapes: the block form,
+  // and the handle form whose disposal a caller normally leaves to `await
+  // using`. Every route either of them reaches is reached by its own method
+  // elsewhere here, so nothing but the inventory sees these three lines.
+  await client.computers.ephemeral({ template: 'base' }, async () => undefined);
+  const scratch = await client.computers.ephemeral({ template: 'base' });
+  await scratch[Symbol.asyncDispose]();
   await c.refresh();
+  // The three readiness waits, which poll routes the calls around them already
+  // reach: `GET computers/:id` for the first two, and a `POST computers/:id/exec`
+  // probe for the guest.
+  await c.waitUntilBuilt();
+  await c.waitUntilRunning();
+  await c.waitForGuest();
   await c.start();
   await c.stop();
   await c.stop({ force: true });
@@ -89,6 +127,9 @@ async function exerciseEverything(client: Client): Promise<void> {
   // off a move body, and the parameter sweep is what proves the SDK sends them.
   // `move` on the class is the mouse pointer — see Computer.relocate.
   await c.relocate({ ramMb: 26000, cpu: 2, diskGb: 40 });
+  // The wait on the move, which reads the same account-wide listing as
+  // `moves.list()` below and is a different method for doing it.
+  await c.waitForMove();
   await client.moves.list();
 
   await c.screenshot();
@@ -131,6 +172,9 @@ async function exerciseEverything(client: Client): Promise<void> {
   await c.open('https://example.com');
 
   await c.readFile('/home/user/out.txt');
+  // The decoded spelling of the same read. Same route, same request, its own
+  // entry point.
+  await c.readTextFile('/home/user/out.txt');
   // The ranged forms as well as the whole-file one: `Range` is a parameter of
   // this route like any other, and a read that never sends it is exactly the
   // gap the parameter half of this test exists to see.
@@ -147,6 +191,11 @@ async function exerciseEverything(client: Client): Promise<void> {
   await c.setSchedule({ enabled: true, hour: 3, minute: 30, tz: 'Europe/London' });
   await c.clearSchedule();
 
+  await c.agent({ prompt: 'do a thing', modelKey: 'sk-test' });
+  // The streaming entry point the call above waits out for you. All three agent
+  // methods are `POST computers/:id/agent`, so the route check sees one method
+  // where there are three.
+  for await (const _ of c.agentStream({ prompt: 'do a thing', modelKey: 'sk-test' })) break;
   await c.agentOnce({ prompt: 'do a thing', modelKey: 'sk-test' });
   await c.agentOnce({
     prompt: 'do a thing',
@@ -167,6 +216,7 @@ async function exerciseEverything(client: Client): Promise<void> {
     includeUnfinished: true,
     allowPartial: true,
   });
+  await client.snapshots.listWithStatus({ allowPartial: true });
   await client.snapshots.restore('snap-1');
   await client.snapshots.clone('snap-1');
   await client.snapshots.clone('snap-1', 'from-snapshot');
@@ -246,6 +296,67 @@ describe('surface', () => {
     const called = await exercised();
     const unreached = [...ALLOWED].filter((r) => !called.has(r)).sort();
     expect(unreached).toEqual([...UNIMPLEMENTED].sort());
+  });
+
+  it('every public method is named in the exercise', async () => {
+    // The claim the route check above cannot make. `ALLOWED - called` proves
+    // every route was reached by SOMETHING, and says nothing about a method
+    // sharing a route with one already exercised — three methods are
+    // `POST computers/:id/agent`, three are `POST computers/:id/exec`, and every
+    // mouse and keyboard call is `POST computers/:id/input`. Thirteen methods
+    // had gone through that hole by the time this was written (OPL-3911).
+    //
+    // The inventory is derived from the source, so closing this is adding the
+    // call rather than editing a list, and a method added tomorrow is in the
+    // inventory before anybody thinks about coverage.
+    const rec = recorder(anyRoute);
+    const client = new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: rec.fetch });
+    const named = await recordNamedCalls(SURFACE, [exerciseEverything], () =>
+      exerciseEverything(client),
+    );
+    const missed = [...names(SURFACE)].filter((m) => !named.has(m)).sort();
+    expect(
+      missed,
+      'public methods exerciseEverything() never calls; sharing a route with a method that ' +
+        'IS called is not coverage',
+    ).toEqual([]);
+  });
+
+  it('catches a method that shares a route somebody else already reaches', async () => {
+    // The regression test for the assertion above, on a real pair rather than a
+    // contrived one. `Computer.open` is sugar over `Computer.exec`: same verb,
+    // same route, different method. So the two exercises below reach an
+    // IDENTICAL set of routes and every route-shaped check in this file is
+    // equally happy with both — which is the hole. Only the inventory tells
+    // them apart, and without this the new assertion would be as unfalsifiable
+    // as the one it was written to shore up.
+    const run = async (exercise: (c: Computer) => Promise<void>) => {
+      const rec = recorder(anyRoute);
+      const client = new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: rec.fetch });
+      const computer = await client.computers.get('vm-1');
+      const named = await recordNamedCalls(SURFACE, [exercise], () => exercise(computer));
+      return { named, routes: new Set(rec.calls.slice(1).map(routeOf)) };
+    };
+
+    async function forgotOpen(c: Computer): Promise<void> {
+      await c.exec('true');
+    }
+    async function calledOpen(c: Computer): Promise<void> {
+      await c.exec('true');
+      await c.open('https://example.com');
+    }
+
+    const forgetful = await run(forgotOpen);
+    const complete = await run(calledOpen);
+
+    expect(
+      [...complete.routes].sort(),
+      'the two exercises must reach the same routes, or this proves nothing about a method ' +
+        'that shares one',
+    ).toEqual([...forgetful.routes].sort());
+    expect(names(SURFACE)).toContain('Computer.open');
+    expect(forgetful.named).not.toContain('Computer.open');
+    expect(complete.named).toContain('Computer.open');
   });
 
   it('every parameter the SDK sends is one the platform documents', async () => {

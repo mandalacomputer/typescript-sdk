@@ -402,6 +402,24 @@ export const buildEvents = (): Response =>
     { status: 200, headers: { 'content-type': 'text/event-stream' } },
   );
 
+/** What an agent run answers with, streamed or not. */
+export const AGENT_RESULT = { steps: 1, stop: 'end_turn', text: 'done' };
+
+/**
+ * The agent run as a stream of frames, in the platform's own event spelling.
+ *
+ * A `done` frame carrying a result, because that is what ends a run: without
+ * one `agent()` consumes the whole stream and throws "the agent stream ended
+ * without a result", which is a fixture failure wearing the costume of a
+ * platform one.
+ */
+export const agentEvents = (): Response =>
+  new Response(
+    `event: step\ndata: ${JSON.stringify({ n: 1, detail: 'clicked' })}\n\n` +
+      `event: done\ndata: ${JSON.stringify(AGENT_RESULT)}\n\n`,
+    { status: 200, headers: { 'content-type': 'text/event-stream' } },
+  );
+
 export const anyRoute: Responder = (call) => {
   const { path, method } = call;
   const get = method === 'GET';
@@ -422,7 +440,13 @@ export const anyRoute: Responder = (call) => {
   if (path.endsWith('/windows')) return json([]);
   if (/\/windows\/[^/]+$/.test(path)) return json({ id: '0x1', title: 'w' });
   if (path.endsWith('/schedule')) return json({ enabled: true, hour: 4, minute: 0, tz: 'UTC' });
-  if (path.endsWith('/agent')) return json({ steps: 1, stop: 'end_turn', text: 'done' });
+  // Told apart by the request, like the exec above: `stream: true` is a
+  // different response MEDIUM, not a different payload, and a mock that
+  // answered JSON to both would fail every streaming call on its content type
+  // rather than exercising it.
+  if (path.endsWith('/agent')) {
+    return isRecord(call.body) && call.body.stream === true ? agentEvents() : json(AGENT_RESULT);
+  }
   if (path === '/templates' || path === '/sizes') return json(get ? [] : PUBLISHED_TEMPLATE);
   if (path === '/templates/schema') return json({ $id: 'https://x/templates/schema' });
   if (path === '/templates/validate') return json(TEMPLATE_CHECK);
