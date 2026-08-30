@@ -167,11 +167,29 @@ function scanFile(fileName: string, source: string): Map<string, ClassInfo> {
   const found = new Map<string, ClassInfo>();
 
   const walk = (node: ts.Node): void => {
-    if (ts.isClassDeclaration(node) && node.name) {
+    if (ts.isClassExpression(node)) {
+      throw new Error(
+        `unsupported class expression in ${fileName}; declare a named class declaration`,
+      );
+    }
+    if (ts.isClassDeclaration(node)) {
+      if (!node.name) {
+        throw new Error(
+          `unsupported anonymous class declaration in ${fileName}; give the class a name`,
+        );
+      }
       const info: ClassInfo = { bodies: new Map(), instanceFields: new Set(), publicNames: [] };
-      const heritage = node.heritageClauses?.find((h) => h.token === ts.SyntaxKind.ExtendsKeyword)
-        ?.types[0]?.expression;
-      if (heritage && ts.isIdentifier(heritage)) info.base = heritage.text;
+      const extendsClause = node.heritageClauses?.find(
+        (clause) => clause.token === ts.SyntaxKind.ExtendsKeyword,
+      );
+      if (extendsClause) {
+        const heritage = extendsClause.types[0]?.expression;
+        if (!heritage || !ts.isIdentifier(heritage)) {
+          const base = heritage?.getText(file) ?? extendsClause.getText(file);
+          throw new Error(`unsupported base class for ${node.name.text} in ${fileName}: ${base}`);
+        }
+        info.base = heritage.text;
+      }
 
       for (const member of node.members) {
         if (!member.name) continue;

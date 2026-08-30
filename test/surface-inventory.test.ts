@@ -134,6 +134,25 @@ describe('the request-making rule', () => {
     ).toThrow(/duplicate class name A in fake-0\.ts and fake-1\.ts/);
   });
 
+  it('refuses class forms whose exported identity cannot be derived', () => {
+    expect(() =>
+      scan(`export const Jobs = class {
+        async list() { return this.#t.json('GET', 'jobs'); }
+      }`),
+    ).toThrow(/unsupported class expression in fake-0\.ts/);
+    expect(() => scan(`export default class {}`)).toThrow(
+      /unsupported anonymous class declaration in fake-0\.ts/,
+    );
+  });
+
+  it('refuses base classes that are not plain identifiers', () => {
+    for (const base of ['resources.Computer', 'computerBase()']) {
+      expect(() => scan(`class A extends ${base} { async go() { return super.go(); } }`)).toThrow(
+        `unsupported base class for A in fake-0.ts: ${base}`,
+      );
+    }
+  });
+
   it('follows an inherited method reached through this or super', () => {
     // EphemeralComputer's disposer reaches the wire only through Computer's
     // `delete`. A scan that looked at one class body at a time would call the
