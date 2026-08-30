@@ -23,8 +23,18 @@
  *
  * Exits 0 and says so when the platform repo is not checked out. That is the
  * ordinary case in CI on this repository, and failing over it would make the
- * check something people learn to ignore. Where it matters is on a machine that
- * has both, and in any job that checks out both.
+ * check something people learn to ignore.
+ *
+ * Where it is enforced is the platform's own CI, which checks this repo out
+ * beside itself and runs this script against it (OPL-3916). That is deliberate
+ * rather than incidental: what this prints is the routes, parameters and
+ * constant values that have not shipped yet, and this repository's Actions logs
+ * are world-readable the day it goes public, where the platform's are not.
+ * Running it here would also put a read key for a private repo inside a public
+ * one, which is the wrong direction for a credential to point.
+ *
+ * So on a machine that has both this is what catches drift before a push, and
+ * everywhere else it is what the platform runs.
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';

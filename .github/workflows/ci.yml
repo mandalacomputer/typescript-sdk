@@ -22,6 +22,9 @@ jobs:
       - run: npm run lint
       - run: npm run typecheck
       - run: npm run build
-      # The surface diff is part of `npm test` and skips itself here, where the
-      # platform repo is not checked out. See scripts/check-surface.mjs.
+      # The surface diff is the second half of `npm test` and skips itself
+      # here, where the platform repo is not checked out — deliberately, not
+      # for want of a token. The platform's own CI checks this repo out beside
+      # itself and runs the script there, where the diff it prints is not a
+      # public log (OPL-3916). See scripts/check-surface.mjs.
       - run: npm test
