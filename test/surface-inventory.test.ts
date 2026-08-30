@@ -106,10 +106,10 @@ describe('the request-making rule', () => {
     }
   });
 
-  it('allows a classified non-request transport handoff', () => {
-    expect(scan(`class A { make(data) { return new Computer(this.#t, data); } }`).has('A')).toBe(
-      false,
-    );
+  it('counts every transport handoff conservatively', () => {
+    expect(sorted(scan(`class A { make(data) { return consume(this.#t, data); } }`), 'A')).toEqual([
+      'make',
+    ]);
   });
 
   it('does not count a transport member that makes no request', () => {
@@ -153,6 +153,12 @@ describe('the request-making rule', () => {
     }
   });
 
+  it('refuses an identifier base when a method depends on resolving it', () => {
+    expect(() => scan(`class A extends External { async go() { return super.go(); } }`)).toThrow(
+      /unresolved base class External while tracing A in fake-0\.ts/,
+    );
+  });
+
   it('follows an inherited method reached through this or super', () => {
     // EphemeralComputer's disposer reaches the wire only through Computer's
     // `delete`. A scan that looked at one class body at a time would call the
@@ -182,6 +188,23 @@ describe('the request-making rule', () => {
       #one(id) { return this.#t.json('GET', id); }
     }`);
     expect(sorted(found, 'A')).toEqual(['all']);
+  });
+
+  it('normalizes literal element access and rejects dynamic keys', () => {
+    const found = scan(`class A {
+      async go() { return this['send'](); }
+      async send() { return this.#t.json('GET', 'x'); }
+    }`);
+    expect(sorted(found, 'A')).toEqual(['go', 'send']);
+    expect(() => scan(`class A { go(key) { return this[key](); } }`)).toThrow(
+      /unsupported computed member access in A\.go: \[key\]/,
+    );
+  });
+
+  it('refuses a public request-making accessor that cannot be recorded', () => {
+    expect(() => scan(`class A { get status() { return this.#t.json('GET', 'x'); } }`)).toThrow(
+      /A\.status in fake-0\.ts is a public request-making accessor; declare it as a prototype method/,
+    );
   });
 });
 

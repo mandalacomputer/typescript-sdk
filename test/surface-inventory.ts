@@ -70,18 +70,6 @@ const VERBS: ReadonlySet<string> = new Set(['json', 'jsonArray', 'listing', 'byt
  */
 const NON_REQUEST_TRANSPORT: ReadonlySet<string> = new Set(['baseUrl']);
 
-/**
- * Exact callees that receive the transport without making a request.
- *
- * Every other bare use of `this.#t` is rejected. Keeping this list narrow is
- * what prevents an alias from hiding a request from the member tables above.
- */
-const NON_REQUEST_TRANSPORT_CONSUMERS: ReadonlySet<string> = new Set([
-  'Computer',
-  'EphemeralComputer',
-  'oneComputer',
-]);
-
 /** A class as this module addresses one: by name, and by its prototype. */
 export type Ctor = { readonly name: string; readonly prototype: object };
 
@@ -112,6 +100,8 @@ type ClassInfo = {
   bodies: Map<string, Reaches>;
   /** The name in `extends`, when it is a plain identifier. */
   base?: string;
+  /** Getters and setters, which the prototype recorder cannot wrap as methods. */
+  accessors: Set<string>;
   /** Function-valued fields installed on instances rather than the prototype. */
   instanceFields: Set<string>;
   /** Declared names that are addressable public API, in declaration order. */
@@ -126,7 +116,29 @@ type ClassInfo = {
  * later, and because a member this module could not name is one it must not
  * silently drop.
  */
-const nameText = (name: ts.PropertyName, source: ts.SourceFile): string => name.getText(source);
+function literalPropertyName(node: ts.Node): string | undefined {
+  if (
+    ts.isStringLiteral(node) ||
+    ts.isNumericLiteral(node) ||
+    ts.isNoSubstitutionTemplateLiteral(node)
+  ) {
+    return node.text;
+  }
+  return undefined;
+}
+
+const nameText = (name: ts.PropertyName, source: ts.SourceFile): string => {
+  const literal = literalPropertyName(name);
+  if (literal !== undefined) return literal;
+  if (ts.isComputedPropertyName(name)) {
+    const computed = literalPropertyName(name.expression);
+    if (computed !== undefined) return computed;
+    const expression = name.expression.getText(source);
+    if (/^Symbol\.[A-Za-z]+$/.test(expression)) return `[${expression}]`;
+    throw new Error(`unsupported computed member name ${name.getText(source)}`);
+  }
+  return name.getText(source);
+};
 
 /** Whether a member is reachable by a caller holding an instance. */
 function isPublic(member: ts.ClassElement, name: string): boolean {
@@ -178,7 +190,12 @@ function scanFile(fileName: string, source: string): Map<string, ClassInfo> {
           `unsupported anonymous class declaration in ${fileName}; give the class a name`,
         );
       }
-      const info: ClassInfo = { bodies: new Map(), instanceFields: new Set(), publicNames: [] };
+      const info: ClassInfo = {
+        accessors: new Set(),
+        bodies: new Map(),
+        instanceFields: new Set(),
+        publicNames: [],
+      };
       const extendsClause = node.heritageClauses?.find(
         (clause) => clause.token === ts.SyntaxKind.ExtendsKeyword,
       );
@@ -207,6 +224,7 @@ function scanFile(fileName: string, source: string): Map<string, ClassInfo> {
         };
         readBody(body, file, `${node.name.text}.${name}`, reaches);
         info.bodies.set(name, reaches);
+        if (ts.isGetAccessor(member) || ts.isSetAccessor(member)) info.accessors.add(name);
         if (ts.isPropertyDeclaration(member)) info.instanceFields.add(name);
         if (isPublic(member, name) && !info.publicNames.includes(name)) info.publicNames.push(name);
       }
@@ -246,14 +264,18 @@ function readBody(body: ts.Node, file: ts.SourceFile, where: string, into: Reach
       if (isTransport(node)) {
         const parent = node.parent;
         const directMember = ts.isPropertyAccessExpression(parent) && parent.expression === node;
-        const classifiedConsumer =
+        const transportHandoff =
           (ts.isCallExpression(parent) || ts.isNewExpression(parent)) &&
-          parent.arguments?.includes(node) === true &&
-          NON_REQUEST_TRANSPORT_CONSUMERS.has(parent.expression.getText(file));
-        if (!directMember && !classifiedConsumer) {
+          parent.arguments?.includes(node) === true;
+        if (transportHandoff) {
+          // The callee's identity cannot be proven from syntax alone. Counting
+          // every handoff is conservative and prevents a same-named helper from
+          // hiding a request by masquerading as a known non-request consumer.
+          into.transport = true;
+        } else if (!directMember) {
           throw new Error(
             `indirect transport access in ${where}: this.${TRANSPORT} must be used directly ` +
-              'by a classified member or non-request consumer',
+              'by a classified member or as a call argument',
           );
         }
       }
@@ -275,7 +297,13 @@ function readBody(body: ts.Node, file: ts.SourceFile, where: string, into: Reach
       (node.expression.kind === ts.SyntaxKind.ThisKeyword ||
         node.expression.kind === ts.SyntaxKind.SuperKeyword)
     ) {
-      const member = `[${node.argumentExpression.getText(file)}]`;
+      const literal = literalPropertyName(node.argumentExpression);
+      const expression = node.argumentExpression.getText(file);
+      const member =
+        literal ?? (/^Symbol\.[A-Za-z]+$/.test(expression) ? `[${expression}]` : undefined);
+      if (member === undefined) {
+        throw new Error(`unsupported computed member access in ${where}: [${expression}]`);
+      }
       if (node.expression.kind === ts.SyntaxKind.ThisKeyword) into.siblings.add(member);
       else into.inherited.add(member);
     }
@@ -334,7 +362,11 @@ export function requestingMethods(
       for (let name = start; name && !seen.has(name); ) {
         seen.add(name);
         const current = classes.get(name);
-        if (!current) return undefined;
+        if (!current) {
+          throw new Error(
+            `unresolved base class ${name} while tracing ${className} in ${declaredIn.get(className)}`,
+          );
+        }
         const body = current.bodies.get(member);
         if (body) return body;
         name = current.base;
@@ -376,6 +408,13 @@ export function requestingMethods(
       throw new Error(
         `${className}.${instanceField} in ${declaredIn.get(className)} is a public ` +
           'request-making instance field; declare it as a prototype method so it can be recorded',
+      );
+    }
+    const accessor = [...own].find((member) => info.accessors.has(member));
+    if (accessor !== undefined) {
+      throw new Error(
+        `${className}.${accessor} in ${declaredIn.get(className)} is a public request-making ` +
+          'accessor; declare it as a prototype method so it can be recorded',
       );
     }
     if (own.size > 0) found.set(className, own);
