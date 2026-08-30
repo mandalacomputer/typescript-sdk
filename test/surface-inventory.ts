@@ -140,6 +140,21 @@ const nameText = (name: ts.PropertyName, source: ts.SourceFile): string => {
   return name.getText(source);
 };
 
+/** Whether a declared type contains the SDK's transport type by its canonical name. */
+function containsTransportType(type: ts.TypeNode | undefined, source: ts.SourceFile): boolean {
+  if (!type) return false;
+  let found = false;
+  const visit = (node: ts.Node): void => {
+    if (ts.isTypeReferenceNode(node)) {
+      const name = node.typeName.getText(source);
+      if (name === 'Transport' || name.endsWith('.Transport')) found = true;
+    }
+    if (!found) ts.forEachChild(node, visit);
+  };
+  visit(type);
+  return found;
+}
+
 /** Whether a member is reachable by a caller holding an instance. */
 function isPublic(member: ts.ClassElement, name: string): boolean {
   if (name.startsWith('#')) return false;
@@ -209,8 +224,37 @@ function scanFile(fileName: string, source: string): Map<string, ClassInfo> {
       }
 
       for (const member of node.members) {
+        if (ts.isConstructorDeclaration(member)) {
+          for (const parameter of member.parameters) {
+            const parameterProperty = parameter.modifiers?.some((modifier) =>
+              [
+                ts.SyntaxKind.PublicKeyword,
+                ts.SyntaxKind.ProtectedKeyword,
+                ts.SyntaxKind.PrivateKeyword,
+                ts.SyntaxKind.ReadonlyKeyword,
+              ].includes(modifier.kind),
+            );
+            if (parameterProperty && containsTransportType(parameter.type, file)) {
+              throw new Error(
+                `unrecognized Transport parameter property ${parameter.name.getText(file)} ` +
+                  `in ${node.name.text}; store Transport on this.${TRANSPORT}`,
+              );
+            }
+          }
+          continue;
+        }
         if (!member.name) continue;
         const name = nameText(member.name, file);
+        if (
+          ts.isPropertyDeclaration(member) &&
+          name !== TRANSPORT &&
+          containsTransportType(member.type, file)
+        ) {
+          throw new Error(
+            `unrecognized Transport field ${node.name.text}.${name}; ` +
+              `store Transport on this.${TRANSPORT}`,
+          );
+        }
         const body = bodyOf(member);
         if (!body) continue;
         // Overloads share a name with their implementation, and only the
@@ -241,15 +285,36 @@ function scanFile(fileName: string, source: string): Map<string, ClassInfo> {
 
 /** Fill in one member's {@link Reaches} from its body. */
 function readBody(body: ts.Node, file: ts.SourceFile, where: string, into: Reaches): void {
+  const isPrivateField = (node: ts.Node): node is ts.PropertyAccessExpression =>
+    ts.isPropertyAccessExpression(node) && ts.isPrivateIdentifier(node.name);
   const isTransport = (node: ts.Node): node is ts.PropertyAccessExpression =>
-    ts.isPropertyAccessExpression(node) &&
+    isPrivateField(node) &&
     node.expression.kind === ts.SyntaxKind.ThisKeyword &&
-    ts.isPrivateIdentifier(node.name) &&
     node.name.text === TRANSPORT;
 
   const visit = (node: ts.Node): void => {
     if (ts.isPropertyAccessExpression(node)) {
       const inner = node.expression;
+      if (
+        isPrivateField(node) &&
+        node.name.text === TRANSPORT &&
+        node.expression.kind !== ts.SyntaxKind.ThisKeyword
+      ) {
+        throw new Error(
+          `indirect transport receiver in ${where}: ${node.getText(file)}; ` +
+            `access the transport as this.${TRANSPORT}`,
+        );
+      }
+      if (
+        isPrivateField(inner) &&
+        inner.name.text !== TRANSPORT &&
+        VERBS.has(node.name.getText(file))
+      ) {
+        throw new Error(
+          `unrecognized transport receiver in ${where}: ${inner.getText(file)}; ` +
+            `store Transport on this.${TRANSPORT}`,
+        );
+      }
       const onTransport = isTransport(inner);
       if (onTransport) {
         const member = node.name.getText(file);

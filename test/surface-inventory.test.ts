@@ -98,6 +98,32 @@ describe('the request-making rule', () => {
     );
   });
 
+  it('refuses request verbs on an unrecognized private transport field', () => {
+    expect(() =>
+      scan(`class A {
+        #transport: Transport;
+        async go() { return this.#transport.json('GET', 'x'); }
+      }`),
+    ).toThrow(/unrecognized Transport field A\.#transport; store Transport on this\.#t/);
+    expect(() => scan(`class A { async go() { return this.#other.json('GET', 'x'); } }`)).toThrow(
+      /unrecognized transport receiver in A\.go: this\.#other/,
+    );
+  });
+
+  it('refuses the transport field through an aliased receiver', () => {
+    expect(() =>
+      scan(`class A {
+        async go() { const self = this; return self.#t.json('GET', 'x'); }
+      }`),
+    ).toThrow(/indirect transport receiver in A\.go: self\.#t/);
+  });
+
+  it('refuses Transport parameter properties under another name', () => {
+    expect(() => scan(`class A { constructor(readonly transport: Transport) {} }`)).toThrow(
+      /unrecognized Transport parameter property transport in A/,
+    );
+  });
+
   it('refuses aliased or destructured transport access', () => {
     for (const statement of [`const t = this.#t`, `const { json } = this.#t`]) {
       expect(() => scan(`class A { async go() { ${statement}; } }`)).toThrow(
