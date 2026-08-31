@@ -100,6 +100,7 @@ export {
   TimeoutError,
   TooLargeError,
   UnavailableError,
+  ValidationError,
 } from './errors.js';
 export type {
   BackgroundExec,
@@ -124,6 +125,7 @@ export type {
   UsageReport,
   UsageTotals,
   VncConnect,
+  WindowResult,
 } from './models.js';
 export type {
   CreateArgs,

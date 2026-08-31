@@ -28,6 +28,7 @@ import type {
   Schedule,
   Snapshot,
   VncConnect,
+  WindowResult,
 } from './models.js';
 import {
   belongsToComputer,
@@ -45,6 +46,7 @@ import {
   toSchedule,
   toSnapshot,
   toVncConnect,
+  toWindowResult,
 } from './models.js';
 import * as P from './paths.js';
 import type { CallOptions } from './resources.js';
@@ -1205,11 +1207,28 @@ export class Computer {
    * applications. Pass `{ includeAll: true }` for all of them.
    */
   async windows(opts: { includeAll?: boolean } & CallOptions = {}): Promise<GuestWindow[]> {
-    const data = await this.#t.jsonArray('GET', P.computerAction(this.id, 'windows'), {
+    const path = P.computerAction(this.id, 'windows');
+    const data = await this.#t.json<Record<string, unknown>>('GET', path, {
       query: { include: P.flag(opts.includeAll, 'includeAll') ? 'all' : undefined },
       signal: opts.signal,
     });
-    return data.filter(P.isRecord).map(toGuestWindow);
+    // A NAMED object, not a bare array (OPL-4176). This read `jsonArray` until
+    // then and threw on every call ever made against the platform, because the
+    // route answers `{"windows":[...]}` — deliberately, and the reference says
+    // why: the shape has somewhere to grow, and an empty desktop answers
+    // `{"windows":[]}` rather than `null`.
+    //
+    // The absent key is refused rather than read as an empty desktop, which is
+    // where this parts company with mandala-computer-python's
+    // `_windows_from_response`. `{}` is not a WindowList: the platform sends
+    // the key for an empty desktop — verified against app.mandala.computer,
+    // not read off the reference — so a body without it is a proxy or a
+    // half-written response, and calling that "nothing is open" is the same
+    // coercion `clipboard()` refuses one method along.
+    if (!P.isRecord(data) || !Array.isArray(data.windows)) {
+      throw new MandalaError(`expected a windows array from GET ${path}`);
+    }
+    return data.windows.filter(P.isRecord).map(toGuestWindow);
   }
 
   /**
@@ -1223,22 +1242,32 @@ export class Computer {
    *
    * Prefer `focus` over `raise`: raising without focusing gives a window that is
    * visibly in front and silently not receiving keystrokes.
+   *
+   * A {@link WindowResult} rather than a window, because two outcomes have no
+   * window to describe and only one of them is a `close`. See `gone`. This
+   * method decoded the body as a bare window until OPL-4176 and threw on every
+   * call; the platform has always answered
+   * `{"ok":true,"gone":false,"window":{...}}`.
    */
   async windowAction(
     windowId: string,
     action: P.WindowAction,
     geometry: { x?: number; y?: number; width?: number; height?: number } = {},
     opts: CallOptions = {},
-  ): Promise<GuestWindow> {
+  ): Promise<WindowResult> {
     const path = P.windowPath(this.id, windowId);
     const data = await this.#t.json<Record<string, unknown>>('POST', path, {
       body: P.windowBody({ action, ...geometry }),
       signal: opts.signal,
     });
-    if (!P.isRecord(data) || !data.id) {
-      throw new MandalaError(`expected a window from POST ${path}`);
+    // The floor is that this was an object at all. Nothing stronger: `window`
+    // is legitimately `null` on a close and on an action the guest could not
+    // describe, so requiring one here would refuse the two answers this shape
+    // exists to carry.
+    if (!P.isRecord(data)) {
+      throw new MandalaError(`expected a window result from POST ${path}`);
     }
-    return toGuestWindow(data);
+    return toWindowResult(data);
   }
 
   /**

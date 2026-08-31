@@ -216,6 +216,28 @@ export const cloudflareJson = (status: number): Response =>
     { status, headers: { 'content-type': 'application/json' } },
   );
 
+/**
+ * One window, in the shape the platform sends.
+ *
+ * In full, including the fields this SDK does not read: `pid`, and `visible`
+ * — which is the daemon's own name for the property, and the one it sends.
+ * There is no `minimized` on this wire and there never was (server/windows.go,
+ * OPL-3583), so a fixture carrying one would let a decoder that reads it pass.
+ */
+export const WINDOW = {
+  id: '0x2a0002c',
+  title: 'Example Domain — Mozilla Firefox',
+  class: 'firefox-esr',
+  type: 'normal',
+  pid: 1090,
+  x: 0,
+  y: 51,
+  width: 1280,
+  height: 749,
+  focused: true,
+  visible: true,
+};
+
 export const COMPUTER = {
   id: 'vm-1',
   name: 'demo',
@@ -437,8 +459,15 @@ export const anyRoute: Responder = (call) => {
   // the write answers an ack, and a mock that gave both the same shape would let
   // a decoder that reads the wrong field pass.
   if (path.endsWith('/clipboard')) return json(get ? { text: 'on the clipboard' } : { ok: true });
-  if (path.endsWith('/windows')) return json([]);
-  if (/\/windows\/[^/]+$/.test(path)) return json({ id: '0x1', title: 'w' });
+  // Both window routes answer a NAMED OBJECT, verified against
+  // app.mandala.computer rather than read off the reference: the listing is
+  // `{"windows":[...]}` and answers `{"windows":[]}` for an empty desktop, and
+  // an action is `{"ok":true,"gone":false,"window":{...}}` — with `window`
+  // NULL and `gone` true after a close. Both were a bare array and a bare
+  // window here, which is what the code expected, so the fixture asserted the
+  // bug instead of catching it and neither method had ever worked (OPL-4176).
+  if (path.endsWith('/windows')) return json({ windows: [WINDOW] });
+  if (/\/windows\/[^/]+$/.test(path)) return json({ ok: true, gone: false, window: WINDOW });
   if (path.endsWith('/schedule')) return json({ enabled: true, hour: 4, minute: 0, tz: 'UTC' });
   // Told apart by the request, like the exec above: `stream: true` is a
   // different response MEDIUM, not a different payload, and a mock that

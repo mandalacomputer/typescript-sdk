@@ -1479,7 +1479,28 @@ export type GuestWindow = {
   width: number;
   height: number;
   focused: boolean;
-  minimized: boolean;
+  /**
+   * Whether this window is on the screen rather than minimised.
+   *
+   * The daemon's own name for the property and the one it puts on the wire
+   * (`server/windows.go`, OPL-3583): "Visible distinguishes a minimised window
+   * from one on screen. Minimised windows stay on the client list, and an agent
+   * that clicks at the coordinates of one is clicking at whatever is actually
+   * there."
+   *
+   * This was `minimized` until OPL-4176, reading a key that has never existed
+   * on this wire — so it was `false` for every window on every desktop,
+   * including the minimised ones, which is the answer the daemon's comment says
+   * gets a click sent somewhere nobody asked for. The fixture supplied the
+   * missing key, so nothing was red.
+   *
+   * TRUE only, and the polarity is the daemon's argument rather than a
+   * convention: a window wrongly reported as minimised is one a caller skips,
+   * and a window wrongly reported as on screen is a click landing on whatever
+   * is really at those coordinates. So an answer that did not say gets the
+   * harmless half.
+   */
+  visible: boolean;
   raw: Record<string, unknown>;
 };
 
@@ -1496,7 +1517,56 @@ export function toGuestWindow(d: Record<string, unknown>): GuestWindow {
     // TRUE only. Both are claims about one window against every other, and a
     // caller matching on them is picking which window to type into.
     focused: said(d.focused),
-    minimized: said(d.minimized),
+    visible: said(d.visible),
+    raw: { ...d },
+  };
+}
+
+/**
+ * What a window action left behind.
+ *
+ * {@link window} is the window AS IT NOW IS rather than an acknowledgement of
+ * what was asked. Believe it rather than the request: the window manager places
+ * the frame and applications snap to their own increments, so a move to
+ * (300, 200) routinely lands at (305, 229).
+ *
+ * A named object rather than the window alone, because the platform sends one
+ * and because the window is genuinely absent in two different situations —
+ * `{"gone":true,"ok":true,"window":null}` after a close, verified live — and
+ * {@link gone} is the only thing that tells them apart. This SDK read the body
+ * as a bare window until OPL-4176 and therefore threw on every call, close or
+ * not.
+ */
+export type WindowResult = {
+  /**
+   * The window afterwards, or `undefined` when there is none to describe.
+   *
+   * `undefined` for a `null` as well as for an absent key, which is the shape
+   * this actually arrives in: the field is always present and carries `null`,
+   * so a caller testing `'window' in result` would get a different answer from
+   * one testing the value.
+   */
+  window?: GuestWindow;
+  /**
+   * The window closed, which is what a `close` is for.
+   *
+   * This is what separates the two outcomes that have no {@link window} to
+   * show. `true` means it is gone; `false` with no window means the action
+   * happened and the guest could not describe the result — an outcome, not a
+   * failure, and not a reason to repeat the action.
+   */
+  gone: boolean;
+  raw: Record<string, unknown>;
+};
+
+export function toWindowResult(d: Record<string, unknown>): WindowResult {
+  const w = d.window;
+  return {
+    window: isRecord(w) ? toGuestWindow(w) : undefined,
+    // TRUE only: a close nobody confirmed is not a close, and reporting one
+    // that did not happen is how a caller stops looking for a window that is
+    // still on the screen.
+    gone: said(d.gone),
     raw: { ...d },
   };
 }

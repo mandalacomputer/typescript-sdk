@@ -25,9 +25,16 @@
  *
  * The subclass exists so the CLI can tell an SDK refusal — which is a sentence
  * to print for the user — from a `TypeError` out of a bug in the CLI itself,
- * which is a stack trace for whoever has to fix it. Not exported from the
- * package's entry point: to a caller these are still exactly `TypeError`s, as
- * documented.
+ * which is a stack trace for whoever has to fix it.
+ *
+ * EXPORTED, since OPL-4176. It was held back on the argument that to a caller
+ * these are still exactly `TypeError`s — which is true, and stays true, and was
+ * not the whole of it: every local refusal in this SDK is one of these, and
+ * `src/computer.ts` wrote `catch (e) { if (e instanceof ValidationError) }` as
+ * the way to catch them, which nobody outside this package could write. A
+ * documented idiom that does not compile for the reader is worse than either
+ * choice made on purpose. `instanceof TypeError` still catches every one of
+ * them, so nothing that was true before is less true now.
  */
 export class ValidationError extends TypeError {
   override name = 'ValidationError';

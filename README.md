@@ -280,17 +280,29 @@ yet. Linux only.
 
 ```ts
 for (const w of await c.windows()) {
-  console.log(w.id, w.windowClass, w.title, w.focused);
+  console.log(w.id, w.windowClass, w.title, w.focused, w.visible);
 }
-await c.windowAction('0x2600003', 'focus');
-await c.windowAction('0x2600003', 'move', { x: 100, y: 100 });
+const moved = await c.windowAction('0x2600003', 'move', { x: 100, y: 100 });
+console.log(moved.window?.x, moved.window?.y);          // 105, 129, probably
+
+const shut = await c.windowAction('0x2600003', 'close');
+shut.gone;                                              // true — there is no window left
 ```
 
 Match on `windowClass`, not `title`: the class is the application, the title is
-whatever page it is showing. Prefer `focus` over `raise` — raising without
+whatever page it is showing. `visible` is false for a **minimised** window,
+which stays on the list — clicking at the coordinates of one puts the click on
+whatever is actually there. Prefer `focus` over `raise`: raising without
 focusing gives a window that is visibly in front and silently not receiving
-keystrokes. The reply is the window *afterwards*, not an acknowledgement: window
-managers snap to their own grid, so a move to 300,200 routinely lands at 305,229.
+keystrokes.
+
+The reply is the window *afterwards*, not an acknowledgement — window managers
+snap to their own grid, so a move to 300,200 routinely lands at 305,229 —
+wrapped in a result rather than returned bare, because two outcomes have no
+window to describe and `gone` is the only thing that separates them: `true`
+after a close, and `false` when the action happened and the guest could not
+describe what it left. The second is an outcome, not a failure, and not a reason
+to repeat the action.
 
 ### Clipboard
 
@@ -945,6 +957,7 @@ import {
   OriginTLSError,      //     525/526 — a certificate they cannot agree on
   ConnectionError,     //   the platform could not be reached. Retryable.
   TimeoutError,        //   a wait helper gave up
+  ValidationError,     // a TypeError: your argument, refused before it was sent
   isTransient,
 } from 'mandala-computer';
 
@@ -956,6 +969,12 @@ try {
   else throw err;
 }
 ```
+
+`ValidationError` is the odd one out and is deliberately **not** a
+`MandalaError`: it is a `TypeError`, because a relative guest path or half a
+coordinate is a mistake in your own code rather than something the platform
+said. Nothing was sent when you get one. Catching `TypeError` still works and
+always did — the class is exported so the narrower catch can be written too.
 
 `ConflictError` is the one that usually clears itself: a guest still booting, a
 disk still being copied, another operation holding the guest agent. The
