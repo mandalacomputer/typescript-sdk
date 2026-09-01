@@ -139,13 +139,11 @@ try {
 
   // The coordinate convention, which the platform pins in its own e2e for the
   // same reason: an event and a listing that disagree send every click to the
-  // wrong place. Read through `fetch` rather than `Computer.windows()`, which
-  // expects a bare array and cannot decode this route's `{"windows":[...]}`
-  // (OPL-4176) — the check is about the platform, not about that bug.
-  const listing = await fetch(`${c.baseUrl}/computers/${vm.id}/windows`, {
-    headers: { authorization: `Bearer ${key}` },
-  }).then((r) => r.json());
-  const listed = (listing.windows ?? []).find((w) => w.id === opened.window?.id);
+  // wrong place. Through `Computer.windows()` again — this read went via raw
+  // `fetch` while that method could not decode the route it calls, which is the
+  // bug this branch fixes (OPL-4176), and leaving the workaround would mean the
+  // one script that talks to the real platform never exercised the fix.
+  const listed = (await vm.windows()).find((w) => w.id === opened.window?.id);
   check(
     'the event and the listing put the window in the same place',
     !!listed && listed.x === opened.window?.x && listed.y === opened.window?.y,
@@ -153,6 +151,28 @@ try {
       event: [opened.window?.x, opened.window?.y],
       listing: [listed?.x, listed?.y],
     }),
+  );
+
+  // `visible` is the only thing that separates a minimised window from one on
+  // the screen, and a click at the coordinates of the first lands on whatever
+  // is really there. It replaced a `minimized` that read a key this wire has
+  // never carried, so it was false for every window including the minimised
+  // ones — a live minimise is the only check that could have caught that, and
+  // is the only one that can keep catching it.
+  check('a window on the screen reads as visible', listed?.visible === true);
+  const acted = await vm.windowAction(opened.window.id, 'minimize');
+  check(
+    'a window action answers with the window, not an acknowledgement',
+    acted.window?.id === opened.window.id && acted.gone === false,
+    JSON.stringify({ gone: acted.gone, id: acted.window?.id }),
+  );
+  const hidden = (await vm.windows()).find((w) => w.id === opened.window?.id);
+  check('and a minimised one does not', hidden?.visible === false, `visible=${hidden?.visible}`);
+  const shut = await vm.windowAction(opened.window.id, 'close');
+  check(
+    'a close reports gone with no window to describe',
+    shut.gone === true && shut.window === undefined,
+    JSON.stringify({ gone: shut.gone, window: shut.window ?? null }),
   );
 
   // What a process restart would do: come back from a stored cursor and be
