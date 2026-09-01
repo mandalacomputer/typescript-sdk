@@ -467,9 +467,57 @@ export type TemplateCheck = {
    * A new label or a version bump leaves it alone, so comparing it against a
    * previous run is how you tell whether an edit means a rebuild. Absent for a
    * document naming a parent in `spec.from`, which cannot be computed without
-   * the parent's.
+   * the parent's — and {@link buildDigestNeeds} is the platform's own sentence
+   * about that document rather than this general one.
    */
   buildDigest?: string;
+  /**
+   * What the build digest would need, for a document that names a parent.
+   *
+   * REPLACES {@link buildDigest} rather than accompanying it. The daemon is an
+   * if/else on `spec.from` (`server/templateschema.go`): no parent gets a
+   * digest, a parent gets this instead. So the two are never both present, and
+   * a caller watching only for the digest sees a field missing and is told
+   * nothing about why.
+   *
+   * A sentence meant to be read, naming what could not be computed and where
+   * to compute it:
+   *
+   * > the contents of acme/base's image, which only a host holding it can
+   * > supply. Run `gorillad -build-template <file> -dry-run` there to see this
+   * > document's build digest
+   *
+   * The answer is a fact about a particular host's images directory rather than
+   * anything the author of a document has or could send, which is why it is
+   * prose and not a second digest. This SDK dropped it until OPL-4195, so a
+   * caller read {@link buildDigest}'s doc comment where the platform had sent
+   * the answer for their own document.
+   */
+  buildDigestNeeds?: string;
+  /**
+   * The document as the digests were taken over it, key order and whitespace
+   * normalised. Compact JSON, no trailing newline.
+   *
+   * What lets a caller check {@link docDigest} THEMSELVES rather than trusting
+   * the platform to have hashed honestly. It is also what a ref is immutably
+   * bound to: two YAML files differing only in comments and key order are the
+   * same document and hash the same, which is why republishing one of them is
+   * accepted as identical despite looking different.
+   */
+  canonical?: string;
+  /**
+   * The catalogue row this document describes, as the daemon's own row.
+   *
+   * NOT a {@link Template}, and deliberately not decoded as one: this carries
+   * the `family` the document names, where `GET /templates` answers a projected
+   * shape that does not. Reading it through {@link toTemplate} would put the
+   * projection's field names on a record that does not have them.
+   *
+   * A record left as it arrived, therefore — the same reading
+   * {@link PublishedTemplate.document} gets, for the same reason. Present only
+   * on a valid document.
+   */
+  template?: Record<string, unknown>;
   raw: Record<string, unknown>;
 };
 
@@ -492,6 +540,14 @@ export function toTemplateCheck(d: Record<string, unknown>): TemplateCheck {
     ...(d.ref == null ? {} : { ref: str(d.ref) }),
     ...(d.doc_digest == null ? {} : { docDigest: str(d.doc_digest) }),
     ...(d.build_digest == null ? {} : { buildDigest: str(d.build_digest) }),
+    // The digest and its absence-with-a-reason are an if/else on the wire, so
+    // nothing here has to reconcile them: whichever one arrived is the one that
+    // appears, and a payload carrying both would report both rather than pick.
+    ...(d.build_digest_needs == null ? {} : { buildDigestNeeds: str(d.build_digest_needs) }),
+    ...(d.canonical == null ? {} : { canonical: str(d.canonical) }),
+    // A RECORD or nothing. `str()` on an object gives '[object Object]', which
+    // would be a field present, typed, and carrying no information at all.
+    ...(isRecord(d.template) ? { template: { ...d.template } } : {}),
     raw: { ...d },
   };
 }

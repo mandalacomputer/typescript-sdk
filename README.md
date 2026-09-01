@@ -100,6 +100,29 @@ const t = await client.templates.publish(doc);
 const c = await client.computers.create({ template: t.ref });
 ```
 
+A valid answer carries more than the verdict. `docDigest` identifies the whole
+document and changes with any edit at all; `buildDigest` covers only what decides
+the image, so comparing it against a previous run tells you whether an edit means
+a rebuild.
+
+A document that names a parent in `spec.from` has **no** `buildDigest` — it
+cannot be computed without the parent's — and gets `buildDigestNeeds` in its
+place, which is a sentence saying what is missing and where to get it. The two
+are never both present, so read the second when the first is absent rather than
+treating the absence as unexplained:
+
+```ts
+if (!check.buildDigest) console.log(check.buildDigestNeeds);
+// the contents of acme/base's image, which only a host holding it can supply.
+// Run `gorillad -build-template <file> -dry-run` there to see this document's
+// build digest
+```
+
+`canonical` is the document as the digests were taken over it, key order and
+whitespace normalised — hash it yourself to check `docDigest` rather than
+trusting the platform to have done it honestly. `template` is the catalogue row
+the document describes, left as the record it arrived as.
+
 **The namespace is your account.** `metadata.namespace` has to be your account
 id — anything else is a `403`, `system` included — and this SDK does not rewrite
 it, because publishing a ref that is not the one in your file would be worse than

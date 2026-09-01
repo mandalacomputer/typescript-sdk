@@ -15,6 +15,8 @@ import {
   type Responder,
   recorder,
   TEMPLATE_BUILD,
+  TEMPLATE_CHECK,
+  TEMPLATE_CHECK_LAYERED,
 } from './harness.js';
 
 /**
@@ -114,6 +116,52 @@ describe('checking a document', () => {
     expect(check.valid).toBe(true);
     expect(check.docDigest).toBe('sha256:aaaa');
     expect(check.buildDigest).toBe('sha256:bbbb');
+  });
+
+  it('reads the canonical form and the catalogue row a valid answer carries', async () => {
+    // Both are sent on every valid document and neither was decoded until
+    // OPL-4195. `canonical` is what lets a caller check `docDigest` themselves
+    // instead of trusting the platform to have hashed honestly; the row carries
+    // the `family` the document names, which the projected shape does not.
+    const { client: c } = client();
+    const check = await c.templates.validate('apiVersion: mandala/v1');
+    expect(check.canonical).toBe('{"apiVersion":"mandala/v1","kind":"Template"}');
+    expect(check.template).toEqual({
+      namespace: 'acc-1',
+      name: 'devbox',
+      version: '1.0.0',
+      family: 'debian-13',
+    });
+  });
+
+  it('reads why a layered document has no build digest, rather than only that it has none', async () => {
+    // The daemon is an if/else on `spec.from` (server/templateschema.go): no
+    // parent gets `build_digest`, a parent gets `build_digest_needs` instead.
+    // So a client watching only for the digest sees a field missing and is told
+    // nothing about why — and the platform sent the reason, naming what cannot
+    // be computed and the command that computes it.
+    const { client: c } = client((call) =>
+      call.path === '/templates/validate' ? json(TEMPLATE_CHECK_LAYERED) : anyRoute(call),
+    );
+    const check = await c.templates.validate('apiVersion: mandala/v1');
+    expect(check.valid).toBe(true);
+    expect(check.buildDigest).toBeUndefined();
+    expect(check.buildDigestNeeds).toContain("acme/base's image");
+    expect(check.buildDigestNeeds).toContain('gorillad -build-template');
+  });
+
+  it('leaves a non-record `template` off rather than stringifying it', async () => {
+    // `str()` on an object gives '[object Object]' — a field present, typed,
+    // and carrying nothing. Absent is the honest answer, and `raw` still has
+    // whatever arrived.
+    const { client: c } = client((call) =>
+      call.path === '/templates/validate'
+        ? json({ ...TEMPLATE_CHECK, template: ['acc-1/devbox@1.0.0'] })
+        : anyRoute(call),
+    );
+    const check = await c.templates.validate('apiVersion: mandala/v1');
+    expect(check.template).toBeUndefined();
+    expect(check.raw.template).toEqual(['acc-1/devbox@1.0.0']);
   });
 });
 

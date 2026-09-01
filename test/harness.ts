@@ -501,12 +501,44 @@ export const RETIRED_TEMPLATES = {
   refs_claimed: 1,
 };
 
-/** A valid document, as the validator reports one. */
+/**
+ * A valid document, as the validator reports one.
+ *
+ * All six keys a valid answer carries, and the SDK read four of them until
+ * OPL-4195. `template` and `canonical` are sent on every valid document
+ * (`server/templateschema.go`), so a fixture that omitted them was the same
+ * trap the window fixture was: it asserted the reading that produced the gap.
+ *
+ * This document names no parent, so it gets `build_digest`. The `build_digest_needs`
+ * half of the daemon's if/else is exercised by {@link TEMPLATE_CHECK_LAYERED}
+ * rather than here, because the two are never both present.
+ */
 export const TEMPLATE_CHECK = {
   valid: true,
   ref: 'acc-1/devbox@1.0.0',
   doc_digest: 'sha256:aaaa',
   build_digest: 'sha256:bbbb',
+  template: { namespace: 'acc-1', name: 'devbox', version: '1.0.0', family: 'debian-13' },
+  canonical: '{"apiVersion":"mandala/v1","kind":"Template"}',
+};
+
+/**
+ * The same answer for a document that names a parent in `spec.from`.
+ *
+ * `build_digest_needs` REPLACES `build_digest` here — the daemon is an if/else,
+ * not two fields — and the text is the platform's own, which is the whole reason
+ * the field is worth decoding: it names what could not be computed and where to
+ * compute it.
+ */
+export const TEMPLATE_CHECK_LAYERED = {
+  valid: true,
+  ref: 'acc-1/layered@1.0.0',
+  doc_digest: 'sha256:cccc',
+  build_digest_needs:
+    "the contents of acme/base's image, which only a host holding it can supply. " +
+    "Run `gorillad -build-template <file> -dry-run` there to see this document's build digest",
+  template: { namespace: 'acc-1', name: 'layered', version: '1.0.0', family: 'debian-13' },
+  canonical: '{"apiVersion":"mandala/v1","kind":"Template"}',
 };
 
 /** One build job (platform OPL-3791). */
