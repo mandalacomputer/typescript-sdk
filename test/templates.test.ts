@@ -148,24 +148,32 @@ describe('checking a document', () => {
    * warn about.
    */
   it('decodes the row through the same reading a listing gets', async () => {
-    const { client: c } = client();
+    // THE SAME ROW ON BOTH WIRES, so the two decodings have to agree field for
+    // field rather than merely look alike. Comparing the fixtures instead would
+    // only prove the two happen to carry the same keys, and an optional field
+    // present on one and absent on the other would break it for no reason.
+    const { client: c } = client((call) =>
+      call.method === 'GET' && call.path === '/templates'
+        ? json([TEMPLATE_CHECK.template])
+        : anyRoute(call),
+    );
     const [check, rows] = await Promise.all([
       c.templates.validate('apiVersion: mandala/v1'),
-      c.templates.publish('apiVersion: mandala/v1'),
+      c.templates.list(),
     ]);
-    // Same decoder, same field names — camelCase sizes, not the wire's
-    // `ram_mb`. A record would have carried the wire spelling through.
-    expect(Object.keys(check.template ?? {}).sort()).toEqual(Object.keys(rows.template).sort());
+    // camelCase sizes, not the wire's `ram_mb`. A record would have carried the
+    // wire spelling through on one side and not the other.
+    expect(check.template).toEqual(rows[0]);
   });
 
   /**
-   * `desktop` survives on the row's `raw`, and `family` would too.
+   * What the model does not name is still on the row's `raw`.
    *
-   * The projection publishes `desktop` deliberately — it changes what a window
-   * id means, a compositor address rather than an X window id (OPL-4223) — and
-   * the model does not name it yet, so `raw` is where a caller reaches it. It
-   * is also where an older control plane's `family` still is, which is what
-   * makes decoding the row cost nothing: nothing that arrived is thrown away.
+   * `family` is the case that matters: the projection drops it, so it only
+   * arrives from a control plane deployed before OPL-4190 — and decoding the
+   * row cost that caller nothing, because nothing that arrived is thrown away.
+   * This is the promise the doc comment makes when it tells a reader to look
+   * there instead.
    */
   it('keeps what the model does not name on the row it decoded', async () => {
     const { client: c } = client((call) =>
@@ -177,7 +185,11 @@ describe('checking a document', () => {
         : anyRoute(call),
     );
     const check = await c.templates.validate('apiVersion: mandala/v1');
-    expect(check.template?.raw.desktop).toBe('wayland');
+    // `in` and not `check.template.family`, which no longer COMPILES — the
+    // decoded row is a `Template` and `Template` does not name the field. That
+    // refusal is the improvement: the raw record let the same expression type-
+    // check and answer `undefined`.
+    expect('family' in (check.template ?? {})).toBe(false);
     expect(check.template?.raw.family).toBe('debian-13');
   });
 
@@ -969,6 +981,94 @@ describe('a template row carries its ref', () => {
     const row = rows[0] as Template;
     expect(row.ref).toBeUndefined();
     expect('ref' in row).toBe(false);
+  });
+});
+
+/**
+ * OPL-4259. The same miss as `ref`, one field along.
+ *
+ * `publicTemplate` publishes `desktop` and argues for it where it argues
+ * `family` is internal: it changes what a caller gets from routes they already
+ * use. `os` is `linux` for a Wayland guest and an X11 one alike, so this is the
+ * only field that separates them, and a caller who cannot see it cannot tell
+ * whether a window id is a compositor address or an X window id.
+ */
+describe('a template row says which display protocol it speaks', () => {
+  it('carries the field a Wayland template is told apart by', async () => {
+    const { client: c } = client((call) =>
+      call.method === 'GET' && call.path === '/templates'
+        ? json([TEMPLATE_CHECK.template])
+        : anyRoute(call),
+    );
+    const rows = await c.templates.list();
+    expect(rows).toHaveLength(1);
+    const row = rows[0] as Template;
+    expect(row.desktop).toBe('wayland');
+    // Not distinguishable by `os`, which is the reason the field exists.
+    expect(row.os).toBe('linux');
+  });
+
+  /**
+   * ABSENT, and not `'x11'`.
+   *
+   * The three-way reading is the whole care in this field. A host deployed
+   * before OPL-4223 does not send it, and the platform's projector passes that
+   * silence through rather than naming a value, because naming one would assert
+   * a property of an image nobody claimed. A decoder defaulting to `'x11'`
+   * would put that assertion back on this side of the wire; `str()`'s own
+   * fallback would answer `''`, a display protocol no host speaks. Both are
+   * this client inventing what the platform declines to say — the fault
+   * `cursorPosition` and the window geometry decoder each refuse by name.
+   */
+  it('says nothing rather than x11 when the platform said nothing', async () => {
+    const { client: c } = client((call) =>
+      call.method === 'GET' && call.path === '/templates'
+        ? json([{ name: 'base', label: 'Base', os: 'linux', cpu: 2, ram_mb: 2048, disk_gb: 20 }])
+        : anyRoute(call),
+    );
+    const rows = await c.templates.list();
+    expect(rows).toHaveLength(1);
+    const row = rows[0] as Template;
+    expect(row.desktop).toBeUndefined();
+    expect('desktop' in row).toBe(false);
+  });
+
+  /**
+   * An explicit `x11` is passed through as itself.
+   *
+   * The absent case above is a host that has not been told about the field; a
+   * host that HAS says `x11` out loud, and flattening the two would lose the
+   * only evidence a caller has that the platform actually answered the
+   * question.
+   */
+  it('keeps an x11 the platform did say', async () => {
+    const { client: c } = client((call) =>
+      call.method === 'GET' && call.path === '/templates'
+        ? json([{ ...TEMPLATE_CHECK.template, desktop: 'x11' }])
+        : anyRoute(call),
+    );
+    const rows = await c.templates.list();
+    expect((rows[0] as Template).desktop).toBe('x11');
+  });
+
+  /** Every route that answers a catalogue row goes through the one decoder. */
+  it('reaches a caller through publish, get and validate alike', async () => {
+    const wayland = { ...PUBLISHED_TEMPLATE.template, desktop: 'wayland' };
+    const { client: c } = client((call) =>
+      call.path === '/templates/validate'
+        ? json(TEMPLATE_CHECK)
+        : call.path.startsWith('/templates/') || call.path === '/templates'
+          ? json({ ...PUBLISHED_TEMPLATE, template: wayland })
+          : anyRoute(call),
+    );
+    const [published, fetched, check] = await Promise.all([
+      c.templates.publish('apiVersion: mandala/v1'),
+      c.templates.get('acc-1', 'devbox'),
+      c.templates.validate('apiVersion: mandala/v1'),
+    ]);
+    expect(published.template.desktop).toBe('wayland');
+    expect(fetched.template.desktop).toBe('wayland');
+    expect(check.template?.desktop).toBe('wayland');
   });
 });
 
