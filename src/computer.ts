@@ -2125,33 +2125,21 @@ export class Computer {
    * has taken as long as ten seconds to draw, so screenshot until the screen
    * changes rather than concluding from one frame that nothing launched.
    *
-   * Refused here on a computer that SAYS it runs Windows, and left to the
-   * platform otherwise — including on one whose payload named no `os` at all.
-   * That asymmetry is deliberate, and it is not the usual save-a-round-trip
-   * rule: a desktop-session exec is refused by the platform too, specifically
-   * and permanently (`reason: "unsupported"`, which {@link APIError.reason}
-   * already reads as settled). What the platform does NOT do on this path is
-   * refuse it FIRST. Its synchronous exec checks "not running" before it
-   * checks the OS, so a stopped Windows computer answers `not running`, and a
-   * caller who does as they are told and starts it is then refused anyway —
-   * the loop with no exit that the background path avoids by ordering its own
-   * Windows check ahead of that one. This guard is the way past that ordering,
-   * not a claim to know better than the platform.
+   * Linux only, and the refusal is the platform's rather than this SDK's. A
+   * desktop session on a Windows guest is refused before the computer is asked
+   * whether it is running (platform OPL-4208), carrying `reason: "unsupported"`
+   * — which {@link APIError.reason} reads as settled, so a retry loop stops on
+   * it rather than starting the computer and asking again.
    *
-   * Which is why an absent or unrecognised `os` is NOT refused here. It reads
-   * as `''`, and an allow-list on `'linux'` would turn it into a refusal this
-   * SDK cannot justify: the platform knows the guest's OS and this object does
-   * not, so a Linux computer whose payload lost the field — or one from a host
-   * too old to report it — would be refused for a POSIX command it would have
-   * run. Unknown goes to the party that can actually tell.
+   * There is deliberately no OS check here. This SDK held one until OPL-4202,
+   * for the single reason that the platform used to answer `not running` first
+   * and refuse Windows several steps later, which sent a caller with a stopped
+   * Windows computer round a loop with no exit. Ordering that refusal correctly
+   * upstream retired the guard: the platform knows what the guest runs, and this
+   * object knows only what its last payload said, so a computer whose `os` never
+   * arrived would have been refused here for a command it could have run.
    */
   async open(url: string, opts: { timeoutS?: number } & CallOptions = {}): Promise<ExecResult> {
-    if (this.os === 'windows') {
-      throw new MandalaError(
-        `open() is Linux-only for now: ${this.id} runs Windows. ` +
-          'Use exec() with a Windows launch command instead.',
-      );
-    }
     return this.exec(P.openUrlCommand(url), {
       timeoutS: opts.timeoutS ?? 30,
       desktop: true,
