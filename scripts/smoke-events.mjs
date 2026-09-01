@@ -22,9 +22,11 @@
  * rather than being screenshotted for; that a second wait on an up desktop
  * returns at once instead of forever; that the opening frame carries the
  * vocabulary and the desktop; that a background command's exit arrives off the
- * wire with its code; that a window opening is described, with the same
- * coordinates the listing gives; that a cursor resumes; and that a suspended
- * computer is refused with a sentence naming the suspend.
+ * wire with its code; that a nominated tree comes back normalised, arms as an
+ * event, and reports a file written under it; that a window opening is
+ * described, with the same coordinates the listing gives; that a cursor
+ * resumes; and that a suspended computer is refused with a sentence naming the
+ * suspend.
  */
 
 const key = process.env.MANDALA_API_KEY?.trim();
@@ -124,6 +126,68 @@ try {
     'process.exited carries the pid and the real code',
     exited?.pid === job.pid && exited?.exitCode === 7 && exited?.lost === false,
     JSON.stringify({ pid: exited?.pid, exitCode: exited?.exitCode }),
+  );
+
+  // `file.changed`, which is the only type that never arrives unasked and the
+  // only one whose state is answered in the opening frame rather than by an
+  // event. Both halves are readings of the reference that no fixture can
+  // settle: a mock says back whatever the reading that wrote it said.
+  const tree = '/tmp/sdk-watch';
+  await vm.exec(`mkdir -p ${tree}`);
+  const stopWatching = new AbortController();
+  // A deadline on the SIGNAL and not on the loop body: a loop that checks the
+  // clock only when an event arrives never checks it on the failure this is
+  // here to catch, which is a tree that never arms and therefore says nothing.
+  const watchTimer = setTimeout(() => stopWatching.abort(), 120_000);
+  let nominated;
+  // A trailing slash on the way out, on purpose. The host normalises it away
+  // and the cleaned form is what every event carries, so this is the one check
+  // that can catch a client matching on what it sent.
+  const watcher = vm.events({
+    watch: `${tree}/`,
+    reconnect: false,
+    signal: stopWatching.signal,
+    onConnect: (hello) => {
+      nominated ??= hello.watching;
+    },
+  });
+  let armed;
+  let created;
+  try {
+    for await (const ev of watcher) {
+      if (ev.type !== 'file.changed') continue;
+      if (ev.armed) {
+        // Only NOW. inotify reports changes and not state, so a file written
+        // before the watch is armed is never reported and never will be —
+        // touching it any earlier is a check that fails for the right reason
+        // and looks like a broken feature.
+        armed = ev;
+        await vm.exec(`touch ${tree}/a.txt`);
+        continue;
+      }
+      if (ev.path) {
+        created = ev;
+        break;
+      }
+    }
+  } finally {
+    clearTimeout(watchTimer);
+    watcher.close();
+  }
+  check(
+    'the opening frame answers the nomination, normalised',
+    nominated?.length === 1 && nominated[0].path === tree,
+    JSON.stringify(nominated ?? null),
+  );
+  check(
+    'and says the tree is not live yet, so the arming is an event',
+    nominated?.[0]?.armed === false && armed?.watch === tree,
+    JSON.stringify({ helloArmed: nominated?.[0]?.armed, event: armed?.watch ?? null }),
+  );
+  check(
+    'a file created under it arrives as a created, inside the tree',
+    created?.kind === 'created' && created?.path === `${tree}/a.txt` && created?.dir === false,
+    JSON.stringify({ kind: created?.kind, path: created?.path, dir: created?.dir }),
   );
 
   // Started BEFORE the thing that causes it: a wait opened after the event has

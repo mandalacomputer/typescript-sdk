@@ -15,7 +15,7 @@ import { describe, expect, it } from 'vitest';
 // Not on the package's export list, which is a gap of its own — every local
 // refusal in this SDK is one of these and a caller cannot name the class.
 import { ValidationError } from '../src/errors.js';
-import { toComputerEvent, toHello, withCursor } from '../src/events.js';
+import { toComputerEvent, toHello, withCursor, withWatches } from '../src/events.js';
 import {
   Client,
   type ComputerEvent,
@@ -218,9 +218,100 @@ describe('one frame, decoded', () => {
   it('passes a type it has never heard of straight through', () => {
     // The reference says the vocabulary grows and that a client must ignore a
     // type it does not recognise. It cannot ignore what it was never handed.
-    const ev = toComputerEvent(event({ type: 'file.changed', data: { path: '/tmp/x' } }));
-    expect(ev?.type).toBe('file.changed');
-    expect(ev?.data).toEqual({ path: '/tmp/x' });
+    //
+    // The stand-in has to be a type this build really does not know, and it
+    // used to be `file.changed` — which this branch gave promoted fields and a
+    // `switch` arm of its own, so the one test whose job is the `default`
+    // branch stopped reaching it and would have stayed green through a decoder
+    // that dropped every unrecognised frame.
+    const ev = toComputerEvent(event({ type: 'disk.full', data: { device: '/dev/vda1' } }));
+    expect(ev?.type).toBe('disk.full');
+    expect(ev?.data).toEqual({ device: '/dev/vda1' });
+    // Nothing promoted, because this SDK knows nothing about it — and the
+    // envelope every event carries is still read.
+    expect(ev?.cursor).toBe('ep-1:8');
+    expect(ev?.seq).toBe(7);
+    expect(ev?.path).toBeUndefined();
+  });
+
+  it('reads all three shapes a file.changed arrives in', () => {
+    // A typed model that assumes `path` is always there is wrong for two of
+    // them. `watch` is the only field all three share, and it is the one that
+    // says which nominated tree this is about.
+    const change = toComputerEvent(
+      event({
+        type: 'file.changed',
+        source: 'guest',
+        data: { watch: '/home/user/p', path: '/home/user/p/a.txt', kind: 'created' },
+      }),
+    );
+    expect(change).toMatchObject({
+      watch: '/home/user/p',
+      path: '/home/user/p/a.txt',
+      kind: 'created',
+      dir: false,
+    });
+    expect(change?.armed).toBeUndefined();
+    expect(change?.lostReason).toBeUndefined();
+
+    const madeDir = toComputerEvent(
+      event({
+        type: 'file.changed',
+        source: 'guest',
+        data: { watch: '/home/user/p', path: '/home/user/p/sub', kind: 'created', dir: true },
+      }),
+    );
+    expect(madeDir?.dir).toBe(true);
+
+    const armed = toComputerEvent(
+      event({
+        type: 'file.changed',
+        source: 'guest',
+        data: { watch: '/home/user/p', armed: true },
+      }),
+    );
+    expect(armed).toMatchObject({ watch: '/home/user/p', armed: true });
+    // Nothing is invented about a file this frame does not name — `dir: false`
+    // here would describe a path that is not in it.
+    expect(armed?.path).toBeUndefined();
+    expect(armed?.kind).toBeUndefined();
+    expect(armed?.dir).toBeUndefined();
+
+    const lost = toComputerEvent(
+      event({
+        type: 'file.changed',
+        source: 'guest',
+        data: { watch: '/home/user/p', lost: 'flood' },
+      }),
+    );
+    expect(lost).toMatchObject({ watch: '/home/user/p', lostReason: 'flood' });
+    expect(lost?.path).toBeUndefined();
+    expect(lost?.armed).toBeUndefined();
+  });
+
+  it('keeps file.changed’s `lost` off process.exited’s boolean of the same name', () => {
+    // The wire spells both `lost`, and they are not the same thing: one is a
+    // flag saying a command's outcome is unknown, the other a reason a tree's
+    // picture is incomplete. Folded onto one field, `if (ev.lost)` over a
+    // `file.changed` would read `"flood"` as a command that never ended.
+    const ev = toComputerEvent(
+      event({ type: 'file.changed', source: 'guest', data: { watch: '/w', lost: 'unwatchable' } }),
+    );
+    expect(ev?.lost).toBeUndefined();
+    expect(ev?.lostReason).toBe('unwatchable');
+
+    const exited = toComputerEvent(event({ type: 'process.exited', data: { pid: 5, lost: true } }));
+    expect(exited?.lost).toBe(true);
+    expect(exited?.lostReason).toBeUndefined();
+  });
+
+  it('says armed only where the platform did', () => {
+    // The wire sends `armed` to announce a tree going live and never sends a
+    // disarming, so a `false` here would be an event this client invented.
+    const unreadable = toComputerEvent(
+      event({ type: 'file.changed', source: 'guest', data: { watch: '/w', armed: 'yes' } }),
+    );
+    expect(unreadable?.armed).toBeUndefined();
   });
 
   it('is not an event for hello, or for anything that is not a frame', () => {
@@ -318,6 +409,45 @@ describe('the opening frame', () => {
     expect(toHello(event())).toBeUndefined();
     expect(toHello(undefined)).toBeUndefined();
   });
+
+  it('reads the trees this stream nominated, as the host spelled them back', () => {
+    const h = toHello(
+      hello({
+        watching: [
+          { path: '/home/user/p', armed: false },
+          { path: '/srv/out', armed: true },
+        ],
+      }),
+    );
+    expect(h?.watching).toEqual([
+      { path: '/home/user/p', armed: false },
+      { path: '/srv/out', armed: true },
+    ]);
+  });
+
+  it('leaves `watching` absent when nothing was nominated', () => {
+    // Absent is the platform saying no `file.changed` can arrive on this socket
+    // at all — a different answer from an empty list, so it is `undefined`.
+    expect(toHello(hello())?.watching).toBeUndefined();
+    expect(toHello(hello({ watching: [] }))?.watching).toEqual([]);
+  });
+
+  it('reads `armed` as true only, and keeps an entry it cannot read', () => {
+    // TRUE only, for the reason `ready` is: a tree read as live when it is not
+    // has a client taking silence for "nothing has changed" and never finding
+    // out. Read as not-live when it is, the client waits — and a wait ends at
+    // somebody's timeout.
+    const h = toHello(
+      hello({ watching: [{ path: '/w', armed: 'true' }, { armed: true }, 'not a tree'] }),
+    );
+    // The unreadable entry is still an entry the host answered with: dropping
+    // it would make the length disagree with what was nominated, which is the
+    // one thing this is read to check.
+    expect(h?.watching).toEqual([
+      { path: '/w', armed: false },
+      { path: '', armed: true },
+    ]);
+  });
 });
 
 describe('the resume position on the URL', () => {
@@ -331,6 +461,26 @@ describe('the resume position on the URL', () => {
   it('leaves the URL alone when there is nothing to resume from', () => {
     expect(withCursor('wss://h/events?token=t')).toBe('wss://h/events?token=t');
     expect(withCursor('wss://h/events?token=t', '')).toBe('wss://h/events?token=t');
+  });
+
+  it('repeats `watch` once per tree, beside the credential already there', () => {
+    expect(withWatches('wss://h/events?token=t', ['/home/user/p', '/srv/o ut'])).toBe(
+      'wss://h/events?token=t&watch=%2Fhome%2Fuser%2Fp&watch=%2Fsrv%2Fo%20ut',
+    );
+    expect(withWatches('wss://h/events', ['/w'])).toBe('wss://h/events?watch=%2Fw');
+  });
+
+  it('does not normalise a nomination on the way out', () => {
+    // The HOST normalises, and its answer comes back in `hello.watching`. A
+    // second normaliser here could only ever disagree with the one that
+    // decides.
+    expect(withWatches('wss://h/e?t=1', ['/home/user/./p/'])).toBe(
+      'wss://h/e?t=1&watch=%2Fhome%2Fuser%2F.%2Fp%2F',
+    );
+  });
+
+  it('leaves the URL alone when nothing was nominated', () => {
+    expect(withWatches('wss://h/events?token=t', [])).toBe('wss://h/events?token=t');
   });
 });
 
@@ -1149,6 +1299,243 @@ describe('a connection that fails after it was told hello', () => {
   });
 });
 
+describe('nominating a tree to watch', () => {
+  it('puts one `watch` on the URL per tree, and puts them back on every reconnect', async () => {
+    // A nomination is not a cursor: it is fixed for the life of the
+    // subscription, and without it no `file.changed` can arrive at all. A
+    // reconnect that dropped it would come back to a socket that is healthy and
+    // silent — the one failure a caller cannot tell from a quiet directory.
+    const { computer: c } = await computer();
+    const urls: string[] = [];
+    await collect(
+      c.events({
+        watch: ['/home/user/p', '/srv/out'],
+        backoffMs: 1,
+        maxRetries: 1,
+        webSocket: socketFactory((s, n) => {
+          urls.push(s.url);
+          s.emitOpen();
+          s.send(hello({ ready: false, cursor: 'ep-1:0', watching: [] }));
+          s.send(event({ cursor: 'ep-1:5' }));
+          if (n === 0) return s.close();
+        }),
+      }),
+      2,
+    );
+    expect(urls[0]).toBe('wss://host/events?token=t&watch=%2Fhome%2Fuser%2Fp&watch=%2Fsrv%2Fout');
+    // And beside the resume position, which the reconnect adds on top.
+    expect(urls[1]).toBe(
+      'wss://host/events?token=t&watch=%2Fhome%2Fuser%2Fp&watch=%2Fsrv%2Fout&since=ep-1%3A5',
+    );
+  });
+
+  it('takes a single path as well as a list', async () => {
+    const { computer: c } = await computer();
+    const urls: string[] = [];
+    await collect(
+      c.events({
+        watch: '/home/user/p',
+        reconnect: false,
+        webSocket: socketFactory((s) => {
+          urls.push(s.url);
+          s.emitOpen();
+          s.send(hello({ ready: false }));
+          s.close();
+        }),
+      }),
+    );
+    expect(urls[0]).toBe('wss://host/events?token=t&watch=%2Fhome%2Fuser%2Fp');
+  });
+
+  it('surfaces what the host gave back, which is not what was sent', async () => {
+    // The host normalises a nomination — a trailing slash and a `.` segment are
+    // cleaned away — and the cleaned form is what every event carries. A client
+    // matching on what it sent matches nothing.
+    const { computer: c } = await computer();
+    const stream = c.events({
+      watch: '/home/user/./p/',
+      reconnect: false,
+      webSocket: socketFactory((s) => {
+        s.emitOpen();
+        s.send(hello({ ready: false, watching: [{ path: '/home/user/p', armed: false }] }));
+        s.send(
+          event({
+            type: 'file.changed',
+            source: 'guest',
+            data: { watch: '/home/user/p', armed: true },
+          }),
+        );
+        s.close();
+      }),
+    });
+    const got = await collect(stream);
+    expect(stream.watching).toEqual([{ path: '/home/user/p', armed: false }]);
+    expect(got[0]?.watch).toBe('/home/user/p');
+    expect(got[0]?.armed).toBe(true);
+    // `hello` carries it too, and both are copies: a caller who edits what they
+    // were handed has changed their own record, not this stream's next answer.
+    stream.watching?.push({ path: '/hacked', armed: true });
+    (stream.hello?.watching ?? []).push({ path: '/hacked', armed: true });
+    expect(stream.watching).toHaveLength(1);
+    // The ENTRIES too, and not only the array around them. Shared, the three
+    // "snapshots" were one object: an edit to a tree handed out reached the
+    // frame behind it, and the next read gave the edit back as though the host
+    // had said it.
+    const handed = stream.watching;
+    if (handed?.[0]) handed[0].armed = true;
+    const hello0 = stream.hello?.watching?.[0];
+    if (hello0) hello0.path = '/hacked';
+    expect(stream.watching).toEqual([{ path: '/home/user/p', armed: false }]);
+  });
+
+  it('hands a connect hook a frame it cannot edit this stream through', async () => {
+    // `onConnect` is given the LIVE opening frame, which is the one door the
+    // copies beside this were added to shut. A hook that edits an entry must
+    // not be able to talk the stream into reporting a tree as live.
+    const { computer: c } = await computer();
+    const stream = c.events({
+      watch: '/w',
+      reconnect: false,
+      onConnect: (h) => {
+        const first = h.watching?.[0];
+        if (first) first.armed = true;
+      },
+      webSocket: socketFactory((s) => {
+        s.emitOpen();
+        s.send(hello({ ready: false, watching: [{ path: '/w', armed: false }] }));
+        s.send(event());
+        s.close();
+      }),
+    });
+    await collect(stream);
+    expect(stream.watching).toEqual([{ path: '/w', armed: false }]);
+  });
+
+  it('re-answers arming per connection, because no event says it', async () => {
+    // The guest answers a nomination once. A tree that was not live on the
+    // connection that dropped can be live on the one that replaced it, and
+    // there is no `armed` event for a client that was not there to hear the
+    // first one.
+    const { computer: c } = await computer();
+    const stream = c.events({
+      watch: '/w',
+      backoffMs: 1,
+      maxRetries: 1,
+      webSocket: socketFactory((s, n) => {
+        s.emitOpen();
+        s.send(hello({ ready: false, watching: [{ path: '/w', armed: n > 0 }] }));
+        s.send(event({ cursor: `ep-1:${n + 1}` }));
+        if (n === 0) s.close();
+      }),
+    });
+    await collect(stream, 2);
+    expect(stream.watching).toEqual([{ path: '/w', armed: true }]);
+  });
+
+  it('refuses a nomination the platform would refuse silently', async () => {
+    // A `400` for a path this host cannot honour, and a `409` for one tree too
+    // many, reach a websocket client as the same empty 1006 close a rotated
+    // credential gives — so with reconnect on, the default, they are a stream
+    // that reopens forever and never says why. The two this SDK can refuse
+    // locally are refused before a socket is opened at all.
+    const { computer: c } = await computer();
+    expect(() => c.events({ watch: 'home/user/p' })).toThrow(ValidationError);
+    expect(() => c.events({ watch: 'C:\\Users\\p' })).toThrow(ValidationError);
+    expect(() => c.events({ watch: '' })).toThrow(ValidationError);
+    expect(() => c.events({ watch: ['/a', '/b', '/c', '/d', '/e'] })).toThrow(ValidationError);
+    // A `watch` this SDK cannot make sense of is refused rather than read as a
+    // stream that nominated nothing — which opens quietly and reports no file
+    // change ever, on a call that asked for them.
+    expect(() => c.events({ watch: 42 as unknown as string })).toThrow(ValidationError);
+    // Four is the limit, not the refusal.
+    expect(() => c.events({ watch: ['/a', '/b', '/c', '/d'] })).not.toThrow();
+  });
+
+  it('refuses the root, however it is spelled', async () => {
+    // Watching everything is the one thing this feature exists to make
+    // impossible to ask for by accident: it would spend the directory budget on
+    // /usr before reaching anything the caller cares about and report `lost`
+    // forever. The platform refuses it with a 400, which reaches a websocket
+    // client as the same silence a rotated credential does.
+    const { computer: c } = await computer();
+    for (const root of ['/', '//', '/.', '/./', '/home/..', '/a/b/../..']) {
+      expect(() => c.events({ watch: root })).toThrow(ValidationError);
+    }
+    // A path that merely PASSES THROUGH the root's spellings is a directory.
+    expect(() => c.events({ watch: '/home/user/../user/./p/' })).not.toThrow();
+  });
+
+  it('refuses a path the platform bounds, before the upgrade does', async () => {
+    const { computer: c } = await computer();
+    // 256 bytes is the platform's own bound, and it counts BYTES.
+    expect(() => c.events({ watch: `/${'a'.repeat(255)}` })).not.toThrow();
+    expect(() => c.events({ watch: `/${'a'.repeat(256)}` })).toThrow(ValidationError);
+    expect(() => c.events({ watch: `/${'é'.repeat(128)}` })).toThrow(ValidationError);
+    // A newline in a path this host echoes back and logs is a caller choosing
+    // what somebody else's terminal renders.
+    expect(() => c.events({ watch: '/home/user/p\n/etc' })).toThrow(ValidationError);
+    // A lone surrogate is the one bad path the upgrade would NOT refuse:
+    // percent-encoding turns it into a replacement character, so the host is
+    // handed a valid path that is not the one that was asked for.
+    expect(() => c.events({ watch: '/home/\ud800/p' })).toThrow(ValidationError);
+  });
+
+  it('counts the cap in trees, the way the platform counts it', async () => {
+    // The host cleans and de-duplicates BEFORE it applies the limit, so five
+    // spellings of four directories is a stream it opens. Counting the array
+    // instead refused a nomination the platform accepts — the same defect as
+    // accepting one it refuses, pointed the other way.
+    const { computer: c } = await computer();
+    expect(() => c.events({ watch: ['/a/b', '/a/b/', '/a/./b', '/c', '/c/'] })).not.toThrow();
+    expect(() => c.events({ watch: ['/a', '/b', '/c', '/d', '/e'] })).toThrow(
+      /at most 4 directories on one stream \(got 5\)/,
+    );
+  });
+
+  it('sends the nomination as it was written, not as it was counted', async () => {
+    // The cleaning above is for the two refusals and for nothing else. What
+    // goes on the wire is what the caller wrote, because the HOST's answer in
+    // `hello.watching` is what a client matches on and a second normaliser here
+    // could only ever disagree with the one that decides.
+    const { computer: c } = await computer();
+    const urls: string[] = [];
+    await collect(
+      c.events({
+        watch: '/home/user/../user/./p/',
+        reconnect: false,
+        webSocket: socketFactory((s) => {
+          urls.push(s.url);
+          s.emitOpen();
+          s.send(hello({ ready: false }));
+          s.close();
+        }),
+      }),
+    );
+    expect(urls[0]).toContain(encodeURIComponent('/home/user/../user/./p/'));
+  });
+
+  it('names the nominations when a refused upgrade says nothing else', async () => {
+    // The computer reports itself running, so the refusal was about the
+    // connection — and a stream that nominates trees has two more ways to reach
+    // exactly this silence. It stays retryable, because none of them can be
+    // told apart from a rotated credential; what changes is that the sentence
+    // stops pretending the watches are not a candidate.
+    const { computer: c } = await computer();
+    const err = await collect(
+      c.events({
+        watch: '/home/user/p',
+        backoffMs: 1,
+        maxRetries: 1,
+        webSocket: socketFactory((s) => s.emitError()),
+      }),
+    ).catch((e) => e);
+    expect(err).toBeInstanceOf(ConnectionError);
+    expect(String(err)).toContain('/home/user/p');
+    expect(String(err)).toContain('already watching its limit');
+    expect(isSettled(err)).toBe(false);
+  });
+});
+
 describe('a refusal on the upgrade', () => {
   it('reads a suspended computer off the computer, because the socket cannot say', async () => {
     // A 409, a 401 and a TCP reset all reach a WebSocket client as an error
@@ -1432,6 +1819,83 @@ describe('waitFor', () => {
     });
     expect(ev.pid).toBe(5);
     expect(seen).toEqual(['ep-1:0']);
+  });
+
+  it('refuses file.changed on a stream that nominated nothing', async () => {
+    // The advertised list gets this one wrong on its own: the computer CAN emit
+    // `file.changed` and still emits none, because it is the only type that
+    // never arrives unasked. From inside the loop that is indistinguishable
+    // from a directory nobody has touched.
+    const { computer: c } = await computer();
+    const err = await c
+      .waitFor('file.changed', {
+        timeoutMs: 30_000,
+        webSocket: socketFactory((s) => {
+          s.emitOpen();
+          s.send(hello({ ready: false, events: ['file.changed', 'computer.idle'] }));
+        }),
+      })
+      .catch((e) => e);
+    expect(String(err)).toContain('never arrives unasked');
+    expect(String(err)).toContain('watch:');
+    expect(isSettled(err)).toBe(true);
+  });
+
+  it('waits for it once a tree is nominated', async () => {
+    const { computer: c } = await computer();
+    const ev = await c.waitFor('file.changed', {
+      timeoutMs: 2_000,
+      watch: '/home/user/p',
+      webSocket: socketFactory((s) => {
+        s.emitOpen();
+        s.send(hello({ ready: false, events: ['file.changed'], watching: [] }));
+        s.send(
+          event({
+            type: 'file.changed',
+            source: 'guest',
+            data: { watch: '/home/user/p', path: '/home/user/p/a.txt', kind: 'modified' },
+          }),
+        );
+      }),
+    });
+    expect(ev).toMatchObject({
+      watch: '/home/user/p',
+      path: '/home/user/p/a.txt',
+      kind: 'modified',
+    });
+  });
+
+  it('does not send a caller after a watch when the computer cannot emit it at all', async () => {
+    // Two different refusals, and the advice only fits one of them. Telling a
+    // caller on an image without the watcher to nominate a tree sends them
+    // after a fix that changes nothing.
+    const { computer: c } = await computer();
+    const err = await c
+      .waitFor('file.changed', {
+        timeoutMs: 30_000,
+        webSocket: socketFactory((s) => {
+          s.emitOpen();
+          s.send(hello({ ready: false, events: ['computer.idle'] }));
+        }),
+      })
+      .catch((e) => e);
+    expect(String(err)).toContain('cannot emit file.changed');
+    expect(String(err)).not.toContain('never arrives unasked');
+  });
+
+  it('waits when a nominated-nothing file.changed is only half of what is wanted', async () => {
+    // The rule is unchanged: a refusal only where NONE of the wanted types can
+    // arrive. The half that can is still the half the caller meant.
+    const { computer: c } = await computer();
+    const ev = await c.waitFor(['file.changed', 'process.exited'], {
+      timeoutMs: 2_000,
+      webSocket: socketFactory((s) => {
+        s.emitOpen();
+        s.send(hello({ ready: false, events: ['file.changed', 'process.exited'] }));
+        s.send(event({ type: 'process.exited', data: { pid: 5, exit_code: 0 } }));
+      }),
+    });
+    expect(ev.pid).toBe(5);
   });
 
   it('refuses a wait with nothing to wait for, and a deadline that is not a number', async () => {

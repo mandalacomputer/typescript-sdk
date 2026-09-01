@@ -28,7 +28,8 @@ import { MAX_TIMER_MS } from './transport.js';
  *
  * `daemon` means the platform observed it: a command exited, a machine changed
  * power state, the idle sweep came round. `guest` means the machine reported it
- * about itself — every `window.*`, `clipboard.changed`, and `computer.ready` —
+ * about itself — every `window.*`, `clipboard.changed`, `file.changed`, and
+ * `computer.ready` —
  * and anyone with root inside that guest can make those say anything. They are
  * the tenant's own machine describing itself, which is exactly as much as they
  * are worth.
@@ -59,6 +60,7 @@ export type ComputerEventType =
   | 'window.focused'
   | 'window.blurred'
   | 'clipboard.changed'
+  | 'file.changed'
   | 'process.exited'
   | 'computer.ready'
   | 'computer.idle'
@@ -81,15 +83,112 @@ export type ComputerEventType =
  */
 export const STREAM_FRAME_TYPES: readonly ComputerEventType[] = ['gap', 'closed', 'capabilities'];
 
-/** The event types the platform will only send when the GUEST can produce them. */
+/**
+ * The event types the platform will only send when the GUEST can produce them.
+ *
+ * A list, and NOT one capability. The guest half is reported over two different
+ * channels and a computer can have one without the other: everything here
+ * except `file.changed` needs the X bindings the window watcher runs on, while
+ * `file.changed` needs only the terminal channel — so an image too old to carry
+ * the bindings emits no `window.*` at all and can still watch a tree. Read
+ * {@link ComputerEvents.eventTypes} for what THIS computer says it can do;
+ * treating membership here as a single yes-or-no gets that computer wrong in
+ * both directions.
+ */
 export const GUEST_EVENT_TYPES: readonly ComputerEventType[] = [
   'window.opened',
   'window.closed',
   'window.focused',
   'window.blurred',
   'clipboard.changed',
+  'file.changed',
   'computer.ready',
 ];
+
+/**
+ * How many trees one stream may nominate with {@link EventStreamOptions.watch}.
+ *
+ * DISTINCT trees, counted the way the platform counts them: it normalises and
+ * de-duplicates first, so `['/a/b', '/a/b/']` is one nomination and not two.
+ * Two spellings of one directory is a caller repeating themselves rather than
+ * asking for something impossible, and refusing it here would be this SDK
+ * turning away a stream the platform would have opened.
+ *
+ * Per SOCKET. There is a second, larger cap the platform applies per COMPUTER —
+ * 32 distinct trees across every stream open on it — and a nomination past that
+ * one is refused on the upgrade rather than here.
+ */
+export const MAX_WATCHES = 4;
+
+/**
+ * How long one nominated path may be, in BYTES of UTF-8 rather than characters.
+ *
+ * The platform's own bound. Checked here for the reason every other nomination
+ * rule is: past it the upgrade is a `400`, and a `400` reaches a websocket
+ * client as the same empty close a rotated credential gives.
+ */
+export const MAX_WATCH_PATH_BYTES = 256;
+
+/**
+ * The reason a watched tree's picture is incomplete, on {@link
+ * ComputerEvent.lostReason}.
+ *
+ * Open, like every other word on this wire.
+ *
+ * - `flood` — the tree changed faster than the cap allows it to be reported.
+ *   Transient: re-read the tree and keep listening. A build under a watched
+ *   path costs one of these rather than thousands of events.
+ * - `budget` — the tree is bigger than the directory budget one watch gets, so
+ *   part of it is not being watched at all. Permanent for this watch, and the
+ *   fix is to nominate a narrower path.
+ * - `unwatchable` — the directory is not there yet, is not a directory, cannot
+ *   be read, or is a SYMLINK. Links are refused rather than followed, because
+ *   inotify pins whatever the link resolved to when the watch was added, so a
+ *   followed link would report one tree under another tree's name — nominate
+ *   the real path. This is the only reason that means the tree is not being
+ *   watched at all, and the only one that can recover on its own: nominating
+ *   the directory a job is about to create is supported, and the watch starts
+ *   by itself when it appears. That recovery is announced by an `armed` event
+ *   and by nothing else — there is no event for the directory's own creation.
+ */
+export type WatchLost = 'flood' | 'budget' | 'unwatchable' | (string & {});
+
+/**
+ * One tree this stream nominated, as the host answered for it in `hello`.
+ *
+ * @see ComputerEvents.watching
+ */
+export type WatchedTree = {
+  /**
+   * The nomination as the host NORMALISED it — a trailing slash and a `.`
+   * segment are cleaned away — and the form every `file.changed` carries in
+   * {@link ComputerEvent.watch}.
+   *
+   * So this is what to match on, not the string you passed: a client comparing
+   * against its own `'/home/user/'` matches nothing.
+   */
+  path: string;
+  /**
+   * Whether this tree is ALREADY being watched.
+   *
+   * The half a client gets wrong. A nomination is accepted the moment the
+   * socket opens, but the tree is not live until the guest has been asked —
+   * and on a computer nobody has opened a terminal on, the host has to install
+   * the watcher into the guest first, which is seconds rather than
+   * milliseconds. inotify reports changes and not state, so anything that
+   * happens in that window is never reported and never will be.
+   *
+   * `false` means wait for this tree's `{watch, armed: true}` event before
+   * reading silence as "nothing has changed". `true` means live NOW and NO
+   * event is coming to say so — somebody else nominated it first and the guest
+   * answers a nomination once.
+   *
+   * The same split as {@link Hello.ready}: state in the opening frame,
+   * transitions on the stream. An SDK that models only the event has the
+   * wait-forever bug on both.
+   */
+  armed: boolean;
+};
 
 /**
  * One frame off the stream.
@@ -180,10 +279,80 @@ export type ComputerEvent = {
    * The handle goes with it, so `execPoll(pid)` answers 404 from here on. The
    * event is sent so that a caller waiting on it stops waiting, not because
    * anything was learned about how the command ended.
+   *
+   * `process.exited` ONLY. `file.changed` has a `lost` of its own on the wire
+   * and it is a REASON rather than a flag, so it arrives as {@link lostReason};
+   * this field is never set for one.
    */
   lost?: boolean;
   /** `clipboard.changed`: `clipboard` or `primary`. The contents are not on this stream. */
   selection?: string;
+  /**
+   * `file.changed`: which nominated tree this is about — on all three of its
+   * shapes, and the only field they share.
+   *
+   * The path as the HOST normalised it, which is what {@link
+   * ComputerEvents.watching} gives back and not necessarily the string that was
+   * passed to {@link EventStreamOptions.watch}. Match on the former.
+   */
+  watch?: string;
+  /**
+   * `file.changed`: the absolute path that changed, always inside {@link watch}.
+   *
+   * Present on the shape that reports a change, and ABSENT on the two that
+   * report the watch itself — {@link armed} and {@link lostReason}. A model
+   * that assumes a path is always there is wrong for two frames in three.
+   */
+  path?: string;
+  /**
+   * `file.changed`: `created`, `modified` or `deleted`. Set with {@link path}.
+   *
+   * Writes are coalesced, so this is the truth about that path when the window
+   * closed rather than a transcript: a file created and then written reads as
+   * `created`, one written and then removed as `deleted`. A rename inside the
+   * tree is a `deleted` for the old path and a `created` for the new one, not a
+   * move — inotify reports the two ends separately and one of them is often
+   * outside the tree.
+   *
+   * Named for the wire field it carries, which is `kind`. It says what happened
+   * to a file; {@link type} says what kind of event this is.
+   */
+  kind?: string;
+  /** `file.changed`: true when the thing at {@link path} is a directory. */
+  dir?: boolean;
+  /**
+   * `file.changed`: this tree is live from HERE ON, and was not before.
+   *
+   * `true` or absent — never `false`, because the platform sends it only to
+   * announce arming and reports no disarming for this to be the other half of.
+   * Nothing that happened to the tree before it is reported or ever will be, so
+   * this is what closes the window between nominating a tree and watching it;
+   * until it arrives, silence means "not watching yet" rather than "nothing has
+   * changed". See {@link WatchedTree.armed} for the case where it never
+   * arrives because the tree was ALREADY live when this stream joined.
+   *
+   * It comes again after anything that re-arms the watch — a stop and a start,
+   * a guest reboot, a broker replaced — and a second one means what the first
+   * did: reporting starts here, so re-read the tree if what happened during the
+   * interruption matters. `computer.ready` says the same thing about a desktop
+   * session.
+   */
+  armed?: boolean;
+  /**
+   * `file.changed`: the picture of this tree is incomplete, and why.
+   *
+   * Treat any value as "what I believe about this tree is wrong". Only
+   * `unwatchable` means the tree is not being watched at all; see {@link
+   * WatchLost} for what each one asks of a caller.
+   *
+   * NOT spelled `lost`, though that is the wire field, and the difference is
+   * not a whim: {@link lost} is already a BOOLEAN on `process.exited` and one
+   * field cannot honestly be both. Widening that to `boolean | string` would
+   * put a reason where every existing caller reads a flag. So the two are
+   * separate fields — and a caller writing `if (ev.lost)` over a `file.changed`
+   * gets `undefined`, which is why this one is documented from both ends.
+   */
+  lostReason?: WatchLost;
   /** `computer.started` / `.stopped` / `.suspended`: the state it is in now. */
   status?: string;
   /**
@@ -292,6 +461,20 @@ export type Hello = {
    * correlatable.
    */
   windows?: GuestWindow[];
+  /**
+   * The trees this stream will report file changes under, or `undefined`.
+   *
+   * ABSENT when nothing was nominated, which is the platform saying no
+   * `file.changed` can arrive on this socket at all — `file.changed` is the one
+   * type that never comes unasked. Nominate with
+   * {@link EventStreamOptions.watch}.
+   *
+   * Read it rather than assuming: each entry's `path` is the nomination as this
+   * host normalised it and is the form every event carries, and its `armed`
+   * says whether that tree is live already or has an `armed` event still to
+   * come. See {@link WatchedTree}.
+   */
+  watching?: WatchedTree[];
   raw: Record<string, unknown>;
 };
 
@@ -378,6 +561,25 @@ export function toComputerEvent(frame: unknown): ComputerEvent | undefined {
     case 'clipboard.changed':
       ev.selection = text(data.selection);
       break;
+    case 'file.changed': {
+      ev.watch = text(data.watch);
+      ev.path = text(data.path);
+      ev.kind = text(data.kind);
+      // Only where there is a path for it to describe. `dir` is present on the
+      // wire exactly when the thing that changed is a directory, so `false` is
+      // the right answer for a change to a file — and no answer at all is the
+      // right one for the two shapes that name no file, where a `false` would
+      // be this client describing something the frame never mentioned.
+      if (ev.path !== undefined) ev.dir = said(data.dir);
+      // TRUE or nothing. The platform sends `armed` only to announce a tree
+      // going live and never sends a disarming, so a `false` here would be an
+      // event this stream invented. See ComputerEvent.armed.
+      if (said(data.armed)) ev.armed = true;
+      // `lost` on the wire, `lostReason` here, because `lost` on this envelope
+      // is already `process.exited`'s boolean. See ComputerEvent.lostReason.
+      ev.lostReason = text(data.lost);
+      break;
+    }
     case 'computer.started':
     case 'computer.stopped':
     case 'computer.suspended':
@@ -420,6 +622,13 @@ export function toHello(frame: unknown): Hello | undefined {
   const windows = Array.isArray(frame.windows)
     ? frame.windows.filter(isRecord).map(toGuestWindow)
     : undefined;
+  // Every record kept, exactly as `windows` keeps every record: an entry this
+  // client cannot read is still an entry the host answered with, and dropping
+  // it would make `watching.length` disagree with what was nominated — which
+  // is the one thing a caller reads this to check.
+  const watching = Array.isArray(frame.watching)
+    ? frame.watching.filter(isRecord).map(toWatchedTree)
+    : undefined;
   return {
     computer: typeof frame.computer === 'string' ? frame.computer : '',
     cursor: typeof frame.cursor === 'string' ? frame.cursor : '',
@@ -430,8 +639,23 @@ export function toHello(frame: unknown): Hello | undefined {
     ready: frame.ready === true,
     events: stringList(frame.events) ?? [],
     windows,
+    watching,
     raw: { ...frame },
   };
+}
+
+/**
+ * One `hello.watching` entry.
+ *
+ * `armed` is TRUE ONLY, for the reason {@link toHello} reads `ready` that way
+ * and it is the same split: an unreadable field must not be read as a tree that
+ * is live. Wrong in that direction, a client takes silence for "nothing has
+ * changed" over a tree nothing is watching yet, and never finds out. Wrong in
+ * the other, it waits for an `armed` event — which ends at a caller's timeout,
+ * and which the platform may well be about to send anyway.
+ */
+function toWatchedTree(entry: Record<string, unknown>): WatchedTree {
+  return { path: text(entry.path) ?? '', armed: entry.armed === true };
 }
 
 // --- the socket -------------------------------------------------------------
@@ -500,6 +724,48 @@ export type EventStreamOptions = {
    * get a `gap` event, which is the same news said honestly.
    */
   since?: string;
+  /**
+   * Directories inside the guest to be told about changes under, as
+   * `file.changed` events.
+   *
+   * The one thing on this stream that has to be ASKED for. Without a nomination
+   * no `file.changed` can arrive at all, so this is a stream option rather than
+   * an event type to watch for and hope — and it is fixed for the life of the
+   * subscription, re-sent on every reconnect, because a socket that came back
+   * without it would go quiet rather than fail.
+   *
+   * ```ts
+   * const stream = c.events({ watch: '/home/user/project' });
+   * for await (const ev of stream) {
+   *   if (ev.type !== 'file.changed') continue;
+   *   if (ev.armed) continue;                  // live from here on
+   *   if (ev.lostReason) continue;             // my picture of the tree is wrong
+   *   console.log(ev.kind, ev.path);
+   * }
+   * ```
+   *
+   * Absolute paths, and at most {@link MAX_WATCHES} of them — both refused here
+   * rather than on the wire, where the platform's `400` reaches a websocket
+   * client as a socket that opens and then says nothing.
+   *
+   * **Match on what you were given, not on what you sent.** The host normalises
+   * a nomination — a trailing slash and a `.` segment are cleaned away — and
+   * the cleaned form is what every event carries in {@link ComputerEvent.watch}.
+   * {@link ComputerEvents.watching} is the answer, per tree.
+   *
+   * **And wait for `armed` before you read silence as "nothing changed".** A
+   * tree is not being watched the moment `hello` accepts it; see
+   * {@link WatchedTree.armed}, which is the state, and
+   * {@link ComputerEvent.armed}, which is the transition.
+   *
+   * Nominate the NARROWEST tree you can. A home directory under a build is
+   * thousands of changes a second, and the replay history this stream keeps is
+   * per computer and shared with every other subscriber to it — so a broad
+   * watch spends the history a client resuming with a cursor needs. A computer
+   * watches at most 32 distinct trees across every stream open on it, and a
+   * nomination past that is refused on the upgrade.
+   */
+  watch?: string | readonly string[];
   /**
    * Reopen the socket when it drops, resuming from the last event you consumed.
    * On by default, and it is most of what this class is for.
@@ -738,6 +1004,7 @@ export class ComputerEvents implements AsyncIterable<ComputerEvent> {
   readonly #maxRetries: number;
   readonly #connectTimeoutMs: number;
   readonly #maxQueued: number;
+  readonly #watch: readonly string[];
   readonly #webSocket: EventSocketFactory;
   readonly #onConnect?: (hello: Hello) => void;
   readonly #signal?: AbortSignal;
@@ -762,6 +1029,10 @@ export class ComputerEvents implements AsyncIterable<ComputerEvent> {
     this.#maxRetries = opts.maxRetries ?? EVENT_STREAM_DEFAULTS.maxRetries;
     this.#connectTimeoutMs = opts.connectTimeoutMs ?? EVENT_STREAM_DEFAULTS.connectTimeoutMs;
     this.#maxQueued = opts.maxQueued ?? EVENT_STREAM_DEFAULTS.maxQueued;
+    // Checked in the constructor, beside the numbers and for the same reason:
+    // a nomination the platform will refuse is worth saying before a socket is
+    // opened, and the refusal it would draw carries nothing a client can read.
+    this.#watch = checkWatches(watchList(opts.watch));
     this.#webSocket = opts.webSocket ?? globalEventSocket;
     this.#onConnect = opts.onConnect;
     this.#signal = opts.signal;
@@ -808,7 +1079,12 @@ export class ComputerEvents implements AsyncIterable<ComputerEvent> {
     // objects and are deliberately not deep-copied, as `windows` says.
     const h = this.#hello;
     if (!h) return undefined;
-    return { ...h, events: [...h.events], windows: h.windows ? [...h.windows] : undefined };
+    return {
+      ...h,
+      events: [...h.events],
+      windows: h.windows ? [...h.windows] : undefined,
+      watching: copyWatching(h.watching),
+    };
   }
 
   /**
@@ -826,6 +1102,40 @@ export class ComputerEvents implements AsyncIterable<ComputerEvent> {
     // handing out the live one lets `stream.eventTypes.push('window.opened')`
     // talk a wait into hanging on a machine that cannot produce the event.
     return this.#types ? [...this.#types] : undefined;
+  }
+
+  /**
+   * What the newest connection's opening frame said about the trees this stream
+   * nominated, or `undefined` when it nominated none.
+   *
+   * The thing to read before matching a `file.changed`, and before reading
+   * silence: each entry's `path` is the nomination as the HOST spelled it,
+   * which is the form the events carry, and its `armed` says whether that tree
+   * is live already or has an `armed` event still to come.
+   *
+   * `undefined` until the first opening frame lands, which is when the socket
+   * is opened — and the socket is opened by the first pull on the iterator. To
+   * read the answer before that, or on a computer that may say nothing for a
+   * while, use {@link EventStreamOptions.onConnect}, which is handed the same
+   * frame:
+   *
+   * ```ts
+   * const stream = c.events({
+   *   watch: '/home/user/project/',
+   *   onConnect: (hello) => console.log(hello.watching),
+   * });                                 // [{ path: '/home/user/project', armed: false }]
+   * ```
+   *
+   * Replaced on every reconnect, because arming is answered per connection: a
+   * tree that was `false` on the connection that dropped can be `true` on the
+   * one that replaced it, and no event says so.
+   */
+  get watching(): WatchedTree[] | undefined {
+    // A copy of the array AND of the entries — see `copyWatching`, which is
+    // why this one goes deeper than `windows` does. Shared, an entry handed to
+    // a caller was the same object `#hello` holds and the one `onConnect` was
+    // given, so editing it changed what the next read of any of the three said.
+    return copyWatching(this.#hello?.watching);
   }
 
   /** The desktop the newest connection joined, when it was sent one. */
@@ -1013,7 +1323,10 @@ export class ComputerEvents implements AsyncIterable<ComputerEvent> {
    */
   async #connect(frames: Frames): Promise<void> {
     const signal = this.#signal;
-    const url = withCursor(await this.#url(signal), this.#cursor);
+    // Nominations first, cursor last. Both go on every connection: a reconnect
+    // that dropped the `watch=` would come back to a socket that is healthy and
+    // silent, which is the one failure a caller cannot tell from a quiet tree.
+    const url = withCursor(withWatches(await this.#url(signal), this.#watch), this.#cursor);
     const sock = this.#webSocket(url);
     this.#socket = sock;
 
@@ -1165,6 +1478,10 @@ export class ComputerEvents implements AsyncIterable<ComputerEvent> {
       ...hello,
       events: [...hello.events],
       windows: hello.windows ? [...hello.windows] : undefined,
+      // Deeper than the arrays beside it: `#onConnect` is handed the live
+      // `hello` a line later, and sharing the entries left a hook able to edit
+      // what this stream reports having been told.
+      watching: copyWatching(hello.watching),
     };
     // The vocabulary is snapshotted for the same reason and separately, because
     // a `capabilities` frame replaces this one without touching `#hello`.
@@ -1282,6 +1599,154 @@ export function withCursor(url: string, cursor?: string): string {
   // one byte of a credential.
   const sep = url.includes('?') ? '&' : '?';
   return `${url}${sep}since=${encodeURIComponent(cursor)}`;
+}
+
+/**
+ * `events_url` with this stream's nominations on it, one `&watch=` each.
+ *
+ * Appended rather than assembled through `URL`, for the reason
+ * {@link withCursor} appends: the credential in this URL is already
+ * percent-encoded and a parser is a chance to change a byte of it. Repeated
+ * rather than joined, because that is the shape the reference names — and the
+ * paths are NOT normalised on the way out. The host normalises, and its answer
+ * comes back in `hello.watching`; a second normaliser here could only ever
+ * disagree with the one that decides.
+ */
+export function withWatches(url: string, watch: readonly string[]): string {
+  let out = url;
+  for (const path of watch) {
+    out += `${out.includes('?') ? '&' : '?'}watch=${encodeURIComponent(path)}`;
+  }
+  return out;
+}
+
+/**
+ * {@link EventStreamOptions.watch} as a list, without judging what is in it.
+ *
+ * Anything that is neither a string nor an array comes back as a one-element
+ * list holding it, so that {@link checkWatches} is the one place a bad
+ * nomination is refused. Answering `[]` here instead would read a `watch` this
+ * SDK cannot make sense of as a stream that nominated nothing — which opens
+ * quietly and reports no file change ever, on a call that asked for them.
+ */
+export function watchList(watch?: string | readonly string[]): readonly string[] {
+  if (watch === undefined) return [];
+  if (Array.isArray(watch)) return watch;
+  return [watch as string];
+}
+
+/**
+ * The nominations, refused here rather than on the upgrade.
+ *
+ * A `400` for a path this host cannot honour, and a `409` for one tree too
+ * many, are both invisible to a websocket client: what reaches it is the same
+ * empty 1006 close a rotated credential gives, and with `reconnect` on — the
+ * default — the result is a stream that reopens forever and never says why. So
+ * the two refusals this SDK can make locally are made locally, before a socket
+ * is opened at all.
+ *
+ * POSIX-absolute, and only that. `file.changed` runs on inotify, so it is a
+ * Linux guest by construction — and a Windows computer has no event stream to
+ * nominate anything on, which {@link Computer.events} already refuses in as
+ * many words. A `C:\` path here can only be a mistake.
+ */
+function checkWatches(watch: readonly string[]): string[] {
+  const paths = watch.map((path) => {
+    if (typeof path !== 'string' || path === '') {
+      throw new ValidationError(`watch takes directories to watch, not ${JSON.stringify(path)}`);
+    }
+    if (!path.startsWith('/')) {
+      throw new ValidationError(
+        `a watched directory must be an absolute guest path: ${JSON.stringify(path)}`,
+      );
+    }
+    if (new TextEncoder().encode(path).length > MAX_WATCH_PATH_BYTES) {
+      throw new ValidationError(
+        `a watched directory may be at most ${MAX_WATCH_PATH_BYTES} bytes: ` +
+          `${JSON.stringify(path)}`,
+      );
+    }
+    // Refused rather than escaped, which is the platform's own reading: a path
+    // may hold these on Linux, and this one is echoed back in an opening frame
+    // and written to somebody's log, so a newline in it is a caller choosing
+    // what another terminal renders. Nobody nominates one by accident.
+    //
+    // By code point rather than by a character class, which the linter refuses
+    // for the sound reason that a control character written into a regex is
+    // usually a typo. This one is the case it is not.
+    if ([...path].some((ch) => ch < ' ' || ch === '\u007f')) {
+      throw new ValidationError(
+        `a watched directory cannot contain control characters: ${JSON.stringify(path)}`,
+      );
+    }
+    // A lone surrogate is not UTF-8, and it is the one bad path that would NOT
+    // be refused on the upgrade: `encodeURIComponent` turns it into a
+    // replacement character, so the host is handed a valid path that is not the
+    // one that was asked for, and watches the wrong tree quietly.
+    if (/\p{Surrogate}/u.test(path)) {
+      throw new ValidationError(`a watched directory must be valid UTF-8: ${JSON.stringify(path)}`);
+    }
+    if (cleanWatchPath(path) === '/') {
+      throw new ValidationError(
+        `watching / is not a nomination; name the directory you are waiting on ` +
+          `(got ${JSON.stringify(path)})`,
+      );
+    }
+    return path;
+  });
+  // DISTINCT trees, because that is what the platform counts: it cleans and
+  // de-duplicates before it applies the cap, so five spellings of four
+  // directories is a stream it opens. Counting the array instead was this SDK
+  // refusing a nomination the platform accepts, which is the same defect as
+  // accepting one it refuses, pointed the other way.
+  const trees = new Set(paths.map(cleanWatchPath));
+  if (trees.size > MAX_WATCHES) {
+    throw new ValidationError(
+      `watch takes at most ${MAX_WATCHES} directories on one stream (got ${trees.size}): ` +
+        'open a second stream, or nominate a parent of several of them',
+    );
+  }
+  return paths;
+}
+
+/**
+ * A copy of the `watching` list AND of the entries in it.
+ *
+ * Deeper than the copies beside it, and deliberately: a {@link WatchedTree} is
+ * two scalars, so there is nothing to share and no cost to copying — while
+ * `hello.windows` carries a `raw` of everything the platform sent, which is the
+ * caller's own record and is not this SDK's to duplicate on every read. Shared,
+ * the entries made three "snapshots" one object: `stream.watching[0].armed =
+ * true` reached `#hello`, and the next read handed the edit back as though the
+ * host had said it.
+ */
+function copyWatching(watching: WatchedTree[] | undefined): WatchedTree[] | undefined {
+  return watching?.map((w) => ({ ...w }));
+}
+
+/**
+ * One nominated path as the platform's `path.Clean` would leave it — for the
+ * two REFUSALS above, and for nothing else.
+ *
+ * NOT a second normaliser on the way out. {@link withWatches} still sends what
+ * the caller wrote, because the host's answer in `hello.watching` is what a
+ * client matches on and a second opinion could only ever disagree with the one
+ * that decides. This answers the two questions a refusal has to settle before a
+ * socket is opened — whether two nominations name one tree, and whether one of
+ * them is the root — and neither answer reaches the wire.
+ *
+ * Exact rather than a guess: the algorithm is the platform's own, segment by
+ * segment. Empty and `.` segments go, `..` pops the one before it, and popping
+ * past the root is the root.
+ */
+function cleanWatchPath(p: string): string {
+  const out: string[] = [];
+  for (const seg of p.split('/')) {
+    if (seg === '' || seg === '.') continue;
+    if (seg === '..') out.pop();
+    else out.push(seg);
+  }
+  return `/${out.join('/')}`;
 }
 
 /**
