@@ -219,10 +219,14 @@ export const cloudflareJson = (status: number): Response =>
 /**
  * One window, in the shape the platform sends.
  *
- * In full, including the fields this SDK does not read: `pid`, and `visible`
- * — which is the daemon's own name for the property, and the one it sends.
- * There is no `minimized` on this wire and there never was (server/windows.go,
- * OPL-3583), so a fixture carrying one would let a decoder that reads it pass.
+ * In full, and `visible` is the daemon's own name for the property as well as
+ * the one it sends. There is no `minimized` on this wire and there never was
+ * (server/windows.go, OPL-3583), so a fixture carrying one would let a decoder
+ * that reads it pass.
+ *
+ * `pid` is here for the same reason it is on the wire: it is sent on real
+ * windows, and a fixture that omitted it would let a decoder reading nothing
+ * at all pass the field's own test.
  */
 export const WINDOW = {
   id: '0x2a0002c',
