@@ -122,13 +122,16 @@ export type {
   WatchLost,
 } from './events.js';
 export {
+  answersWait,
   ComputerEvents,
   EVENT_STREAM_DEFAULTS,
   GUEST_EVENT_TYPES,
   globalEventSocket,
   isSettled,
+  MAX_WATCH_PATH_BYTES,
   MAX_WATCHES,
   STREAM_FRAME_TYPES,
+  unarmedTrees,
 } from './events.js';
 export type {
   BackgroundExec,

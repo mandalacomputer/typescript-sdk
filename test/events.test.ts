@@ -1369,7 +1369,9 @@ describe('nominating a tree to watch', () => {
       }),
     });
     const got = await collect(stream);
-    expect(stream.watching).toEqual([{ path: '/home/user/p', armed: false }]);
+    // The opening frame said `false` and the event moved it: `watching` is the
+    // tree's state, not the frame's claim about it.
+    expect(stream.watching).toEqual([{ path: '/home/user/p', armed: true }]);
     expect(got[0]?.watch).toBe('/home/user/p');
     expect(got[0]?.armed).toBe(true);
     // `hello` carries it too, and both are copies: a caller who edits what they
@@ -1382,10 +1384,10 @@ describe('nominating a tree to watch', () => {
     // frame behind it, and the next read gave the edit back as though the host
     // had said it.
     const handed = stream.watching;
-    if (handed?.[0]) handed[0].armed = true;
+    if (handed?.[0]) handed[0].armed = false;
     const hello0 = stream.hello?.watching?.[0];
     if (hello0) hello0.path = '/hacked';
-    expect(stream.watching).toEqual([{ path: '/home/user/p', armed: false }]);
+    expect(stream.watching).toEqual([{ path: '/home/user/p', armed: true }]);
   });
 
   it('hands a connect hook a frame it cannot edit this stream through', async () => {
@@ -1409,6 +1411,81 @@ describe('nominating a tree to watch', () => {
     });
     await collect(stream);
     expect(stream.watching).toEqual([{ path: '/w', armed: false }]);
+  });
+
+  it('moves a tree between live and not, on the two reasons the platform moves it', async () => {
+    // `armed` is announced once and never restated to a client already told, so
+    // a list that only ever reported `hello` would answer `false` for the life
+    // of the stream about a tree that went live a second later.
+    const { computer: c } = await computer();
+    const fileEvent = (data: Record<string, unknown>) =>
+      event({ type: 'file.changed', source: 'guest', data });
+    const stream = c.events({
+      watch: ['/a', '/b'],
+      reconnect: false,
+      webSocket: socketFactory((s) => {
+        s.emitOpen();
+        s.send(
+          hello({
+            ready: false,
+            watching: [
+              { path: '/a', armed: false },
+              { path: '/b', armed: false },
+            ],
+          }),
+        );
+        s.send(fileEvent({ watch: '/a', armed: true }));
+        s.send(fileEvent({ watch: '/b', armed: true }));
+        // `flood` and `budget` say the tree IS watched and is being reported
+        // incompletely, so silence under them still means nothing changed. The
+        // platform's own armed set moves on `unwatchable` and on nothing else.
+        s.send(fileEvent({ watch: '/a', lost: 'flood' }));
+        s.send(fileEvent({ watch: '/a', lost: 'budget' }));
+        s.send(fileEvent({ watch: '/b', lost: 'unwatchable' }));
+        s.close();
+      }),
+    });
+    await collect(stream);
+    expect(stream.watching).toEqual([
+      { path: '/a', armed: true },
+      { path: '/b', armed: false },
+    ]);
+    // And `hello` stays the FRAME. The markers move the live list and must not
+    // reach the opening frame, which is documented as what this connection was
+    // told when it joined — the same split `events` and `eventTypes` keep.
+    // Written into the frame instead, `stream.hello.watching` drifted into live
+    // state while the `hello` a connect hook was handed stayed the original, so
+    // the two doors disagreed about the same tree.
+    expect(stream.hello?.watching).toEqual([
+      { path: '/a', armed: false },
+      { path: '/b', armed: false },
+    ]);
+  });
+
+  it('invents no row for a tree the opening frame never named', async () => {
+    // A marker for anything else is a host this build does not understand, or
+    // an event that leaked past the nomination. Either way, putting its path in
+    // `watching` would be this stream claiming to watch something it never
+    // asked about — the one thing that list is relied on to mean.
+    const { computer: c } = await computer();
+    const stream = c.events({
+      watch: '/a',
+      reconnect: false,
+      webSocket: socketFactory((s) => {
+        s.emitOpen();
+        s.send(hello({ ready: false, watching: [{ path: '/a', armed: false }] }));
+        s.send(
+          event({
+            type: 'file.changed',
+            source: 'guest',
+            data: { watch: '/elsewhere', armed: true },
+          }),
+        );
+        s.close();
+      }),
+    });
+    await collect(stream);
+    expect(stream.watching).toEqual([{ path: '/a', armed: false }]);
   });
 
   it('re-answers arming per connection, because no event says it', async () => {
@@ -1863,6 +1940,159 @@ describe('waitFor', () => {
       path: '/home/user/p/a.txt',
       kind: 'modified',
     });
+  });
+
+  it('ends a file.changed wait on a change, not on the marker that says the watch went live', async () => {
+    // Three shapes share the type and only one is a change. Matched on the name
+    // alone this returned the arming marker — no file had changed — and closed
+    // the socket. And it did that only SOMETIMES: the guest answers a
+    // nomination once, so the same call against a tree somebody else had armed
+    // never meets the marker and waits for a real change. One call, two
+    // meanings, decided by who got there first.
+    const { computer: c } = await computer();
+    const ev = await c.waitFor('file.changed', {
+      timeoutMs: 2_000,
+      watch: '/out',
+      webSocket: socketFactory((s) => {
+        s.emitOpen();
+        // A FRESH nomination, which is the case that used to end early.
+        s.send(
+          hello({
+            ready: false,
+            events: ['file.changed'],
+            watching: [{ path: '/out', armed: false }],
+          }),
+        );
+        s.send(
+          event({ type: 'file.changed', source: 'guest', data: { watch: '/out', armed: true } }),
+        );
+        s.send(
+          event({ type: 'file.changed', source: 'guest', data: { watch: '/out', lost: 'flood' } }),
+        );
+        s.send(
+          event({
+            type: 'file.changed',
+            source: 'guest',
+            data: { watch: '/out', path: '/out/a.txt', kind: 'created' },
+          }),
+        );
+      }),
+    });
+    expect(ev).toMatchObject({ path: '/out/a.txt', kind: 'created' });
+    expect(ev.armed).toBeUndefined();
+  });
+
+  it('does not let arming answer a wait that was about something else', async () => {
+    // `waitFor(['file.changed', 'process.exited'])` completed on arming before
+    // the process had done anything.
+    const { computer: c } = await computer();
+    const ev = await c.waitFor(['file.changed', 'process.exited'], {
+      timeoutMs: 2_000,
+      watch: '/out',
+      webSocket: socketFactory((s) => {
+        s.emitOpen();
+        s.send(
+          hello({
+            ready: false,
+            events: ['file.changed', 'process.exited'],
+            watching: [{ path: '/out', armed: false }],
+          }),
+        );
+        s.send(
+          event({ type: 'file.changed', source: 'guest', data: { watch: '/out', armed: true } }),
+        );
+        s.send(event({ type: 'process.exited', data: { pid: 5, exit_code: 0 } }));
+      }),
+    });
+    expect(ev.pid).toBe(5);
+  });
+
+  it('names the tree that never armed when the wait runs out', async () => {
+    // The cost of the rule above: a nomination the guest could not honour is
+    // silent in exactly the way a tree where nothing happened is, which is the
+    // whole of what `armed` is for. A sentence rather than an early refusal —
+    // `unwatchable` recovers on its own, and this SDK cannot tell a typo from a
+    // directory a job is about to create.
+    const { computer: c } = await computer();
+    const err = await c
+      .waitFor('file.changed', {
+        timeoutMs: 80,
+        backoffMs: 1,
+        watch: ['/out', '/live'],
+        webSocket: socketFactory((s) => {
+          s.emitOpen();
+          s.send(
+            hello({
+              ready: false,
+              events: ['file.changed'],
+              watching: [
+                { path: '/out', armed: false },
+                { path: '/live', armed: false },
+              ],
+            }),
+          );
+          // One of the two arms; the sentence must name only the other.
+          s.send(
+            event({ type: 'file.changed', source: 'guest', data: { watch: '/live', armed: true } }),
+          );
+        }),
+      })
+      .catch((e) => e);
+    expect(err).toBeInstanceOf(TimeoutError);
+    expect(String(err)).toContain('watch on /out was not armed when this ended');
+    expect(String(err)).not.toContain('/live');
+  });
+
+  it('does not call a tree that armed and then went unwatchable one that never armed', async () => {
+    // Two histories end at the same place — a tree that stayed dark, and one
+    // that went live and was taken back out — and only the first never armed.
+    // The sentence claims the state at the deadline, which is true of both.
+    const { computer: c } = await computer();
+    const err = await c
+      .waitFor('file.changed', {
+        timeoutMs: 80,
+        backoffMs: 1,
+        watch: '/out',
+        webSocket: socketFactory((s) => {
+          s.emitOpen();
+          s.send(
+            hello({
+              ready: false,
+              events: ['file.changed'],
+              watching: [{ path: '/out', armed: false }],
+            }),
+          );
+          s.send(
+            event({ type: 'file.changed', source: 'guest', data: { watch: '/out', armed: true } }),
+          );
+          s.send(
+            event({
+              type: 'file.changed',
+              source: 'guest',
+              data: { watch: '/out', lost: 'unwatchable' },
+            }),
+          );
+        }),
+      })
+      .catch((e) => e);
+    expect(String(err)).toContain('was not armed when this ended');
+    expect(String(err)).not.toContain('never');
+  });
+
+  it('says nothing about watches on a timeout that nominated none', async () => {
+    const { computer: c } = await computer();
+    const err = await c
+      .waitFor('process.exited', {
+        timeoutMs: 80,
+        backoffMs: 1,
+        webSocket: socketFactory((s) => {
+          s.emitOpen();
+          s.send(hello({ ready: false }));
+        }),
+      })
+      .catch((e) => e);
+    expect(String(err)).toContain('within 80ms');
+    expect(String(err)).not.toContain('was not armed');
   });
 
   it('does not send a caller after a watch when the computer cannot emit it at all', async () => {
