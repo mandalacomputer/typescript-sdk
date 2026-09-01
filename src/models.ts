@@ -271,6 +271,29 @@ export type VncConnect = {
    */
   terminalUrl: string;
   /**
+   * Websocket URL streaming what this computer DOES — windows opening and
+   * closing, the clipboard changing hands, a background command exiting, the
+   * desktop becoming ready, power transitions. Nothing is ever sent to it.
+   *
+   * The point of it is that an agent stops paying for a screenshot to learn
+   * that nothing has changed. {@link Computer.events} is the way to read it —
+   * an async iterator that keeps the cursor and reconnects — and
+   * {@link Computer.waitFor} is the one call that replaces a polling loop.
+   *
+   * Carries the same controlling credential as {@link url}, so treat it as that
+   * credential. `''` for a viewer, because a window title is content and a
+   * watch-only credential must not read it, and `''` on a Windows guest, which
+   * has nowhere to run the watcher the guest half needs.
+   *
+   * Present and refused is a case to plan for, and both refusals are a `409` on
+   * the upgrade rather than a socket that closes: a suspended computer is NOT
+   * resumed for you here, and a stopped one is answered with
+   * `reason: "unavailable"`. Neither reaches a websocket client as a status —
+   * see {@link Computer.events}, which reads the computer to find out which of
+   * them it was.
+   */
+  eventsUrl: string;
+  /**
    * Whether this socket was provisioned with the platform-controlled halves of
    * the guest clipboard bridge (platform OPL-3870): the vdagent channel QEMU
    * was given at its last cold boot, and an original image whose capability
@@ -333,6 +356,7 @@ export function toVncConnect(d: unknown): VncConnect | undefined {
     viewToken,
     embedUrl: str(d.embed_url),
     terminalUrl: str(d.terminal_url),
+    eventsUrl: str(d.events_url),
     clipboard: said(d.clipboard),
     raw: { ...d },
   };

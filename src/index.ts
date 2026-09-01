@@ -70,7 +70,13 @@ export type {
   AgentStop,
   AgentUsage,
 } from './agent.js';
-export type { DeleteOptions, FileChunk, ScrollOptions, WaitOptions } from './computer.js';
+export type {
+  DeleteOptions,
+  FileChunk,
+  ScrollOptions,
+  WaitForOptions,
+  WaitOptions,
+} from './computer.js';
 export {
   Computer,
   DEFAULT_RESOLUTION,
@@ -102,6 +108,25 @@ export {
   UnavailableError,
   ValidationError,
 } from './errors.js';
+export type {
+  ComputerEvent,
+  ComputerEventType,
+  EventRefusal,
+  EventSocket,
+  EventSocketFactory,
+  EventSource,
+  EventStreamOptions,
+  EventUrlSource,
+  Hello,
+} from './events.js';
+export {
+  ComputerEvents,
+  EVENT_STREAM_DEFAULTS,
+  GUEST_EVENT_TYPES,
+  globalEventSocket,
+  isSettled,
+  STREAM_FRAME_TYPES,
+} from './events.js';
 export type {
   BackgroundExec,
   BuildProgress,

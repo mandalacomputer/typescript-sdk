@@ -464,6 +464,94 @@ The output is a **cursor, not a buffer**: each poll gives you only what has been
 printed since the last one, so two readers on one pid split the output between
 them rather than each seeing all of it.
 
+### Events
+
+**A computer says what it is doing.** Waiting for something to happen is a
+socket, not a screenshot every second that mostly reports that nothing has
+changed:
+
+```ts
+await c.waitFor('computer.ready');                      // the desktop is up
+const done = await c.waitFor('process.exited');         // a background command ended
+console.log(done.pid, done.exitCode);
+```
+
+or the whole stream:
+
+```ts
+for await (const ev of c.events()) {
+  if (ev.type === 'window.opened') console.log('opened', ev.window?.title);
+  if (ev.type === 'process.exited' && ev.pid === job.pid) break;   // closes the socket
+}
+```
+
+Windows opening, closing and taking focus; the clipboard changing hands; a
+background command exiting; the desktop becoming ready; every power transition.
+`ev.data` always holds the payload verbatim, and the fields worth reading are
+promoted onto the event: `window`, `windowId`, `pid`, `exitCode`, `lost`,
+`selection`, `status`, `previous`, `idleSeconds`, `oldestCursor`, `detail`.
+
+**It keeps your place.** Every event carries an opaque cursor, and the position
+after the last event you actually *consumed* is what a reconnect resumes from —
+so a socket that drops mid-loop does not lose the `process.exited` you were
+waiting for. Each reconnect re-reads the computer for a fresh `events_url`,
+because a restart rotates that credential and a restart is one of the ordinary
+reasons the socket dropped. `stream.cursor` is that position if you want to keep
+it across a process restart; pass it back as `since`.
+
+Where the host can no longer replay that far you get a `gap` event rather than
+silence. It is not an error and it is not swallowed: it is the signal that what
+you missed is unrecoverable, and to reconcile against `windows()` or
+`execPoll()` instead of assuming nothing happened.
+
+**`computer.ready` has a trap in it, and this SDK takes it out.** It fires once
+per desktop *session*, so a machine that has been up for an hour will never send
+it again — a raw socket waiting for it waits forever. The opening frame carries
+the state instead, and a stream that joins an already-ready desktop yields a
+`computer.ready` marked `synthesized: true` as its first event. That is what
+makes `waitFor('computer.ready')` return at once on a computer somebody else
+already brought up.
+
+Only where it could not arrive as an event: a stream opened with `since` either
+already had the readiness or is about to be handed it out of the backlog, so
+nothing is made up there. A resume that *gapped* does get one, because the
+backlog it would have been in is what the gap says is gone.
+
+A *second* `computer.ready` is real news: restarting the display manager inside
+a guest destroys the desktop and brings up a new one without the computer ever
+leaving `running`. The new desktop's windows arrive as `window.opened` *before*
+that second ready, so a client that empties its map when it arrives throws away
+the openings it was just handed. Nothing on the wire marks where the
+replacement begins — ask `windows()`, which asks the machine.
+
+Three frames are about the *stream* rather than about the computer, and they
+arrive as events too, because a client cannot ignore what it was never handed:
+`gap`, `closed` (this host ending the socket deliberately, with a sentence
+saying why) and `capabilities` (the vocabulary being revised under an open
+socket). **Ignore a `type` you do not recognise** — the vocabulary grows.
+
+A `closed` is reopened like any other drop rather than being sorted by its
+wording, and the reconnect's own `GET computers/:id` is what sorts it: a
+computer that moved to another host hands back that host's URL and the stream
+carries on, and one that is gone answers 404 and ends it.
+
+`ev.source` is worth reading. `daemon` means the platform observed it; `guest`
+means the machine reported it about itself — every `window.*`,
+`clipboard.changed` and `computer.ready` — and anyone with root inside that
+guest can make those say anything.
+
+`waitFor` refuses rather than waiting out two cases. An event type *this*
+computer cannot emit: a Windows guest, or an image built without the X bindings
+the watcher needs, produces no `window.*` and no `computer.ready`, the opening
+frame says so, and `stream.eventTypes` is that list. And a computer that is
+suspended or stopped — the stream is the one part of this API that does **not**
+resume a suspended computer for you. Neither refusal reaches a websocket client
+as a status (a 409, a 401 and a TCP reset are the same 1006 close), so the SDK
+reads the computer afterwards and says which it was.
+
+Windows guests have no event stream at all: there is nowhere in the guest to run
+the watcher the guest half needs.
+
 ### Files
 
 ```ts
@@ -677,6 +765,7 @@ the client asking politely:
 | `vnc.viewUrl` / `vnc.viewToken` | watch only. The platform *drops input* on this socket, so a patched client still cannot type — and takes the clipboard capability out of the connection as it is negotiated, so what the person at the desktop copies does not come back over it either. |
 | `vnc.embedUrl` | the hosted viewer, watch-only, for an `<iframe>`. The credential is in the URL fragment, which browsers never send to a server — so it stays out of access logs and out of `Referer`. |
 | `vnc.terminalUrl` | an interactive PTY in the guest, on the *controlling* credential. `''` on Windows; present but refused on a computer that has not been cold-booted since terminals shipped. |
+| `vnc.eventsUrl` | the event stream — what this computer *does*, pushed rather than polled for, on the *controlling* credential. `''` on Windows and for a viewer, because a window title is content. See [Events](#events); `events()` reads it for you. |
 
 Neither is your API key, which is every computer on the account, forever. Both
 end when the computer restarts.
@@ -740,6 +829,11 @@ await c.waitForGuest();        // something inside the guest answers
 `waitForGuest` is the one you usually want before `exec`, files, windows, or
 expecting a screenshot to show a desktop rather than a boot screen. It probes
 with `exit 0`, a builtin of both bash and cmd.exe, so it works on either OS.
+
+For the *desktop* rather than the guest agent, `await c.waitFor('computer.ready')`
+is the machine telling you — see [Events](#events). It costs one socket instead
+of a screenshot every second, and it returns at once on a desktop that is
+already up.
 
 These throw rather than waiting out the timeout for a state that will not
 resolve on its own. A failed build stops all three. A suspended session stops
@@ -1122,8 +1216,26 @@ than rejected, and unknown SSE event types are skipped rather than thrown on. A
 platform that starts returning more must not break older clients.
 
 **No dependencies.** `fetch` and `WebSocket` are both global on Node 22. A
-websocket library would have been this package's only runtime dependency, carried
-by every user of the library for the sake of one CLI command.
+websocket library would have been this package's only runtime dependency,
+carried by every user of the library for the sake of one CLI command and the
+event stream. Both take a factory (`events({ webSocket })`) for anyone who wants
+a different implementation.
+
+**An event is one flat shape, not a discriminated union.** A union needs a
+member for "a type this build has never heard of", and in TypeScript that
+member's discriminant can only be `string` — which puts it back inside every
+narrowing, so `ev.type === 'process.exited'` stops implying `ev.pid`. It would
+buy exactness on the eleven types named today and lose it on every type added
+after, which is the wrong way round for a stream whose reference says the
+vocabulary grows.
+
+**A refused websocket says nothing, so the SDK asks.** Measured on Node 22 and
+26: a 409, a 401 and a TCP reset all arrive as an `error` carrying a `TypeError`
+with an empty message and a `close` with code 1006. The status line and body are
+not exposed anywhere on the `WebSocket` API. So a failed upgrade is followed by
+one `GET computers/:id`, and the state it answers with is what the message says
+— inference, named as such, and better than "the connection failed" about a
+machine somebody suspended.
 
 **Only `/api/v1`.** Never the hypervisor daemon's own routes. Its ops endpoints
 (`/host`, `/fleet`, `/audit`) are not owner-scoped inside the daemon, because
@@ -1159,6 +1271,18 @@ npm run build
 `npm test` looks for the platform repo next door (or at `MANDALA_PLATFORM_REPO`)
 and skips the diff, loudly, when it is not there — failing over its absence would
 make the check something people learn to ignore.
+
+Two scripts talk to the real platform instead of a mock, both opt-in and both
+skipped without a key:
+
+```sh
+MANDALA_API_KEY=com_... npm run smoke:live     # read-only: the template store
+MANDALA_API_KEY=com_... npm run smoke:events   # CREATES a computer, ~15s, deletes it
+```
+
+They exist because a fixture written from the same reading of the reference that
+produced the code asserts a wrong reading rather than catching it. `smoke:events`
+found `windows()` broken against the live platform on its first run.
 
 ## License
 
