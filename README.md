@@ -462,6 +462,13 @@ await c.open('https://example.com');
 > that decides which browser the guest opens, so if that ever needs to be a
 > different one, it changes there and your callers do not.
 
+Linux only. A computer that reports Windows is refused here rather than sent a
+POSIX command line — the platform refuses a desktop-session exec there too, but
+it checks that *after* "not running", so a stopped one would be told to start
+first and refused once it had. A computer that reports no OS at all is not
+refused: the platform knows what the guest runs and this object does not, so
+that call goes there and is answered by whoever can tell.
+
 ### Long-running commands
 
 **`exec` cannot wait longer than about two minutes**, whatever `timeoutS` says.
