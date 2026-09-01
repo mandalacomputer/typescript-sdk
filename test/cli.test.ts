@@ -225,6 +225,21 @@ describe('guestDestination', () => {
     expect(guestBasename('C:\\Users\\dev\\')).toBe('dev');
   });
 
+  it('refuses a dot segment, which is not a name (OPL-4215)', () => {
+    // The caller builds a LOCAL destination out of this — `join(destDir, name)`
+    // when the destination is a directory, the way scp does — and
+    // `join('./out', '..')` is the parent. `mandala scp vm:/tmp/.. ./out/`
+    // therefore wrote outside the directory that was named. `pathId` already
+    // refuses both spellings for URL segments, for the same reason.
+    expect(guestBasename('/tmp/..')).toBe('');
+    expect(guestBasename('/tmp/.')).toBe('');
+    expect(guestBasename('..')).toBe('');
+    expect(guestBasename('C:\\Users\\dev\\..')).toBe('');
+    // A name that merely CONTAINS dots is a name.
+    expect(guestBasename('/tmp/..notes')).toBe('..notes');
+    expect(guestBasename('/tmp/a.b')).toBe('a.b');
+  });
+
   it('appends the source basename to a directory, on either separator', () => {
     // A Windows guest is spelled with backslashes, and read as a filename that
     // destination is a path the platform cannot write.

@@ -73,10 +73,20 @@ function die(message: string): never {
   throw new Died(message);
 }
 
-/** A guest path's final component, regardless of which OS the guest runs. */
+/**
+ * A guest path's final component, regardless of which OS the guest runs.
+ *
+ * A dot segment is not a name and is refused as one. The caller here uses this
+ * to build a local destination — `join(destDir, name)` when the destination is
+ * a directory, the way `scp` does — and `join('./out', '..')` is `.`, so
+ * `mandala scp vm:/tmp/.. ./out/` wrote outside the directory that was named.
+ * `pathId` already refuses both for URL segments, for the same reason and with
+ * the same two spellings (OPL-4215).
+ */
 export function guestBasename(path: string): string {
   const parts = path.split(/[\\/]/).filter((part) => part.length > 0);
-  return parts.at(-1) ?? '';
+  const last = parts.at(-1) ?? '';
+  return last === '.' || last === '..' ? '' : last;
 }
 
 /**

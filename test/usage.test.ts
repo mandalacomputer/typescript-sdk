@@ -57,6 +57,35 @@ describe('reading usage', () => {
     expect(report.period.source).toBe('subscription');
   });
 
+  it('refuses a report whose totals object was never sent (OPL-4215)', async () => {
+    // Every `num()` answers 0 for an absent totals object, and both caveat
+    // flags read false, so a body carrying no figures at all came back as a
+    // real and empty billing window.
+    //
+    // Refused rather than caveated. `degraded` is documented as the shortfall
+    // that CLEARS — "retry when the host is back" — and `unmetered` as the one
+    // that does not; a body with no totals is neither, and a caller following
+    // either doc would wait for something that is not coming.
+    const { client: c } = client(answering({ usage: undefined }));
+    await expect(c.usage.read()).rejects.toThrow(/expected a usage report to carry its totals/);
+  });
+
+  it('refuses a totals object that is not a record either', async () => {
+    const { client: c } = client(answering({ usage: [] }));
+    await expect(c.usage.read()).rejects.toThrow(/carry its totals/);
+  });
+
+  it('takes a real empty window as the answer it is', async () => {
+    // The distinction the refusal above is for: a totals object that WAS sent
+    // and holds zeros is an account that ran nothing, and neither refusing it
+    // nor caveating it would be true.
+    const { client: c } = client(answering({ usage: { computers: [] } }));
+    const report = await c.usage.read();
+    expect(report.usage.runHours).toBe(0);
+    expect(report.degraded).toBe(false);
+    expect(report.breakdown).toBe(true);
+  });
+
   it('keeps the whole payload, so a field added later is still readable', async () => {
     const { client: c } = client(answering({ future_field: 7 }));
     expect((await c.usage.read()).raw.future_field).toBe(7);
