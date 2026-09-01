@@ -292,7 +292,13 @@ shut.gone;                                              // true — there is no 
 Match on `windowClass`, not `title`: the class is the application, the title is
 whatever page it is showing. `visible` is false for a **minimised** window,
 which stays on the list — clicking at the coordinates of one puts the click on
-whatever is actually there. Prefer `focus` over `raise`: raising without
+whatever is actually there.
+
+`pid` is the process that owns the window, and is `undefined` where the guest
+did not say — never `0`, which is a pid a guest may genuinely advertise. It
+does **not** identify the window: an application that keeps one process for
+several windows — `xfce4-terminal` is one — reports the same pid on all of
+them, so killing this pid can take windows you never asked about. Prefer `focus` over `raise`: raising without
 focusing gives a window that is visibly in front and silently not receiving
 keystrokes.
 

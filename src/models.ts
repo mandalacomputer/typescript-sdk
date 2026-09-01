@@ -1498,6 +1498,34 @@ export type GuestWindow = {
   /** The X11 window class — the application, not its current document. */
   windowClass: string;
   type: string;
+  /**
+   * The process inside the guest that owns this window, where the window says
+   * so.
+   *
+   * IT DOES NOT IDENTIFY THE WINDOW. An application that keeps one process for
+   * several windows — `xfce4-terminal` is one — reports the same pid on all of
+   * them, so killing this pid can take windows you never asked about. That
+   * paragraph is the reference's (OPL-4179) and the daemon's before it, which
+   * ends "Learned the way these things are learned"; it is here rather than
+   * summarised away because a one-line "the process that owns this window" is
+   * an invitation to exactly the mistake it describes.
+   *
+   * `undefined` RATHER THAN `0` where the window does not say, which is why
+   * this is not a `num(d.pid)` like every other number on this type. The
+   * daemon declares it `PID *int` with `json:"pid,omitempty"`
+   * (`server/windows.go`) so that absent and zero stay different things: a
+   * guest is free to advertise `_NET_WM_PID` 0, and reporting that as "no pid"
+   * would be inventing an answer — as would reporting a window that said
+   * nothing as owned by pid 0, which is what `num`'s fallback does.
+   *
+   * Sent on real windows, and the pid it names is a live process in the guest
+   * — verified against app.mandala.computer rather than read off the
+   * reference. This SDK published ten of the route's eleven fields until
+   * OPL-4194: `visible` was being read under a key that has never existed on
+   * this wire and was fixed as the bug it was (OPL-4176), and `pid` was simply
+   * absent, which is the half with no wrong answer attached to point at it.
+   */
+  pid?: number;
   x: number;
   y: number;
   width: number;
@@ -1534,6 +1562,11 @@ export function toGuestWindow(d: Record<string, unknown>): GuestWindow {
     title: str(d.title),
     windowClass: str(d.class),
     type: str(d.type),
+    // {@link count} rather than {@link num}, and the difference is the whole
+    // of the field: `num` answers 0 for an absent key, and 0 is a pid a guest
+    // may genuinely advertise. Both refuse a boolean and an array, so the only
+    // thing this changes is that a window with no pid says so.
+    pid: count(d.pid),
     x: num(d.x),
     y: num(d.y),
     width: num(d.width),

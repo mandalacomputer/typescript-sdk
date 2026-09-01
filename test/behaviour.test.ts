@@ -947,10 +947,38 @@ describe('what a payload cannot be allowed to mean', () => {
       y: 51,
       focused: true,
       visible: true,
+      pid: 1090,
     });
-    // The wire's own fields survive for anything this SDK does not read — `pid`
-    // is on every window and is on no type here.
-    expect(w?.raw.pid).toBe(1090);
+    // And the wire's own fields survive alongside the decoded ones, for
+    // anything this SDK does not read.
+    expect(w?.raw.class).toBe('firefox-esr');
+  });
+
+  it('separates a window with no pid from one whose pid is 0', async () => {
+    // The daemon declares the field `PID *int` with `json:"pid,omitempty"`
+    // precisely so these stay different things: a guest is free to advertise
+    // `_NET_WM_PID` 0, and `num()` — 0 for an absent key — would report the
+    // window that said nothing as owned by pid 0 and the one that said 0 as
+    // indistinguishable from it.
+    const bodies = [
+      { ...WINDOW, pid: undefined },
+      { ...WINDOW, pid: null },
+      { ...WINDOW, pid: 0 },
+      // Present and unreadable is not a pid either. A boolean is the one worth
+      // pinning: `Number(true)` is 1, which would name a real process.
+      { ...WINDOW, pid: true },
+      { ...WINDOW, pid: [] },
+      { ...WINDOW, pid: 'zsh' },
+    ];
+    const seen: (number | undefined)[] = [];
+    for (const body of bodies) {
+      const { client: c } = client((call) =>
+        call.path.endsWith('/windows') ? json({ windows: [body] }) : anyRoute(call),
+      );
+      const [w] = await (await c.computers.get('vm-1')).windows();
+      seen.push(w?.pid);
+    }
+    expect(seen).toEqual([undefined, undefined, 0, undefined, undefined, undefined]);
   });
 
   it('reads an empty desktop as empty and a body with no windows key as broken', async () => {
