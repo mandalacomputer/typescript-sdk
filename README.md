@@ -535,7 +535,8 @@ Windows opening, closing and taking focus; the clipboard changing hands; a
 background command exiting; the desktop becoming ready; every power transition.
 `ev.data` always holds the payload verbatim, and the fields worth reading are
 promoted onto the event: `window`, `windowId`, `pid`, `exitCode`, `lost`,
-`selection`, `status`, `previous`, `idleSeconds`, `oldestCursor`, `detail`.
+`selection`, `watch`, `path`, `kind`, `dir`, `armed`, `lostReason`, `status`,
+`previous`, `idleSeconds`, `oldestCursor`, `detail`.
 
 **It keeps your place.** Every event carries an opaque cursor, and the position
 after the last event you actually *consumed* is what a reconnect resumes from —
@@ -573,6 +574,81 @@ that second ready, so a client that empties its map when it arrives throws away
 the openings it was just handed. Nothing on the wire marks where the
 replacement begins — ask `windows()`, which asks the machine.
 
+#### Watching a directory
+
+**`file.changed` is the one event that never arrives unasked.** Nominate the
+trees you want on the way in, and only those are reported:
+
+```ts
+const stream = c.events({ watch: '/home/user/project' });   // up to four
+for await (const ev of stream) {
+  if (ev.type !== 'file.changed') continue;
+  if (ev.armed) continue;                     // this tree is live from here on
+  if (ev.lostReason) continue;                // my picture of this tree is wrong
+  console.log(ev.kind, ev.path);              // created | modified | deleted
+}
+```
+
+Because it is a nomination rather than a filter, it is an option on the stream
+and not a `type` to watch for: without one, no `file.changed` can reach the
+socket at all. It is fixed for the life of the subscription and re-sent on every
+reconnect — a socket that came back without it would be healthy and silent,
+which is the one failure you cannot tell from a quiet directory.
+
+**Match on what you were given, not on what you sent.** The host normalises a
+nomination — a trailing slash and a `.` segment are cleaned away — and the
+cleaned form is what every event carries in `ev.watch`. `stream.watching` is the
+answer, one entry per tree — and `onConnect` is where to read it before the
+first event, since it is the opening frame that carries it:
+
+```ts
+const stream = c.events({
+  watch: '/home/user/project/',
+  onConnect: (hello) => console.log(hello.watching),
+});                                // [{ path: '/home/user/project', armed: false }]
+```
+
+**And `armed` is the half that is easy to get wrong.** A tree is *not* being
+watched the moment the opening frame accepts it: the guest has to be asked, and
+on a computer nobody has opened a terminal on the host installs the watcher
+first — seconds, not milliseconds. inotify reports changes and not state, so
+anything that happens in that window is never reported and never will be.
+`armed: false` in `stream.watching` means wait for that tree's `file.changed`
+carrying `armed: true`; `armed: true` there means live **now**, and no event is
+coming to say so, because the guest answers a nomination once and somebody else
+got there first. Same split as `ready`: state in the opening frame, transitions
+on the stream. An `armed` also comes again after anything that re-arms the watch
+— a stop and a start, a guest reboot — and means what the first one did:
+reporting starts *here*, so re-read the tree if the interruption mattered.
+
+The other shape carrying no `path` is a loss, in `ev.lostReason`. `flood` is
+transient — the tree changed faster than the cap allows, so re-read it and keep
+listening; a build under a watched path costs one of these rather than thousands
+of events. `budget` means the tree is bigger than the directory budget one watch
+gets, so part of it is not watched at all: permanent, and the fix is a narrower
+path. `unwatchable` is the only one that means the tree is not being watched —
+it is not there yet, is not a directory, cannot be read, or is a *symlink*,
+which is refused rather than followed because inotify pins whatever the link
+resolved to. That one recovers on its own where it can: nominating the directory
+a job is about to create is supported, and the watch starts by itself when it
+appears, announced by an `armed` and by nothing else.
+
+Renames are a `deleted` and a `created`, not a move. Writes are coalesced, so
+what you get is the truth about a path when the window closed rather than a
+transcript of every write. Nothing is announced about what is *already* in a
+tree when you nominate it — those are not changes.
+
+Nominate the narrowest tree you can. Four per stream, and a computer watches at
+most 32 distinct trees across every stream open on it; a nomination past that is
+refused on the upgrade. The replay history is per computer and shared with every
+other subscriber, so a broad watch spends the history a client resuming with a
+cursor needs.
+
+`file.changed` needs only the terminal channel, *not* the X bindings the window
+watcher runs on — so it is advertised on Linux computers that emit no
+`window.*` at all. The guest half is not one capability; read
+`stream.eventTypes` rather than assuming the two travel together.
+
 Three frames are about the *stream* rather than about the computer, and they
 arrive as events too, because a client cannot ignore what it was never handed:
 `gap`, `closed` (this host ending the socket deliberately, with a sentence
@@ -586,14 +662,16 @@ carries on, and one that is gone answers 404 and ends it.
 
 `ev.source` is worth reading. `daemon` means the platform observed it; `guest`
 means the machine reported it about itself — every `window.*`,
-`clipboard.changed` and `computer.ready` — and anyone with root inside that
-guest can make those say anything.
+`clipboard.changed`, `file.changed` and `computer.ready` — and anyone with root
+inside that guest can make those say anything.
 
-`waitFor` refuses rather than waiting out two cases. An event type *this*
+`waitFor` refuses rather than waiting out three cases. An event type *this*
 computer cannot emit: a Windows guest, or an image built without the X bindings
 the watcher needs, produces no `window.*` and no `computer.ready`, the opening
-frame says so, and `stream.eventTypes` is that list. And a computer that is
-suspended or stopped — the stream is the one part of this API that does **not**
+frame says so, and `stream.eventTypes` is that list. A `waitFor('file.changed')`
+with no `watch` nominated, which the advertised list alone would call reachable
+and which nothing would ever satisfy. And a computer that is suspended or
+stopped — the stream is the one part of this API that does **not**
 resume a suspended computer for you. Neither refusal reaches a websocket client
 as a status (a 409, a 401 and a TCP reset are the same 1006 close), so the SDK
 reads the computer afterwards and says which it was.

@@ -34,6 +34,7 @@ import {
   type EventStreamOptions,
   STREAM_FRAME_TYPES,
   settled,
+  watchList,
 } from './events.js';
 import type {
   BackgroundExec,
@@ -147,6 +148,9 @@ export type WaitForOptions = EventStreamOptions & {
   timeoutMs?: number;
 };
 
+/** Named once: the reachability rule below reads it three times. */
+const FILE_CHANGED = 'file.changed';
+
 /**
  * The refusal for a wait whose event cannot arrive, or `undefined`.
  *
@@ -159,19 +163,37 @@ export type WaitForOptions = EventStreamOptions & {
  * advertised list, which is about the COMPUTER. Counting them as impossible
  * would refuse `waitFor('gap')` — a reasonable thing to wait for, and the one
  * this list has no opinion about.
+ *
+ * `file.changed` is the one type the advertised list gets wrong on its own. A
+ * computer that CAN emit it says so, and still emits none unless this stream
+ * nominated a tree — it is the only type that never arrives unasked. So a
+ * `waitFor('file.changed')` with no `watch` is a wait for something the
+ * platform has already been told not to send, and reads from inside a
+ * `for await` exactly like a directory nobody has touched.
  */
 function unreachableTypes(
   id: string,
   wanted: Set<string>,
   advertised: string[],
+  nominated: number,
 ): Error | undefined {
   const reachable = new Set([...advertised, ...STREAM_FRAME_TYPES]);
+  // Advertised but not asked for. Kept as its own answer so the sentence below
+  // can be the true one: a computer that never advertised `file.changed` also
+  // cannot emit it, and telling that caller to nominate a tree would send them
+  // after a fix that changes nothing.
+  const unasked = nominated === 0 && reachable.has(FILE_CHANGED) && wanted.has(FILE_CHANGED);
+  if (nominated === 0) reachable.delete(FILE_CHANGED);
   const impossible = [...wanted].filter((t) => !reachable.has(t));
   if (impossible.length < wanted.size) return undefined;
   return settled(
     new MandalaError(
-      `${id} cannot emit ${impossible.join(' or ')}, so waiting for it would never end. ` +
-        `It advertises: ${advertised.join(', ') || 'nothing'}.`,
+      `${id} cannot emit ${impossible.join(' or ')} on this stream, so waiting for it would ` +
+        `never end. It advertises: ${advertised.join(', ') || 'nothing'}.` +
+        (unasked
+          ? ` ${FILE_CHANGED} is the one type that never arrives unasked — nominate a tree ` +
+            `with watch: '/absolute/path' and it can.`
+          : ''),
     ),
   );
 }
@@ -1387,7 +1409,7 @@ export class Computer {
   events(opts: EventStreamOptions = {}): ComputerEvents {
     return new ComputerEvents(
       (signal) => this.#eventsUrl(signal),
-      (signal) => this.#eventsRefusal(signal),
+      (signal) => this.#eventsRefusal(signal, watchList(opts.watch)),
       opts,
     );
   }
@@ -1436,6 +1458,11 @@ export class Computer {
     // where a throw would be caught by the reconnect logic and read as a
     // connection that failed.
     let impossible: Error | undefined;
+    // How many trees this wait's own stream nominates. Read from the options
+    // rather than off the stream, because `file.changed` being reachable is a
+    // fact about the subscription and not about the computer — and it is the
+    // same for every connection the wait makes.
+    const nominated = watchList(streamOpts.watch).length;
     const stream = this.events({
       ...streamOpts,
       signal: deadline,
@@ -1458,7 +1485,7 @@ export class Computer {
         // deadline instead of saying so.
         const events = [...hello.events];
         streamOpts.onConnect?.(hello);
-        impossible = unreachableTypes(this.id, wanted, events);
+        impossible = unreachableTypes(this.id, wanted, events, nominated);
         if (impossible) stream.close();
       },
     });
@@ -1466,7 +1493,7 @@ export class Computer {
       for await (const ev of stream) {
         if (wanted.has(ev.type)) return ev;
         if (ev.type === 'capabilities' && ev.events) {
-          impossible = unreachableTypes(this.id, wanted, ev.events);
+          impossible = unreachableTypes(this.id, wanted, ev.events, nominated);
           if (impossible) break;
         }
       }
@@ -1559,7 +1586,7 @@ export class Computer {
    * — with `settled` on them, because neither a suspended computer nor a
    * stopped one becomes reachable by being asked again.
    */
-  async #eventsRefusal(signal?: AbortSignal): Promise<Error> {
+  async #eventsRefusal(signal: AbortSignal | undefined, watch: readonly string[]): Promise<Error> {
     try {
       await this.refresh({ signal });
     } catch (err) {
@@ -1589,6 +1616,22 @@ export class Computer {
     // It is running, so the refusal was about the connection rather than the
     // machine — a rotated credential, a host that moved, an edge in the way.
     // Retryable, and the reconnect is what retries it.
+    //
+    // A stream that nominates trees has two more ways to be refused, and both
+    // arrive here looking identical to the three above: a path this host cannot
+    // honour is a `400`, and a computer already watching its limit is a `409`.
+    // Neither can be read off the socket, and neither can be told from a
+    // rotated credential — so this stays retryable and says what it cannot
+    // rule out, rather than guessing at one of them.
+    if (watch.length > 0) {
+      return new ConnectionError(
+        `${this.id}'s event stream would not open, and it reports itself as running. This ` +
+          `stream nominates ${watch.join(', ')} to watch, and a nomination this host cannot ` +
+          `honour is refused the same silent way: a path it will not accept, or a computer ` +
+          `already watching its limit of trees across every stream open on it. Open the stream ` +
+          `without watch to tell that apart from a connection that simply failed`,
+      );
+    }
     return new ConnectionError(
       `${this.id}'s event stream would not open, and it reports itself as running`,
     );
