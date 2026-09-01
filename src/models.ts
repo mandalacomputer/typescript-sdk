@@ -535,18 +535,27 @@ export type TemplateCheck = {
    */
   canonical?: string;
   /**
-   * The catalogue row this document describes, as the daemon's own row.
+   * The catalogue row this document describes — the same {@link Template} shape
+   * `templates.list()` answers. Present only on a valid document.
    *
-   * NOT a {@link Template}, and deliberately not decoded as one: this carries
-   * the `family` the document names, where `GET /templates` answers a projected
-   * shape that does not. Reading it through {@link toTemplate} would put the
-   * projection's field names on a record that does not have them.
+   * A raw record until OPL-4256, and the reason was true when it was written:
+   * the route was forwarded with no projector, so what arrived was the daemon's
+   * OWN row, carrying the `family` the document names where `GET /templates`
+   * answers a projected shape that does not. Decoding two different shapes
+   * through one function is what that comment refused, and rightly.
    *
-   * A record left as it arrived, therefore — the same reading
-   * {@link PublishedTemplate.document} gets, for the same reason. Present only
-   * on a valid document.
+   * OPL-4190 gave the route `publicTemplate` — the same projection the listing
+   * and `GET /templates/{ns}/{name}` already went through — so there is one
+   * `Template` shape on the surface again and nothing left for a second reading
+   * to preserve. What the raw record cost in the meantime was silence: a caller
+   * who believed the comment wrote `check.template.family` and got `undefined`
+   * from the day the control plane rolled, with no throw and, on a
+   * `Record<string, unknown>`, no type error either.
+   *
+   * {@link raw} still carries whatever arrived, so `family` is readable there on
+   * a control plane deployed before that projection.
    */
-  template?: Record<string, unknown>;
+  template?: Template;
   raw: Record<string, unknown>;
 };
 
@@ -574,9 +583,11 @@ export function toTemplateCheck(d: Record<string, unknown>): TemplateCheck {
     // appears, and a payload carrying both would report both rather than pick.
     ...(d.build_digest_needs == null ? {} : { buildDigestNeeds: str(d.build_digest_needs) }),
     ...(d.canonical == null ? {} : { canonical: str(d.canonical) }),
-    // A RECORD or nothing. `str()` on an object gives '[object Object]', which
-    // would be a field present, typed, and carrying no information at all.
-    ...(isRecord(d.template) ? { template: { ...d.template } } : {}),
+    // A RECORD or nothing, still: `toTemplate` on a string or an array would
+    // publish a row of empty names and zero sizes — a template present, typed,
+    // and describing nothing — where absent says the truth, and `raw` keeps
+    // whatever did arrive.
+    ...(isRecord(d.template) ? { template: toTemplate(d.template) } : {}),
     raw: { ...d },
   };
 }
