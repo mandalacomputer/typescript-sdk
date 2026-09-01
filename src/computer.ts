@@ -58,13 +58,14 @@ import {
   str,
   toBackgroundExec,
   toExecResult,
-  toGuestWindow,
   toHoldings,
   toMove,
   toSchedule,
   toSnapshot,
   toVncConnect,
+  toWindowListing,
   toWindowResult,
+  windowContradiction,
 } from './models.js';
 import * as P from './paths.js';
 import type { CallOptions } from './resources.js';
@@ -1556,7 +1557,12 @@ export class Computer {
     if (!P.isRecord(data) || !Array.isArray(data.windows)) {
       throw new MandalaError(`expected a windows array from GET ${path}`);
     }
-    return data.windows.filter(P.isRecord).map(toGuestWindow);
+    // And every row in it names a window. `toGuestWindow` coerces an absent id
+    // to `''` — it has to, because the same decoder runs inside the event
+    // stream's message listener, where a throw would end a connection over one
+    // frame — so the refusal lives here, on the surface whose whole purpose is
+    // handing back handles the eight window actions take (OPL-4200).
+    return toWindowListing(data.windows, `GET ${path}`);
   }
 
   /**
@@ -1595,7 +1601,15 @@ export class Computer {
     if (!P.isRecord(data) || !isWindowResult(data)) {
       throw new MandalaError(`expected a window result from POST ${path}`);
     }
-    return toWindowResult(data);
+    const result = toWindowResult(data);
+    // A body that says the window is gone AND describes it says two things a
+    // caller acts on differently, and this is the layer that has to choose
+    // between them rather than leave the choice to whichever field the caller
+    // read. The same split `builds.wait` makes: the reading is in models.ts and
+    // the throw is at the call site that acts on it (OPL-4200).
+    const contradiction = windowContradiction(result);
+    if (contradiction !== null) throw new MandalaError(`${contradiction} (POST ${path})`);
+    return result;
   }
 
   /**

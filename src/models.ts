@@ -1582,10 +1582,44 @@ export type GuestWindow = {
    * absent, which is the half with no wrong answer attached to point at it.
    */
   pid?: number;
-  x: number;
-  y: number;
-  width: number;
-  height: number;
+  /**
+   * Where the window is, and how big it is — or nothing, where the wire did not
+   * say.
+   *
+   * `undefined` RATHER THAN `0`, for the reason {@link pid} is not a `num()`
+   * either, and with more behind it: `num`'s fallback for an absent, null or
+   * unreadable field is 0, and 0 on this field is not a missing answer but A
+   * PLACE. The `WINDOW` fixture in this repo has `x: 0` on a perfectly real
+   * window, so a coordinate this client could not read came back
+   * indistinguishable from the top-left corner of the screen — and the corner
+   * of the screen is where an agent then clicks. `cursorPosition` refuses
+   * exactly this and says why in as many words ("that corner of the screen
+   * again"); the window decoder went on inventing it until OPL-4200.
+   *
+   * THE DAEMON ALREADY REFUSES THIS AT THE ORIGIN, which is what makes the
+   * fallback a divergence rather than a house rule. `applyWindowGeom`
+   * (`server/windows.go`) reports whether all four coordinates were present and
+   * parsed, and says why they are not optional: "a window whose position this
+   * cannot read is a window a caller cannot click, and reporting it at the
+   * origin with no size is the 'plausible but wrong' answer rather than a
+   * missing one." A row that fails it is skipped from the listing and the whole
+   * answer is then returned as an error, and the guest broker's own decoder
+   * drops a window event the same way. So `num`'s zero was this client putting
+   * back the exact answer the platform declines to give.
+   *
+   * All four are declared without `omitempty`, so absent here means something
+   * is already wrong — schema drift, a truncated body, a proxy answering in the
+   * platform's place. `w.x ?? 0` is the repair to avoid: there is no sensible
+   * fallback for a place, and the one this replaced is the bug. Ask
+   * {@link Computer.windows} again, or act on a window that answered.
+   */
+  x?: number;
+  /** As {@link x}: absent where the wire did not say. */
+  y?: number;
+  /** As {@link x}: absent where the wire did not say. */
+  width?: number;
+  /** As {@link x}: absent where the wire did not say. */
+  height?: number;
   focused: boolean;
   /**
    * Whether this window is on the screen rather than minimised.
@@ -1636,6 +1670,24 @@ const windowPid = (v: unknown): number | undefined => {
   return n !== undefined && Number.isInteger(n) && n >= 0 ? n : undefined;
 };
 
+/**
+ * One window row, decoded and never refused.
+ *
+ * TOTAL, unlike `toTemplateBuild` and `computerRecord` next door, which throw
+ * on a record whose identity is missing. It cannot join them, and the reason is
+ * where it is called from rather than what it decodes: this runs inside the
+ * event stream's own message listener (`toComputerEvent`, `toHello`), where a
+ * throw is not a rejected call a caller can catch but an exception out of a
+ * socket callback — and the stream's stated policy for a frame it cannot read
+ * is to skip it and read the next one, never to end the connection over it.
+ *
+ * So a row this decoder cannot make sense of is REPORTED rather than refused,
+ * and the refusing is done one layer out by whoever is handing a caller
+ * something to act on: {@link toWindowListing} for the listing, and
+ * {@link windowContradiction} at {@link Computer.windowAction}. That split is
+ * the one `buildContradiction` already draws — a pure reading here, the throw
+ * at the call site that acts on it (OPL-4200).
+ */
 export function toGuestWindow(d: Record<string, unknown>): GuestWindow {
   return {
     id: str(d.id),
@@ -1646,16 +1698,64 @@ export function toGuestWindow(d: Record<string, unknown>): GuestWindow {
     // for an absent key, and 0 is a pid a guest may genuinely advertise. See
     // {@link windowPid} for the rest of what it refuses.
     pid: windowPid(d.pid),
-    x: num(d.x),
-    y: num(d.y),
-    width: num(d.width),
-    height: num(d.height),
+    // NOT `num`, for the reason {@link GuestWindow.x} gives: `num` answers 0,
+    // and 0 is an origin a window really has rather than one it failed to
+    // report. `count` is the same optional-number rule `cursorPosition` reads
+    // the pointer with, and it refuses the same coercions — `[]`, `[7]` and
+    // `'  '` all decode to nothing rather than to a coordinate (OPL-3850).
+    x: count(d.x),
+    y: count(d.y),
+    width: count(d.width),
+    height: count(d.height),
     // TRUE only. Both are claims about one window against every other, and a
     // caller matching on them is picking which window to type into.
     focused: said(d.focused),
     visible: said(d.visible),
     raw: { ...d },
   };
+}
+
+/**
+ * The rows of a window listing, refused when one of them names no window.
+ *
+ * `id` is the whole of what a listing is FOR — every one of the eight window
+ * actions takes it, and a row without one is a window a caller can see and
+ * cannot touch. `str(d.id)` answers `''` for an absent, null or unreadable one,
+ * which is a value that compares equal to nothing on the desktop and is not
+ * refused anywhere downstream either: `windowPath` goes through `pathId` and
+ * throws, so the empty id never reaches the wire as an empty path segment — it
+ * simply sits in the caller's list, matching nothing.
+ *
+ * This is the answer `buildId` already gives one surface along, and for the
+ * failure it was written for: the build decoders coerced, `builds.list` turned
+ * schema drift into a shorter inventory that looked complete, and nothing was
+ * red (OPL-3835). Dropping the row here would reproduce exactly that — a
+ * desktop that looks like it has one window fewer — so the listing is refused
+ * whole and says which row was wrong.
+ *
+ * Refusing the LISTING rather than the row is also the posture the platform
+ * takes on its own side of this route: a window it could not describe is left
+ * out and the answer then carries an error — "a window on this desktop could
+ * not be described, so this list is missing one that exists" — because a prefix
+ * of a window list is a complete-looking answer that is wrong
+ * (`server/windows.go`).
+ *
+ * Every window the live route sends carries `id`; this fires only on one that
+ * does not. The EVENT stream deliberately does not share it: a `window.opened`
+ * frame is news rather than an answer, and `window.closed` already reads an
+ * empty id there as "did not say" rather than as an identity.
+ */
+export function toWindowListing(rows: unknown[], what: string): GuestWindow[] {
+  const windows = rows.filter(isRecord).map(toGuestWindow);
+  const nameless = windows.findIndex((w) => w.id === '');
+  if (nameless !== -1) {
+    throw new MandalaError(
+      `${what} answered a window with no id (row ${nameless} of ${windows.length}, ` +
+        `title ${JSON.stringify(windows[nameless]?.title ?? '')}); every window action takes ` +
+        `an id, so a listing carrying one that names nothing is drift rather than a desktop`,
+    );
+  }
+  return windows;
 }
 
 /**
@@ -1705,6 +1805,42 @@ export function toWindowResult(d: Record<string, unknown>): WindowResult {
     gone: said(d.gone),
     raw: { ...d },
   };
+}
+
+/**
+ * Why this result cannot be believed, or `null` if it can.
+ *
+ * One shape qualifies: a `gone` the wire actually said was true, beside a
+ * window object describing the window it says is gone. The two halves are read
+ * by different callers — one drives `result.window`, another branches on
+ * `result.gone` — so a body carrying both is answered differently by two
+ * correct programs. The first keeps clicking at a window that is not there; the
+ * second throws away a window that is.
+ *
+ * The reading, not the raw record, unlike {@link buildContradiction}: `gone` is
+ * already `said()` and {@link WindowResult.window} is already "a record was
+ * there", so neither field has been through a coercion this could be fooled by.
+ *
+ * Absent, null and unreadable are NOT contradictions, for the same reason they
+ * are not on a build: they are a host that said nothing, and `gone` false with
+ * no window is a documented outcome — the action happened and the guest could
+ * not describe it.
+ *
+ * A REPORT rather than a refusal, and deliberately: the live close is
+ * `{"gone":true,"ok":true,"window":null}`, so nothing sends this today, and the
+ * shape has an obvious legitimate future — "closed, and here is what it was".
+ * The day the platform documents that, this stops being a contradiction and the
+ * change is deleting one throw at the one call site, not unpicking a rule from
+ * the decoder. Until then the caller is told rather than quietly handed the
+ * half of the body it happened to read first (OPL-4200).
+ */
+export function windowContradiction(r: WindowResult): string | null {
+  if (!r.gone || !r.window) return null;
+  return (
+    `the window action reports the window gone and describes window ` +
+    `${JSON.stringify(r.window.id)} in the same body. The record contradicts itself, so ` +
+    `neither half of it can be trusted — read windows() for what is on the desktop`
+  );
 }
 
 /**

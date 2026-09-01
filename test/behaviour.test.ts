@@ -1045,6 +1045,67 @@ describe('what a payload cannot be allowed to mean', () => {
     expect(seen).toEqual([undefined, undefined, undefined, 1090, 0]);
   });
 
+  it('answers nothing for geometry it could not read, rather than the corner of the screen', async () => {
+    // `num`'s fallback is 0, and 0 on these four fields is not a missing answer
+    // but a place: the fixture beside this test has `x: 0` on a real window. So
+    // a coordinate the wire did not carry came back indistinguishable from the
+    // top-left corner, and the corner is where an agent then clicks.
+    // `cursorPosition` refused exactly this and this decoder did not (OPL-4200).
+    const bodies = [
+      { ...WINDOW, x: undefined, y: null, width: [], height: '  ' },
+      // The coercions `Number()` walks straight through. `Number([7])` is 7,
+      // which is a coordinate this client invented rather than read (OPL-3850).
+      { ...WINDOW, x: [7], y: {}, width: true, height: 'wide' },
+    ];
+    for (const body of bodies) {
+      const { client: c } = client((call) =>
+        call.path.endsWith('/windows') ? json({ windows: [body] }) : anyRoute(call),
+      );
+      const [w] = await (await c.computers.get('vm-1')).windows();
+      expect([w?.x, w?.y, w?.width, w?.height]).toEqual([
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+      ]);
+      // And the row is still a window: the identity half is what tells a
+      // browser that failed to open from one that has not painted, and it is
+      // readable whether or not the geometry was.
+      expect(w?.id).toBe('0x2a0002c');
+    }
+
+    // A real 0 survives, which is the whole reason this is `count` and not a
+    // truthiness test — the fixture's own `x` is one.
+    const { client: real } = client(anyRoute);
+    const [live] = await (await real.computers.get('vm-1')).windows();
+    expect([live?.x, live?.y, live?.width, live?.height]).toEqual([0, 51, 1280, 749]);
+  });
+
+  it('refuses a listing carrying a window that names nothing', async () => {
+    // `id` is the whole of what a listing is for — every window action takes it
+    // — and `str()` answers `''` for one that is absent, null or unreadable.
+    // That row is a window a caller can see and cannot touch, and it matches
+    // nothing on the desktop. Dropping it instead would be the failure `buildId`
+    // was written for: schema drift as a shorter inventory that looks complete.
+    for (const bad of [
+      { ...WINDOW, id: undefined },
+      { ...WINDOW, id: null },
+      { ...WINDOW, id: '' },
+    ]) {
+      const { client: c } = client((call) =>
+        call.path.endsWith('/windows') ? json({ windows: [WINDOW, bad] }) : anyRoute(call),
+      );
+      const computer = await c.computers.get('vm-1');
+      await expect(computer.windows()).rejects.toThrow(/answered a window with no id \(row 1 of 2/);
+    }
+
+    // The EVENT stream does not share the refusal: a frame is news rather than
+    // an answer, and `toGuestWindow` runs inside a socket listener where a throw
+    // ends the connection rather than one call.
+    const { toGuestWindow } = await import('../src/models.js');
+    expect(toGuestWindow({ title: 'x' }).id).toBe('');
+  });
+
   it('reads an empty desktop as empty and a body with no windows key as broken', async () => {
     // `{"windows":[]}` is the platform's answer for a desktop with nothing on
     // it, so it must decode; `{}` is not a window list, and calling it "nothing
@@ -1130,6 +1191,35 @@ describe('what a payload cannot be allowed to mean', () => {
     // outcome, and reading it as a close would have a caller stop looking for a
     // window that is still on the screen.
     expect(undescribed.gone).toBe(false);
+  });
+
+  it('refuses an action that says the window is gone and describes it in the same body', async () => {
+    // Two halves read by two different callers: one drives `result.window` and
+    // keeps clicking at a window the body calls gone, the other branches on
+    // `gone` and throws away a window the body describes. Both are correct
+    // programs, so the disagreement has to be settled here rather than by
+    // whichever field a caller happened to read (OPL-4200).
+    const { client: c } = client((call) =>
+      /\/windows\/[^/]+$/.test(call.path)
+        ? json({ ok: true, gone: true, window: WINDOW })
+        : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    await expect(computer.windowAction('0x2a0002c', 'close')).rejects.toThrow(
+      /reports the window gone and describes window "0x2a0002c" in the same body/,
+    );
+
+    // Only a `gone` the wire SAID. Absent, null and unreadable are a host that
+    // said nothing, not a contradiction — the same line `buildContradiction`
+    // draws — so a body that carries a window and no verdict is the ordinary
+    // successful action it looks like.
+    const { windowContradiction, toWindowResult } = await import('../src/models.js');
+    for (const gone of [undefined, null, 'maybe', false]) {
+      expect(windowContradiction(toWindowResult({ ok: true, gone, window: WINDOW }))).toBe(null);
+    }
+    // And a close with no window to show is the shape the platform actually
+    // sends, which must never be refused.
+    expect(windowContradiction(toWindowResult({ ok: true, gone: true, window: null }))).toBe(null);
   });
 
   it('reads the clipboard, and refuses an answer with no text in it', async () => {
