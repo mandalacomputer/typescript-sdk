@@ -393,10 +393,22 @@ describe('the stream', () => {
     expect(got[0]?.cursor).toBe('ep-1:0');
   });
 
-  it('does not synthesize a second ready on a reconnect', async () => {
-    // A second `computer.ready` means a desktop you have not seen before. One
-    // manufactured on every reconnect would report a desktop replacement that
-    // never happened, and the reference tells a client to act on that.
+  it('tells a gapped resume the desktop is ready, even having said so before', async () => {
+    // The decision is per CONNECTION and used to be per stream, kept by a
+    // latch that survived the reconnects on the argument that this client had
+    // already been told. It had been told about a DIFFERENT DESKTOP
+    // (OPL-4206).
+    //
+    // A display manager restarting inside the guest destroys the desktop and
+    // brings up a new one without the computer leaving `running`. If the socket
+    // then drops and the resume GAPS, the new session's own `computer.ready` is
+    // in the backlog the gap says is gone — and the latch suppressed the
+    // synthesized one, so `waitFor('computer.ready')` ran to its timeout on a
+    // desktop that was up.
+    //
+    // The latch could only ever suppress where `windows` is present, which is
+    // the platform saying this connection has no continuity: it was live
+    // exactly where the client has least information of its own.
     const { computer: c } = await computer();
     const got = await collect(
       c.events({
@@ -404,18 +416,47 @@ describe('the stream', () => {
         backoffMs: 1,
         webSocket: socketFactory((s, n) => {
           s.emitOpen();
-          s.send(hello({ ready: true }));
-          if (n === 0) s.close();
-          else {
-            s.send(event({ type: 'computer.idle' }));
-            s.close();
-          }
+          // `windows` present on both: no continuity either time, which is what
+          // a gapped resume looks like.
+          s.send(hello({ ready: true, windows: [] }));
+          if (n > 0) s.send(event({ type: 'computer.idle' }));
+          s.close();
         }),
       }),
       3,
     ).catch((err) => err);
     const types = Array.isArray(got) ? got.map((e: ComputerEvent) => e.type) : [];
-    expect(types.filter((t) => t === 'computer.ready')).toHaveLength(1);
+    expect(types.filter((t) => t === 'computer.ready')).toHaveLength(2);
+    // Both marked, so a caller can tell an inference from the platform's own
+    // event and reconcile with the listing rather than trusting either.
+    const readies = (got as ComputerEvent[]).filter((e) => e.type === 'computer.ready');
+    expect(readies.every((e) => e.synthesized === true)).toBe(true);
+  });
+
+  it('does not repeat it for a reconnect that kept its place', async () => {
+    // The half that must not have been lost with the latch. A reconnect WITH
+    // continuity carries no `windows`, and there the readiness either already
+    // reached this client or is in the backlog about to — so nothing is made
+    // up, and no duplicate is invented for the ordinary drop-and-resume that
+    // costs a caller a listing call to reconcile.
+    const { computer: c } = await computer();
+    const { windows: _w, ...resumed } = hello({ ready: true });
+    const got = await collect(
+      c.events({
+        since: 'ep-1:2',
+        maxRetries: 1,
+        backoffMs: 1,
+        webSocket: socketFactory((s, n) => {
+          s.emitOpen();
+          s.send(resumed);
+          if (n > 0) s.send(event({ type: 'computer.idle' }));
+          s.close();
+        }),
+      }),
+      2,
+    ).catch((err) => err);
+    const types = Array.isArray(got) ? got.map((e: ComputerEvent) => e.type) : [];
+    expect(types.filter((t) => t === 'computer.ready')).toHaveLength(0);
   });
 
   it('does not synthesize one for a resume, where the real event is still coming', async () => {
