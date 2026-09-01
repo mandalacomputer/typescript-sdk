@@ -1426,7 +1426,7 @@ export class Computer {
    * cursors and reconnects applies, so this survives a socket that drops while
    * it waits; the socket is closed on the way out however this returns.
    *
-   * Two things it refuses rather than waiting out:
+   * Three things it refuses rather than waiting out:
    *
    * - an event type THIS computer cannot emit. The opening frame lists what it
    *   can — a Windows guest, or an image built without the X bindings the
@@ -1434,11 +1434,23 @@ export class Computer {
    *   waiting for one of those is waiting for something the platform has
    *   already said will not arrive. Checked again whenever a `capabilities`
    *   frame revises the list under an open socket.
+   * - `file.changed` with no tree nominated, which the advertised list alone
+   *   would call reachable and nothing would ever satisfy: it is the one type
+   *   that never arrives unasked, so pass `watch` here as you would to
+   *   {@link events}.
    * - a computer that is suspended or stopped, which is the `409` on the
    *   upgrade rather than anything about the wait.
    *
    * `computer.ready` returns at once on a desktop that is already up; see
    * {@link events} and {@link ComputerEvent.synthesized}.
+   *
+   * It matches on the TYPE and on nothing else, which is worth knowing for the
+   * one type that arrives in more than one shape: a `waitFor('file.changed')`
+   * returns the first frame of that type, and on a live computer that is
+   * almost always the `{watch, armed: true}` announcing the tree went live
+   * rather than a change to a file. Skipping the arming and the losses is
+   * something a `for await` over {@link events} does and this does not — see
+   * {@link EventStreamOptions.watch} for that loop.
    */
   async waitFor(types: string | string[], opts: WaitForOptions = {}): Promise<ComputerEvent> {
     const wanted = new Set(typeof types === 'string' ? [types] : types);

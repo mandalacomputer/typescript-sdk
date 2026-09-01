@@ -1710,21 +1710,6 @@ function checkWatches(watch: readonly string[]): string[] {
 }
 
 /**
- * One nominated path as the platform's `path.Clean` would leave it — for the
- * two REFUSALS above, and for nothing else.
- *
- * NOT a second normaliser on the way out. {@link withWatches} still sends what
- * the caller wrote, because the host's answer in `hello.watching` is what a
- * client matches on and a second opinion could only ever disagree with the one
- * that decides. This answers the two questions a refusal has to settle before a
- * socket is opened — whether two nominations name one tree, and whether one of
- * them is the root — and neither answer reaches the wire.
- *
- * Exact rather than a guess: the algorithm is the platform's own, segment by
- * segment. Empty and `.` segments go, `..` pops the one before it, and popping
- * past the root is the root.
- */
-/**
  * A copy of the `watching` list AND of the entries in it.
  *
  * Deeper than the copies beside it, and deliberately: a {@link WatchedTree} is
@@ -1739,6 +1724,21 @@ function copyWatching(watching: WatchedTree[] | undefined): WatchedTree[] | unde
   return watching?.map((w) => ({ ...w }));
 }
 
+/**
+ * One nominated path as the platform's `path.Clean` would leave it — for the
+ * two REFUSALS above, and for nothing else.
+ *
+ * NOT a second normaliser on the way out. {@link withWatches} still sends what
+ * the caller wrote, because the host's answer in `hello.watching` is what a
+ * client matches on and a second opinion could only ever disagree with the one
+ * that decides. This answers the two questions a refusal has to settle before a
+ * socket is opened — whether two nominations name one tree, and whether one of
+ * them is the root — and neither answer reaches the wire.
+ *
+ * Exact rather than a guess: the algorithm is the platform's own, segment by
+ * segment. Empty and `.` segments go, `..` pops the one before it, and popping
+ * past the root is the root.
+ */
 function cleanWatchPath(p: string): string {
   const out: string[] = [];
   for (const seg of p.split('/')) {

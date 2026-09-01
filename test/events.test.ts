@@ -218,9 +218,20 @@ describe('one frame, decoded', () => {
   it('passes a type it has never heard of straight through', () => {
     // The reference says the vocabulary grows and that a client must ignore a
     // type it does not recognise. It cannot ignore what it was never handed.
-    const ev = toComputerEvent(event({ type: 'file.changed', data: { path: '/tmp/x' } }));
-    expect(ev?.type).toBe('file.changed');
-    expect(ev?.data).toEqual({ path: '/tmp/x' });
+    //
+    // The stand-in has to be a type this build really does not know, and it
+    // used to be `file.changed` — which this branch gave promoted fields and a
+    // `switch` arm of its own, so the one test whose job is the `default`
+    // branch stopped reaching it and would have stayed green through a decoder
+    // that dropped every unrecognised frame.
+    const ev = toComputerEvent(event({ type: 'disk.full', data: { device: '/dev/vda1' } }));
+    expect(ev?.type).toBe('disk.full');
+    expect(ev?.data).toEqual({ device: '/dev/vda1' });
+    // Nothing promoted, because this SDK knows nothing about it — and the
+    // envelope every event carries is still read.
+    expect(ev?.cursor).toBe('ep-1:8');
+    expect(ev?.seq).toBe(7);
+    expect(ev?.path).toBeUndefined();
   });
 
   it('reads all three shapes a file.changed arrives in', () => {

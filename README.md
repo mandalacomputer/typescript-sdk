@@ -679,10 +679,20 @@ the watcher needs, produces no `window.*` and no `computer.ready`, the opening
 frame says so, and `stream.eventTypes` is that list. A `waitFor('file.changed')`
 with no `watch` nominated, which the advertised list alone would call reachable
 and which nothing would ever satisfy. And a computer that is suspended or
-stopped — the stream is the one part of this API that does **not**
-resume a suspended computer for you. Neither refusal reaches a websocket client
-as a status (a 409, a 401 and a TCP reset are the same 1006 close), so the SDK
-reads the computer afterwards and says which it was.
+stopped — the stream is the one part of this API that does **not** resume a
+suspended computer for you.
+
+That last one is a refusal on the *upgrade*, and no refusal on the upgrade
+reaches a websocket client as a status: a 409, a 401 and a TCP reset are the
+same 1006 close, so the SDK reads the computer afterwards and says which it was.
+A nomination the host will not honour arrives the same silent way, which is why
+`watch` is checked before a socket is opened.
+
+`waitFor` matches on the type and on nothing else, which matters for the one
+type that arrives in more than one shape: `waitFor('file.changed')` returns the
+first frame of that type, and on a live computer that is almost always the
+`armed` announcing the tree went live. Skipping the arming and the losses is
+what the `for await` loop above does and what this does not.
 
 Windows guests have no event stream at all: there is nowhere in the guest to run
 the watcher the guest half needs.
