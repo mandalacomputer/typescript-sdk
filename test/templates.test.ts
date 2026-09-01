@@ -121,17 +121,64 @@ describe('checking a document', () => {
   it('reads the canonical form and the catalogue row a valid answer carries', async () => {
     // Both are sent on every valid document and neither was decoded until
     // OPL-4195. `canonical` is what lets a caller check `docDigest` themselves
-    // instead of trusting the platform to have hashed honestly; the row carries
-    // the `family` the document names, which the projected shape does not.
+    // instead of trusting the platform to have hashed honestly.
     const { client: c } = client();
     const check = await c.templates.validate('apiVersion: mandala/v1');
     expect(check.canonical).toBe('{"apiVersion":"mandala/v1","kind":"Template"}');
-    expect(check.template).toEqual({
-      namespace: 'acc-1',
-      name: 'devbox',
-      version: '1.0.0',
-      family: 'debian-13',
-    });
+    expect(check.template?.name).toBe('devbox');
+    expect(check.template?.ref).toBe('acc-1/devbox@1.0.0');
+    expect(check.template?.label).toBe('My desktop');
+    expect(check.template?.os).toBe('linux');
+    expect(check.template?.cpu).toBe(2);
+    expect(check.template?.ramMb).toBe(4096);
+    expect(check.template?.diskGb).toBe(30);
+  });
+
+  /**
+   * The row is a {@link Template}, not a record shaped like one.
+   *
+   * It was `Record<string, unknown>` until OPL-4256, and the model said why:
+   * the route had no projector, so it answered the daemon's own row carrying
+   * `family`, and decoding that through `toTemplate` would have put the
+   * projection's field names on a record that did not have them. OPL-4190 gave
+   * the route `publicTemplate` and the two shapes became one, so the reason
+   * went — but a raw record fails QUIETLY, which is what makes it worth a test:
+   * `check.template.family` went from a string to `undefined` on the day the
+   * control plane rolled, with nothing thrown and nothing for TypeScript to
+   * warn about.
+   */
+  it('decodes the row through the same reading a listing gets', async () => {
+    const { client: c } = client();
+    const [check, rows] = await Promise.all([
+      c.templates.validate('apiVersion: mandala/v1'),
+      c.templates.publish('apiVersion: mandala/v1'),
+    ]);
+    // Same decoder, same field names — camelCase sizes, not the wire's
+    // `ram_mb`. A record would have carried the wire spelling through.
+    expect(Object.keys(check.template ?? {}).sort()).toEqual(Object.keys(rows.template).sort());
+  });
+
+  /**
+   * `desktop` survives on the row's `raw`, and `family` would too.
+   *
+   * The projection publishes `desktop` deliberately — it changes what a window
+   * id means, a compositor address rather than an X window id (OPL-4223) — and
+   * the model does not name it yet, so `raw` is where a caller reaches it. It
+   * is also where an older control plane's `family` still is, which is what
+   * makes decoding the row cost nothing: nothing that arrived is thrown away.
+   */
+  it('keeps what the model does not name on the row it decoded', async () => {
+    const { client: c } = client((call) =>
+      call.path === '/templates/validate'
+        ? json({
+            ...TEMPLATE_CHECK,
+            template: { ...TEMPLATE_CHECK.template, family: 'debian-13' },
+          })
+        : anyRoute(call),
+    );
+    const check = await c.templates.validate('apiVersion: mandala/v1');
+    expect(check.template?.raw.desktop).toBe('wayland');
+    expect(check.template?.raw.family).toBe('debian-13');
   });
 
   it('reads why a layered document has no build digest, rather than only that it has none', async () => {
@@ -150,9 +197,10 @@ describe('checking a document', () => {
     expect(check.buildDigestNeeds).toContain('gorillad -build-template');
   });
 
-  it('leaves a non-record `template` off rather than stringifying it', async () => {
-    // `str()` on an object gives '[object Object]' — a field present, typed,
-    // and carrying nothing. Absent is the honest answer, and `raw` still has
+  it('leaves a non-record `template` off rather than decoding one from nothing', async () => {
+    // `toTemplate` on an array reads every field off it as missing and answers
+    // a row of empty names and zero sizes — a template present, typed, and
+    // describing nothing. Absent is the honest answer, and `raw` still has
     // whatever arrived.
     const { client: c } = client((call) =>
       call.path === '/templates/validate'

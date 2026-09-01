@@ -539,6 +539,21 @@ export const RETIRED_TEMPLATES = {
  * (`server/templateschema.go`), so a fixture that omitted them was the same
  * trap the window fixture was: it asserted the reading that produced the gap.
  *
+ * `template` is `publicTemplate`'s output, the shape `GET /templates` lists and
+ * `GET /templates/{ns}/{name}` answers, since OPL-4190 gave this route the
+ * projector it had been forwarded without. It carried `{namespace, name,
+ * version, family}` here until OPL-4256, which no deployment has ever sent:
+ * the daemon's own row is `name, ref, label, os, desktop, cpu, ram_mb, disk_gb`
+ * and `family`, and the projection drops the last of those. A fixture nobody
+ * checked against either shape is how the model's "not a Template" comment
+ * stayed plausible for two platform releases after it stopped being true.
+ *
+ * `desktop` is here because it is PUBLIC where `family` is not (OPL-4223): it
+ * changes what a window id means — a compositor address rather than an X window
+ * id — so a fixture leaving it out would describe a narrower row than the one
+ * tenants get. `wayland` rather than the absence that means X11, because the
+ * absent case is the one a fixture cannot tell apart from a field nobody sends.
+ *
  * This document names no parent, so it gets `build_digest`. The `build_digest_needs`
  * half of the daemon's if/else is exercised by {@link TEMPLATE_CHECK_LAYERED}
  * rather than here, because the two are never both present.
@@ -548,7 +563,16 @@ export const TEMPLATE_CHECK = {
   ref: 'acc-1/devbox@1.0.0',
   doc_digest: 'sha256:aaaa',
   build_digest: 'sha256:bbbb',
-  template: { namespace: 'acc-1', name: 'devbox', version: '1.0.0', family: 'debian-13' },
+  template: {
+    name: 'devbox',
+    ref: 'acc-1/devbox@1.0.0',
+    label: 'My desktop',
+    os: 'linux',
+    desktop: 'wayland',
+    cpu: 2,
+    ram_mb: 4096,
+    disk_gb: 30,
+  },
   canonical: '{"apiVersion":"mandala/v1","kind":"Template"}',
 };
 
@@ -567,7 +591,15 @@ export const TEMPLATE_CHECK_LAYERED = {
   build_digest_needs:
     "the contents of acme/base's image, which only a host holding it can supply. " +
     "Run `gorillad -build-template <file> -dry-run` there to see this document's build digest",
-  template: { namespace: 'acc-1', name: 'layered', version: '1.0.0', family: 'debian-13' },
+  template: {
+    name: 'layered',
+    ref: 'acc-1/layered@1.0.0',
+    label: 'Layered on a parent',
+    os: 'linux',
+    cpu: 2,
+    ram_mb: 4096,
+    disk_gb: 30,
+  },
   canonical: '{"apiVersion":"mandala/v1","kind":"Template"}',
 };
 
