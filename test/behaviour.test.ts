@@ -522,6 +522,9 @@ describe('waiting', () => {
     expect(err).not.toBeInstanceOf(DOMException);
   });
 
+  /** The values a boolean option must refuse, whichever option it is. */
+  const NOT_BOOLEANS = ['false', 'true', 0, 1, null, new Boolean(false)];
+
   /**
    * The second sweep, after the first one missed these.
    *
@@ -530,10 +533,6 @@ describe('waiting', () => {
    * built and where the two flags that matter most live — so it graded itself
    * clean while `deleteSnapshots` was still read by `!` (adversarial review,
    * second pass, OPL-3835).
-   *
-   * `background` is not in the list below because no caller can reach it:
-   * execBackground passes the literal `true`. It is validated anyway, so that
-   * the rule holds if that ever changes.
    *
    * `deleteSnapshots: "false"` is the worst value on this surface. `!"false"`
    * is false, so a caller who wrote the word FALSE, with a fingerprint in hand
@@ -544,9 +543,15 @@ describe('waiting', () => {
    * Asserted as no request AT ALL, which is the only assertion worth making
    * about an irreversible call: a refusal that still sent it would have
    * destroyed the snapshots and then complained.
+   *
+   * These two are their own test, and were not until OPL-4203. The argument
+   * above is about irreversibility and nothing else, and it used to sit on a
+   * case that swept five more options that undo fine — so a reader had to work
+   * out which half of the loop it was talking about. Splitting keeps it
+   * attached to the calls it is actually about.
    */
-  it('refuses a non-boolean flag on every destructive option', async () => {
-    for (const bad of ['false', 'true', 0, 1, null, new Boolean(false)]) {
+  it('refuses a non-boolean flag on the two irreversible options, and sends nothing', async () => {
+    for (const bad of NOT_BOOLEANS) {
       const v = bad as unknown as boolean;
       const { rec, client: c } = client(anyRoute);
       const computer = await c.computers.get('vm-1');
@@ -554,6 +559,37 @@ describe('waiting', () => {
       for (const call of [
         () => computer.delete({ deleteSnapshots: v, expect: 'fp-1' }),
         () => computer.stop({ force: v }),
+      ]) {
+        await expect(call()).rejects.toThrow(TypeError);
+      }
+      expect(rec.calls.length).toBe(before);
+    }
+  });
+
+  /**
+   * The same rule on the options where being wrong is recoverable.
+   *
+   * Nothing here destroys anything — a snapshot with the wrong memory flag, a
+   * screenshot served from cache, a command run off the desktop session. The
+   * rule is the rule anyway: a flag the caller did not mean is a DIFFERENT CALL
+   * from the one they wrote, and a client that silently picks one has answered
+   * a question nobody asked.
+   *
+   * Still asserted as no request at all, for the same reason it is worth
+   * asserting on the irreversible pair: a refusal that has already sent the
+   * request is not a refusal.
+   *
+   * `background` is not in the list because no caller can reach it:
+   * execBackground passes the literal `true`. It is validated anyway, so that
+   * the rule holds if that ever changes.
+   */
+  it('refuses a non-boolean flag on the recoverable options too', async () => {
+    for (const bad of NOT_BOOLEANS) {
+      const v = bad as unknown as boolean;
+      const { rec, client: c } = client(anyRoute);
+      const computer = await c.computers.get('vm-1');
+      const before = rec.calls.length;
+      for (const call of [
         () => computer.snapshot({ memory: v }),
         () => computer.windows({ includeAll: v }),
         () => computer.screenshot(undefined, { fresh: v }),
