@@ -1693,34 +1693,53 @@ describe('exec', () => {
     expect(String(err.body)).toMatch(/8f2a1c/);
   });
 
-  it('refuses to open a URL on a Windows guest rather than sending a POSIX command', async () => {
-    // Not for the reason the round-trip rule usually gives — the platform
-    // refuses a desktop exec on Windows too, and says `unsupported` when it
-    // does. It refuses it AFTER "not running", so a stopped Windows computer
-    // would be told to start first and refused once it had. This guard is the
-    // way past that ordering.
-    const { client: c } = client(() => json({ ...COMPUTER, os: 'windows' }));
-    const computer = await c.computers.get('vm-1');
-    await expect(computer.open('https://example.com')).rejects.toThrow(/Linux-only/);
+  it('leaves the OS to the platform rather than refusing a guest it only half knows', async () => {
+    // This SDK held an `os === 'windows'` guard until OPL-4202, and it survived
+    // that review for one reason only: the platform answered "not running"
+    // ahead of the Windows refusal, so a stopped Windows computer was told to
+    // start and refused once it had. Platform OPL-4208 hoisted that refusal
+    // above the running check, which retired the guard.
+    //
+    // Both rows go to the platform now — Windows because it answers better
+    // than this object can, and an absent `os` because a payload that lost the
+    // field says nothing about the guest, and refusing on it would have failed
+    // a Linux computer for a command it could have run.
+    for (const os of ['windows', undefined]) {
+      const { rec, client: c } = client((call) =>
+        call.path === '/computers/vm-1' && call.method === 'GET'
+          ? json({ ...COMPUTER, os })
+          : anyRoute(call),
+      );
+      const computer = await c.computers.get('vm-1');
+      expect(computer.os).toBe(os ?? '');
+      await computer.open('https://example.com');
+      expect(rec.last().path).toBe('/computers/vm-1/exec');
+      expect((rec.last().body as { session: string }).session).toBe('desktop');
+    }
   });
 
-  it('sends the open anyway when the computer named no os, rather than guessing', async () => {
-    // The refusal above is a denylist on purpose. An allow-list on 'linux'
-    // would read an absent `os` as not-Linux and refuse a computer this SDK
-    // has simply not been told about — one whose payload lost the field, or
-    // one from a host too old to send it. The platform knows the guest's OS
-    // and this object does not, so the unknown case goes to the platform,
-    // which refuses it there if it turns out to be Windows.
-    const { rec, client: c } = client((call) =>
-      call.path === '/computers/vm-1' && call.method === 'GET'
-        ? json({ ...COMPUTER, os: undefined })
-        : anyRoute(call),
+  it('surfaces the platform refusal of a desktop session on Windows as settled', async () => {
+    // What the caller gets instead of the old local throw. `unsupported` is
+    // the word the hoisted refusal carries, and isTransient reading it as
+    // permanent is the whole reason deleting the guard costs a retry loop
+    // nothing: it stops here rather than starting the computer and asking
+    // again for a fact that was true before it started.
+    const { client: c } = client((call) =>
+      call.path === '/computers/vm-1/exec'
+        ? json(
+            {
+              error: 'session "desktop" is not supported on Windows guests yet',
+              reason: 'unsupported',
+            },
+            { status: 409 },
+          )
+        : json({ ...COMPUTER, os: 'windows' }),
     );
     const computer = await c.computers.get('vm-1');
-    expect(computer.os).toBe('');
-    await computer.open('https://example.com');
-    expect(rec.last().path).toBe('/computers/vm-1/exec');
-    expect((rec.last().body as { session: string }).session).toBe('desktop');
+    const err = await computer.open('https://example.com').catch((e) => e);
+    expect(err).toBeInstanceOf(APIError);
+    expect((err as APIError).reason).toBe('unsupported');
+    expect(isTransient(err)).toBe(false);
   });
 });
 
