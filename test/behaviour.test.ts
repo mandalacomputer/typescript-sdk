@@ -1694,11 +1694,33 @@ describe('exec', () => {
   });
 
   it('refuses to open a URL on a Windows guest rather than sending a POSIX command', async () => {
-    // cmd.exe answering "'nohup' is not recognized" through an ExecResult
-    // reads as anything but what actually went wrong.
+    // Not for the reason the round-trip rule usually gives — the platform
+    // refuses a desktop exec on Windows too, and says `unsupported` when it
+    // does. It refuses it AFTER "not running", so a stopped Windows computer
+    // would be told to start first and refused once it had. This guard is the
+    // way past that ordering.
     const { client: c } = client(() => json({ ...COMPUTER, os: 'windows' }));
     const computer = await c.computers.get('vm-1');
     await expect(computer.open('https://example.com')).rejects.toThrow(/Linux-only/);
+  });
+
+  it('sends the open anyway when the computer named no os, rather than guessing', async () => {
+    // The refusal above is a denylist on purpose. An allow-list on 'linux'
+    // would read an absent `os` as not-Linux and refuse a computer this SDK
+    // has simply not been told about — one whose payload lost the field, or
+    // one from a host too old to send it. The platform knows the guest's OS
+    // and this object does not, so the unknown case goes to the platform,
+    // which refuses it there if it turns out to be Windows.
+    const { rec, client: c } = client((call) =>
+      call.path === '/computers/vm-1' && call.method === 'GET'
+        ? json({ ...COMPUTER, os: undefined })
+        : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    expect(computer.os).toBe('');
+    await computer.open('https://example.com');
+    expect(rec.last().path).toBe('/computers/vm-1/exec');
+    expect((rec.last().body as { session: string }).session).toBe('desktop');
   });
 });
 

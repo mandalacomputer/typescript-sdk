@@ -2125,9 +2125,25 @@ export class Computer {
    * has taken as long as ten seconds to draw, so screenshot until the screen
    * changes rather than concluding from one frame that nothing launched.
    *
-   * Linux only, and refused rather than attempted on a Windows guest: the
-   * command it sends is a POSIX one, and cmd.exe answering "'nohup' is not
-   * recognized" through an ExecResult reads as anything but what went wrong.
+   * Refused here on a computer that SAYS it runs Windows, and left to the
+   * platform otherwise — including on one whose payload named no `os` at all.
+   * That asymmetry is deliberate, and it is not the usual save-a-round-trip
+   * rule: a desktop-session exec is refused by the platform too, specifically
+   * and permanently (`reason: "unsupported"`, which {@link APIError.reason}
+   * already reads as settled). What the platform does NOT do on this path is
+   * refuse it FIRST. Its synchronous exec checks "not running" before it
+   * checks the OS, so a stopped Windows computer answers `not running`, and a
+   * caller who does as they are told and starts it is then refused anyway —
+   * the loop with no exit that the background path avoids by ordering its own
+   * Windows check ahead of that one. This guard is the way past that ordering,
+   * not a claim to know better than the platform.
+   *
+   * Which is why an absent or unrecognised `os` is NOT refused here. It reads
+   * as `''`, and an allow-list on `'linux'` would turn it into a refusal this
+   * SDK cannot justify: the platform knows the guest's OS and this object does
+   * not, so a Linux computer whose payload lost the field — or one from a host
+   * too old to report it — would be refused for a POSIX command it would have
+   * run. Unknown goes to the party that can actually tell.
    */
   async open(url: string, opts: { timeoutS?: number } & CallOptions = {}): Promise<ExecResult> {
     if (this.os === 'windows') {
