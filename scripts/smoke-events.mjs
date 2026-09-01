@@ -79,26 +79,51 @@ try {
     `${Date.now() - t}ms`,
   );
 
-  const stream = vm.events();
-  const first = await stream[Symbol.asyncIterator]().next();
-  check('the opening frame lands before the first event', !first.done, String(first.value?.type));
-  check(
-    'it advertises the guest half of the vocabulary',
-    (stream.eventTypes ?? []).includes('window.opened'),
-    `${(stream.eventTypes ?? []).length} types`,
-  );
-  check(
-    'it carries the desktop this stream joined',
-    Array.isArray(stream.windows),
-    `${stream.windows?.length} windows`,
-  );
+  // Closed in a `finally`, and `reconnect: false`. Calling `.next()` parks the
+  // generator at its `yield`: the socket stays open, keeps filling a
+  // 4096-deep queue, and reconnects on its own while the waits below open
+  // streams of their own. The close used to sit after those waits, so any throw
+  // in between leaked it — a grok bug hunt found this, and it is the kind of
+  // thing only a script that really connects can have wrong.
+  const stream = vm.events({ reconnect: false });
+  let kept;
+  try {
+    const first = await stream[Symbol.asyncIterator]().next();
+    check('the opening frame lands before the first event', !first.done, String(first.value?.type));
+    check(
+      'it advertises the guest half of the vocabulary',
+      (stream.eventTypes ?? []).includes('window.opened'),
+      `${(stream.eventTypes ?? []).length} types`,
+    );
+    check(
+      'it carries the desktop this stream joined',
+      Array.isArray(stream.windows),
+      `${stream.windows?.length} windows`,
+    );
+    kept = stream.cursor;
+    check('the stream kept a cursor to resume from', typeof kept === 'string', kept);
+  } finally {
+    stream.close();
+  }
 
   const job = await vm.execBackground('sleep 4; exit 7');
-  const exited = await vm.waitFor('process.exited', { timeoutMs: 90_000 });
+  // Matched on the PID, because `waitFor` returns the first exit on the whole
+  // computer and a freshly booted guest has others of its own — session setup,
+  // desktop autostart, whatever the template runs. Taking the first one made
+  // the pid and code assertions below fail against a process nobody asked
+  // about, on a run that looked like a real regression. The README's own
+  // example filters the same way.
+  let exited;
+  for await (const ev of vm.events({ since: kept })) {
+    if (ev.type === 'process.exited' && ev.pid === job.pid) {
+      exited = ev;
+      break;
+    }
+  }
   check(
     'process.exited carries the pid and the real code',
-    exited.pid === job.pid && exited.exitCode === 7 && exited.lost === false,
-    JSON.stringify({ pid: exited.pid, exitCode: exited.exitCode }),
+    exited?.pid === job.pid && exited?.exitCode === 7 && exited?.lost === false,
+    JSON.stringify({ pid: exited?.pid, exitCode: exited?.exitCode }),
   );
 
   // Started BEFORE the thing that causes it: a wait opened after the event has
@@ -129,10 +154,6 @@ try {
       listing: [listed?.x, listed?.y],
     }),
   );
-
-  const kept = stream.cursor;
-  check('the stream kept a cursor to resume from', typeof kept === 'string', kept);
-  stream.close();
 
   // What a process restart would do: come back from a stored cursor and be
   // handed what happened while nobody was listening.

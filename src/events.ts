@@ -19,8 +19,9 @@
  */
 
 import { ConnectionError, MandalaError, ValidationError } from './errors.js';
-import { type GuestWindow, toGuestWindow } from './models.js';
+import { type GuestWindow, said, toGuestWindow } from './models.js';
 import { isRecord } from './paths.js';
+import { MAX_TIMER_MS } from './transport.js';
 
 /**
  * Who is describing this event.
@@ -287,7 +288,12 @@ const int = (v: unknown): number | undefined => {
   if (typeof v !== 'number' && typeof v !== 'string') return undefined;
   if (typeof v === 'string' && v.trim() === '') return undefined;
   const n = Number(v);
-  return Number.isFinite(n) ? n : undefined;
+  // An INTEGER, not merely a finite number, because every field this reads is
+  // one: a sequence, a pid, a second count. `toBackgroundExec` already refuses
+  // a non-integer pid, and a `91.5` reaching `ev.pid` would fail the
+  // `ev.pid === job.pid` comparison the whole `process.exited` wait is built
+  // on — silently, and looking like a command that never ended.
+  return Number.isInteger(n) ? n : undefined;
 };
 
 /** A string, or `undefined` for anything that is not one. Empty counts as absent. */
@@ -313,7 +319,12 @@ export function toComputerEvent(frame: unknown): ComputerEvent | undefined {
   const data = isRecord(frame.data) ? frame.data : {};
   const ev: ComputerEvent = {
     type,
-    at: typeof frame.at === 'string' ? frame.at : new Date().toISOString(),
+    // `''` rather than the clock. `at` is documented as the platform's own
+    // timestamp, and a `new Date()` put there is indistinguishable from one —
+    // so a frame that carried no time would have this client's wall clock read
+    // back as the platform's. `closed` and `capabilities` legitimately have no
+    // `at` at all. Empty is the same non-answer `cursor` gives.
+    at: typeof frame.at === 'string' ? frame.at : '',
     computer: typeof frame.computer === 'string' ? frame.computer : '',
     seq: int(frame.seq),
     cursor: typeof frame.cursor === 'string' ? frame.cursor : '',
@@ -329,14 +340,29 @@ export function toComputerEvent(frame: unknown): ComputerEvent | undefined {
     case 'window.blurred':
       ev.windowId = text(data.id);
       break;
-    case 'process.exited':
+    case 'process.exited': {
       ev.pid = int(data.pid);
+      // Classified with `said`, like every other wire boolean in this SDK
+      // (OPL-3850), rather than `=== true`. The polarity matters more here than
+      // it does on `hello.ready`: a `lost` this client cannot read is a command
+      // whose outcome is unknown, and calling that `false` presents it as one
+      // that finished.
+      const lost = said(data.lost);
+      const code = int(data.exit_code);
       // `lost` and `exit_code` are exclusive on the wire and stay exclusive
-      // here. A truthy `lost` beside a number would otherwise hand a caller
-      // both an exit code and a statement that there is none.
-      ev.lost = data.lost === true;
-      ev.exitCode = ev.lost ? undefined : int(data.exit_code);
+      // here: a truthy `lost` beside a number would hand a caller both an exit
+      // code and a statement that there is none.
+      //
+      // The reverse does NOT hold, and the type says so rather than this
+      // inventing it. A frame with neither is a malformed one, and answering it
+      // with `lost: true` would be this client asserting the guest lost track
+      // of a command nobody said that about. `exitCode` is undefined whenever
+      // no readable code arrived; `lost` is true only where the platform said
+      // it.
+      ev.lost = lost;
+      ev.exitCode = lost ? undefined : code;
       break;
+    }
     case 'clipboard.changed':
       ev.selection = text(data.selection);
       break;
@@ -365,6 +391,14 @@ export function toComputerEvent(frame: unknown): ComputerEvent | undefined {
     default:
       break;
   }
+  // A statement ABOUT the stream is not a position IN it, and the envelope has
+  // to say so however the host spelled it. The platform shipped a gap carrying
+  // `"seq":0` once, and a client applying the obvious rule — ignore anything
+  // not newer than the last sequence I saw — discarded the one frame that
+  // reports unrecoverable loss. Copying that zero through would leave this
+  // type's own promise ("Absent is what it means") false against exactly the
+  // build that made the promise necessary.
+  if (STREAM_FRAME_TYPES.includes(type)) ev.seq = undefined;
   return ev;
 }
 
@@ -721,12 +755,20 @@ export class ComputerEvents implements AsyncIterable<ComputerEvent> {
    * something the platform has already said will not arrive.
    */
   get eventTypes(): string[] | undefined {
-    return this.#types;
+    // A COPY. The array behind this is `hello.events`, which is what decides
+    // whether a wait can end — `waitFor` refuses a type that is not in it — so
+    // handing out the live one lets `stream.eventTypes.push('window.opened')`
+    // talk a wait into hanging on a machine that cannot produce the event.
+    return this.#types ? [...this.#types] : undefined;
   }
 
   /** The desktop the newest connection joined, when it was sent one. */
   get windows(): GuestWindow[] | undefined {
-    return this.#hello?.windows;
+    // A copy of the array, for the reason `eventTypes` is copied. The windows
+    // in it are the decoder's own objects and are not deep-copied: `raw` is
+    // already a per-window copy, and a caller who edits a window they were
+    // handed has changed their own record of it, not this stream's next answer.
+    return this.#hello?.windows ? [...this.#hello.windows] : undefined;
   }
 
   /**
@@ -844,6 +886,16 @@ export class ComputerEvents implements AsyncIterable<ComputerEvent> {
           // was never yielded, so the position never reached it and the
           // reconnect asks for it again.
           if (ev.cursor) this.#cursor = ev.cursor;
+          // Latched HERE, where the event reaches the caller, and not where it
+          // was queued. A connection that fails between the two — a hello that
+          // lands after the connect deadline, a hook that throws — takes its
+          // whole queue with it, and a latch set at the push would leave the
+          // stream believing it had delivered a readiness nobody received. The
+          // next connection then declines to synthesize, and a
+          // `waitFor('computer.ready')` on an already-ready desktop waits for
+          // an event that cannot happen twice: the exact hang this synthesis
+          // exists to prevent.
+          if (ev.type === 'computer.ready') this.#sawReady = true;
           delivered += 1;
           yield ev;
           if (this.#stopped()) return;
@@ -913,6 +965,14 @@ export class ComputerEvents implements AsyncIterable<ComputerEvent> {
       frames.push({ kind: 'frame', value: frame });
     });
 
+    // ONE deadline across both phases, not one each. The option says
+    // "milliseconds to wait for the handshake and the opening frame", and two
+    // sequential timers of that length mean a caller who set five seconds waits
+    // ten — on the one number they set to bound how long a dead connection ties
+    // them up.
+    const deadline = Date.now() + this.#connectTimeoutMs;
+    const remaining = () => Math.max(deadline - Date.now(), 0);
+
     let handshake: 'pending' | 'open' | 'failed' = 'pending';
     const opened = new Promise<void>((resolve, reject) => {
       const done = (fn: () => void) => {
@@ -924,13 +984,20 @@ export class ComputerEvents implements AsyncIterable<ComputerEvent> {
         () =>
           done(() => {
             handshake = 'failed';
+            // Closed HERE rather than left for `#run`'s catch. Until the socket
+            // is shut its message listener is still live and independent of
+            // `handshake`, so a hello arriving in that gap runs `#acceptHello`
+            // on a connection this method has already given up on — queueing a
+            // readiness into a queue nobody will read, on top of leaving the
+            // socket open for as long as the catch takes to arrive.
+            this.#shutSocket();
             reject(
               new ConnectionError(
                 `the event stream did not open within ${this.#connectTimeoutMs}ms`,
               ),
             );
           }),
-        this.#connectTimeoutMs,
+        remaining(),
       );
       sock.addEventListener('open', () =>
         done(() => {
@@ -966,14 +1033,39 @@ export class ComputerEvents implements AsyncIterable<ComputerEvent> {
       throw err;
     }
 
-    const hello = await withTimeout(
-      helloFrame,
-      this.#connectTimeoutMs,
-      () => new ConnectionError(`the event stream said nothing within ${this.#connectTimeoutMs}ms`),
-    );
+    let hello: Hello | undefined;
+    try {
+      hello = await withTimeout(
+        helloFrame,
+        remaining(),
+        () =>
+          new ConnectionError(`the event stream said nothing within ${this.#connectTimeoutMs}ms`),
+      );
+    } catch (err) {
+      // Closed here rather than inside the error factory, and the difference is
+      // not tidiness: closing the socket settles `helloFrame` with `undefined`
+      // through the close listener, so a factory that closed before it returned
+      // lost its own race — `Promise.race` took the resolution and this method
+      // reported "closed before it said what it was" about a socket IT had just
+      // closed for saying nothing. Reject first, shut second.
+      this.#shutSocket();
+      throw err;
+    }
     if (!hello) {
       throw new ConnectionError('the event stream closed before it said what it was');
     }
+    // The hook runs HERE, inside this method's own try, and not from the
+    // message listener that read the frame. Called from the listener a throw
+    // was an EventTarget exception: it skipped `settle(hello)`, so this method
+    // sat out its whole connect deadline and reported a stream that said
+    // nothing — while the option's own documentation promised the throw would
+    // be caught by the reconnect logic. `waitFor` was written around that
+    // promise, which is what makes it worth keeping rather than restating.
+    //
+    // Everything the hook can read is already true by this line: the
+    // vocabulary, the desktop, the cursor, and the readiness queued ahead of
+    // any event this connection will deliver.
+    this.#onConnect?.(hello);
   }
 
   /** What the opening frame settles, in the order it has to settle it. */
@@ -1002,14 +1094,33 @@ export class ComputerEvents implements AsyncIterable<ComputerEvent> {
     // Once per stream, not once per connection: `#sawReady` survives the
     // reconnects, for the same reason.
     if (hello.ready && hello.windows !== undefined && !this.#sawReady) {
-      this.#sawReady = true;
-      frames.push({ kind: 'event', value: readyFromHello(hello) });
+      frames.push({ kind: 'event', value: this.#readyFromHello(hello) });
     }
-    // Last, so that everything a hook can read off this object — the
-    // vocabulary, the desktop, the cursor — is already true, and so that a
-    // hook which closes the stream closes one whose state it was allowed to
-    // judge.
-    this.#onConnect?.(hello);
+  }
+
+  /**
+   * A `computer.ready` built from the opening frame's `ready`.
+   *
+   * Not a replay, and marked so. It carries THIS STREAM'S position rather than
+   * hello's, which are the same thing on a fresh join and are not on a resume:
+   * hello's cursor names where the connection starts, which on a gapped resume
+   * is behind the `since` the caller already holds. Yielded, that rewound the
+   * stream's own position and put it in front of the `gap` — so a `waitFor`
+   * that returned on this event handed back a cursor pointing into history it
+   * had already been told was unrecoverable.
+   *
+   * No sequence, because it never had one.
+   */
+  #readyFromHello(hello: Hello): ComputerEvent {
+    return {
+      type: 'computer.ready',
+      at: new Date().toISOString(),
+      computer: hello.computer,
+      cursor: this.#cursor ?? hello.cursor,
+      source: 'guest',
+      data: {},
+      synthesized: true,
+    };
   }
 
   /** One frame, as an event, with the bookkeeping that happens as it goes past. */
@@ -1017,33 +1128,12 @@ export class ComputerEvents implements AsyncIterable<ComputerEvent> {
     const ev = toComputerEvent(frame);
     if (!ev) return undefined;
     if (ev.type === 'capabilities' && ev.events) this.#types = ev.events;
-    if (ev.type === 'computer.ready') this.#sawReady = true;
     return ev;
   }
 }
 
 /** The rejection that means "the upgrade was refused and said nothing about why". */
 const HANDSHAKE_REFUSED = Symbol('mandala.handshakeRefused');
-
-/**
- * A `computer.ready` built out of the opening frame's `ready`.
- *
- * Not a replay of the event, and marked so. It carries hello's own cursor —
- * which is where this client IS, so storing it and reconnecting asks for what
- * comes next rather than for a position in the past — and no sequence, because
- * it never had one.
- */
-function readyFromHello(hello: Hello): ComputerEvent {
-  return {
-    type: 'computer.ready',
-    at: new Date().toISOString(),
-    computer: hello.computer,
-    cursor: hello.cursor,
-    source: 'guest',
-    data: {},
-    synthesized: true,
-  };
-}
 
 /**
  * A frame's JSON, or `undefined` for anything that is not a text frame of it.
@@ -1110,9 +1200,23 @@ function checkStreamNumbers(o: {
       throw new ValidationError(`${name} must be a positive finite number (got ${v})`);
     }
   };
-  positive('backoffMs', o.backoffMs);
-  positive('maxBackoffMs', o.maxBackoffMs);
-  positive('connectTimeoutMs', o.connectTimeoutMs);
+  // The ceiling matters for the same reason the floor does, and it was the half
+  // this refusal was missing. `setTimeout` stores its delay in a 32-bit signed
+  // int, so anything past MAX_TIMER_MS wraps to 1ms and fires AT ONCE — a
+  // `backoffMs` of 2e10, meant as "back off for ages", is the unthrottled
+  // reconnect loop against the platform that a NaN would have produced.
+  // `checkWait` and `Transport` both cap here already; this did not.
+  const timer = (name: string, v: number) => {
+    positive(name, v);
+    if (v > MAX_TIMER_MS) {
+      throw new ValidationError(
+        `${name} must be no greater than ${MAX_TIMER_MS} (got ${v}): a longer delay wraps to 1ms`,
+      );
+    }
+  };
+  timer('backoffMs', o.backoffMs);
+  timer('maxBackoffMs', o.maxBackoffMs);
+  timer('connectTimeoutMs', o.connectTimeoutMs);
   positive('maxQueued', o.maxQueued);
   if (!Number.isFinite(o.maxRetries) || o.maxRetries < 0) {
     throw new ValidationError(

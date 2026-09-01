@@ -215,6 +215,62 @@ describe('one frame, decoded', () => {
   });
 });
 
+describe('what the decoder refuses to invent', () => {
+  it('leaves no sequence on a frame that carries one it should not', () => {
+    // The platform shipped a gap with `"seq":0` once, and a client applying the
+    // obvious rule — ignore anything not newer than the last sequence I saw —
+    // dropped the one frame that reports unrecoverable loss. Copying that zero
+    // through leaves this type's promise ("Absent is what it means") false
+    // against exactly the build that made it necessary.
+    for (const type of ['gap', 'closed', 'capabilities']) {
+      expect(toComputerEvent({ ...event({ type }), seq: 0 })?.seq).toBeUndefined();
+    }
+    // And an ordinary event's own zero survives: sequence zero is a real
+    // position, the first event a computer ever records.
+    expect(toComputerEvent(event({ seq: 0 }))?.seq).toBe(0);
+  });
+
+  it('does not put this client’s clock where the platform’s timestamp goes', () => {
+    // `at` is documented as the platform's own value. A `new Date()` there is
+    // indistinguishable from one, so a frame that carried no time would have
+    // the reader's wall clock read back as the writer's.
+    expect(toComputerEvent({ type: 'closed', detail: 'gone' })?.at).toBe('');
+    expect(toComputerEvent(event({ at: 12345 }))?.at).toBe('');
+  });
+
+  it('classifies `lost` the way this SDK classifies every other wire boolean', () => {
+    // `=== true` read a string or a 1 as not-lost and then promoted the
+    // exit_code beside it — the pair the comments say must never be handed over
+    // together. The polarity is the opposite of `hello.ready`'s: an unreadable
+    // `lost` is a command whose outcome is unknown, and `false` presents it as
+    // one that finished.
+    for (const lost of [true, 'true', 1, 'True']) {
+      const ev = toComputerEvent(
+        event({ type: 'process.exited', data: { pid: 91, lost, exit_code: -1 } }),
+      );
+      expect([ev?.lost, ev?.exitCode]).toEqual([true, undefined]);
+    }
+    // Unreadable is not a claim either way, so it stays out of `lost` — and the
+    // code that came with it is still handed over.
+    const odd = toComputerEvent(
+      event({ type: 'process.exited', data: { pid: 91, lost: 'maybe', exit_code: 3 } }),
+    );
+    expect([odd?.lost, odd?.exitCode]).toEqual([false, 3]);
+  });
+
+  it('reads whole numbers only, where every field it reads is one', () => {
+    // `ev.pid === job.pid` is what the whole `process.exited` wait rests on, so
+    // a `91.5` arriving as a pid fails that comparison silently and looks like
+    // a command that never ended. `toBackgroundExec` already refuses one.
+    const ev = toComputerEvent(event({ type: 'process.exited', data: { pid: 91.5 } }));
+    expect(ev?.pid).toBeUndefined();
+    expect(toComputerEvent(event({ seq: 7.5 }))?.seq).toBeUndefined();
+    expect(
+      toComputerEvent(event({ type: 'computer.idle', data: { idle_seconds: 1800 } }))?.idleSeconds,
+    ).toBe(1800);
+  });
+});
+
 describe('the opening frame', () => {
   it('reads the vocabulary, the cursor and the desktop', () => {
     const h = toHello(hello({ windows: [WINDOW] }));
@@ -400,6 +456,43 @@ describe('the stream', () => {
     expect(got[0]?.synthesized).toBe(true);
   });
 
+  it('does not rewind the stream behind the cursor it was resuming from', async () => {
+    // A gapped resume is the case: `hello.cursor` names where the CONNECTION
+    // starts, which is behind the `since` the caller already holds. Carried on
+    // the synthesized event and then yielded, it moved the stream's own
+    // position backwards and sat in front of the gap — so a wait that returned
+    // on this event handed back a cursor pointing into history the same frame
+    // was about to call unrecoverable.
+    const { computer: c } = await computer();
+    const stream = c.events({
+      since: 'ep-1:9',
+      maxRetries: 1,
+      backoffMs: 1,
+      webSocket: socketFactory((s) => {
+        s.emitOpen();
+        // hello.cursor is 'ep-1:0' — far behind the resume position.
+        s.send(hello({ ready: true, windows: [] }));
+        s.send({
+          cursor: 'ep-1:9',
+          at: '2026-08-31T12:00:00Z',
+          type: 'gap',
+          computer: 'vm-1',
+          source: 'daemon',
+          data: { detail: 'cannot replay that far' },
+        });
+        s.close();
+      }),
+    });
+    const got: ComputerEvent[] = [];
+    for await (const ev of stream) {
+      got.push(ev);
+      if (got.length === 1) break;
+    }
+    expect(got[0]).toMatchObject({ type: 'computer.ready', synthesized: true });
+    expect(got[0]?.cursor).toBe('ep-1:9');
+    expect(stream.cursor).toBe('ep-1:9');
+  });
+
   it('does not synthesize one at all when the desktop is not up', async () => {
     const { computer: c } = await computer();
     const got = await collect(
@@ -499,6 +592,27 @@ describe('the stream', () => {
       }),
     );
     expect(got.map((e) => e.type)).toEqual(['computer.idle']);
+  });
+
+  it('hands out its state rather than a handle on it', async () => {
+    // `eventTypes` is what decides whether a wait can end — `waitFor` refuses a
+    // type that is not in it — so the live array would let
+    // `stream.eventTypes.push(...)` talk a wait into hanging on a machine that
+    // cannot produce the event.
+    const { computer: c } = await computer();
+    const stream = c.events({
+      reconnect: false,
+      webSocket: socketFactory((s) => {
+        s.emitOpen();
+        s.send(hello({ ready: false, windows: [WINDOW] }));
+        s.close();
+      }),
+    });
+    await collect(stream);
+    stream.eventTypes?.push('window.invented');
+    stream.windows?.pop();
+    expect(stream.eventTypes).not.toContain('window.invented');
+    expect(stream.windows).toHaveLength(1);
   });
 
   it('refuses a second consumer rather than splitting the events between two', async () => {
@@ -686,6 +800,113 @@ describe('reconnecting', () => {
       stop.abort();
     }
     expect(got.map((e) => e.type)).toEqual(['computer.idle']);
+  });
+});
+
+describe('a connection that fails after it was told hello', () => {
+  it('does not spend a readiness the caller never received', async () => {
+    // The latch has to sit where the event reaches the caller, not where it was
+    // queued. A connection that fails between the two takes its whole queue
+    // with it, and a latch set at the push leaves the stream believing it
+    // delivered a readiness nobody got — so the next connection declines to
+    // synthesize and a wait on an already-ready desktop waits for an event that
+    // cannot happen twice.
+    let connections = 0;
+    const { computer: c } = await computer();
+    const got = await collect(
+      c.events({
+        backoffMs: 1,
+        maxRetries: 3,
+        connectTimeoutMs: 200,
+        // The first connection's hook throws, which is what discards its queue.
+        onConnect: () => {
+          if (connections++ === 0) throw new Error('the caller’s hook blew up');
+        },
+        webSocket: socketFactory((s) => {
+          s.emitOpen();
+          s.send(hello({ ready: true }));
+        }),
+      }),
+      1,
+    );
+    expect(got.map((e) => e.type)).toEqual(['computer.ready']);
+    expect(got[0]?.synthesized).toBe(true);
+    expect(connections).toBe(2);
+  });
+
+  it('treats a throwing onConnect as the failed connection its docs promise', async () => {
+    // The hook ran from the websocket message listener, so a throw was an
+    // EventTarget exception: it skipped the hello handoff, and the connect
+    // deadline expired reporting a stream that "said nothing" — while the
+    // option documented the throw as being caught by the reconnect logic.
+    // `waitFor` is written around that promise.
+    const { computer: c } = await computer();
+    const started = Date.now();
+    const err = await collect(
+      c.events({
+        reconnect: false,
+        connectTimeoutMs: 10_000,
+        onConnect: () => {
+          throw new Error('nope');
+        },
+        webSocket: socketFactory((s) => {
+          s.emitOpen();
+          s.send(hello({ ready: false }));
+        }),
+      }),
+    ).catch((e) => e);
+    expect(String(err)).toContain('nope');
+    // Immediately, rather than after the connect deadline it used to wait out.
+    expect(Date.now() - started).toBeLessThan(5_000);
+  });
+
+  it('gives up on a handshake that never completes, and releases the socket', async () => {
+    // The socket IS released either way — `#run`'s catch shuts it — so this
+    // asserts the outcome and not the promptness. Closing it at the point of
+    // giving up rather than one catch further out is still right, and the
+    // window it removes is a few microtasks wide: no test here can tell the two
+    // apart without becoming a race, and a green test that cannot fail is worse
+    // than a note saying so.
+    const seen: FakeSocket[] = [];
+    const { computer: c } = await computer();
+    const err = await collect(
+      c.events({
+        reconnect: false,
+        connectTimeoutMs: 60,
+        // Never opens: the handshake deadline is what ends this.
+        webSocket: socketFactory((s) => {
+          seen.push(s);
+        }),
+      }),
+    ).catch((e) => e);
+    expect(String(err)).toContain('did not open within');
+    expect(seen[0]?.closed).toBe(true);
+  });
+
+  it('spends one connect budget across the handshake and the opening frame', async () => {
+    // Two sequential timers of `connectTimeoutMs` mean a caller who set five
+    // seconds waits ten — on the one number they set to bound how long a dead
+    // connection ties them up.
+    //
+    // The socket opens LATE and then says nothing, because that is the only
+    // shape that can tell the two apart: a socket that opens at once spends
+    // nothing on the first phase, so one budget and two are the same number and
+    // the test cannot fail. Written the easy way first, it passed with the bug
+    // reinstated.
+    const { computer: c } = await computer();
+    const started = Date.now();
+    const err = await collect(
+      c.events({
+        reconnect: false,
+        connectTimeoutMs: 300,
+        webSocket: socketFactory((s) => {
+          setTimeout(() => s.emitOpen(), 200);
+        }),
+      }),
+    ).catch((e) => e);
+    expect(String(err)).toContain('said nothing within');
+    // One budget: ~300ms from the start. Two: 200 to open plus a fresh 300.
+    expect(Date.now() - started).toBeLessThan(450);
   });
 });
 
@@ -933,6 +1154,26 @@ describe('waitFor', () => {
     expect(err).toBe(reason);
   });
 
+  it('calls the caller’s own onConnect as well as its own', async () => {
+    // `onConnect` is an option on WaitForOptions like any other, and this used
+    // to overwrite it — accepted by the type, documented on the option, and
+    // silently never called. `signal` IS replaced, and that is not the same
+    // thing: it is composed first, so the caller's still fires.
+    const { computer: c } = await computer();
+    const seen: string[] = [];
+    const ev = await c.waitFor('process.exited', {
+      timeoutMs: 2_000,
+      onConnect: (h) => seen.push(h.cursor),
+      webSocket: socketFactory((s) => {
+        s.emitOpen();
+        s.send(hello({ ready: false }));
+        s.send(event({ type: 'process.exited', data: { pid: 5, exit_code: 0 } }));
+      }),
+    });
+    expect(ev.pid).toBe(5);
+    expect(seen).toEqual(['ep-1:0']);
+  });
+
   it('refuses a wait with nothing to wait for, and a deadline that is not a number', async () => {
     const { computer: c } = await computer();
     await expect(c.waitFor([])).rejects.toThrow(ValidationError);
@@ -963,6 +1204,25 @@ describe('waitFor', () => {
 });
 
 describe('the numbers a stream is given', () => {
+  it('refuses one past the ceiling a timer silently wraps at', async () => {
+    // `setTimeout` stores its delay in a 32-bit signed int, so anything past
+    // MAX_TIMER_MS wraps to 1ms and fires AT ONCE — a `backoffMs` of 2e10,
+    // meant as "back off for ages", is the unthrottled reconnect loop against
+    // the platform that a NaN would have produced. `checkWait` and `Transport`
+    // both cap here; this did not.
+    const { computer: c } = await computer();
+    for (const opts of [
+      { backoffMs: 2 ** 31 },
+      { maxBackoffMs: 2 ** 31 },
+      { connectTimeoutMs: 1e12 },
+    ]) {
+      expect(() => c.events(opts)).toThrow(ValidationError);
+      expect(() => c.events(opts)).toThrow(/wraps to 1ms/);
+    }
+    // The ceiling itself is allowed, as it is in `checkWait`.
+    expect(() => c.events({ backoffMs: 2 ** 31 - 1 })).not.toThrow();
+  });
+
   it('refuses one that is not finite, before a socket is opened', async () => {
     // `setTimeout(fn, NaN)` fires at once, so a non-finite backoff is an
     // unthrottled reconnect loop against the platform, and nothing says so.

@@ -1286,7 +1286,18 @@ export class Computer {
     const stream = this.events({
       ...streamOpts,
       signal: deadline,
+      // COMPOSED, not replaced. `onConnect` is an option on `WaitForOptions`
+      // like any other, and this used to overwrite it — so a caller's hook was
+      // accepted by the type, documented on the option, and silently never
+      // called. `signal` above IS replaced, and that is not the same thing:
+      // it is composed first, through `deadlineSignal`, so the caller's still
+      // fires.
+      //
+      // Theirs first, because the check below can close the stream, and a hook
+      // that never sees the connection it was promised is the defect this is
+      // fixing rather than a smaller version of it.
       onConnect: (hello) => {
+        streamOpts.onConnect?.(hello);
         impossible = unreachableTypes(this.id, wanted, hello.events);
         if (impossible) stream.close();
       },
