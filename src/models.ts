@@ -362,6 +362,35 @@ export function toVncConnect(d: unknown): VncConnect | undefined {
   };
 }
 
+/**
+ * The `events_url` off a raw connect surface, read WITHOUT the two desktop
+ * credentials {@link toVncConnect} requires.
+ *
+ * A safety net rather than a fix for an observed payload, and worth saying
+ * plainly which it is. `web/lib/vncconnect.ts` returns the whole surface or
+ * none of it unless the caller is a viewer, and the viewer shape carries
+ * `view_token` with no `token` and NO `events_url` at all — the stream URL is
+ * built over the controlling credential, and a watch-only credential is not
+ * given window titles. So the platform does not today send a surface that has
+ * this field and is short a token.
+ *
+ * It is read separately anyway because the COUPLING was the mistake, not the
+ * payload. `url` and `view_url` are built here over the two credentials, so
+ * half a set is no connect surface — that is {@link toVncConnect}'s rule and it
+ * stays. `events_url` is not built over either of them; it arrives whole. A
+ * rule that happens to be safe because a second rule elsewhere never violates
+ * it is one platform change away from not being safe, and the cost of not
+ * relying on that is three lines.
+ *
+ * What actually bit is in {@link Computer.events}: a viewer's surface decoded
+ * to `undefined`, and the absence read as "the platform could not reach the
+ * host" — weather, retried forever, on a computer whose host had answered.
+ * That branch now tests the raw `vnc` key (OPL-4215).
+ */
+export function vncEventsUrl(d: unknown): string {
+  return isRecord(d) ? str(d.events_url) : '';
+}
+
 export type Template = {
   name: string;
   /**
@@ -978,7 +1007,23 @@ export type UsageReport = {
 
 export function toUsageReport(d: Record<string, unknown>): UsageReport {
   const period = isRecord(d.period) ? d.period : {};
-  const totals = isRecord(d.usage) ? d.usage : {};
+  // The totals object has to have been SENT. Absent, every `num()` below
+  // answers 0 and both caveat flags read false, so a body carrying no figures
+  // at all was presented as a real and empty billing window — a bill nobody
+  // rendered, reported as a bill of nothing, to the one caller who reads this
+  // route to find out what they are spending.
+  //
+  // REFUSED rather than caveated, which was the first fix and the wrong one.
+  // `degraded` is documented as the transient shortfall — "this one clears on
+  // its own — retry when the host is back" — and `unmetered` as the permanent
+  // one; a response with no totals object is neither, it is drift, and a caller
+  // following either flag's doc would wait for something that is not coming.
+  // `Usage.read` already refuses a body that is not a record; this is the same
+  // refusal one field in (OPL-4215).
+  if (!isRecord(d.usage)) {
+    throw new MandalaError('expected a usage report to carry its totals');
+  }
+  const totals = d.usage;
   const rows = Array.isArray(totals.computers) ? totals.computers.filter(isRecord) : [];
   const through = d.reported_through;
   return {
@@ -1220,9 +1265,31 @@ const snapshotUnreachable = (d: Record<string, unknown>): boolean => {
   return (w === WIRE.NULL || w === WIRE.MALFORMED) && isUnreachableStub(d);
 };
 
+/**
+ * A snapshot's id, refused when there is not one.
+ *
+ * Not a hazard to the unreachable placeholder rows this listing exists to
+ * surface: `projection.ts` sets `id` on every row it emits, bare ones included
+ * — what a bare row drops is `computer_id`, `state`, `kind` and the rest, which
+ * is exactly what {@link isUnreachableStub} recognises it by. A row short an
+ * `id` is drift, not a placeholder.
+ */
+const snapshotId = (d: Record<string, unknown>): string => {
+  const id = str(d.id);
+  if (!id) throw new MandalaError('expected a snapshot to carry an id');
+  return id;
+};
+
 export function toSnapshot(d: Record<string, unknown>): Snapshot {
   return {
-    id: str(d.id),
+    // Refused rather than coerced to `''`, the way {@link buildId} refuses a
+    // build with no id and `toWindowListing` refuses a listing carrying one.
+    // A snapshot is the thing a restore names, so a row that names nothing is
+    // a row nothing can be done with — and `snapshots.list()` handed it back
+    // looking as well-formed as every other row beside it. The same drift
+    // OPL-3835 and OPL-4200 refused elsewhere, on the inventory they missed
+    // (OPL-4215).
+    id: snapshotId(d),
     computerId: str(d.computer_id),
     computerName: str(d.computer_name),
     name: str(d.name),

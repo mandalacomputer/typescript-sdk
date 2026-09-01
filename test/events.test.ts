@@ -1292,3 +1292,177 @@ describe('the numbers a stream is given', () => {
     expect(() => c.events({ maxRetries: 0 })).not.toThrow();
   });
 });
+
+/**
+ * A connect surface the platform sent short a desktop credential (OPL-4215).
+ *
+ * The shape that actually arrives is a VIEWER's, and it is worth writing it out
+ * rather than inventing a tidier one: `web/lib/vncconnect.ts` answers a viewer
+ * with `view_url`, `view_token`, `embed_url` and `clipboard` and nothing else —
+ * no `token`, no `url`, and no `events_url`, because the stream URL is built
+ * over the controlling credential and a watch-only one is not given window
+ * titles.
+ *
+ * `toVncConnect` requires both credentials, so that surface decoded to
+ * `undefined`, and `#eventsUrl` read the absence as "the platform could not
+ * reach the host holding this computer" — weather, retried forever, on a
+ * computer whose host had answered. The settled sentence written for exactly
+ * this case sat below it and could not be reached.
+ */
+describe('a watch-only connect surface', () => {
+  /** A viewer's surface, field for field as the platform builds it. */
+  const viewer = {
+    view_url: 'wss://host/vnc?token=v',
+    view_token: 'v',
+    embed_url: 'https://host/embed#v',
+    clipboard: false,
+  };
+  const withVnc =
+    (vnc: unknown): Responder =>
+    (call) =>
+      call.path === '/computers/vm-1' ? json({ ...COMPUTER, vnc }) : anyRoute(call);
+
+  it('still offers no vnc surface, which is the rule that was always right', async () => {
+    const { computer: c } = await computer(withVnc(viewer));
+    expect(c.vnc).toBeUndefined();
+  });
+
+  it('tells a viewer the stream is not theirs, rather than retrying it forever', async () => {
+    // The settled sentence, reached at last. Not weather: a watch-only
+    // credential will not become a controlling one by asking again.
+    const { computer: c } = await computer(withVnc(viewer));
+    const err = await collect(
+      c.events({ reconnect: false, webSocket: socketFactory(() => {}) }),
+    ).catch((e) => e);
+    expect(err).toBeInstanceOf(MandalaError);
+    expect(String(err)).toContain('has no events_url');
+    expect(String(err)).toContain('watch-only');
+    expect(isSettled(err)).toBe(true);
+  });
+
+  it('reads an events_url that arrives without both tokens, if one ever does', async () => {
+    // Not a shape the platform sends today — a surface short a token has no
+    // `events_url` — which is why this pins the DECODER's rule rather than
+    // claiming a payload. `events_url` is not built over the two desktop
+    // credentials, so it must not be dropped with them; a coupling that is safe
+    // only because a second rule elsewhere never violates it is one platform
+    // change away from not being safe.
+    const { computer: c } = await computer(withVnc({ ...COMPUTER.vnc, view_token: '' }));
+    const urls: string[] = [];
+    const got = await collect(
+      c.events({
+        reconnect: false,
+        webSocket: socketFactory((s) => {
+          urls.push(s.url);
+          s.emitOpen();
+          s.send(hello({ ready: false }));
+          s.send(event({ cursor: 'ep-1:2' }));
+          s.close();
+        }),
+      }),
+    );
+    expect(got).toHaveLength(1);
+    expect(urls[0]).toContain('wss://host/events');
+  });
+
+  it('keeps calling a genuinely absent surface an unreachable host', async () => {
+    const { computer: c } = await computer(withVnc(undefined));
+    const err = await collect(
+      c.events({ reconnect: false, webSocket: socketFactory(() => {}) }),
+    ).catch((e) => e);
+    expect(err).toBeInstanceOf(ConnectionError);
+    expect(isSettled(err)).toBe(false);
+  });
+});
+
+describe('the stream numbers a caller sets', () => {
+  it('treats an empty `since` as no position rather than as one it holds', async () => {
+    // `since: ''` was stored, which blocked the hello frame's cursor from being
+    // adopted, and was falsy in `withCursor`, so it never reached the URL
+    // either. The stream believed it held a position and rejoined at the head
+    // on every reconnect, replaying events the caller had already been given.
+    // `?? ''` on a caller's own option is how one arrives.
+    const { computer: c } = await computer();
+    const urls: string[] = [];
+    const stream = c.events({
+      since: '',
+      maxRetries: 2,
+      backoffMs: 1,
+      webSocket: socketFactory((s, n) => {
+        urls.push(s.url);
+        s.emitOpen();
+        s.send(hello({ ready: false, cursor: 'ep-1:1' }));
+        if (n === 0) s.send(event({ seq: 1, cursor: 'ep-1:2' }));
+        if (n === 1) s.send(event({ seq: 2, cursor: 'ep-1:3' }));
+        s.close();
+      }),
+    });
+    await collect(stream, 2);
+    expect(urls[0]).not.toContain('since=');
+    expect(urls[1]).toContain('since=ep-1%3A2');
+  });
+
+  it('adopts the hello cursor for an empty `since`, as it does for an omitted one', async () => {
+    const { computer: c } = await computer();
+    const stream = c.events({
+      since: '',
+      reconnect: false,
+      webSocket: socketFactory((s) => {
+        s.emitOpen();
+        s.send(hello({ ready: false, cursor: 'ep-1:1' }));
+        s.close();
+      }),
+    });
+    await collect(stream);
+    expect(stream.cursor).toBe('ep-1:1');
+  });
+
+  it('caps the backoff RESET too, on a connection that delivered before it dropped', async () => {
+    // The path the first fix missed. `delivered > 0` resets the backoff, and
+    // the reset took the raw option while only the initial assignment had been
+    // capped — so a stream that was working and then dropped slept the full
+    // uncapped wait, which is the whole bug on the connection most likely to
+    // hit it.
+    const { computer: c } = await computer();
+    const started = Date.now();
+    await collect(
+      c.events({
+        maxRetries: 2,
+        backoffMs: 3_000,
+        maxBackoffMs: 5,
+        webSocket: socketFactory((s, n) => {
+          s.emitOpen();
+          s.send(hello({ ready: false }));
+          s.send(event({ seq: n + 1, cursor: `ep-1:${n + 2}` }));
+          s.close();
+        }),
+      }),
+      2,
+    );
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
+  it('caps the FIRST reconnect sleep at maxBackoffMs, not only the ones after it', async () => {
+    // The doubling was clamped and the initial value was not, so a caller who
+    // set both got one wait past the ceiling they had just named.
+    // `checkStreamNumbers` validates each number independently and never
+    // compares the two.
+    const { computer: c } = await computer();
+    const started = Date.now();
+    await collect(
+      c.events({
+        maxRetries: 1,
+        backoffMs: 5_000,
+        maxBackoffMs: 5,
+        webSocket: socketFactory((s, n) => {
+          s.emitOpen();
+          s.send(hello({ ready: false }));
+          if (n > 0) s.send(event({ cursor: 'ep-1:9' }));
+          s.close();
+        }),
+      }),
+      1,
+    );
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+});
