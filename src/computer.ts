@@ -950,6 +950,15 @@ export class Computer {
     // before the wait began, and "was still building" concluded from that is a
     // claim about a computer nobody has actually looked at.
     let observed = false;
+    // Whether the MOST RECENT refresh answered, which is a different question
+    // from whether any of them did, and the two were spelled with one flag.
+    // `observed` has to mean "any", because that is what keeps a wait from
+    // quoting data an old `list()` left on the handle; but the timeout sentence
+    // needs "the latest", because "IS still building" is a claim about now. One
+    // answer followed by 503s to the deadline satisfied "any", and the wait
+    // reported a fifteen-minute-old reading in the present tense. Builds.wait
+    // splits the same two meanings across its three messages (OPL-4201).
+    let fresh = false;
     let polled = false;
     let delayMs = pollMs;
     for (;;) {
@@ -967,14 +976,21 @@ export class Computer {
       if (this.#statusKnown() && !this.isBuilding) return this;
       if (Date.now() >= deadline) {
         throw new TimeoutError(
-          !polled || (observed && this.#statusKnown())
+          // Present tense only from the latest refresh — or from no refresh at
+          // all, where `timeoutMs: 0` returns the handle's own reading and the
+          // wait has had no chance to age it.
+          !polled || (fresh && this.#statusKnown())
             ? `${this.id} was still building after ${timeoutMs}ms ` +
                 '(it has not stopped; only this wait has)'
-            : observed
-              ? `${this.id} answered within ${timeoutMs}ms without a status this client could ` +
-                `read (${JSON.stringify(this.#data.status)}), so whether its disk copy finished ` +
-                'is unknown'
-              : `${this.id} could not be observed within ${timeoutMs}ms: every refresh failed`,
+            : observed && this.#statusKnown()
+              ? `${this.id} could not be reached for the last part of ${timeoutMs}ms; when it ` +
+                'last answered its disk was still being copied. The copy has not stopped, only ' +
+                'this wait has — call refresh() for where it got to.'
+              : observed
+                ? `${this.id} answered within ${timeoutMs}ms without a status this client could ` +
+                  `read (${JSON.stringify(this.#data.status)}), so whether its disk copy ` +
+                  'finished is unknown'
+                : `${this.id} could not be observed within ${timeoutMs}ms: every refresh failed`,
         );
       }
       // The sleep comes before every poll but the first. A clone that finished
@@ -996,6 +1012,7 @@ export class Computer {
           // refresh whose answer it has already stopped waiting for.
           await this.refresh({ signal: deadlineSignal(deadline - Date.now(), signal) });
           observed = true;
+          fresh = true;
         } catch (err) {
           // A caller who cancelled leaves now, whatever their reason is named.
           if (signal?.aborted) throw err;
@@ -1007,6 +1024,12 @@ export class Computer {
           // verdict on it — the same rule waitUntilRunning applies. Anything
           // else is not weather.
           if (!isDeadlineAbort(err) && !isTransientForPoll(err)) throw err;
+          // Cleared for a host that did not answer, and NOT for this wait's own
+          // deadline landing inside the request: the platform did not fail
+          // there, and the reading from the poll before it is one interval old
+          // rather than a whole budget old. Builds.wait leaves its flag alone
+          // in the same place, for the same reason.
+          if (!isDeadlineAbort(err)) fresh = false;
           delayMs = retryDelay(pollMs, err);
         }
       }
@@ -1042,6 +1065,12 @@ export class Computer {
     // full timeout to learn the same thing — and the data may be fresh from a
     // get() one line before this call.
     let observed = false;
+    // Whether the LATEST refresh answered — waitUntilBuilt's flag, for its
+    // reason. `observed` cannot carry this second meaning as well: it is what
+    // stops the wait quoting pre-call data, so it has to survive a failed poll,
+    // and the timeout sentence below then read the first answer of the wait as
+    // the state of the machine now (OPL-4201).
+    let fresh = false;
     for (;;) {
       let delayMs = pollMs;
       // Guarded rather than unconditional, so the sleep at the bottom of the
@@ -1053,6 +1082,7 @@ export class Computer {
           // another sixty inside a refresh it has stopped waiting for.
           await this.refresh({ signal: deadlineSignal(deadline - Date.now(), signal) });
           observed = true;
+          fresh = true;
         } catch (err) {
           // A caller who cancelled leaves now, whatever their reason is named.
           if (signal?.aborted) throw err;
@@ -1077,6 +1107,11 @@ export class Computer {
           // Anything else — a revoked key, a computer that is gone — is not
           // weather.
           if (!isDeadlineAbort(err) && !isTransientForPoll(err)) throw err;
+          // The host did not answer, so the timeout below drops to the past
+          // tense. Not for this wait's own deadline arriving mid-request: that
+          // is not the platform failing, and waitUntilBuilt and builds.wait
+          // both hold their flag across it for the same reason.
+          if (!isDeadlineAbort(err)) fresh = false;
           delayMs = retryDelay(pollMs, err);
         }
       }
@@ -1105,12 +1140,17 @@ export class Computer {
         );
       }
       if (Date.now() >= deadline) {
-        // "was still X" is only claimed about a status this wait actually saw;
-        // a handle nobody could refresh reports the refreshes, not the status.
+        // "was still X" is only claimed about a status this wait actually saw
+        // ON ITS LAST POLL; a handle nobody could refresh reports the
+        // refreshes, and one whose refreshes stopped answering says when it
+        // last looked rather than pretending the reading is current.
         throw new TimeoutError(
-          observed
-            ? `${this.id} was still ${JSON.stringify(this.status)} after ${timeoutMs}ms`
-            : `${this.id} could not be observed within ${timeoutMs}ms: every refresh failed`,
+          !observed
+            ? `${this.id} could not be observed within ${timeoutMs}ms: every refresh failed`
+            : fresh
+              ? `${this.id} was still ${JSON.stringify(this.status)} after ${timeoutMs}ms`
+              : `${this.id} could not be reached for the last part of ${timeoutMs}ms; when it ` +
+                `last answered it was ${JSON.stringify(this.status)}`,
         );
       }
       await sleepUntilNextPoll(delayMs, deadline, signal);
