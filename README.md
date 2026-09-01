@@ -323,6 +323,15 @@ does **not** identify the window: an application that keeps one process for
 several windows — `xfce4-terminal` is one — reports the same pid on all of
 them, so killing this pid can take windows you never asked about.
 
+`x`, `y`, `width` and `height` are `undefined` on the same rule and for a
+sharper reason: `0` is a place a window really is — the top-left corner — so a
+coordinate this client could not read must not come back as one. The live route
+sends all four on every window, so absent means something is already wrong, and
+`w.x ?? 0` is the wrong repair: there is no fallback for a place. A listing
+carrying a window with **no `id`** is refused outright rather than handed back,
+because every window action takes that id and a row without one names nothing
+you can act on.
+
 Prefer `focus` over `raise`: raising without focusing gives a window that is
 visibly in front and silently not receiving keystrokes.
 

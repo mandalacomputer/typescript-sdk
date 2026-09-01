@@ -119,6 +119,22 @@ describe('one frame, decoded', () => {
     }
   });
 
+  it('decodes a window frame it cannot read rather than throwing out of the socket', () => {
+    // The listing refuses a window with no id and answers nothing for geometry
+    // it could not read (OPL-4200). The refusal deliberately stops at the route:
+    // `toGuestWindow` runs here, inside the message listener, where a throw is
+    // not a rejected call a caller can catch but an exception out of a socket
+    // callback — and this stream's policy for a frame it cannot read is to skip
+    // it and read the next one, never to end the connection over it.
+    const ev = toComputerEvent(
+      event({ type: 'window.opened', source: 'guest', data: { title: 'Terminal', x: [7] } }),
+    );
+    expect(ev?.window).toMatchObject({ id: '', title: 'Terminal' });
+    // And the coordinate is absent rather than 7 or 0, on this route as on the
+    // other one: the two decode the same window through the same function.
+    expect(ev?.window?.x).toBeUndefined();
+  });
+
   it('names a closed or blurred window and invents no geometry for it', () => {
     // The platform sends `{id}` and nothing else on both, deliberately: a
     // window that is gone has no position, and a zero-valued one on the wire
