@@ -1015,51 +1015,6 @@ export type Snapshot = {
 };
 
 /**
- * Whether a snapshot ROW stands in for one nobody could read.
- *
- * The documented placeholder is an id and this flag and nothing more:
- * `computer_id` is absent because there was no host to say what the snapshot
- * belonged to, and `state` is what every real snapshot carries and no
- * placeholder does. Key PRESENCE decides both, not truthiness — a row carrying
- * `"computer_id": null` is a full row that failed to fill the field in, and
- * reading it as a stub admits it into every computer's filtered list.
- *
- * THE SHAPE IS REQUIRED WHATEVER THE FLAG SAYS. `unreachable` means opposite
- * things on the two rows it can appear on, and this is the reason a filtered
- * listing tests the row rather than the decoded flag: on a stub the flag is the
- * marker saying the listing is short, and dropping it reports a confident count
- * over an incomplete answer; on a FULL row belonging to another computer,
- * believing it hands somebody else's snapshots to a caller who filtered for
- * their own — from a listing often read just before an irreversible delete.
- * Applying the shape test only to the values this client cannot read left
- * exactly that hole one branch over (Codex review, OPL-3850), which is the same
- * hole the Python SDK's own review of this surface found.
- *
- * A tolerant test rather than an exact whitelist, for the reason Python gives:
- * `Object.keys(d)` against `{id, unreachable}` stops recognising a stub the
- * moment the platform adds a `created_at` or a `kind` to it, and filtering those
- * out drops precisely the markers saying an answer is short.
- */
-/**
- * Whether a ROW off the wire belongs to the computer named.
- *
- * The raw field against the id, rather than the decoded `computerId`, for the
- * reason {@link terminalStatus} gives about a status: `str()` is a coercion and
- * a coercion cannot decide identity. `String(['vm-1'])` is `'vm-1'`, because an
- * array of one joins to its element — so a row whose `computer_id` arrived as
- * `["vm-1"]` matched a filter for `vm-1` and was handed to a caller who asked
- * for their own snapshots, on a listing usually read just before an
- * irreversible delete (Codex adversarial review, OPL-3850). Python is safe from
- * this by accident of formatting: `str(["vm-1"])` is `"['vm-1']"` and matches
- * nothing. Accident is not agreement, so this is explicit.
- *
- * Shared with `waitForMove`, which had the identical hole and did not get the
- * identical fix the first time: it picks this computer's row out of an
- * account-wide listing, so a malformed `computer_id` there returns somebody
- * else's move as this one's outcome — or polls it as this one's live move
- * (Codex review, third pass, OPL-3850). One invariant, one function.
- */
-/**
  * The rows out of a `GET /moves` envelope, or a refusal naming what arrived.
  *
  * `{ moves: [...] }` is the shape. Anything else is the platform failing to
@@ -1110,9 +1065,54 @@ export const latestFinishedMove = (moves: Move[]): Move | undefined =>
     undefined,
   );
 
+/**
+ * Whether a ROW off the wire belongs to the computer named.
+ *
+ * The raw field against the id, rather than the decoded `computerId`, for the
+ * reason {@link terminalStatus} gives about a status: `str()` is a coercion and
+ * a coercion cannot decide identity. `String(['vm-1'])` is `'vm-1'`, because an
+ * array of one joins to its element — so a row whose `computer_id` arrived as
+ * `["vm-1"]` matched a filter for `vm-1` and was handed to a caller who asked
+ * for their own snapshots, on a listing usually read just before an
+ * irreversible delete (Codex adversarial review, OPL-3850). Python is safe from
+ * this by accident of formatting: `str(["vm-1"])` is `"['vm-1']"` and matches
+ * nothing. Accident is not agreement, so this is explicit.
+ *
+ * Shared with `waitForMove`, which had the identical hole and did not get the
+ * identical fix the first time: it picks this computer's row out of an
+ * account-wide listing, so a malformed `computer_id` there returns somebody
+ * else's move as this one's outcome — or polls it as this one's live move
+ * (Codex review, third pass, OPL-3850). One invariant, one function.
+ */
 export const belongsToComputer = (d: Record<string, unknown>, id: string): boolean =>
   d.computer_id === id;
 
+/**
+ * Whether a snapshot ROW stands in for one nobody could read.
+ *
+ * The documented placeholder is an id and this flag and nothing more:
+ * `computer_id` is absent because there was no host to say what the snapshot
+ * belonged to, and `state` is what every real snapshot carries and no
+ * placeholder does. Key PRESENCE decides both, not truthiness — a row carrying
+ * `"computer_id": null` is a full row that failed to fill the field in, and
+ * reading it as a stub admits it into every computer's filtered list.
+ *
+ * THE SHAPE IS REQUIRED WHATEVER THE FLAG SAYS. `unreachable` means opposite
+ * things on the two rows it can appear on, and this is the reason a filtered
+ * listing tests the row rather than the decoded flag: on a stub the flag is the
+ * marker saying the listing is short, and dropping it reports a confident count
+ * over an incomplete answer; on a FULL row belonging to another computer,
+ * believing it hands somebody else's snapshots to a caller who filtered for
+ * their own — from a listing often read just before an irreversible delete.
+ * Applying the shape test only to the values this client cannot read left
+ * exactly that hole one branch over (Codex review, OPL-3850), which is the same
+ * hole the Python SDK's own review of this surface found.
+ *
+ * A tolerant test rather than an exact whitelist, for the reason Python gives:
+ * `Object.keys(d)` against `{id, unreachable}` stops recognising a stub the
+ * moment the platform adds a `created_at` or a `kind` to it, and filtering those
+ * out drops precisely the markers saying an answer is short.
+ */
 export const isUnreachableStub = (d: Record<string, unknown>): boolean => {
   if ('computer_id' in d) return false;
   const w = wire(d.unreachable);
@@ -1569,6 +1569,30 @@ export function toWindowResult(d: Record<string, unknown>): WindowResult {
     gone: said(d.gone),
     raw: { ...d },
   };
+}
+
+/**
+ * Whether a body is a window-action result at all.
+ *
+ * `{}` and `{"ok":true}` decode perfectly well through {@link toWindowResult} —
+ * `window` absent is `undefined`, `gone` absent is `false` — and that pair is
+ * the one outcome the type says a caller must NOT retry: the action happened
+ * and the guest could not describe what it left. So a truncated 200, or a proxy
+ * answering in the platform's place, read as a deliberate no-op with a
+ * documented instruction attached to it.
+ *
+ * The live envelope always carries both keys — `{"gone":false,"ok":true,
+ * "window":{...}}`, and `{"gone":true,"ok":true,"window":null}` on a close,
+ * verified against app.mandala.computer — so requiring one of them costs
+ * nothing a real platform sends. `window` may be `null`; what is refused is its
+ * ABSENCE, which is why this tests the key rather than the value.
+ *
+ * The same refusal `windows()` makes one route along, and it was missing here
+ * only because the guard there was written for a shape that could not decode at
+ * all while this one decodes into a lie.
+ */
+export function isWindowResult(d: Record<string, unknown>): boolean {
+  return 'window' in d || 'gone' in d;
 }
 
 /** The automatic daily snapshot schedule. */

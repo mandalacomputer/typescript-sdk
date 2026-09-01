@@ -816,6 +816,88 @@ describe('what a payload cannot be allowed to mean', () => {
     }
   });
 
+  it('does not read an unreadable status as a disk copy that finished', async () => {
+    // `#statusIs` is a strict comparison precisely so a coerced value cannot
+    // classify — `String(['building'])` is `'building'` — and this wait
+    // inverted it: success was the NEGATION, so an array status read as a copy
+    // that had finished, `buildFailed` did not throw either, and the caller
+    // started a computer whose disk was still being written.
+    for (const status of [['building'], ['build-failed'], undefined, 42]) {
+      const { client: c } = client(() => json({ ...COMPUTER, status }));
+      const computer = await c.computers.get('vm-1');
+      await expect(computer.waitUntilBuilt({ timeoutMs: 60, pollMs: 10 })).rejects.toThrow(
+        TimeoutError,
+      );
+    }
+    // A readable status that is not `building` still returns at once, which is
+    // what makes this safe to call on any computer.
+    const { client: ok } = client(() => json(COMPUTER));
+    await expect((await ok.computers.get('vm-1')).waitUntilBuilt()).resolves.toBeDefined();
+  });
+
+  it('says the status was unreadable rather than that the copy is still running', async () => {
+    const { client: c } = client(() => json({ ...COMPUTER, status: ['building'] }));
+    const computer = await c.computers.get('vm-1');
+    const err = await computer.waitUntilBuilt({ timeoutMs: 60, pollMs: 10 }).catch((e) => e);
+    expect(String(err)).toContain('without a status this client could read');
+  });
+
+  it('does not blame a disk copy that never ran for a deadline that had elapsed', async () => {
+    // `timeoutMs: 0` is a supported argument and reaches here on any ordinary
+    // computer: the budget is gone before the loop can make its first request.
+    // The message named a phase this call never had, and pointed at the wrong
+    // fix — "the copy itself finished" about a computer that was never cloned.
+    const { client: c } = client(anyRoute);
+    const computer = await c.computers.get('vm-1');
+    const err = await computer.waitForGuest({ timeoutMs: 0 }).catch((e) => e);
+    expect(err).toBeInstanceOf(TimeoutError);
+    expect(String(err)).toContain('had elapsed before its guest could be probed');
+    expect(String(err)).not.toContain('disk copy used the whole');
+  });
+
+  it('refuses a hole in a chord rather than sending a null keystroke', async () => {
+    // `JSON.stringify` turns an `undefined` array entry into `null`, so
+    // `key('ctrl', undefined, 'c')` reached the platform as
+    // `keys: ['ctrl', null, 'c']` — a chord with a keystroke nobody named.
+    // `key('ctrl', map.get('copy'))` is how one arrives.
+    const { rec, client: c } = client(anyRoute);
+    const computer = await c.computers.get('vm-1');
+    const before = rec.calls.length;
+    await expect(
+      (computer.key as (...a: unknown[]) => Promise<void>)('ctrl', undefined, 'c'),
+    ).rejects.toThrow(ValidationError);
+    // Refused before anything was sent, which is the only assertion worth
+    // making about a keystroke.
+    expect(rec.calls.length).toBe(before);
+    // The ordinary chord still goes.
+    await computer.key('ctrl', 'c');
+    expect(rec.last().body).toMatchObject({ action: 'key', keys: ['ctrl', 'c'] });
+  });
+
+  it('refuses a window action body that decodes into the one outcome not to retry', async () => {
+    // `{}` and `{"ok":true}` decode perfectly: `window` absent is undefined,
+    // `gone` absent is false — and that pair is documented as "the action
+    // happened and the guest could not describe the result", which a caller is
+    // told not to repeat. So a truncated 200 read as a deliberate no-op.
+    for (const body of [{}, { ok: true }]) {
+      const { client: c } = client((call) =>
+        /\/windows\/[^/]+$/.test(call.path) ? json(body) : anyRoute(call),
+      );
+      const computer = await c.computers.get('vm-1');
+      await expect(computer.windowAction('0x1', 'focus')).rejects.toThrow(
+        /expected a window result/,
+      );
+    }
+    // A null window WITH the key is the real close, and still decodes.
+    const { client: ok } = client((call) =>
+      /\/windows\/[^/]+$/.test(call.path)
+        ? json({ ok: true, gone: true, window: null })
+        : anyRoute(call),
+    );
+    const shut = await (await ok.computers.get('vm-1')).windowAction('0x1', 'close');
+    expect([shut.window, shut.gone]).toEqual([undefined, true]);
+  });
+
   it('lets a caller name the class every local refusal actually is', async () => {
     // The idiom `src/computer.ts` documents — `catch (e) { if (e instanceof
     // ValidationError) }` — was unwritable outside this package until

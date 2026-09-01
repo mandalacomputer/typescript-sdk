@@ -659,10 +659,6 @@ export function errorForStatus(
   if (Cls === GatewayTimeoutError && !namedTheFailure(body)) {
     return new GatewayTimeoutError(said(GATEWAY_TIMEOUT_MESSAGE, status), status, body);
   }
-  // No `namedTheFailure` guard here, and the asymmetry is the point. Every one
-  // of 520-526 means the request never reached the platform, so there is no
-  // reading on which that body carries the platform's account of what happened —
-  // nothing to defer to, and a guard would only look symmetrical.
   // Guarded, where the unreachable statuses below are not, and the difference is
   // which of them the platform could have spoken through. A 520 is its own
   // answer arriving mangled, so a body that parsed as this surface's JSON

@@ -45,6 +45,7 @@ import {
   toMove,
   toSchedule,
   toSnapshot,
+  isWindowResult,
   toVncConnect,
   toWindowResult,
 } from './models.js';
@@ -301,6 +302,20 @@ export class Computer {
    */
   #statusIs(name: string): boolean {
     return this.#data.status === name;
+  }
+
+  /**
+   * Whether the platform sent a status this handle can classify at all.
+   *
+   * The other half of {@link #statusIs}, and it exists because a strict
+   * comparison answers `false` for two different reasons: the status is some
+   * other state, or there is no status here to compare. Every wait that acts on
+   * the NEGATION of a state needs to tell those apart — `!isBuilding` is true
+   * for a computer that has finished copying and equally true for a payload
+   * that carried no status at all.
+   */
+  #statusKnown(): boolean {
+    return typeof this.#data.status === 'string' && this.#data.status !== '';
   }
 
   /**
@@ -886,13 +901,27 @@ export class Computer {
     let delayMs = pollMs;
     for (;;) {
       if (this.buildFailed) throw this.#buildFailure();
-      if (!this.isBuilding) return this;
+      // A READABLE status that is not `building`, not merely the absence of
+      // one. `#statusIs` is a strict comparison precisely so a coerced value
+      // cannot classify — `String(['building'])` is `'building'` — and this
+      // wait inverted it: success was the negation, so `undefined`,
+      // `['building']` and `['build-failed']` all read as a copy that had
+      // finished. `buildFailed` is the same strict test, so the array form did
+      // not throw either; the wait simply returned, and the caller started a
+      // computer whose disk was still being written. `waitUntilRunning` gets
+      // this right by requiring the state it wants rather than the absence of
+      // the one it does not (OPL-3850's shape, on the method that kept it).
+      if (this.#statusKnown() && !this.isBuilding) return this;
       if (Date.now() >= deadline) {
         throw new TimeoutError(
-          observed || !polled
+          !polled || (observed && this.#statusKnown())
             ? `${this.id} was still building after ${timeoutMs}ms ` +
                 '(it has not stopped; only this wait has)'
-            : `${this.id} could not be observed within ${timeoutMs}ms: every refresh failed`,
+            : observed
+              ? `${this.id} answered within ${timeoutMs}ms without a status this client could ` +
+                `read (${JSON.stringify(this.#data.status)}), so whether its disk copy finished ` +
+                'is unknown'
+              : `${this.id} could not be observed within ${timeoutMs}ms: every refresh failed`,
         );
       }
       // The sleep comes before every poll but the first. A clone that finished
@@ -1060,7 +1089,11 @@ export class Computer {
     // A clone may be handed straight to this wait. There is no guest to probe
     // until its disk copy finishes, and only a state refresh can discover that
     // the copy failed while we were waiting.
-    if (this.isBuilding) {
+    // Captured before the wait below can change it: the timeout message turns
+    // on whether a disk copy actually ran, and by the time it is written this
+    // computer is no longer building either way.
+    const copied = this.isBuilding;
+    if (copied) {
       await this.waitUntilBuilt({
         timeoutMs: Math.max(deadline - Date.now(), 0),
         pollMs,
@@ -1135,9 +1168,16 @@ export class Computer {
         throw new TimeoutError(
           probed
             ? `${this.id} guest did not respond within ${timeoutMs}ms`
-            : `${this.id}'s disk copy used the whole ${timeoutMs}ms, so its guest was never probed — ` +
-                `the copy itself finished. Call waitForGuest again with a fresh timeout to ask the ` +
-                `guest.`,
+            : copied
+              ? `${this.id}'s disk copy used the whole ${timeoutMs}ms, so its guest was never ` +
+                `probed — the copy itself finished. Call waitForGuest again with a fresh timeout ` +
+                `to ask the guest.`
+              : // No copy ran, so blaming one names a phase this call never had.
+                // `timeoutMs: 0` is a supported argument and reaches here on any
+                // ordinary computer: the deadline is spent before the loop can
+                // make its first request.
+                `${this.id}'s ${timeoutMs}ms deadline had elapsed before its guest could be ` +
+                `probed, so nothing was asked of it. Call waitForGuest with a longer timeout.`,
         );
       }
       await sleepUntilNextPoll(delayMs, deadline, signal);
@@ -1260,11 +1300,11 @@ export class Computer {
       body: P.windowBody({ action, ...geometry }),
       signal: opts.signal,
     });
-    // The floor is that this was an object at all. Nothing stronger: `window`
-    // is legitimately `null` on a close and on an action the guest could not
-    // describe, so requiring one here would refuse the two answers this shape
-    // exists to carry.
-    if (!P.isRecord(data)) {
+    // `window` is legitimately `null` on a close and on an action the guest
+    // could not describe, so the VALUE cannot be required. The KEY can, and has
+    // to be: without it `{}` and `{"ok":true}` decode into the one outcome a
+    // caller is told not to retry — see `isWindowResult`.
+    if (!P.isRecord(data) || !isWindowResult(data)) {
       throw new MandalaError(`expected a window result from POST ${path}`);
     }
     return toWindowResult(data);
@@ -1529,6 +1569,19 @@ export class Computer {
       throw new ValidationError(
         'key(...) takes key names as separate strings; to pass CallOptions use the array form — ' +
           "key(['ctrl', 'c'], { signal })",
+      );
+    }
+    // A HOLE in the chord, which the check above deliberately let through and
+    // should not have. `JSON.stringify` turns an `undefined` array entry into
+    // `null`, so `key('ctrl', undefined, 'c')` reached the platform as
+    // `keys: ['ctrl', null, 'c']` — a chord with a keystroke nobody named, sent
+    // rather than refused. Exactly the "JavaScript reaches here" case the
+    // comment above is about: `key('ctrl', map.get('copy'))` is how one
+    // arrives, and a caller who wrote that meant a two-key chord.
+    if (spread && rest.some((r) => r === undefined)) {
+      throw new ValidationError(
+        'key(...) takes a key name in every position; one of them was undefined, which reaches ' +
+          'the platform as a null keystroke rather than as the chord you asked for',
       );
     }
     const keys = first == null ? [] : spread ? [first, ...(rest as string[])] : [...first];

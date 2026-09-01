@@ -953,9 +953,14 @@ import {
   UnavailableError,    //     503 — a listing would have been short
   GatewayTimeoutError, //     504/524 — a proxy gave up; the work carries on
   OriginResponseError, //     520 — it answered, unreadably; work may have happened
-  OriginUnreachableError,//   521-523 — a proxy could not reach it; retry
+  OriginUnreachableError,//   521-523 — a proxy could not reach it. NOT in
+                       //     `isTransient`: the outcome is unknown, not "nothing happened"
   OriginTLSError,      //     525/526 — a certificate they cannot agree on
-  ConnectionError,     //   the platform could not be reached. Retryable.
+  ConnectionError,     //   the request never left: DNS, a refused socket, a
+                       //     failed handshake. Retryable, `create` included.
+  ConnectionInterruptedError,// a subclass, and the opposite answer: the request
+                       //     WAS on the wire and the reply was lost. NOT in
+                       //     `isTransient` — replaying a create here makes two.
   TimeoutError,        //   a wait helper gave up
   ValidationError,     // a TypeError: your argument, refused before it was sent
   isTransient,
@@ -969,6 +974,13 @@ try {
   else throw err;
 }
 ```
+
+**Read `isTransient` rather than the comments above when it matters.** Three
+entries in that list are things a caller must not replay blind, and two of them
+look retryable from their names: `OriginUnreachableError` is a proxy failing to
+reach the platform *after* the request left, and `ConnectionInterruptedError` is
+a `ConnectionError` whose subclass carries the opposite verdict from its parent.
+The predicate knows; a table read at a glance does not.
 
 `ValidationError` is the odd one out and is deliberately **not** a
 `MandalaError`: it is a `TypeError`, because a relative guest path or half a
