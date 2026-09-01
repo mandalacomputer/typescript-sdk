@@ -1311,6 +1311,12 @@ export function scheduleBody(args: {
   tz?: string;
 }): Json {
   const { enabled, hour = 4, minute = 0, tz = 'UTC' } = args;
+  // Through {@link requireString} like every other string this file sends. It
+  // was the one field in this builder taken as given — `hour` and `minute` are
+  // range-checked either side of it — so a JavaScript caller's object or number
+  // was JSON-encoded onto the schedule rather than refused here, which is what
+  // this file is for.
+  requireString(tz, 'tz');
   // Through {@link flag} like every other boolean this file sends. Without it a
   // JavaScript caller's `"false"` — or a `new Boolean(false)`, which is an
   // object and therefore truthy — went on the wire verbatim and switched the

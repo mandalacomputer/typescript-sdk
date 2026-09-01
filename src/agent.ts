@@ -13,6 +13,7 @@
  */
 
 import { MandalaError } from './errors.js';
+import { num, str } from './models.js';
 import { isRecord } from './paths.js';
 
 /** What the caller learns about one step. */
@@ -104,10 +105,20 @@ export type AgentArgs = {
   signal?: AbortSignal;
 };
 
-const num = (v: unknown): number => {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : 0;
-};
+// The decoders below read through `num` and `str` from models.ts rather than
+// through `Number()` and `String()`, which is what this file used to do and
+// what the rest of the SDK stopped doing in OPL-3850. This file kept its own
+// one-line `num` and so kept both defects, on the one route that decodes a
+// LIVE stream:
+//
+// - `Number()` is a coercion and not a parser, so `Number([7])` is 7 and a
+//   token count nobody was billed for was reported against an Anthropic key.
+// - `String()` throws when `toString` is not callable, and it is reached from
+//   inside the caller's `for await` — so one unreadable detail line ended a
+//   running agent instead of being skipped.
+//
+// `stop` is not routed through `str` either: it CLASSIFIES, and the comment on
+// it says why that is a stricter rule than being readable.
 
 export function toAgentUsage(d: unknown): AgentUsage {
   const u = isRecord(d) ? d : {};
@@ -122,22 +133,32 @@ export function toAgentUsage(d: unknown): AgentUsage {
 export function toAgentStep(d: unknown, fallbackN: number): AgentStep {
   const s = isRecord(d) ? d : {};
   return {
-    n: s.n == null ? fallbackN : num(s.n),
-    tool: s.tool == null ? '' : String(s.tool),
-    action: s.action == null ? undefined : String(s.action),
-    detail: s.detail == null ? undefined : String(s.detail),
-    error: s.error == null ? undefined : String(s.error),
+    n: num(s.n, fallbackN),
+    tool: str(s.tool),
+    // Absent stays absent: `undefined` here is "the platform did not send one",
+    // which is a different answer from the empty string a value it sent but
+    // this client could not read decodes to.
+    action: s.action == null ? undefined : str(s.action),
+    detail: s.detail == null ? undefined : str(s.detail),
+    error: s.error == null ? undefined : str(s.error),
   };
 }
 
 export function toAgentResult(d: unknown): AgentResult {
   const r = isRecord(d) ? d : {};
-  const stop = r.stop == null ? 'unknown' : String(r.stop);
+  // A STRING or nothing, rather than anything coerced into one, for the reason
+  // `buildContradiction` reads `raw.status` rather than the coerced `status`:
+  // this field classifies, and a coerced value cannot be trusted to classify.
+  // `String(['end_turn'])` is `'end_turn'`, so an array read as the one stop
+  // reason that means the model finished — and `finished` is the single check
+  // the docs tell callers to make instead of comparing this string themselves.
+  // Anything unreadable is the same "nobody said" as an absent one.
+  const stop = typeof r.stop === 'string' ? r.stop : 'unknown';
   return {
     steps: num(r.steps),
     stop,
     finished: stop === 'end_turn',
-    text: r.text == null ? '' : String(r.text),
+    text: str(r.text),
     usage: toAgentUsage(r.usage),
     raw: { ...r },
   };
@@ -160,7 +181,7 @@ export function toAgentEvent(
     case 'step':
       return { type: 'step', step: toAgentStep(data, stepCount + 1) };
     case 'text':
-      return { type: 'text', text: isRecord(data) ? String(data.text ?? '') : String(data) };
+      return { type: 'text', text: isRecord(data) ? str(data.text) : str(data) };
     case 'done':
       if (!isRecord(data) || data.stop == null) {
         throw new MandalaError('the agent stream ended with a done event that had no stop reason');
@@ -168,9 +189,16 @@ export function toAgentEvent(
       return { type: 'done', result: toAgentResult(data) };
     case 'error': {
       const e = isRecord(data) ? data : undefined;
+      // Two ways to end up with nothing, and the sentinel has to cover both:
+      // a value `String()` cannot render at all — which `str` answers with the
+      // empty string rather than by throwing — and one that renders AS the
+      // empty string. `Computer.agent` puts this straight into "the agent run
+      // failed: ", so either would end a run with a reason naming nothing. The
+      // swap to `str` fixed the throw and dropped this fallback on the way.
+      const said = e ? (e.error == null ? '' : str(e.error)) : str(data);
       return {
         type: 'error',
-        error: e ? (e.error == null ? 'the run failed' : String(e.error)) : String(data),
+        error: said || 'the run failed',
         status: num(e?.status),
       };
     }

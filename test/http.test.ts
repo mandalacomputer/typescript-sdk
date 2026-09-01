@@ -768,6 +768,55 @@ describe('server-sent events', () => {
     );
   });
 
+  it('still frames a chunk larger than the cap when it carries boundaries', async () => {
+    // The cap is checked BEFORE the concatenation now, so that the string it
+    // refuses to hold is never built. That check must not cost the drain: a
+    // chunk can legitimately be larger than the cap when it carries the
+    // boundaries to split on, and refusing that would turn a working stream
+    // into an error over an arithmetic shortcut.
+    const step = (n: number) =>
+      `event: step\ndata: {"n":${n},"tool":"computer","detail":"${'x'.repeat(200_000)}"}\n\n`;
+    const body =
+      step(1) +
+      step(2) +
+      step(3) +
+      step(4) +
+      step(5) +
+      step(6) +
+      'event: done\ndata: {"steps":6,"stop":"end_turn","text":"ok"}\n\n';
+    // One read, larger than the cap, with every boundary already in it.
+    const rec = recorder((call) =>
+      call.path.endsWith('/agent') ? stream(body, body.length) : anyRoute(call),
+    );
+    const c = await client(rec).computers.get('vm-1');
+    const seen = [];
+    for await (const ev of c.agentStream({ prompt: 'go', modelKey: 'sk' })) seen.push(ev);
+    expect(body.length).toBeGreaterThan(1 << 20);
+    expect(seen.map((e) => e.type)).toEqual([
+      'step',
+      'step',
+      'step',
+      'step',
+      'step',
+      'step',
+      'done',
+    ]);
+  });
+
+  it('refuses an oversized event split across reads, before holding it', async () => {
+    // The runaway case the cap is for: no boundary anywhere, arriving in
+    // pieces, so the refusal has to come from the running total rather than
+    // from any one chunk.
+    const oversized = `data: ${'x'.repeat((1 << 20) + 1)}`;
+    const rec = recorder((call) =>
+      call.path.endsWith('/agent') ? stream(oversized, 64_000) : anyRoute(call),
+    );
+    const c = await client(rec).computers.get('vm-1');
+    await expect(c.agent({ prompt: 'go', modelKey: 'sk' })).rejects.toThrow(
+      /exceeded 1048576 characters without a boundary/,
+    );
+  });
+
   it('frames a stream a proxy reframed with CRLF', async () => {
     // Splitting on "\n\n" alone would never find a boundary, collapse the whole
     // run into one unparseable event, and lose the result of a run that had in
