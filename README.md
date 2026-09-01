@@ -121,7 +121,9 @@ if (!check.buildDigest) console.log(check.buildDigestNeeds);
 `canonical` is the document as the digests were taken over it, key order and
 whitespace normalised — hash it yourself to check `docDigest` rather than
 trusting the platform to have done it honestly. `template` is the catalogue row
-the document describes, left as the record it arrived as.
+the document describes, in the same shape `templates.list()` answers — so what a
+validated document would look like in a picker is readable before it is
+published.
 
 **The namespace is your account.** `metadata.namespace` has to be your account
 id — anything else is a `403`, `system` included — and this SDK does not rewrite
