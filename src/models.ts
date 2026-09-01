@@ -429,9 +429,10 @@ export type Template = {
    * and nothing at all — and code that treats the third as X11 is right today
    * and wrong the first time a host is rolled back.
    *
-   * READ IT OFF THE COMPUTER WHEN YOU HAVE ONE. A computer keeps the image it
-   * was cut from while a template's version can advance, so this answers a
-   * question about the CATALOGUE. The platform publishes the field on both for
+   * READ {@link Computer.desktop} WHEN YOU HAVE A COMPUTER. A computer keeps the
+   * image it was cut from while a template's version can advance, so this
+   * answers a question about the CATALOGUE and that one answers a question about
+   * the MACHINE. The platform publishes the field in both places for exactly
    * that reason.
    */
   desktop?: string;
@@ -1694,10 +1695,35 @@ export function toBackgroundExec(d: Record<string, unknown>): BackgroundExec {
  * application, the title is whatever page it is showing.
  */
 export type GuestWindow = {
-  /** `0x2600003`-shaped. What {@link Computer.windowAction} takes. */
+  /**
+   * `0x2600003`-shaped. What {@link Computer.windowAction} takes.
+   *
+   * THE SHAPE IS THE SAME ON BOTH DESKTOPS and the THING IS NOT. It is an X
+   * window id on an X11 guest and a Hyprland client address on a Wayland one
+   * (OPL-4223); the daemon validates both against one `0x`-and-hex pattern,
+   * deliberately, so nothing a caller does with the string breaks. What breaks
+   * is taking it somewhere else: a compositor address means nothing to `xdotool`
+   * or `xprop`, so an id read here and handed to X tooling through
+   * {@link Computer.exec} finds no window on a Wayland guest and fails in the
+   * guest rather than at this API.
+   *
+   * {@link Computer.desktop} is what says which one you are holding. This doc
+   * named only the X11 case until OPL-4260.
+   */
   id: string;
   title: string;
-  /** The X11 window class — the application, not its current document. */
+  /**
+   * The application, not its current document.
+   *
+   * The X11 window class on an X11 guest and the compositor's `class` on a
+   * Wayland one, which is what `hyprctl clients` calls the same idea. Matching
+   * on it works on both; what differs is one case worth knowing about, since
+   * the daemon records it and nothing publishes it: an XWayland client — an X11
+   * application running under the Wayland compositor — reports a class that
+   * need not look like its Wayland neighbours'. So on a Wayland guest, a class
+   * that matches nothing you expected is more likely an XWayland application
+   * than a missing window.
+   */
   windowClass: string;
   type: string;
   /**

@@ -500,6 +500,43 @@ export class Computer {
     return str(this.#data.os);
   }
 
+  /**
+   * The display protocol this computer's desktop speaks — `'wayland'`, or
+   * `undefined` for X11 and for a platform that did not say.
+   *
+   * READ IT BEFORE DRIVING A WINDOW. {@link os} is `linux` for a Wayland guest
+   * and an X11 one alike, so this is the only field that separates them, and
+   * two things a caller acts on change with it:
+   *
+   * - a {@link GuestWindow.id} is a Hyprland client address rather than an X
+   *   window id. Same `0x`-and-hex shape, so nothing this API takes changes —
+   *   but the id means nothing to `xdotool` or `xprop`, so anything that leaves
+   *   here for X tooling through {@link exec} stops finding windows;
+   * - a move or a resize of a TILED window is REFUSED rather than quietly
+   *   applied to nothing. See {@link windowAction}, which is where the refusal
+   *   arrives and where the way past it is written down.
+   *
+   * On the COMPUTER rather than only on {@link Template.desktop}, and the
+   * platform publishes it in both places for the reason it gives at
+   * `publicComputer`: a computer keeps the image it was cut from while a
+   * template's version can advance, so the template answers a question about
+   * the CATALOGUE and this one answers a question about the MACHINE.
+   *
+   * `undefined` AND NOT `'x11'`, which is the one place this getter parts
+   * company with every other on this handle. A host deployed before OPL-4223
+   * does not send the field, and the platform passes that silence through
+   * rather than naming a value, because naming one would assert a property of
+   * an image nobody claimed. `str()`'s own fallback would answer `''` — a
+   * display protocol no host speaks — and a fallback of `'x11'` would put the
+   * platform's refused assertion back on this side of the wire. So there are
+   * three readings and not two, and code that treats the third as X11 is right
+   * today and wrong the first time a host is rolled back.
+   */
+  get desktop(): string | undefined {
+    const d = this.#data.desktop;
+    return d == null ? undefined : str(d);
+  }
+
   get template(): string {
     return str(this.#data.template);
   }
@@ -1732,6 +1769,12 @@ export class Computer {
    * Panels, the wallpaper and other furniture are excluded by default — a stock
    * guest with one terminal open has five windows, four of which are not
    * applications. Pass `{ includeAll: true }` for all of them.
+   *
+   * The rows are the same {@link GuestWindow} on either desktop, read off the X
+   * server on an X11 guest and off the compositor on a Wayland one (OPL-4223).
+   * Two fields carry a difference worth knowing about rather than a different
+   * spelling — see {@link GuestWindow.id} and {@link GuestWindow.windowClass} —
+   * and {@link desktop} is what says which you are reading.
    */
   async windows(opts: { includeAll?: boolean } & CallOptions = {}): Promise<GuestWindow[]> {
     const path = P.computerAction(this.id, 'windows');
@@ -1774,6 +1817,23 @@ export class Computer {
    *
    * Prefer `focus` over `raise`: raising without focusing gives a window that is
    * visibly in front and silently not receiving keystrokes.
+   *
+   * A MOVE OR A RESIZE IS REFUSED ON A TILED WINDOW, on a computer whose
+   * {@link desktop} is `wayland`. A tiled window's geometry belongs to the
+   * compositor's layout rather than to the window, so Hyprland accepts the
+   * dispatch and does nothing — and a caller reading that cannot tell "declined"
+   * from "applied, and the numbers happen to match what they already were".
+   * The daemon therefore asks whether the window floats BEFORE dispatching and
+   * refuses when it does not, naming the way past it: float the window (Super+V
+   * in a stock Omarchy) and the move or resize takes. X11 is where the silent
+   * version of this does not arise, and it is why the refusal reads as a fault
+   * to anyone who has only ever driven an X11 guest.
+   *
+   * It arrives as a 400, so as a plain {@link APIError}, and `errors.ts` opens
+   * by saying a 400 never clears. That still holds for the REQUEST — repeating
+   * it byte for byte will be refused again — but the state it complains about
+   * is one the caller can change, and the message names the change. So this is
+   * the 400 on this method to read rather than to give up on.
    *
    * A {@link WindowResult} rather than a window, because two outcomes have no
    * window to describe and only one of them is a `close`. See `gone`. This

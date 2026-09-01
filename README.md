@@ -345,6 +345,25 @@ after a close, and `false` when the action happened and the guest could not
 describe what it left. The second is an outcome, not a failure, and not a reason
 to repeat the action.
 
+**Two desktops answer this, and `c.desktop` says which.** `os` is `linux` for a
+Wayland guest and an X11 one alike, so it is the only field that tells them
+apart — `'wayland'`, `'x11'`, or `undefined` from a host too old to have been
+asked, which is not the same as `'x11'`. Two things change with it:
+
+```ts
+if (c.desktop === 'wayland') {
+  // A move or a resize of a TILED window is REFUSED, not quietly ignored: the
+  // geometry belongs to the compositor's layout. Float it first (Super+V in a
+  // stock Omarchy) and the same call takes.
+  await c.windowAction(w.id, 'move', { x: 100, y: 100 });   // 400 on a tiled window
+}
+```
+
+and `w.id` is a compositor address rather than an X window id. Both are `0x` and
+hex and both are what `windowAction` takes, so nothing on this API changes — but
+an id handed to `xdotool` or `xprop` through `c.exec()` finds no window on a
+Wayland guest.
+
 ### Clipboard
 
 The desktop's `CLIPBOARD` selection — what Ctrl-C writes and Ctrl-V pastes — read
