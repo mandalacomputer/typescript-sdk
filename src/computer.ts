@@ -8,10 +8,19 @@ import {
   toAgentResult,
 } from './agent.js';
 import {
-  APIError,
+  // TYPE-ONLY, both of them, and kept rather than dropped. Every reference to
+  // either in this file is a `{@link}` in a doc comment — `APIError.reason` on
+  // the two clipboard methods, `isTransient` on the retry advice beside them —
+  // so as values they are dead, and `verbatimModuleSyntax` was emitting a
+  // runtime import for two bindings nothing calls. Deleting them instead would
+  // cost the links: `{@link}` resolves through a type import and not through
+  // nothing, and the alternative is qualifying every target by module path.
+  // The inline modifier rather than a second import statement, matching the
+  // `./agent.js` line above.
+  type APIError,
   ConnectionError,
   errorForEventStatus,
-  isTransient,
+  type isTransient,
   MandalaError,
   NotFoundError,
   RangeNotSatisfiableError,
