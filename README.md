@@ -616,8 +616,16 @@ anything that happens in that window is never reported and never will be.
 `armed: false` in `stream.watching` means wait for that tree's `file.changed`
 carrying `armed: true`; `armed: true` there means live **now**, and no event is
 coming to say so, because the guest answers a nomination once and somebody else
-got there first. Same split as `ready`: state in the opening frame, transitions
-on the stream. An `armed` also comes again after anything that re-arms the watch
+got there first. `stream.watching` is each tree's state rather than the opening
+frame's claim about it: an `armed` moves an entry to live and an `unwatchable`
+moves it back, while `flood` and `budget` leave it, because under those the tree
+*is* watched and is merely being reported incompletely. `stream.hello.watching`
+stays what the connection was told when it joined, the same way `hello.events`
+stays the opening vocabulary and `stream.eventTypes` is the live one — read
+`stream.watching` to decide what silence means.
+
+Same split as `ready`: state in the opening frame, transitions on the stream.
+An `armed` also comes again after anything that re-arms the watch
 — a stop and a start, a guest reboot — and means what the first one did:
 reporting starts *here*, so re-read the tree if the interruption mattered.
 
@@ -688,11 +696,14 @@ same 1006 close, so the SDK reads the computer afterwards and says which it was.
 A nomination the host will not honour arrives the same silent way, which is why
 `watch` is checked before a socket is opened.
 
-`waitFor` matches on the type and on nothing else, which matters for the one
-type that arrives in more than one shape: `waitFor('file.changed')` returns the
-first frame of that type, and on a live computer that is almost always the
-`armed` announcing the tree went live. Skipping the arming and the losses is
-what the `for await` loop above does and what this does not.
+`waitFor('file.changed')` ends on a **change**, and not on the arming marker or
+a loss. Three shapes share that type and only one of them is a change, so a wait
+matched on the name alone came back with the arming on a fresh nomination and
+with a real change on a tree somebody else had already armed — the same call
+meaning two things depending on who got there first. The markers still arrive on
+`events()`; they simply do not answer that question. A timeout says which
+nominated tree never armed, because a watch that did not arm is silent in
+exactly the way a tree where nothing happened is.
 
 Windows guests have no event stream at all: there is nowhere in the guest to run
 the watcher the guest half needs.

@@ -473,6 +473,10 @@ export type Hello = {
    * host normalised it and is the form every event carries, and its `armed`
    * says whether that tree is live already or has an `armed` event still to
    * come. See {@link WatchedTree}.
+   *
+   * This is the frame's answer AT CONNECT and stays it. The markers that arrive
+   * afterwards move {@link ComputerEvents.watching}, which is the one to read
+   * for what is true now.
    */
   watching?: WatchedTree[];
   raw: Record<string, unknown>;
@@ -1018,6 +1022,7 @@ export class ComputerEvents implements AsyncIterable<ComputerEvent> {
   #detachMessage?: () => void;
   #hello?: Hello;
   #types?: string[];
+  #watching?: WatchedTree[];
 
   /** @internal — obtain one from `Computer.events()`. */
   constructor(url: EventUrlSource, refusal: EventRefusal, opts: EventStreamOptions = {}) {
@@ -1105,13 +1110,27 @@ export class ComputerEvents implements AsyncIterable<ComputerEvent> {
   }
 
   /**
-   * What the newest connection's opening frame said about the trees this stream
-   * nominated, or `undefined` when it nominated none.
+   * The trees this stream nominated and what is true of them NOW, or
+   * `undefined` when it nominated none.
    *
    * The thing to read before matching a `file.changed`, and before reading
    * silence: each entry's `path` is the nomination as the HOST spelled it,
    * which is the form the events carry, and its `armed` says whether that tree
-   * is live already or has an `armed` event still to come.
+   * is being watched.
+   *
+   * State rather than the opening frame's claim, because arming is announced
+   * ONCE and is never restated to a client that has already been told. A list
+   * that only ever reported `hello` would answer `false` for the rest of the
+   * stream's life about a tree that went live a second later. So an `armed`
+   * event moves the entry to live, and the one loss that means the tree is not
+   * being watched — `unwatchable` — moves it back; `flood` and `budget` leave
+   * it, because under those the tree IS watched and is merely being reported
+   * incompletely.
+   *
+   * This is the live answer and {@link hello}'s `watching` is the frame's, the
+   * same way {@link eventTypes} is live and `hello.events` is the frame's. Read
+   * this one to decide what silence means; read that one to see what the
+   * connection was told when it joined.
    *
    * `undefined` until the first opening frame lands, which is when the socket
    * is opened — and the socket is opened by the first pull on the iterator. To
@@ -1126,16 +1145,17 @@ export class ComputerEvents implements AsyncIterable<ComputerEvent> {
    * });                                 // [{ path: '/home/user/project', armed: false }]
    * ```
    *
-   * Replaced on every reconnect, because arming is answered per connection: a
-   * tree that was `false` on the connection that dropped can be `true` on the
-   * one that replaced it, and no event says so.
+   * Reset by every reconnect to what that connection's opening frame said,
+   * because arming is answered per connection: a tree that was `false` on the
+   * connection that dropped can be `true` on the one that replaced it, and no
+   * event says so.
    */
   get watching(): WatchedTree[] | undefined {
     // A copy of the array AND of the entries — see `copyWatching`, which is
     // why this one goes deeper than `windows` does. Shared, an entry handed to
     // a caller was the same object `#hello` holds and the one `onConnect` was
     // given, so editing it changed what the next read of any of the three said.
-    return copyWatching(this.#hello?.watching);
+    return copyWatching(this.#watching);
   }
 
   /** The desktop the newest connection joined, when it was sent one. */
@@ -1486,6 +1506,20 @@ export class ComputerEvents implements AsyncIterable<ComputerEvent> {
     // The vocabulary is snapshotted for the same reason and separately, because
     // a `capabilities` frame replaces this one without touching `#hello`.
     this.#types = [...hello.events];
+    // The nominations, snapshotted separately for exactly that reason: an
+    // `armed` marker and an `unwatchable` loss move THIS list and must not
+    // reach `#hello`, which is documented as the opening frame of the
+    // connection currently open and has to stay the frame. Same split as
+    // `events` and `eventTypes`, and the same one `windows` keeps. Written into
+    // the frame instead, `stream.hello.watching` drifted into live state while
+    // the `hello` a connect hook was handed stayed the original, so the two
+    // doors disagreed about the same tree (OPL-4255).
+    //
+    // Replaced per connection, like the two beside it: a reconnect
+    // re-nominates and is answered afresh, and the answer can differ — a guest
+    // reboot in between disarms a tree that was live on the last socket — so
+    // carrying the old list forward would report a watch that is not running.
+    this.#watching = copyWatching(hello.watching);
     // The cursor a client stores when it disconnects before seeing an event.
     // Adopted only when nothing has been consumed, because it names a position
     // BEFORE the backlog this connection is about to deliver: taken while
@@ -1566,7 +1600,41 @@ export class ComputerEvents implements AsyncIterable<ComputerEvent> {
     // does `ev.events.push(...)` inside its own `for await` edits the list a
     // wait consults.
     if (ev.type === 'capabilities' && ev.events) this.#types = [...ev.events];
+    else if (ev.type === 'file.changed' && ev.watch) {
+      if (ev.armed) this.#recordArmed(ev.watch, true);
+      // The ONE loss that means the tree is not being watched, and therefore
+      // the one that moves this record. `flood` and `budget` say the tree IS
+      // watched and is being reported incompletely, so a client is still right
+      // to read silence under them as nothing having changed — see
+      // {@link WatchLost}, where that division is the whole difference between
+      // the three.
+      else if (ev.lostReason === 'unwatchable') this.#recordArmed(ev.watch, false);
+    }
     return ev;
+  }
+
+  /**
+   * Move one nominated tree between live and not.
+   *
+   * What makes {@link watching} the tree's STATE rather than the opening
+   * frame's claim about it. Arming is announced once and never restated to a
+   * client that was already told, so a stream that only ever reported `hello`
+   * would answer `armed: false` for the rest of its life about a tree that went
+   * live a second later — on the one field a caller reads to decide whether
+   * silence means "nothing has changed".
+   *
+   * Only for a tree the opening frame named. A marker for anything else is
+   * either a host this build does not understand or an event that leaked past
+   * the nomination, and inventing a row for it would put a path in
+   * {@link watching} that this stream never asked about — which is the one
+   * thing that list is relied on to mean.
+   */
+  #recordArmed(tree: string, armed: boolean): void {
+    const watching = this.#watching;
+    if (!watching) return;
+    for (const w of watching) {
+      if (w.path === tree) w.armed = armed;
+    }
   }
 }
 
@@ -1618,6 +1686,65 @@ export function withWatches(url: string, watch: readonly string[]): string {
     out += `${out.includes('?') ? '&' : '?'}watch=${encodeURIComponent(path)}`;
   }
   return out;
+}
+
+/**
+ * Whether this event is the one a `waitFor` asked for.
+ *
+ * Matching on {@link ComputerEvent.type} alone is right for every type but one.
+ * `file.changed` carries THREE shapes under a single name and only one of them
+ * is a change: the other two say the tree went live and that the picture of it
+ * is incomplete. A wait matched on the type returned whichever arrived first,
+ * so `waitFor('file.changed', { watch })` on a fresh nomination came back with
+ * the arming marker — no file had changed — and closed the socket.
+ *
+ * Worse, it did that only SOMETIMES. The guest answers a nomination once, so
+ * the same call against a tree somebody else had already armed never sees that
+ * marker and waits for a real change. One call, two meanings, decided by who
+ * got there first — and `waitFor(['file.changed', 'process.exited'])` completed
+ * on arming before the process had done anything.
+ *
+ * That is the `computer.ready` trap in a new place: state in `hello`, the
+ * transition on the wire. It is the trap {@link ComputerEvent.synthesized}
+ * exists to remove, and here there is nothing to synthesize, because the caller
+ * did not ask about arming at all (OPL-4255).
+ *
+ * So a wait for `file.changed` ends on a change and nothing else. The markers
+ * are still DELIVERED — `events()` yields every frame, and
+ * {@link ComputerEvents.watching} folds them into each tree's state — they
+ * simply do not answer this question.
+ */
+export function answersWait(ev: ComputerEvent, wanted: ReadonlySet<string>): boolean {
+  if (!wanted.has(ev.type)) return false;
+  // A change is the shape that names a path. `armed` and a loss name only the
+  // tree, and so does a frame this build could not read — which a wait should
+  // sit through rather than end on, for the same reason.
+  return ev.type === 'file.changed' ? ev.path !== undefined : true;
+}
+
+/**
+ * The nominated trees that were not being watched when a wait ran out of time.
+ *
+ * A watch that is not armed is silent in exactly the way a tree where nothing
+ * happened is, and the difference is the whole of what `armed` is for. Left
+ * unsaid, a nomination the guest could not honour — a directory that is not
+ * there, or is a symlink — reaches a caller as an ordinary timeout with nothing
+ * in it to explain the wait.
+ *
+ * The state AT THE DEADLINE, and the sentence built from it says exactly that
+ * rather than "never armed". Two different histories end here: a tree that
+ * stayed dark from the start, and one that went live and was then taken back
+ * out by an `unwatchable`. Only the first never armed, and a diagnosis that
+ * claimed it of the second would be false about the one thing this sentence
+ * exists to be true about.
+ *
+ * Not an error, and deliberately: `unwatchable` recovers on its own, and
+ * nominating the directory a job is about to create is a supported thing to do.
+ * So this is a sentence added to the timeout rather than a reason to end the
+ * wait early.
+ */
+export function unarmedTrees(watching: readonly WatchedTree[] | undefined): string[] {
+  return watching ? watching.filter((t) => !t.armed).map((t) => t.path) : [];
 }
 
 /**
