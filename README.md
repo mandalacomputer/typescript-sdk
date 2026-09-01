@@ -554,7 +554,10 @@ already brought up.
 Only where it could not arrive as an event: a stream opened with `since` either
 already had the readiness or is about to be handed it out of the backlog, so
 nothing is made up there. A resume that *gapped* does get one, because the
-backlog it would have been in is what the gap says is gone.
+backlog it would have been in is what the gap says is gone — **including a
+second time**, if the stream gaps again. A desktop can be replaced inside a
+running computer, and a gap is exactly where the event saying so went missing,
+so one extra readiness per gap is the price of never suppressing a real one.
 
 A *second* `computer.ready` is real news: restarting the display manager inside
 a guest destroys the desktop and brings up a new one without the computer ever

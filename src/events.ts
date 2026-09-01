@@ -235,6 +235,18 @@ export type ComputerEvent = {
    * no continuity and does get one, because the backlog it would have been in
    * is what the gap says is gone.
    *
+   * Decided per CONNECTION, so a stream that gaps more than once can hand you
+   * this for a desktop you already knew was ready — once per gap, and never
+   * for an ordinary reconnect that kept its place. That is deliberate and it is
+   * the cheaper of two wrong answers: the alternative was remembering across
+   * reconnects, which suppressed the readiness of a desktop the client had
+   * never been told about at all, because a display manager can be restarted
+   * inside a running computer and a gap is exactly where the event saying so
+   * went missing (OPL-4206). The reference's instruction for a second
+   * `computer.ready` — treat it as a desktop you have not seen and ask
+   * `GET /computers/{id}/windows` — costs one listing; the suppression cost a
+   * wait that never ended.
+   *
    * Flagged rather than passed off as the real thing because it is not one: it
    * has no {@link seq}, its {@link at} is when this client asked rather than
    * when the desktop came up, and its {@link cursor} is the opening frame's.
@@ -702,8 +714,6 @@ export class ComputerEvents implements AsyncIterable<ComputerEvent> {
   #cursor?: string;
   #hello?: Hello;
   #types?: string[];
-  /** Whether a `computer.ready` has reached the caller on this stream, in any shape. */
-  #sawReady = false;
 
   /** @internal — obtain one from `Computer.events()`. */
   constructor(url: EventUrlSource, refusal: EventRefusal, opts: EventStreamOptions = {}) {
@@ -886,16 +896,6 @@ export class ComputerEvents implements AsyncIterable<ComputerEvent> {
           // was never yielded, so the position never reached it and the
           // reconnect asks for it again.
           if (ev.cursor) this.#cursor = ev.cursor;
-          // Latched HERE, where the event reaches the caller, and not where it
-          // was queued. A connection that fails between the two — a hello that
-          // lands after the connect deadline, a hook that throws — takes its
-          // whole queue with it, and a latch set at the push would leave the
-          // stream believing it had delivered a readiness nobody received. The
-          // next connection then declines to synthesize, and a
-          // `waitFor('computer.ready')` on an already-ready desktop waits for
-          // an event that cannot happen twice: the exact hang this synthesis
-          // exists to prevent.
-          if (ev.type === 'computer.ready') this.#sawReady = true;
           delivered += 1;
           yield ev;
           if (this.#stopped()) return;
@@ -1085,15 +1085,35 @@ export class ComputerEvents implements AsyncIterable<ComputerEvent> {
     // cursor, or one that gapped — which is the platform's own test and the
     // reason it is read here rather than `since` being remembered. With
     // continuity there is nothing to make up: either this client was already
-    // sent the readiness on an earlier connection, or the event that set the
-    // latch is sitting in the backlog about to arrive. Manufacturing one there
-    // puts a second `computer.ready` in front of the real one, and the
-    // reference tells a client to read that as a desktop it has not seen —
-    // so the invention would be a session replacement that never happened.
+    // sent the readiness on an earlier connection, or the event that would
+    // carry it is sitting in the backlog about to arrive. Manufacturing one
+    // there puts a second `computer.ready` in front of the real one, and the
+    // reference tells a client to read that as a desktop it has not seen — so
+    // the invention would be a session replacement that never happened.
     //
-    // Once per stream, not once per connection: `#sawReady` survives the
-    // reconnects, for the same reason.
-    if (hello.ready && hello.windows !== undefined && !this.#sawReady) {
+    // PER CONNECTION, and it used to be per stream: a `#sawReady` latch
+    // survived the reconnects on the argument that this client had already
+    // been told. It had been told about a DIFFERENT DESKTOP (OPL-4206).
+    //
+    // The latch could only ever suppress where `windows` is present, which is
+    // the platform saying this connection has no continuity — so it was live
+    // exactly where the client has least information of its own, and answered a
+    // question about the session it is joining with a fact about the session it
+    // left. A display manager restarting inside the guest destroys the desktop
+    // and brings up a new one without the computer leaving `running`; if the
+    // socket then drops and the resume gaps, session B's own `computer.ready`
+    // is in the backlog the gap says is gone, the latch suppresses the
+    // synthesized one, and `waitFor('computer.ready')` runs to its timeout on a
+    // desktop that is up. That is the hang this synthesis exists to prevent,
+    // reached through the one path where nothing else could correct it.
+    //
+    // The cost is a readiness a caller may already have known about, once per
+    // gap. The reference's own instruction for a second `computer.ready` is to
+    // treat it as a desktop you have not seen and ask
+    // `GET /computers/{id}/windows` — so it costs one listing, against a wait
+    // that never ends. Gaps are not routine: one means this host could not
+    // replay what the client missed.
+    if (hello.ready && hello.windows !== undefined) {
       frames.push({ kind: 'event', value: this.#readyFromHello(hello) });
     }
   }
