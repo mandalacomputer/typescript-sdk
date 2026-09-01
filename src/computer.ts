@@ -9,6 +9,7 @@ import {
 } from './agent.js';
 import {
   APIError,
+  ConnectionError,
   errorForEventStatus,
   isTransient,
   MandalaError,
@@ -18,6 +19,13 @@ import {
   TooLargeError,
   ValidationError,
 } from './errors.js';
+import {
+  type ComputerEvent,
+  ComputerEvents,
+  type EventStreamOptions,
+  STREAM_FRAME_TYPES,
+  settled,
+} from './events.js';
 import type {
   BackgroundExec,
   ExecResult,
@@ -101,6 +109,41 @@ const requireModelKey = (key: string | undefined, what: string): string => {
 };
 
 export type { WaitOptions } from './wait.js';
+
+/** What {@link Computer.waitFor} accepts: a stream's options, plus a deadline. */
+export type WaitForOptions = EventStreamOptions & {
+  /** Milliseconds before giving up. Defaults to three minutes. */
+  timeoutMs?: number;
+};
+
+/**
+ * The refusal for a wait whose event cannot arrive, or `undefined`.
+ *
+ * Only when NONE of the wanted types is possible. A caller waiting for
+ * `process.exited` or `computer.ready` on a guest with no watcher is still
+ * waiting for something reachable, and refusing that would be this SDK
+ * deciding the half it can have is not the half it meant.
+ *
+ * The three stream-control frames are always reachable and are never in the
+ * advertised list, which is about the COMPUTER. Counting them as impossible
+ * would refuse `waitFor('gap')` — a reasonable thing to wait for, and the one
+ * this list has no opinion about.
+ */
+function unreachableTypes(
+  id: string,
+  wanted: Set<string>,
+  advertised: string[],
+): Error | undefined {
+  const reachable = new Set([...advertised, ...STREAM_FRAME_TYPES]);
+  const impossible = [...wanted].filter((t) => !reachable.has(t));
+  if (impossible.length < wanted.size) return undefined;
+  return settled(
+    new MandalaError(
+      `${id} cannot emit ${impossible.join(' or ')}, so waiting for it would never end. ` +
+        `It advertises: ${advertised.join(', ') || 'nothing'}.`,
+    ),
+  );
+}
 
 export type ScrollOptions = CallOptions & {
   direction?: P.ScrollDirection;
@@ -1140,6 +1183,242 @@ export class Computer {
       }
       await sleepUntilNextPoll(delayMs, deadline, signal);
     }
+  }
+
+  // --- events ---------------------------------------------------------
+
+  /**
+   * What this computer is doing, as an async iterator.
+   *
+   * The stream exists so that an agent stops paying for a screenshot to find
+   * out that nothing has happened. Windows opening, closing and taking focus;
+   * the clipboard changing hands; a background command exiting; the desktop
+   * becoming ready; every power transition.
+   *
+   * ```ts
+   * for await (const ev of c.events()) {
+   *   if (ev.type === 'process.exited' && ev.pid === job.pid) break;
+   * }
+   * ```
+   *
+   * Breaking out of the loop closes the socket. So does the returned object's
+   * `close()`, and so does an `AbortSignal` passed as `signal`.
+   *
+   * **It reconnects, and it keeps your place.** Every event carries an opaque
+   * cursor; the position after the last event you actually CONSUMED is what a
+   * reconnect resumes from, so a socket that drops mid-loop does not lose the
+   * `process.exited` you were waiting for. Where this host can no longer replay
+   * that far you are handed a `gap` event instead of silence — not an error and
+   * not swallowed, because it is the signal to reconcile against
+   * {@link windows} or {@link execPoll} rather than to assume nothing happened.
+   *
+   * Three frames are not events about the computer and arrive as events anyway,
+   * because a client cannot ignore what it was never handed: `gap`, `closed`
+   * (this host ending the stream deliberately, with a sentence saying whether
+   * it is worth reopening) and `capabilities` (the vocabulary being revised
+   * under an open socket). Ignore a `type` you do not recognise; the vocabulary
+   * grows.
+   *
+   * `computer.ready` is the one with a trap in it, and this SDK takes it out.
+   * It fires once per desktop SESSION, so a machine that has been up for an
+   * hour will never send it again — a raw socket waiting for it waits forever.
+   * The opening frame carries the state instead, and a stream that joins an
+   * already-ready desktop yields a `computer.ready` marked
+   * {@link ComputerEvent.synthesized} as its first event.
+   *
+   * Refused with a `409` on a suspended computer — this is the one part of the
+   * API that does NOT resume one for you — and on a stopped one. Neither
+   * reaches a websocket client as a status, so what you get is this SDK reading
+   * the computer afterwards and saying which it was.
+   */
+  events(opts: EventStreamOptions = {}): ComputerEvents {
+    return new ComputerEvents(
+      (signal) => this.#eventsUrl(signal),
+      (signal) => this.#eventsRefusal(signal),
+      opts,
+    );
+  }
+
+  /**
+   * Wait for one event, then stop.
+   *
+   * ```ts
+   * await c.waitFor('computer.ready');                       // after a create
+   * const done = await c.waitFor('process.exited');          // after execBackground
+   * ```
+   *
+   * The call that replaces a polling loop. Everything {@link events} does about
+   * cursors and reconnects applies, so this survives a socket that drops while
+   * it waits; the socket is closed on the way out however this returns.
+   *
+   * Two things it refuses rather than waiting out:
+   *
+   * - an event type THIS computer cannot emit. The opening frame lists what it
+   *   can — a Windows guest, or an image built without the X bindings the
+   *   watcher needs, produces no `window.*` and no `computer.ready` — and
+   *   waiting for one of those is waiting for something the platform has
+   *   already said will not arrive. Checked again whenever a `capabilities`
+   *   frame revises the list under an open socket.
+   * - a computer that is suspended or stopped, which is the `409` on the
+   *   upgrade rather than anything about the wait.
+   *
+   * `computer.ready` returns at once on a desktop that is already up; see
+   * {@link events} and {@link ComputerEvent.synthesized}.
+   */
+  async waitFor(types: string | string[], opts: WaitForOptions = {}): Promise<ComputerEvent> {
+    const wanted = new Set(typeof types === 'string' ? [types] : types);
+    if (wanted.size === 0) {
+      throw new ValidationError('waitFor needs at least one event type to wait for');
+    }
+    const { timeoutMs = 180_000, signal: caller, ...streamOpts } = opts;
+    // The same refusal every other wait in this SDK makes, in the same words:
+    // `timeoutMs: Number(unsetEnvVar)` is a deadline that never arrives, and a
+    // wait that never returns is the one failure shape worse than a wrong
+    // answer. The poll interval is not this wait's — there is no poll — so it
+    // is passed as the one number checkWait will accept unremarkably.
+    checkWait(timeoutMs, 1);
+    const deadline = deadlineSignal(timeoutMs, caller);
+    // What the vocabulary said, when it said this wait cannot end. Kept rather
+    // than thrown from the hook: it runs inside the stream's own machinery,
+    // where a throw would be caught by the reconnect logic and read as a
+    // connection that failed.
+    let impossible: Error | undefined;
+    const stream = this.events({
+      ...streamOpts,
+      signal: deadline,
+      // COMPOSED, not replaced. `onConnect` is an option on `WaitForOptions`
+      // like any other, and this used to overwrite it — so a caller's hook was
+      // accepted by the type, documented on the option, and silently never
+      // called. `signal` above IS replaced, and that is not the same thing:
+      // it is composed first, through `deadlineSignal`, so the caller's still
+      // fires.
+      //
+      // Theirs first, because the check below can close the stream, and a hook
+      // that never sees the connection it was promised is the defect this is
+      // fixing rather than a smaller version of it.
+      onConnect: (hello) => {
+        streamOpts.onConnect?.(hello);
+        impossible = unreachableTypes(this.id, wanted, hello.events);
+        if (impossible) stream.close();
+      },
+    });
+    try {
+      for await (const ev of stream) {
+        if (wanted.has(ev.type)) return ev;
+        if (ev.type === 'capabilities' && ev.events) {
+          impossible = unreachableTypes(this.id, wanted, ev.events);
+          if (impossible) break;
+        }
+      }
+    } finally {
+      stream.close();
+    }
+    if (impossible) throw impossible;
+    // A caller who cancelled gets their own reason, not a deadline this wait
+    // set. `deadlineSignal` composes both, so the caller's is checked first —
+    // the rule `waitUntilRunning` follows in every catch it has.
+    if (caller?.aborted) throw caller.reason;
+    if (deadline.aborted) {
+      throw new TimeoutError(
+        `${this.id} did not emit ${[...wanted].join(' or ')} within ${timeoutMs}ms`,
+      );
+    }
+    // Reached only with `reconnect: false`, where the socket ending IS the
+    // answer. Reported as what happened rather than as a timeout that has not
+    // elapsed.
+    throw new MandalaError(
+      `${this.id}'s event stream ended before ${[...wanted].join(' or ')} arrived`,
+    );
+  }
+
+  /**
+   * A fresh `events_url`, on every connection and every reconnect.
+   *
+   * Re-read rather than cached, because the credential in it is rotated by a
+   * restart — and a restart is one of the ordinary reasons the socket dropped.
+   * A reconnect over the old URL is a 401 that looks like a bug in the stream.
+   */
+  async #eventsUrl(signal?: AbortSignal): Promise<string> {
+    try {
+      await this.refresh({ signal });
+    } catch (err) {
+      // A read that will answer the same way forever ends the stream rather
+      // than being retried behind it. Without this a deleted computer or a
+      // revoked key is a reconnect loop with no `maxRetries` to stop it — the
+      // default is to never give up — asking a question already answered, and
+      // never saying the answer out loud.
+      if (err instanceof Error && !isTransientForPoll(err)) throw settled(err);
+      throw err;
+    }
+    const url = this.vnc?.eventsUrl;
+    if (url) return url;
+    if (!this.vnc) {
+      // The platform could not reach the host holding this computer, so it sent
+      // no connect surface at all. Weather, and the stream's own backoff is the
+      // right response to it — deliberately NOT settled.
+      throw new ConnectionError(
+        `the platform did not return a connect surface for ${this.id}; its host may be unreachable`,
+      );
+    }
+    if (this.os === 'windows') {
+      throw settled(
+        new MandalaError(
+          `${this.id} runs Windows, which has no event stream: there is nowhere in the guest ` +
+            'to run the watcher the guest half needs.',
+        ),
+      );
+    }
+    throw settled(
+      new MandalaError(
+        `${this.id} has no events_url. Its host may predate the event stream, or this ` +
+          'credential may be a watch-only one, which is not given window titles.',
+      ),
+    );
+  }
+
+  /**
+   * Why the upgrade was refused, read off the computer after the fact.
+   *
+   * A refused websocket tells its client nothing: a 409, a 401 and a TCP reset
+   * all arrive as an error with an empty message and a 1006 close, and the
+   * `WebSocket` API exposes neither the status nor the body. So the state is
+   * asked for directly, and the two refusals the reference names are named back
+   * — with `settled` on them, because neither a suspended computer nor a
+   * stopped one becomes reachable by being asked again.
+   */
+  async #eventsRefusal(signal?: AbortSignal): Promise<Error> {
+    try {
+      await this.refresh({ signal });
+    } catch (err) {
+      // The read IS the answer here. A 404 says the computer is gone and a 401
+      // says the key is, which are better sentences than anything this method
+      // could infer; a 503 says the host could not be reached, which is the
+      // weather the stream's backoff exists for.
+      if (err instanceof Error) return isTransientForPoll(err) ? err : settled(err);
+      return new ConnectionError(`the event stream for ${this.id} was refused`);
+    }
+    if (this.isSuspended) {
+      return settled(
+        new MandalaError(
+          `${this.id} is suspended, and the event stream is the one part of this API that does ` +
+            'not resume a computer for you: call start() and open it again.',
+        ),
+      );
+    }
+    if (!this.#statusIs('running')) {
+      return settled(
+        new MandalaError(
+          `${this.id} is ${JSON.stringify(this.status)}, and only a running computer has an ` +
+            'event stream: call start() and open it again.',
+        ),
+      );
+    }
+    // It is running, so the refusal was about the connection rather than the
+    // machine — a rotated credential, a host that moved, an edge in the way.
+    // Retryable, and the reconnect is what retries it.
+    return new ConnectionError(
+      `${this.id}'s event stream would not open, and it reports itself as running`,
+    );
   }
 
   // --- observing ------------------------------------------------------

@@ -33,7 +33,7 @@ import {
   UNIMPLEMENTED,
   UNIMPLEMENTED_PARAMETERS,
 } from './allowlist.js';
-import { anyRoute, BASE, type Call, recorder } from './harness.js';
+import { anyRoute, BASE, type Call, EVENTS_HELLO, recorder, socketFactory } from './harness.js';
 import { inventory, names, recordNamedCalls } from './surface-inventory.js';
 
 /**
@@ -190,6 +190,18 @@ async function exerciseEverything(client: Client): Promise<void> {
   await c.setSchedule({ enabled: true, hour: 4 });
   await c.setSchedule({ enabled: true, hour: 3, minute: 30, tz: 'Europe/London' });
   await c.clearSchedule();
+
+  // The event stream, both entry points. Every connection re-reads the computer
+  // for a fresh `events_url` — the credential in it is rotated by a restart —
+  // so both of these are `GET computers/:id` on the wire and neither reaches a
+  // route of its own. That is exactly the case the route half of this file
+  // cannot see, and why they are named here.
+  const stream = socketFactory((socket) => {
+    socket.emitOpen();
+    socket.send(EVENTS_HELLO);
+  });
+  for await (const _ of c.events({ webSocket: stream, reconnect: false })) break;
+  await c.waitFor('computer.ready', { webSocket: stream, reconnect: false, timeoutMs: 5_000 });
 
   await c.agent({ prompt: 'do a thing', modelKey: 'sk-test' });
   // The streaming entry point the call above waits out for you. All three agent

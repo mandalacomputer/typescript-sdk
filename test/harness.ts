@@ -234,8 +234,122 @@ export const COMPUTER = {
     view_token: 'v',
     embed_url: 'https://host/embed#v',
     terminal_url: 'wss://host/terminal?token=t',
+    events_url: 'wss://host/events?token=t',
   },
 };
+
+/**
+ * The opening frame of an event stream, as the platform writes it.
+ *
+ * `ready: true` and a `windows` array, because those are the two answers a
+ * connection with no continuity carries and the two a stub that omitted them
+ * would let a decoder pass without ever reading.
+ */
+export const EVENTS_HELLO = {
+  type: 'hello',
+  computer: 'vm-1',
+  cursor: 'ep-1:0',
+  ready: true,
+  events: [
+    'window.opened',
+    'window.closed',
+    'window.focused',
+    'window.blurred',
+    'clipboard.changed',
+    'process.exited',
+    'computer.ready',
+    'computer.idle',
+    'computer.started',
+    'computer.stopped',
+    'computer.suspended',
+  ],
+  windows: [],
+};
+
+/**
+ * A websocket stand-in the test drives by hand.
+ *
+ * Structural, like {@link EventSocket} itself, so nothing here imports a
+ * websocket implementation and a test can produce a socket that behaves in ways
+ * a real one would not — a handshake that never completes, a close before the
+ * opening frame, a frame that is not JSON.
+ *
+ * Nothing is ever sent TO an event stream, so there is no send half. What is
+ * recorded instead is the URL, which is where the cursor rides.
+ */
+export class FakeSocket {
+  closed = false;
+  readonly #open: (() => void)[] = [];
+  readonly #message: ((ev: { data: unknown }) => void)[] = [];
+  readonly #error: (() => void)[] = [];
+  readonly #close: (() => void)[] = [];
+
+  constructor(readonly url: string) {}
+
+  addEventListener(type: 'open', fn: () => void): void;
+  addEventListener(type: 'message', fn: (ev: { data: unknown }) => void): void;
+  addEventListener(type: 'error', fn: () => void): void;
+  addEventListener(type: 'close', fn: () => void): void;
+  addEventListener(type: string, fn: (ev: { data: unknown }) => void): void {
+    if (type === 'message') this.#message.push(fn);
+    else if (type === 'open') this.#open.push(fn as unknown as () => void);
+    else if (type === 'error') this.#error.push(fn as unknown as () => void);
+    else if (type === 'close') this.#close.push(fn as unknown as () => void);
+  }
+
+  close(): void {
+    this.emitClose();
+  }
+
+  emitOpen(): void {
+    for (const fn of [...this.#open]) fn();
+  }
+
+  /** One text frame. An object is serialised; a string goes as it is. */
+  send(frame: unknown): void {
+    const data = typeof frame === 'string' ? frame : JSON.stringify(frame);
+    this.sendRaw(data);
+  }
+
+  /** One frame verbatim, including the binary shapes this stream drops. */
+  sendRaw(data: unknown): void {
+    // A closed socket delivers nothing, which is the property a test of the
+    // queue bound depends on: the stream closes the socket to stop the flow,
+    // and a stub that went on delivering afterwards would prove nothing.
+    if (this.closed) return;
+    for (const fn of [...this.#message]) fn({ data });
+  }
+
+  emitError(): void {
+    for (const fn of [...this.#error]) fn();
+  }
+
+  emitClose(): void {
+    if (this.closed) return;
+    this.closed = true;
+    for (const fn of [...this.#close]) fn();
+  }
+}
+
+/**
+ * A socket factory that hands each connection to `drive`, numbered from zero.
+ *
+ * Driven on a microtask rather than during construction, because the stream
+ * registers its listeners after the factory returns — a socket that opened
+ * synchronously would fire into nothing, which is a property of this stub
+ * rather than of anything a real websocket does.
+ */
+export function socketFactory(
+  drive: (socket: FakeSocket, connection: number) => void,
+): (url: string) => FakeSocket {
+  let n = 0;
+  return (url: string) => {
+    const socket = new FakeSocket(url);
+    const which = n++;
+    queueMicrotask(() => drive(socket, which));
+    return socket;
+  };
+}
 
 /**
  * One snapshot as the platform sends it, in full.
