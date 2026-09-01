@@ -189,6 +189,29 @@ try {
     created?.kind === 'created' && created?.path === `${tree}/a.txt` && created?.dir === false,
     JSON.stringify({ kind: created?.kind, path: created?.path, dir: created?.dir }),
   );
+  check(
+    'and the arming moved the tree, so `watching` is its state and not hello’s claim',
+    watcher.watching?.[0]?.armed === true,
+    JSON.stringify(watcher.watching ?? null),
+  );
+
+  // And the wait ends on a CHANGE, not on the marker. This is the half a
+  // fixture cannot settle: the arming is real here and arrives first, so a
+  // `waitFor` matched on the type alone comes back with it. Nominated fresh,
+  // because a tree this run already armed would never meet the marker at all —
+  // which is the nondeterminism the rule exists to remove.
+  const second = `${tree}-2`;
+  await vm.exec(`mkdir -p ${second}`);
+  const changing = vm.waitFor('file.changed', { watch: second, timeoutMs: 120_000 });
+  // Written repeatedly, because nothing before the watch arms is ever reported
+  // and this side cannot see when that happened.
+  await vm.execBackground(`for i in $(seq 30); do touch ${second}/b.txt; sleep 1; done`);
+  const change = await changing.catch((e) => e);
+  check(
+    'a wait for a file change ends on a change, not on the arming marker',
+    change?.path === `${second}/b.txt` && change?.armed === undefined,
+    change instanceof Error ? String(change).slice(0, 90) : JSON.stringify({ path: change?.path }),
+  );
 
   // Started BEFORE the thing that causes it: a wait opened after the event has
   // happened is a wait that joins at the head and misses it.
