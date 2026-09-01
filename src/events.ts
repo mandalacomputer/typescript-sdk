@@ -108,12 +108,26 @@ export const GUEST_EVENT_TYPES: readonly ComputerEventType[] = [
 /**
  * How many trees one stream may nominate with {@link EventStreamOptions.watch}.
  *
+ * DISTINCT trees, counted the way the platform counts them: it normalises and
+ * de-duplicates first, so `['/a/b', '/a/b/']` is one nomination and not two.
+ * Two spellings of one directory is a caller repeating themselves rather than
+ * asking for something impossible, and refusing it here would be this SDK
+ * turning away a stream the platform would have opened.
+ *
  * Per SOCKET. There is a second, larger cap the platform applies per COMPUTER —
  * 32 distinct trees across every stream open on it — and a nomination past that
- * one is refused on the upgrade rather than here. Nominating a path a stream is
- * already watching costs nothing against it.
+ * one is refused on the upgrade rather than here.
  */
 export const MAX_WATCHES = 4;
+
+/**
+ * How long one nominated path may be, in BYTES of UTF-8 rather than characters.
+ *
+ * The platform's own bound. Checked here for the reason every other nomination
+ * rule is: past it the upgrade is a `400`, and a `400` reaches a websocket
+ * client as the same empty close a rotated credential gives.
+ */
+export const MAX_WATCH_PATH_BYTES = 256;
 
 /**
  * The reason a watched tree's picture is incomplete, on {@link
@@ -1069,7 +1083,7 @@ export class ComputerEvents implements AsyncIterable<ComputerEvent> {
       ...h,
       events: [...h.events],
       windows: h.windows ? [...h.windows] : undefined,
-      watching: h.watching ? [...h.watching] : undefined,
+      watching: copyWatching(h.watching),
     };
   }
 
@@ -1117,11 +1131,11 @@ export class ComputerEvents implements AsyncIterable<ComputerEvent> {
    * one that replaced it, and no event says so.
    */
   get watching(): WatchedTree[] | undefined {
-    // A copy of the array, for the reason `eventTypes` and `windows` are
-    // copied. The entries are this decoder's own objects and are not
-    // deep-copied: a caller who edits one has changed their own record of it,
-    // not what the next connection will report.
-    return this.#hello?.watching ? [...this.#hello.watching] : undefined;
+    // A copy of the array AND of the entries — see `copyWatching`, which is
+    // why this one goes deeper than `windows` does. Shared, an entry handed to
+    // a caller was the same object `#hello` holds and the one `onConnect` was
+    // given, so editing it changed what the next read of any of the three said.
+    return copyWatching(this.#hello?.watching);
   }
 
   /** The desktop the newest connection joined, when it was sent one. */
@@ -1464,7 +1478,10 @@ export class ComputerEvents implements AsyncIterable<ComputerEvent> {
       ...hello,
       events: [...hello.events],
       windows: hello.windows ? [...hello.windows] : undefined,
-      watching: hello.watching ? [...hello.watching] : undefined,
+      // Deeper than the arrays beside it: `#onConnect` is handed the live
+      // `hello` a line later, and sharing the entries left a hook able to edit
+      // what this stream reports having been told.
+      watching: copyWatching(hello.watching),
     };
     // The vocabulary is snapshotted for the same reason and separately, because
     // a `capabilities` frame replaces this one without touching `#hello`.
@@ -1634,13 +1651,7 @@ export function watchList(watch?: string | readonly string[]): readonly string[]
  * many words. A `C:\` path here can only be a mistake.
  */
 function checkWatches(watch: readonly string[]): string[] {
-  if (watch.length > MAX_WATCHES) {
-    throw new ValidationError(
-      `watch takes at most ${MAX_WATCHES} directories on one stream (got ${watch.length}): ` +
-        'open a second stream, or nominate a parent of several of them',
-    );
-  }
-  return watch.map((path) => {
+  const paths = watch.map((path) => {
     if (typeof path !== 'string' || path === '') {
       throw new ValidationError(`watch takes directories to watch, not ${JSON.stringify(path)}`);
     }
@@ -1649,8 +1660,93 @@ function checkWatches(watch: readonly string[]): string[] {
         `a watched directory must be an absolute guest path: ${JSON.stringify(path)}`,
       );
     }
+    if (new TextEncoder().encode(path).length > MAX_WATCH_PATH_BYTES) {
+      throw new ValidationError(
+        `a watched directory may be at most ${MAX_WATCH_PATH_BYTES} bytes: ` +
+          `${JSON.stringify(path)}`,
+      );
+    }
+    // Refused rather than escaped, which is the platform's own reading: a path
+    // may hold these on Linux, and this one is echoed back in an opening frame
+    // and written to somebody's log, so a newline in it is a caller choosing
+    // what another terminal renders. Nobody nominates one by accident.
+    //
+    // By code point rather than by a character class, which the linter refuses
+    // for the sound reason that a control character written into a regex is
+    // usually a typo. This one is the case it is not.
+    if ([...path].some((ch) => ch < ' ' || ch === '\u007f')) {
+      throw new ValidationError(
+        `a watched directory cannot contain control characters: ${JSON.stringify(path)}`,
+      );
+    }
+    // A lone surrogate is not UTF-8, and it is the one bad path that would NOT
+    // be refused on the upgrade: `encodeURIComponent` turns it into a
+    // replacement character, so the host is handed a valid path that is not the
+    // one that was asked for, and watches the wrong tree quietly.
+    if (/\p{Surrogate}/u.test(path)) {
+      throw new ValidationError(`a watched directory must be valid UTF-8: ${JSON.stringify(path)}`);
+    }
+    if (cleanWatchPath(path) === '/') {
+      throw new ValidationError(
+        `watching / is not a nomination; name the directory you are waiting on ` +
+          `(got ${JSON.stringify(path)})`,
+      );
+    }
     return path;
   });
+  // DISTINCT trees, because that is what the platform counts: it cleans and
+  // de-duplicates before it applies the cap, so five spellings of four
+  // directories is a stream it opens. Counting the array instead was this SDK
+  // refusing a nomination the platform accepts, which is the same defect as
+  // accepting one it refuses, pointed the other way.
+  const trees = new Set(paths.map(cleanWatchPath));
+  if (trees.size > MAX_WATCHES) {
+    throw new ValidationError(
+      `watch takes at most ${MAX_WATCHES} directories on one stream (got ${trees.size}): ` +
+        'open a second stream, or nominate a parent of several of them',
+    );
+  }
+  return paths;
+}
+
+/**
+ * One nominated path as the platform's `path.Clean` would leave it — for the
+ * two REFUSALS above, and for nothing else.
+ *
+ * NOT a second normaliser on the way out. {@link withWatches} still sends what
+ * the caller wrote, because the host's answer in `hello.watching` is what a
+ * client matches on and a second opinion could only ever disagree with the one
+ * that decides. This answers the two questions a refusal has to settle before a
+ * socket is opened — whether two nominations name one tree, and whether one of
+ * them is the root — and neither answer reaches the wire.
+ *
+ * Exact rather than a guess: the algorithm is the platform's own, segment by
+ * segment. Empty and `.` segments go, `..` pops the one before it, and popping
+ * past the root is the root.
+ */
+/**
+ * A copy of the `watching` list AND of the entries in it.
+ *
+ * Deeper than the copies beside it, and deliberately: a {@link WatchedTree} is
+ * two scalars, so there is nothing to share and no cost to copying — while
+ * `hello.windows` carries a `raw` of everything the platform sent, which is the
+ * caller's own record and is not this SDK's to duplicate on every read. Shared,
+ * the entries made three "snapshots" one object: `stream.watching[0].armed =
+ * true` reached `#hello`, and the next read handed the edit back as though the
+ * host had said it.
+ */
+function copyWatching(watching: WatchedTree[] | undefined): WatchedTree[] | undefined {
+  return watching?.map((w) => ({ ...w }));
+}
+
+function cleanWatchPath(p: string): string {
+  const out: string[] = [];
+  for (const seg of p.split('/')) {
+    if (seg === '' || seg === '.') continue;
+    if (seg === '..') out.pop();
+    else out.push(seg);
+  }
+  return `/${out.join('/')}`;
 }
 
 /**

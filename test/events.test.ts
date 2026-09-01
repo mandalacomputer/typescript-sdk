@@ -1366,6 +1366,38 @@ describe('nominating a tree to watch', () => {
     stream.watching?.push({ path: '/hacked', armed: true });
     (stream.hello?.watching ?? []).push({ path: '/hacked', armed: true });
     expect(stream.watching).toHaveLength(1);
+    // The ENTRIES too, and not only the array around them. Shared, the three
+    // "snapshots" were one object: an edit to a tree handed out reached the
+    // frame behind it, and the next read gave the edit back as though the host
+    // had said it.
+    const handed = stream.watching;
+    if (handed?.[0]) handed[0].armed = true;
+    const hello0 = stream.hello?.watching?.[0];
+    if (hello0) hello0.path = '/hacked';
+    expect(stream.watching).toEqual([{ path: '/home/user/p', armed: false }]);
+  });
+
+  it('hands a connect hook a frame it cannot edit this stream through', async () => {
+    // `onConnect` is given the LIVE opening frame, which is the one door the
+    // copies beside this were added to shut. A hook that edits an entry must
+    // not be able to talk the stream into reporting a tree as live.
+    const { computer: c } = await computer();
+    const stream = c.events({
+      watch: '/w',
+      reconnect: false,
+      onConnect: (h) => {
+        const first = h.watching?.[0];
+        if (first) first.armed = true;
+      },
+      webSocket: socketFactory((s) => {
+        s.emitOpen();
+        s.send(hello({ ready: false, watching: [{ path: '/w', armed: false }] }));
+        s.send(event());
+        s.close();
+      }),
+    });
+    await collect(stream);
+    expect(stream.watching).toEqual([{ path: '/w', armed: false }]);
   });
 
   it('re-answers arming per connection, because no event says it', async () => {
@@ -1406,6 +1438,69 @@ describe('nominating a tree to watch', () => {
     expect(() => c.events({ watch: 42 as unknown as string })).toThrow(ValidationError);
     // Four is the limit, not the refusal.
     expect(() => c.events({ watch: ['/a', '/b', '/c', '/d'] })).not.toThrow();
+  });
+
+  it('refuses the root, however it is spelled', async () => {
+    // Watching everything is the one thing this feature exists to make
+    // impossible to ask for by accident: it would spend the directory budget on
+    // /usr before reaching anything the caller cares about and report `lost`
+    // forever. The platform refuses it with a 400, which reaches a websocket
+    // client as the same silence a rotated credential does.
+    const { computer: c } = await computer();
+    for (const root of ['/', '//', '/.', '/./', '/home/..', '/a/b/../..']) {
+      expect(() => c.events({ watch: root })).toThrow(ValidationError);
+    }
+    // A path that merely PASSES THROUGH the root's spellings is a directory.
+    expect(() => c.events({ watch: '/home/user/../user/./p/' })).not.toThrow();
+  });
+
+  it('refuses a path the platform bounds, before the upgrade does', async () => {
+    const { computer: c } = await computer();
+    // 256 bytes is the platform's own bound, and it counts BYTES.
+    expect(() => c.events({ watch: `/${'a'.repeat(255)}` })).not.toThrow();
+    expect(() => c.events({ watch: `/${'a'.repeat(256)}` })).toThrow(ValidationError);
+    expect(() => c.events({ watch: `/${'é'.repeat(128)}` })).toThrow(ValidationError);
+    // A newline in a path this host echoes back and logs is a caller choosing
+    // what somebody else's terminal renders.
+    expect(() => c.events({ watch: '/home/user/p\n/etc' })).toThrow(ValidationError);
+    // A lone surrogate is the one bad path the upgrade would NOT refuse:
+    // percent-encoding turns it into a replacement character, so the host is
+    // handed a valid path that is not the one that was asked for.
+    expect(() => c.events({ watch: '/home/\ud800/p' })).toThrow(ValidationError);
+  });
+
+  it('counts the cap in trees, the way the platform counts it', async () => {
+    // The host cleans and de-duplicates BEFORE it applies the limit, so five
+    // spellings of four directories is a stream it opens. Counting the array
+    // instead refused a nomination the platform accepts — the same defect as
+    // accepting one it refuses, pointed the other way.
+    const { computer: c } = await computer();
+    expect(() => c.events({ watch: ['/a/b', '/a/b/', '/a/./b', '/c', '/c/'] })).not.toThrow();
+    expect(() => c.events({ watch: ['/a', '/b', '/c', '/d', '/e'] })).toThrow(
+      /at most 4 directories on one stream \(got 5\)/,
+    );
+  });
+
+  it('sends the nomination as it was written, not as it was counted', async () => {
+    // The cleaning above is for the two refusals and for nothing else. What
+    // goes on the wire is what the caller wrote, because the HOST's answer in
+    // `hello.watching` is what a client matches on and a second normaliser here
+    // could only ever disagree with the one that decides.
+    const { computer: c } = await computer();
+    const urls: string[] = [];
+    await collect(
+      c.events({
+        watch: '/home/user/../user/./p/',
+        reconnect: false,
+        webSocket: socketFactory((s) => {
+          urls.push(s.url);
+          s.emitOpen();
+          s.send(hello({ ready: false }));
+          s.close();
+        }),
+      }),
+    );
+    expect(urls[0]).toContain(encodeURIComponent('/home/user/../user/./p/'));
   });
 
   it('names the nominations when a refused upgrade says nothing else', async () => {

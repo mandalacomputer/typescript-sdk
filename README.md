@@ -638,11 +638,19 @@ what you get is the truth about a path when the window closed rather than a
 transcript of every write. Nothing is announced about what is *already* in a
 tree when you nominate it — those are not changes.
 
-Nominate the narrowest tree you can. Four per stream, and a computer watches at
-most 32 distinct trees across every stream open on it; a nomination past that is
-refused on the upgrade. The replay history is per computer and shared with every
-other subscriber, so a broad watch spends the history a client resuming with a
-cursor needs.
+Nominate the narrowest tree you can. Four *distinct* trees per stream — counted
+the way the platform counts them, after normalising, so `['/a/b', '/a/b/']` is
+one — and a computer watches at most 32 across every stream open on it; a
+nomination past that one is refused on the upgrade. The replay history is per
+computer and shared with every other subscriber, so a broad watch spends the
+history a client resuming with a cursor needs.
+
+Nominations are checked before a socket is opened, because the platform's `400`
+reaches a websocket client as the same empty close a rotated credential gives —
+and with `reconnect` on, that is a stream that reopens forever and never says
+why. Absolute paths, at most 256 bytes, no control characters, and not the root
+however it is spelled: watching everything would spend the directory budget on
+`/usr` before reaching anything you care about.
 
 `file.changed` needs only the terminal channel, *not* the X bindings the window
 watcher runs on — so it is advertised on Linux computers that emit no
