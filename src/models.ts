@@ -406,6 +406,35 @@ export type Template = {
   ref?: string;
   label: string;
   os: string;
+  /**
+   * The display protocol this template's desktop speaks — `'wayland'`, or
+   * ABSENT for X11 and for a platform that did not say.
+   *
+   * `os` is `linux` for both, so this is the field that separates them, and it
+   * changes what a caller gets from routes they already use: on a Wayland guest
+   * a window id is a compositor address rather than an X window id, and moving
+   * or resizing a TILED window is refused rather than quietly ignored. A caller
+   * who cannot see it cannot tell which of those two worlds they are driving.
+   * That is `publicTemplate`'s own argument for publishing it where it drops
+   * `family` as internal (OPL-4223), and this model dropped it anyway until
+   * OPL-4259 — the same miss as `ref` above, found the same way.
+   *
+   * ABSENT IS NOT `'x11'`, and the distinction is the whole care in this field.
+   * A host deployed before OPL-4223 does not send it, and the platform's
+   * projector passes that silence through rather than inventing a value,
+   * because naming one would assert a property of an image nobody claimed.
+   * Defaulting to `'x11'` here would put that assertion back on this side of
+   * the wire; defaulting to `''` would answer with a display protocol that does
+   * not exist. So there are three readings and not two — `'wayland'`, `'x11'`,
+   * and nothing at all — and code that treats the third as X11 is right today
+   * and wrong the first time a host is rolled back.
+   *
+   * READ IT OFF THE COMPUTER WHEN YOU HAVE ONE. A computer keeps the image it
+   * was cut from while a template's version can advance, so this answers a
+   * question about the CATALOGUE. The platform publishes the field on both for
+   * that reason.
+   */
+  desktop?: string;
   cpu: number;
   ramMb: number;
   diskGb: number;
@@ -418,6 +447,11 @@ export function toTemplate(d: Record<string, unknown>): Template {
     ...(d.ref == null ? {} : { ref: str(d.ref) }),
     label: str(d.label),
     os: str(d.os),
+    // Absent stays absent, like `ref` and for a stronger reason: `str()`'s
+    // fallback would answer '' — a display protocol no host speaks — and a
+    // fallback of 'x11' would be this client claiming something the platform
+    // deliberately declines to claim.
+    ...(d.desktop == null ? {} : { desktop: str(d.desktop) }),
     cpu: num(d.cpu),
     ramMb: num(d.ram_mb),
     diskGb: num(d.disk_gb),
