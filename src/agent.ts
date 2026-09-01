@@ -189,9 +189,16 @@ export function toAgentEvent(
       return { type: 'done', result: toAgentResult(data) };
     case 'error': {
       const e = isRecord(data) ? data : undefined;
+      // Two ways to end up with nothing, and the sentinel has to cover both:
+      // a value `String()` cannot render at all — which `str` answers with the
+      // empty string rather than by throwing — and one that renders AS the
+      // empty string. `Computer.agent` puts this straight into "the agent run
+      // failed: ", so either would end a run with a reason naming nothing. The
+      // swap to `str` fixed the throw and dropped this fallback on the way.
+      const said = e ? (e.error == null ? '' : str(e.error)) : str(data);
       return {
         type: 'error',
-        error: e ? (e.error == null ? 'the run failed' : str(e.error)) : str(data),
+        error: said || 'the run failed',
         status: num(e?.status),
       };
     }

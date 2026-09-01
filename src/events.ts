@@ -655,6 +655,11 @@ class Frames {
     return this.#items.length;
   }
 
+  /** Whether the cap was ever crossed — see the note in {@link push}. */
+  get overflowed(): boolean {
+    return this.#full;
+  }
+
   push(f: Frame): void {
     // Refused once the cap has been crossed — and only for the two kinds that
     // carry DATA. `end` and `error` are how the read loop learns the socket is
@@ -971,6 +976,19 @@ export class ComputerEvents implements AsyncIterable<ComputerEvent> {
       if (this.#stopped()) return;
       if (!this.#reconnect) {
         if (fatal) throw fatal;
+        // Refusing frames past the cap is only lossless BECAUSE a reconnect
+        // re-requests them from the cursor. With no reconnect to follow there
+        // is nothing to ask again, so what was turned away is gone — and the
+        // loop would otherwise end cleanly, which reads to the caller as the
+        // stream having finished rather than having been cut short.
+        if (frames.overflowed) {
+          throw new MandalaError(
+            `the event stream filled its ${this.#maxQueued}-frame queue and was closed, and ` +
+              `reconnect is off, so the frames that arrived after it cannot be asked for again. ` +
+              `Everything queued before the cap was delivered. Consume faster, raise maxQueued, ` +
+              `or leave reconnect on so the stream can resume from its cursor`,
+          );
+        }
         return;
       }
       if (delivered > 0) {
@@ -1139,10 +1157,17 @@ export class ComputerEvents implements AsyncIterable<ComputerEvent> {
 
   /** What the opening frame settles, in the order it has to settle it. */
   #acceptHello(hello: Hello, frames: Frames): void {
-    this.#hello = hello;
-    // SNAPSHOT, not the frame's own array. `eventTypes` copies on the way out
-    // so a caller cannot fake what this computer can emit; aliasing the frame
-    // here left `hello.events` pointing at the very array that copy protects.
+    // A SNAPSHOT of the frame, not the frame. `#onConnect` is handed the live
+    // `hello` a line later, and storing that same object left the two getters
+    // over it able to disagree: `eventTypes` reported what the platform said
+    // while `hello.events` reported what a connect hook had added to it.
+    this.#hello = {
+      ...hello,
+      events: [...hello.events],
+      windows: hello.windows ? [...hello.windows] : undefined,
+    };
+    // The vocabulary is snapshotted for the same reason and separately, because
+    // a `capabilities` frame replaces this one without touching `#hello`.
     this.#types = [...hello.events];
     // The cursor a client stores when it disconnects before seeing an event.
     // Adopted only when nothing has been consumed, because it names a position
@@ -1219,7 +1244,11 @@ export class ComputerEvents implements AsyncIterable<ComputerEvent> {
   #interpret(frame: unknown): ComputerEvent | undefined {
     const ev = toComputerEvent(frame);
     if (!ev) return undefined;
-    if (ev.type === 'capabilities' && ev.events) this.#types = ev.events;
+    // Snapshot, for the reason `#acceptHello` snapshots: `ev` is about to be
+    // YIELDED, so this is the same aliasing one door along — a consumer that
+    // does `ev.events.push(...)` inside its own `for await` edits the list a
+    // wait consults.
+    if (ev.type === 'capabilities' && ev.events) this.#types = [...ev.events];
     return ev;
   }
 }

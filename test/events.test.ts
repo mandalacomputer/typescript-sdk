@@ -910,6 +910,100 @@ describe('reconnecting', () => {
     stream.close();
   });
 
+  it('does not let a caller edit the vocabulary a capabilities frame carried', async () => {
+    // The sibling door to the one above: `#interpret` stores the array off the
+    // `capabilities` event it is about to YIELD, so a consumer editing what it
+    // was handed inside its own `for await` edits the list a wait consults.
+    const { computer: c } = await computer();
+    const stream = c.events({
+      webSocket: socketFactory((s) => {
+        s.emitOpen();
+        s.send(hello({ ready: false, events: ['process.exited'] }));
+        s.send({ type: 'capabilities', events: ['process.exited', 'computer.idle'] });
+        s.send(event());
+      }),
+    });
+    for await (const ev of stream) {
+      if (ev.type === 'capabilities' && ev.events) ev.events.push('window.opened');
+      if (ev.type === 'computer.idle') break;
+    }
+    expect(stream.eventTypes).toEqual(['process.exited', 'computer.idle']);
+    stream.close();
+  });
+
+  it('does not let a connect hook edit the frame the stream kept', async () => {
+    // `onConnect` is handed the live opening frame, so storing that same object
+    // let the two getters over it disagree — `eventTypes` reporting what the
+    // platform said while `hello.events` reported what the hook had added.
+    const { computer: c } = await computer();
+    const stream = c.events({
+      onConnect: (h) => {
+        h.events.push('window.opened');
+        const first = h.windows?.[0];
+        if (first) h.windows?.push({ ...first });
+      },
+      webSocket: socketFactory((s) => {
+        s.emitOpen();
+        s.send(hello({ ready: false, events: ['process.exited'], windows: [WINDOW] }));
+        s.send(event());
+      }),
+    });
+    await collect(stream, 1);
+    expect(stream.eventTypes).toEqual(['process.exited']);
+    expect(stream.hello?.events).toEqual(['process.exited']);
+    expect(stream.windows?.length).toBe(1);
+    stream.close();
+  });
+
+  it('says so when the queue filled and there is no reconnect to recover it', async () => {
+    // Refusing frames past the cap is lossless only BECAUSE the reconnect asks
+    // for them again from the cursor. With reconnect off there is nothing to
+    // ask, so what was turned away is gone — and ending the loop cleanly would
+    // read as the stream having finished rather than having been cut short.
+    const { computer: c } = await computer();
+    const stream = c.events({
+      maxQueued: 2,
+      reconnect: false,
+      webSocket: socketFactory((s) => {
+        s.linger = true;
+        s.emitOpen();
+        s.send(hello({ ready: false }));
+        for (let i = 1; i <= 5; i++) s.send(event({ seq: i, cursor: `ep-1:${i + 1}` }));
+        s.emitClose();
+      }),
+    });
+    const got: ComputerEvent[] = [];
+    const err = await (async () => {
+      try {
+        for await (const ev of stream) got.push(ev);
+        return undefined;
+      } catch (e) {
+        return e;
+      }
+    })();
+    // Everything queued before the cap is still delivered, and then it says
+    // what happened to the rest rather than stopping quietly.
+    expect(got.map((e) => e.cursor)).toEqual(['ep-1:2', 'ep-1:3', 'ep-1:4']);
+    expect(String(err)).toContain('reconnect is off');
+  });
+
+  it('ends quietly when the queue never filled and there is no reconnect', async () => {
+    const { computer: c } = await computer();
+    const stream = c.events({
+      maxQueued: 8,
+      reconnect: false,
+      webSocket: socketFactory((s) => {
+        s.emitOpen();
+        s.send(hello({ ready: false }));
+        s.send(event({ seq: 1, cursor: 'ep-1:2' }));
+        s.emitClose();
+      }),
+    });
+    const got: ComputerEvent[] = [];
+    for await (const ev of stream) got.push(ev);
+    expect(got.map((e) => e.cursor)).toEqual(['ep-1:2']);
+  });
+
   it('still reports a vocabulary the platform replaced mid-stream', async () => {
     const { computer: c } = await computer();
     const stream = c.events({

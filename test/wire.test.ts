@@ -840,6 +840,39 @@ describe('the agent loop reads its payload the way the rest of the SDK does', ()
     }
   });
 
+  it('still names a reason when the error frame carried none it could read', async () => {
+    // `Computer.agent` puts this straight into "the agent run failed: ", so an
+    // error it cannot render has to fall back to a sentence rather than to the
+    // empty string — which is what routing it through `str` alone would do.
+    for (const error of [{ toString: 1 }, '', null]) {
+      const { client: c } = client((call) =>
+        call.path.endsWith('/agent')
+          ? new Response(`event: error\ndata: ${JSON.stringify({ error, status: 500 })}\n\n`, {
+              status: 200,
+              headers: { 'content-type': 'text/event-stream' },
+            })
+          : anyRoute(call),
+      );
+      const computer = await c.computers.get('vm-1');
+      const err = await computer.agent({ prompt: 'go', modelKey: 'sk' }).catch((e) => e);
+      expect(`${JSON.stringify(error)}: ${String(err)}`).toContain('the run failed');
+    }
+  });
+
+  it('still reports the reason the platform did send', async () => {
+    const { client: c } = client((call) =>
+      call.path.endsWith('/agent')
+        ? new Response(
+            `event: error\ndata: ${JSON.stringify({ error: 'model key rejected', status: 401 })}\n\n`,
+            { status: 200, headers: { 'content-type': 'text/event-stream' } },
+          )
+        : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    const err = await computer.agent({ prompt: 'go', modelKey: 'sk' }).catch((e) => e);
+    expect(String(err)).toContain('model key rejected');
+  });
+
   /**
    * The OPL-3850 crash, on the one route where it ends a run rather than a
    * read: `String()` throws a TypeError when `toString` is not callable, and
@@ -878,6 +911,20 @@ describe('a row this client cannot read is not a row it may drop', () => {
     }
   });
 
+  it('bounds the row it quotes back, however large that row is', async () => {
+    // The sibling refusal in `expectMoves` has always truncated what it quotes.
+    // These messages funnel into logs, and a malformed row can be a
+    // multi-megabyte string.
+    const huge = 'x'.repeat(500_000);
+    const { client: c } = client((call) =>
+      call.path.endsWith('/windows') ? json({ windows: [huge] }) : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    const err = await computer.windows().catch((e) => e);
+    expect(String(err)).toContain('is not an object');
+    expect(String(err).length).toBeLessThan(1_000);
+  });
+
   it('still lists the windows the platform did describe', async () => {
     const { client: c } = client((call) =>
       call.path.endsWith('/windows')
@@ -894,14 +941,40 @@ describe('a row this client cannot read is not a row it may drop', () => {
    * having reaped the move, which it does for one reason: the computer is
    * gone. One malformed row reported a live computer as deleted.
    */
-  it('refuses a moves listing carrying a row it cannot read', async () => {
+  it('does not call a move reaped when the rows could not all be read', async () => {
     const { client: c } = client((call) =>
       call.path === '/moves' ? json({ moves: [null] }) : anyRoute(call),
     );
     const computer = await c.computers.get('vm-1');
     const err = await computer.waitForMove({ pollMs: 1 }).catch((e) => e);
-    expect(String(err)).toContain('row 0 of 1');
+    // "Nobody could tell" rather than "the platform reaped it" — the second
+    // says the computer is gone, and one unreadable row is not evidence of it.
+    expect(String(err)).toContain('could not be read at all');
     expect(String(err)).not.toContain('has no move any more');
+  });
+
+  it("still finishes a wait whose own move is readable beside another's junk row", async () => {
+    // `/moves` is account-WIDE, which is why `waitForMove` filters it by
+    // computer id. Refusing the whole listing over a row belonging to some
+    // other computer would abort a wait whose move is present and running —
+    // breaking a wait that works, to fix one that lies.
+    const { client: c } = client((call) =>
+      call.path === '/moves'
+        ? json({ moves: [null, { ...MOVE_DONE, computer_id: 'vm-1', state: 'done', live: false }] })
+        : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    expect((await computer.waitForMove({ pollMs: 1 })).state).toBe('done');
+  });
+
+  it('still refuses an account-wide moves LISTING carrying a row it cannot read', async () => {
+    // The listing caller does answer for every row, so it keeps the posture
+    // `toWindowListing` takes: a row it dropped makes the answer short with
+    // nothing to say so.
+    const { client: c } = client((call) =>
+      call.path === '/moves' ? json({ moves: [null] }) : anyRoute(call),
+    );
+    await expect(c.moves.list()).rejects.toThrow(/row 0 of 1/);
   });
 
   it('still reads an empty moves listing as the move having been reaped', async () => {
