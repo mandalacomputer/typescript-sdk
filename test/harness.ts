@@ -265,6 +265,18 @@ export const COMPUTER = {
 };
 
 /**
+ * A computer whose desktop speaks Wayland (platform OPL-4223).
+ *
+ * A SECOND fixture rather than a `desktop` on {@link COMPUTER}, because the two
+ * branches are both worth holding and only one of them can be the default. The
+ * absent case is what every host deployed before that ticket sends and is what
+ * the main fixture goes on exercising; this is the case a caller has to act on
+ * differently, and `os` stays `linux` on both because that is the whole reason
+ * the field exists — nothing else on the payload tells them apart.
+ */
+export const WAYLAND_COMPUTER = { ...COMPUTER, desktop: 'wayland' };
+
+/**
  * The opening frame of an event stream, as the platform writes it.
  *
  * `ready: true` and a `windows` array, because those are the two answers a
