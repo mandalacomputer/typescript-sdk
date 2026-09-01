@@ -29,11 +29,13 @@ import {
   ValidationError,
 } from './errors.js';
 import {
+  answersWait,
   type ComputerEvent,
   ComputerEvents,
   type EventStreamOptions,
   STREAM_FRAME_TYPES,
   settled,
+  unarmedTrees,
   watchList,
 } from './events.js';
 import type {
@@ -1444,13 +1446,16 @@ export class Computer {
    * `computer.ready` returns at once on a desktop that is already up; see
    * {@link events} and {@link ComputerEvent.synthesized}.
    *
-   * It matches on the TYPE and on nothing else, which is worth knowing for the
-   * one type that arrives in more than one shape: a `waitFor('file.changed')`
-   * returns the first frame of that type, and on a live computer that is
-   * almost always the `{watch, armed: true}` announcing the tree went live
-   * rather than a change to a file. Skipping the arming and the losses is
-   * something a `for await` over {@link events} does and this does not — see
-   * {@link EventStreamOptions.watch} for that loop.
+   * `file.changed` ends this wait only where something actually CHANGED. Three
+   * shapes share that type and the other two are about the tree — it went live,
+   * or the picture of it is incomplete — so a wait matched on the name alone
+   * would come back with the arming marker on a fresh nomination and with a
+   * real change on a tree somebody else had already armed, which is the same
+   * call meaning two different things depending on who got there first. The
+   * markers still arrive on {@link events}, and {@link ComputerEvents.watching}
+   * folds them into each tree's state; they simply do not answer this question.
+   * A timeout says which nominated tree never armed, because a watch that did
+   * not arm is silent in exactly the way a tree where nothing happened is.
    */
   async waitFor(types: string | string[], opts: WaitForOptions = {}): Promise<ComputerEvent> {
     const wanted = new Set(typeof types === 'string' ? [types] : types);
@@ -1503,7 +1508,7 @@ export class Computer {
     });
     try {
       for await (const ev of stream) {
-        if (wanted.has(ev.type)) return ev;
+        if (answersWait(ev, wanted)) return ev;
         if (ev.type === 'capabilities' && ev.events) {
           impossible = unreachableTypes(this.id, wanted, ev.events, nominated);
           if (impossible) break;
@@ -1518,8 +1523,20 @@ export class Computer {
     // the rule `waitUntilRunning` follows in every catch it has.
     if (caller?.aborted) throw caller.reason;
     if (deadline.aborted) {
+      // The trees that never went live, named. A watch that did not arm is
+      // silent in exactly the way a tree where nothing happened is, and without
+      // this the difference — which is the whole of what `armed` is for —
+      // reaches a caller as an ordinary timeout with nothing in it to explain
+      // the wait. A sentence rather than an early refusal: `unwatchable`
+      // recovers on its own, and this SDK cannot tell a typo from a directory a
+      // job is about to create.
+      const never = unarmedTrees(stream.watching);
       throw new TimeoutError(
-        `${this.id} did not emit ${[...wanted].join(' or ')} within ${timeoutMs}ms`,
+        `${this.id} did not emit ${[...wanted].join(' or ')} within ${timeoutMs}ms` +
+          (never.length > 0
+            ? `. Its watch on ${never.join(', ')} never armed, so nothing under it was being ` +
+              `reported`
+            : ''),
       );
     }
     // Reached only with `reconnect: false`, where the socket ending IS the
