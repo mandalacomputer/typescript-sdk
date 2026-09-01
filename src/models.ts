@@ -1039,51 +1039,6 @@ export type Snapshot = {
 };
 
 /**
- * Whether a snapshot ROW stands in for one nobody could read.
- *
- * The documented placeholder is an id and this flag and nothing more:
- * `computer_id` is absent because there was no host to say what the snapshot
- * belonged to, and `state` is what every real snapshot carries and no
- * placeholder does. Key PRESENCE decides both, not truthiness — a row carrying
- * `"computer_id": null` is a full row that failed to fill the field in, and
- * reading it as a stub admits it into every computer's filtered list.
- *
- * THE SHAPE IS REQUIRED WHATEVER THE FLAG SAYS. `unreachable` means opposite
- * things on the two rows it can appear on, and this is the reason a filtered
- * listing tests the row rather than the decoded flag: on a stub the flag is the
- * marker saying the listing is short, and dropping it reports a confident count
- * over an incomplete answer; on a FULL row belonging to another computer,
- * believing it hands somebody else's snapshots to a caller who filtered for
- * their own — from a listing often read just before an irreversible delete.
- * Applying the shape test only to the values this client cannot read left
- * exactly that hole one branch over (Codex review, OPL-3850), which is the same
- * hole the Python SDK's own review of this surface found.
- *
- * A tolerant test rather than an exact whitelist, for the reason Python gives:
- * `Object.keys(d)` against `{id, unreachable}` stops recognising a stub the
- * moment the platform adds a `created_at` or a `kind` to it, and filtering those
- * out drops precisely the markers saying an answer is short.
- */
-/**
- * Whether a ROW off the wire belongs to the computer named.
- *
- * The raw field against the id, rather than the decoded `computerId`, for the
- * reason {@link terminalStatus} gives about a status: `str()` is a coercion and
- * a coercion cannot decide identity. `String(['vm-1'])` is `'vm-1'`, because an
- * array of one joins to its element — so a row whose `computer_id` arrived as
- * `["vm-1"]` matched a filter for `vm-1` and was handed to a caller who asked
- * for their own snapshots, on a listing usually read just before an
- * irreversible delete (Codex adversarial review, OPL-3850). Python is safe from
- * this by accident of formatting: `str(["vm-1"])` is `"['vm-1']"` and matches
- * nothing. Accident is not agreement, so this is explicit.
- *
- * Shared with `waitForMove`, which had the identical hole and did not get the
- * identical fix the first time: it picks this computer's row out of an
- * account-wide listing, so a malformed `computer_id` there returns somebody
- * else's move as this one's outcome — or polls it as this one's live move
- * (Codex review, third pass, OPL-3850). One invariant, one function.
- */
-/**
  * The rows out of a `GET /moves` envelope, or a refusal naming what arrived.
  *
  * `{ moves: [...] }` is the shape. Anything else is the platform failing to
@@ -1134,9 +1089,54 @@ export const latestFinishedMove = (moves: Move[]): Move | undefined =>
     undefined,
   );
 
+/**
+ * Whether a ROW off the wire belongs to the computer named.
+ *
+ * The raw field against the id, rather than the decoded `computerId`, for the
+ * reason {@link terminalStatus} gives about a status: `str()` is a coercion and
+ * a coercion cannot decide identity. `String(['vm-1'])` is `'vm-1'`, because an
+ * array of one joins to its element — so a row whose `computer_id` arrived as
+ * `["vm-1"]` matched a filter for `vm-1` and was handed to a caller who asked
+ * for their own snapshots, on a listing usually read just before an
+ * irreversible delete (Codex adversarial review, OPL-3850). Python is safe from
+ * this by accident of formatting: `str(["vm-1"])` is `"['vm-1']"` and matches
+ * nothing. Accident is not agreement, so this is explicit.
+ *
+ * Shared with `waitForMove`, which had the identical hole and did not get the
+ * identical fix the first time: it picks this computer's row out of an
+ * account-wide listing, so a malformed `computer_id` there returns somebody
+ * else's move as this one's outcome — or polls it as this one's live move
+ * (Codex review, third pass, OPL-3850). One invariant, one function.
+ */
 export const belongsToComputer = (d: Record<string, unknown>, id: string): boolean =>
   d.computer_id === id;
 
+/**
+ * Whether a snapshot ROW stands in for one nobody could read.
+ *
+ * The documented placeholder is an id and this flag and nothing more:
+ * `computer_id` is absent because there was no host to say what the snapshot
+ * belonged to, and `state` is what every real snapshot carries and no
+ * placeholder does. Key PRESENCE decides both, not truthiness — a row carrying
+ * `"computer_id": null` is a full row that failed to fill the field in, and
+ * reading it as a stub admits it into every computer's filtered list.
+ *
+ * THE SHAPE IS REQUIRED WHATEVER THE FLAG SAYS. `unreachable` means opposite
+ * things on the two rows it can appear on, and this is the reason a filtered
+ * listing tests the row rather than the decoded flag: on a stub the flag is the
+ * marker saying the listing is short, and dropping it reports a confident count
+ * over an incomplete answer; on a FULL row belonging to another computer,
+ * believing it hands somebody else's snapshots to a caller who filtered for
+ * their own — from a listing often read just before an irreversible delete.
+ * Applying the shape test only to the values this client cannot read left
+ * exactly that hole one branch over (Codex review, OPL-3850), which is the same
+ * hole the Python SDK's own review of this surface found.
+ *
+ * A tolerant test rather than an exact whitelist, for the reason Python gives:
+ * `Object.keys(d)` against `{id, unreachable}` stops recognising a stub the
+ * moment the platform adds a `created_at` or a `kind` to it, and filtering those
+ * out drops precisely the markers saying an answer is short.
+ */
 export const isUnreachableStub = (d: Record<string, unknown>): boolean => {
   if ('computer_id' in d) return false;
   const w = wire(d.unreachable);
@@ -1503,7 +1503,28 @@ export type GuestWindow = {
   width: number;
   height: number;
   focused: boolean;
-  minimized: boolean;
+  /**
+   * Whether this window is on the screen rather than minimised.
+   *
+   * The daemon's own name for the property and the one it puts on the wire
+   * (`server/windows.go`, OPL-3583): "Visible distinguishes a minimised window
+   * from one on screen. Minimised windows stay on the client list, and an agent
+   * that clicks at the coordinates of one is clicking at whatever is actually
+   * there."
+   *
+   * This was `minimized` until OPL-4176, reading a key that has never existed
+   * on this wire — so it was `false` for every window on every desktop,
+   * including the minimised ones, which is the answer the daemon's comment says
+   * gets a click sent somewhere nobody asked for. The fixture supplied the
+   * missing key, so nothing was red.
+   *
+   * TRUE only, and the polarity is the daemon's argument rather than a
+   * convention: a window wrongly reported as minimised is one a caller skips,
+   * and a window wrongly reported as on screen is a click landing on whatever
+   * is really at those coordinates. So an answer that did not say gets the
+   * harmless half.
+   */
+  visible: boolean;
   raw: Record<string, unknown>;
 };
 
@@ -1520,9 +1541,82 @@ export function toGuestWindow(d: Record<string, unknown>): GuestWindow {
     // TRUE only. Both are claims about one window against every other, and a
     // caller matching on them is picking which window to type into.
     focused: said(d.focused),
-    minimized: said(d.minimized),
+    visible: said(d.visible),
     raw: { ...d },
   };
+}
+
+/**
+ * What a window action left behind.
+ *
+ * {@link window} is the window AS IT NOW IS rather than an acknowledgement of
+ * what was asked. Believe it rather than the request: the window manager places
+ * the frame and applications snap to their own increments, so a move to
+ * (300, 200) routinely lands at (305, 229).
+ *
+ * A named object rather than the window alone, because the platform sends one
+ * and because the window is genuinely absent in two different situations —
+ * `{"gone":true,"ok":true,"window":null}` after a close, verified live — and
+ * {@link gone} is the only thing that tells them apart. This SDK read the body
+ * as a bare window until OPL-4176 and therefore threw on every call, close or
+ * not.
+ */
+export type WindowResult = {
+  /**
+   * The window afterwards, or `undefined` when there is none to describe.
+   *
+   * `undefined` for a `null` as well as for an absent key, which is the shape
+   * this actually arrives in: the field is always present and carries `null`,
+   * so a caller testing `'window' in result` would get a different answer from
+   * one testing the value.
+   */
+  window?: GuestWindow;
+  /**
+   * The window closed, which is what a `close` is for.
+   *
+   * This is what separates the two outcomes that have no {@link window} to
+   * show. `true` means it is gone; `false` with no window means the action
+   * happened and the guest could not describe the result — an outcome, not a
+   * failure, and not a reason to repeat the action.
+   */
+  gone: boolean;
+  raw: Record<string, unknown>;
+};
+
+export function toWindowResult(d: Record<string, unknown>): WindowResult {
+  const w = d.window;
+  return {
+    window: isRecord(w) ? toGuestWindow(w) : undefined,
+    // TRUE only: a close nobody confirmed is not a close, and reporting one
+    // that did not happen is how a caller stops looking for a window that is
+    // still on the screen.
+    gone: said(d.gone),
+    raw: { ...d },
+  };
+}
+
+/**
+ * Whether a body is a window-action result at all.
+ *
+ * `{}` and `{"ok":true}` decode perfectly well through {@link toWindowResult} —
+ * `window` absent is `undefined`, `gone` absent is `false` — and that pair is
+ * the one outcome the type says a caller must NOT retry: the action happened
+ * and the guest could not describe what it left. So a truncated 200, or a proxy
+ * answering in the platform's place, read as a deliberate no-op with a
+ * documented instruction attached to it.
+ *
+ * The live envelope always carries both keys — `{"gone":false,"ok":true,
+ * "window":{...}}`, and `{"gone":true,"ok":true,"window":null}` on a close,
+ * verified against app.mandala.computer — so requiring one of them costs
+ * nothing a real platform sends. `window` may be `null`; what is refused is its
+ * ABSENCE, which is why this tests the key rather than the value.
+ *
+ * The same refusal `windows()` makes one route along, and it was missing here
+ * only because the guard there was written for a shape that could not decode at
+ * all while this one decodes into a lie.
+ */
+export function isWindowResult(d: Record<string, unknown>): boolean {
+  return 'window' in d || 'gone' in d;
 }
 
 /** The automatic daily snapshot schedule. */
