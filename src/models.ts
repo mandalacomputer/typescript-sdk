@@ -407,8 +407,12 @@ export type Template = {
   label: string;
   os: string;
   /**
-   * The display protocol this template's desktop speaks — `'wayland'`, or
-   * ABSENT for X11 and for a platform that did not say.
+   * The display protocol this template's desktop speaks: `'wayland'`, `'x11'`,
+   * or ABSENT where the platform did not say.
+   *
+   * THREE READINGS AND NOT TWO. `if (t.desktop)` is the wrong test — an
+   * explicit `'x11'` passes it — and so is treating the absence as X11. Branch
+   * on `=== 'wayland'`.
    *
    * `os` is `linux` for both, so this is the field that separates them, and it
    * changes what a caller gets from routes they already use: on a Wayland guest
@@ -419,15 +423,14 @@ export type Template = {
    * `family` as internal (OPL-4223), and this model dropped it anyway until
    * OPL-4259 — the same miss as `ref` above, found the same way.
    *
-   * ABSENT IS NOT `'x11'`, and the distinction is the whole care in this field.
-   * A host deployed before OPL-4223 does not send it, and the platform's
+   * WHY THE ABSENCE IS NOT `'x11'`, which is the whole care in this field. A
+   * host deployed before OPL-4223 does not send it, and the platform's
    * projector passes that silence through rather than inventing a value,
    * because naming one would assert a property of an image nobody claimed.
    * Defaulting to `'x11'` here would put that assertion back on this side of
    * the wire; defaulting to `''` would answer with a display protocol that does
-   * not exist. So there are three readings and not two — `'wayland'`, `'x11'`,
-   * and nothing at all — and code that treats the third as X11 is right today
-   * and wrong the first time a host is rolled back.
+   * not exist. Code that reads the absence as X11 is right today and wrong the
+   * first time a host is rolled back.
    *
    * READ {@link Computer.desktop} WHEN YOU HAVE A COMPUTER. A computer keeps the
    * image it was cut from while a template's version can advance, so this

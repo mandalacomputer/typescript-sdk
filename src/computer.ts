@@ -501,8 +501,12 @@ export class Computer {
   }
 
   /**
-   * The display protocol this computer's desktop speaks — `'wayland'`, or
-   * `undefined` for X11 and for a platform that did not say.
+   * The display protocol this computer's desktop speaks: `'wayland'`, `'x11'`,
+   * or `undefined` where the platform did not say.
+   *
+   * THREE READINGS AND NOT TWO. `if (c.desktop)` is the wrong test — an
+   * explicit `'x11'` passes it — and so is treating the absence as X11. Branch
+   * on `=== 'wayland'`.
    *
    * READ IT BEFORE DRIVING A WINDOW. {@link os} is `linux` for a Wayland guest
    * and an X11 one alike, so this is the only field that separates them, and
@@ -522,15 +526,15 @@ export class Computer {
    * template's version can advance, so the template answers a question about
    * the CATALOGUE and this one answers a question about the MACHINE.
    *
-   * `undefined` AND NOT `'x11'`, which is the one place this getter parts
-   * company with every other on this handle. A host deployed before OPL-4223
-   * does not send the field, and the platform passes that silence through
-   * rather than naming a value, because naming one would assert a property of
-   * an image nobody claimed. `str()`'s own fallback would answer `''` — a
-   * display protocol no host speaks — and a fallback of `'x11'` would put the
-   * platform's refused assertion back on this side of the wire. So there are
-   * three readings and not two, and code that treats the third as X11 is right
-   * today and wrong the first time a host is rolled back.
+   * WHY THE ABSENCE IS NOT `'x11'` — the one place this getter parts company
+   * with every other on this handle. A host deployed before OPL-4223 does not
+   * send the field, and the platform passes that silence through rather than
+   * naming a value, because naming one would assert a property of an image
+   * nobody claimed. `str()`'s own fallback would answer `''`, a display
+   * protocol no host speaks, and a fallback of `'x11'` would put the platform's
+   * refused assertion back on this side of the wire. Code that reads the
+   * absence as X11 is right today and wrong the first time a host is rolled
+   * back.
    */
   get desktop(): string | undefined {
     const d = this.#data.desktop;
@@ -1825,9 +1829,9 @@ export class Computer {
    * from "applied, and the numbers happen to match what they already were".
    * The daemon therefore asks whether the window floats BEFORE dispatching and
    * refuses when it does not, naming the way past it: float the window (Super+V
-   * in a stock Omarchy) and the move or resize takes. X11 is where the silent
-   * version of this does not arise, and it is why the refusal reads as a fault
-   * to anyone who has only ever driven an X11 guest.
+   * in a stock Omarchy) and the move or resize takes. Nothing like it happens
+   * on X11, where a move on any window is simply accepted — which is why this
+   * refusal reads as a fault to anyone who has only ever driven an X11 guest.
    *
    * It arrives as a 400, so as a plain {@link APIError}, and `errors.ts` opens
    * by saying a 400 never clears. That still holds for the REQUEST — repeating

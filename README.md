@@ -351,18 +351,20 @@ apart — `'wayland'`, `'x11'`, or `undefined` from a host too old to have been
 asked, which is not the same as `'x11'`. Two things change with it:
 
 ```ts
-if (c.desktop === 'wayland') {
-  // A move or a resize of a TILED window is REFUSED, not quietly ignored: the
-  // geometry belongs to the compositor's layout. Float it first (Super+V in a
-  // stock Omarchy) and the same call takes.
-  await c.windowAction(w.id, 'move', { x: 100, y: 100 });   // 400 on a tiled window
-}
+c.desktop;                                        // 'wayland' | 'x11' | undefined
+
+// The call is the same on both, and on X11 it simply works. What Wayland adds
+// is a refusal: a TILED window's geometry belongs to the compositor's layout,
+// so this comes back a 400 rather than a move that quietly changed nothing.
+// The message names the way past it — float the window (Super+V in a stock
+// Omarchy) and the same call takes.
+await c.windowAction('0x2600003', 'move', { x: 100, y: 100 });
 ```
 
-and `w.id` is a compositor address rather than an X window id. Both are `0x` and
-hex and both are what `windowAction` takes, so nothing on this API changes — but
-an id handed to `xdotool` or `xprop` through `c.exec()` finds no window on a
-Wayland guest.
+The other change is what a window's `id` **is**: a Hyprland client address
+rather than an X window id. Both are `0x` and hex and both are what
+`windowAction` takes, so nothing on this API changes — but an id handed to
+`xdotool` or `xprop` through `c.exec()` finds no window on a Wayland guest.
 
 ### Clipboard
 
