@@ -345,6 +345,27 @@ after a close, and `false` when the action happened and the guest could not
 describe what it left. The second is an outcome, not a failure, and not a reason
 to repeat the action.
 
+**Two desktops answer this, and `c.desktop` says which.** `os` is `linux` for a
+Wayland guest and an X11 one alike, so it is the only field that tells them
+apart — `'wayland'`, `'x11'`, or `undefined` from a host too old to have been
+asked, which is not the same as `'x11'`. Two things change with it:
+
+```ts
+c.desktop;                                        // 'wayland' | 'x11' | undefined
+
+// The call is the same on both, and on X11 it simply works. What Wayland adds
+// is a refusal: a TILED window's geometry belongs to the compositor's layout,
+// so this comes back a 400 rather than a move that quietly changed nothing.
+// The message names the way past it — float the window (Super+V in a stock
+// Omarchy) and the same call takes.
+await c.windowAction('0x2600003', 'move', { x: 100, y: 100 });
+```
+
+The other change is what a window's `id` **is**: a Hyprland client address
+rather than an X window id. Both are `0x` and hex and both are what
+`windowAction` takes, so nothing on this API changes — but an id handed to
+`xdotool` or `xprop` through `c.exec()` finds no window on a Wayland guest.
+
 ### Clipboard
 
 The desktop's `CLIPBOARD` selection — what Ctrl-C writes and Ctrl-V pastes — read
