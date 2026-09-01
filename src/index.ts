@@ -118,6 +118,8 @@ export type {
   EventStreamOptions,
   EventUrlSource,
   Hello,
+  WatchedTree,
+  WatchLost,
 } from './events.js';
 export {
   ComputerEvents,
@@ -125,6 +127,7 @@ export {
   GUEST_EVENT_TYPES,
   globalEventSocket,
   isSettled,
+  MAX_WATCHES,
   STREAM_FRAME_TYPES,
 } from './events.js';
 export type {
