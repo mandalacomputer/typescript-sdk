@@ -902,12 +902,9 @@ function wholePoint(x?: number, y?: number): void {
  * trailing object: quietly accepting a second spelling is how two spellings
  * drift apart, and the message can name the one that works.
  */
-function requireModifiers(v: unknown, what: string): void {
+function requireModifiers(v: unknown, what: string, spelling: string): void {
   if (!Array.isArray(v)) {
-    throw new ValidationError(
-      `${what} must be an array of key names; to pass CallOptions give the modifiers first — ` +
-        'click(x, y, [], { signal })',
-    );
+    throw new ValidationError(`${what} must be an array of key names — ${spelling}`);
   }
   for (const m of v) requireString(m, `${what} entry`);
 }
@@ -926,7 +923,15 @@ export function clickBody(
   y?: number,
   modifiers: readonly string[] = [],
 ): Json {
-  requireModifiers(modifiers, 'click() modifiers');
+  // The spelling is the CALLER'S, not this builder's. Five click methods reach
+  // here and `scroll` reaches it too, where the advice a click needs is not
+  // merely unhelpful but impossible: `scroll` takes its modifiers as a named
+  // option, so the positional slot the click message describes does not exist.
+  requireModifiers(
+    modifiers,
+    `${action}() modifiers`,
+    `to pass CallOptions give the modifiers first — ${action}(x, y, [], { signal })`,
+  );
   wholePoint(x, y);
   const body: Json = { action };
   if (x !== undefined && y !== undefined) {
@@ -1002,7 +1007,11 @@ export function scrollBody(args: {
   if (!SCROLL_DIRECTIONS.includes(args.direction)) {
     throw new ValidationError(`direction must be one of ${SCROLL_DIRECTIONS.join(', ')}`);
   }
-  requireModifiers(args.modifiers ?? [], 'scroll() modifiers');
+  requireModifiers(
+    args.modifiers ?? [],
+    'scroll() modifiers',
+    "they are already an option here — scroll(x, y, { modifiers: ['shift'], signal })",
+  );
   wholePoint(args.x, args.y);
   const body: Json = {
     action: 'scroll',
@@ -1249,8 +1258,12 @@ export function windowBody(args: {
   // to the `geometry` parameter, and an unnamed key went to the platform as
   // part of the request while the signal it carried was dropped — a close that
   // could not be cancelled and said nothing about it (OPL-4215).
-  for (const key of Object.keys(args)) {
-    if (!WINDOW_BODY_KEYS.includes(key)) {
+  for (const [key, value] of Object.entries(args)) {
+    // An `undefined` value is not a key on the wire — the return below drops it
+    // — so refusing one would refuse a correct request. A JavaScript caller
+    // spreading a partially-filled geometry object is the same population this
+    // guard is for, and it must not be the one it turns away.
+    if (value !== undefined && !WINDOW_BODY_KEYS.includes(key)) {
       throw new ValidationError(
         `windowAction() geometry takes only ${WINDOW_BODY_KEYS.slice(1).join(', ')} (got ` +
           `${JSON.stringify(key)}); to pass CallOptions give the geometry first — ` +

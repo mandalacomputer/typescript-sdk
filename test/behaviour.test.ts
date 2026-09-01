@@ -2819,6 +2819,24 @@ describe('an options object where a point was expected', () => {
     expect(rec.last().body).toMatchObject({ start_coordinate: [1, 2] });
     await computer.drag(30, 40);
     expect(rec.last().body).not.toHaveProperty('start_coordinate');
+    // `null` is a point nobody gave, and reaches `from?.x` exactly as
+    // `undefined` does. Guarded with `!== undefined` this dereferenced null and
+    // threw a TypeError naming neither the argument nor the call.
+    await computer.drag(50, 60, null as never);
+    expect(rec.last().body).not.toHaveProperty('start_coordinate');
+  });
+
+  it('refuses an array bound to scroll()\u2019s options, which holds no modifiers', async () => {
+    // The mirror of the click misbinding: `click(100, 200, ['shift'])` is
+    // correct, so `scroll(100, 200, ['shift'])` is the natural next line — and
+    // here `modifiers` is a named option, so the array binds to `opts` and the
+    // scroll happened with nothing held down.
+    const { client: c } = client(anyRoute);
+    const computer = await c.computers.get('vm-1');
+    await expect(computer.scroll(100, 200, ['shift'] as never)).rejects.toThrow(
+      /takes its modifiers as an option/,
+    );
+    await computer.scroll(100, 200, { modifiers: ['shift'] });
   });
 
   it('refuses click({ signal }) rather than sending an uncancellable click', async () => {
@@ -2836,9 +2854,10 @@ describe('an options object where a point was expected', () => {
   it('refuses windowAction(id, action, { signal }) rather than closing uncancellably', async () => {
     const { client: c } = client(anyRoute);
     const computer = await c.computers.get('vm-1');
-    await expect(
-      computer.windowAction('w-1', 'close', { signal: undefined } as never),
-    ).rejects.toThrow(/geometry takes only/);
+    const { signal } = new AbortController();
+    await expect(computer.windowAction('w-1', 'close', { signal } as never)).rejects.toThrow(
+      /geometry takes only/,
+    );
   });
 });
 
@@ -2858,6 +2877,21 @@ describe('a body the route did not send', () => {
       call.path === '/snapshots' ? json([{ ...SNAPSHOT, id: undefined }]) : anyRoute(call),
     );
     await expect(c.snapshots.list()).rejects.toThrow(/expected a snapshot to carry an id/);
+  });
+
+  it('still admits the unreachable placeholder this listing exists to surface', async () => {
+    // The row that fear about the refusal above lands on, and it is safe:
+    // `projection.ts` sets `id` on every row it emits, bare ones included. What
+    // a placeholder drops is `computer_id`, `state` and the rest — which is
+    // what it is recognised by.
+    const { client: c } = client((call) =>
+      call.path === '/snapshots'
+        ? json([{ id: 'snap-9', name: 'nightly', unreachable: true }])
+        : anyRoute(call),
+    );
+    const [snap] = await c.snapshots.list();
+    expect(snap?.id).toBe('snap-9');
+    expect(snap?.unreachable).toBe(true);
   });
 });
 
@@ -2935,6 +2969,18 @@ describe('an exec deadline that cannot be represented', () => {
     const { client: c } = client(anyRoute);
     const computer = await c.computers.get('vm-1');
     await expect(computer.exec('sleep 1', { timeoutS: 3_000_000 })).rejects.toThrow(
+      /timeoutS must be no greater than/,
+    );
+  });
+
+  it('catches the arguments whose derived deadline overflows to Infinity', async () => {
+    // Tested on the product, `(1e308 + 30) * 1000` is Infinity, which is not
+    // greater than MAX_TIMER_MS — so the largest arguments walked through the
+    // ceiling and got the transport's generic sentence about the deadline,
+    // which is the message this refusal exists to replace.
+    const { client: c } = client(anyRoute);
+    const computer = await c.computers.get('vm-1');
+    await expect(computer.exec('sleep 1', { timeoutS: 1e308 })).rejects.toThrow(
       /timeoutS must be no greater than/,
     );
   });

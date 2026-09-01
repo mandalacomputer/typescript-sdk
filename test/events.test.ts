@@ -1296,30 +1296,58 @@ describe('the numbers a stream is given', () => {
 /**
  * A connect surface the platform sent short a desktop credential (OPL-4215).
  *
- * `toVncConnect` treats `token` and `view_token` as atomic, which is right for
- * the two URLs it builds over them: one built over a missing credential is a
- * string indistinguishable from a working one that answers 401 forever.
- * `events_url` is not one of those. The platform sends it whole, with the
- * controlling credential already in it, and taking the three together threw
- * away a stream that was answering.
+ * The shape that actually arrives is a VIEWER's, and it is worth writing it out
+ * rather than inventing a tidier one: `web/lib/vncconnect.ts` answers a viewer
+ * with `view_url`, `view_token`, `embed_url` and `clipboard` and nothing else —
+ * no `token`, no `url`, and no `events_url`, because the stream URL is built
+ * over the controlling credential and a watch-only one is not given window
+ * titles.
+ *
+ * `toVncConnect` requires both credentials, so that surface decoded to
+ * `undefined`, and `#eventsUrl` read the absence as "the platform could not
+ * reach the host holding this computer" — weather, retried forever, on a
+ * computer whose host had answered. The settled sentence written for exactly
+ * this case sat below it and could not be reached.
  */
-describe('a vnc surface short a view_token', () => {
-  const partial = { ...COMPUTER.vnc, view_token: '' };
+describe('a watch-only connect surface', () => {
+  /** A viewer's surface, field for field as the platform builds it. */
+  const viewer = {
+    view_url: 'wss://host/vnc?token=v',
+    view_token: 'v',
+    embed_url: 'https://host/embed#v',
+    clipboard: false,
+  };
   const withVnc =
     (vnc: unknown): Responder =>
     (call) =>
       call.path === '/computers/vm-1' ? json({ ...COMPUTER, vnc }) : anyRoute(call);
 
   it('still offers no vnc surface, which is the rule that was always right', async () => {
-    const { computer: c } = await computer(withVnc(partial));
+    const { computer: c } = await computer(withVnc(viewer));
     expect(c.vnc).toBeUndefined();
   });
 
-  it('opens the stream anyway, rather than reconnecting against a live one forever', async () => {
-    // The failure this replaces: the drop read as "the platform sent no connect
-    // surface", which is deliberately NOT settled, and `maxRetries` defaults to
-    // never give up. A reachable stream reconnected forever.
-    const { computer: c } = await computer(withVnc(partial));
+  it('tells a viewer the stream is not theirs, rather than retrying it forever', async () => {
+    // The settled sentence, reached at last. Not weather: a watch-only
+    // credential will not become a controlling one by asking again.
+    const { computer: c } = await computer(withVnc(viewer));
+    const err = await collect(
+      c.events({ reconnect: false, webSocket: socketFactory(() => {}) }),
+    ).catch((e) => e);
+    expect(err).toBeInstanceOf(MandalaError);
+    expect(String(err)).toContain('has no events_url');
+    expect(String(err)).toContain('watch-only');
+    expect(isSettled(err)).toBe(true);
+  });
+
+  it('reads an events_url that arrives without both tokens, if one ever does', async () => {
+    // Not a shape the platform sends today — a surface short a token has no
+    // `events_url` — which is why this pins the DECODER's rule rather than
+    // claiming a payload. `events_url` is not built over the two desktop
+    // credentials, so it must not be dropped with them; a coupling that is safe
+    // only because a second rule elsewhere never violates it is one platform
+    // change away from not being safe.
+    const { computer: c } = await computer(withVnc({ ...COMPUTER.vnc, view_token: '' }));
     const urls: string[] = [];
     const got = await collect(
       c.events({
@@ -1335,19 +1363,6 @@ describe('a vnc surface short a view_token', () => {
     );
     expect(got).toHaveLength(1);
     expect(urls[0]).toContain('wss://host/events');
-  });
-
-  it('settles a surface that answered and has no stream, rather than retrying it', async () => {
-    // A host that answered is not weather. Windows and a watch-only credential
-    // both arrive this way, and both throws were unreachable while a partial
-    // surface decoded to `undefined`.
-    const { computer: c } = await computer(withVnc({ ...partial, events_url: '' }));
-    const err = await collect(
-      c.events({ reconnect: false, webSocket: socketFactory(() => {}) }),
-    ).catch((e) => e);
-    expect(err).toBeInstanceOf(MandalaError);
-    expect(String(err)).toContain('has no events_url');
-    expect(isSettled(err)).toBe(true);
   });
 
   it('keeps calling a genuinely absent surface an unreachable host', async () => {
@@ -1400,6 +1415,31 @@ describe('the stream numbers a caller sets', () => {
     });
     await collect(stream);
     expect(stream.cursor).toBe('ep-1:1');
+  });
+
+  it('caps the backoff RESET too, on a connection that delivered before it dropped', async () => {
+    // The path the first fix missed. `delivered > 0` resets the backoff, and
+    // the reset took the raw option while only the initial assignment had been
+    // capped — so a stream that was working and then dropped slept the full
+    // uncapped wait, which is the whole bug on the connection most likely to
+    // hit it.
+    const { computer: c } = await computer();
+    const started = Date.now();
+    await collect(
+      c.events({
+        maxRetries: 2,
+        backoffMs: 3_000,
+        maxBackoffMs: 5,
+        webSocket: socketFactory((s, n) => {
+          s.emitOpen();
+          s.send(hello({ ready: false }));
+          s.send(event({ seq: n + 1, cursor: `ep-1:${n + 2}` }));
+          s.close();
+        }),
+      }),
+      2,
+    );
+    expect(Date.now() - started).toBeLessThan(1_000);
   });
 
   it('caps the FIRST reconnect sleep at maxBackoffMs, not only the ones after it', async () => {

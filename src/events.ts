@@ -847,12 +847,15 @@ export class ComputerEvents implements AsyncIterable<ComputerEvent> {
 
   async *#run(): AsyncGenerator<ComputerEvent> {
     let failures = 0;
-    // Capped from the FIRST sleep. The doubling below is clamped to
-    // `maxBackoffMs`, but the initial value was taken raw, so a caller who set
-    // both got one wait past the ceiling they had just named — the one number
-    // `checkStreamNumbers` validates each of independently and never compares
-    // (OPL-4215).
-    let backoff = Math.min(this.#backoffMs, this.#maxBackoffMs);
+    // Capped from the FIRST sleep, and from every RESET of it. The doubling
+    // below is clamped to `maxBackoffMs`; the starting value was taken raw in
+    // both places it is set, so a caller who set both got a wait past the
+    // ceiling they had just named — `checkStreamNumbers` validates each of
+    // these numbers independently and never compares the two. Named once
+    // rather than clamped at each site, because the two sites drifting apart
+    // is how the first fix for this missed the second one (OPL-4215).
+    const first = Math.min(this.#backoffMs, this.#maxBackoffMs);
+    let backoff = first;
     for (;;) {
       if (this.#stopped()) return;
       // Closing the socket is the whole response to a queue that is filling:
@@ -922,7 +925,7 @@ export class ComputerEvents implements AsyncIterable<ComputerEvent> {
       }
       if (delivered > 0) {
         failures = 0;
-        backoff = this.#backoffMs;
+        backoff = first;
       }
       failures += 1;
       if (this.#maxRetries > 0 && failures > this.#maxRetries) {

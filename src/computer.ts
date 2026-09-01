@@ -1899,7 +1899,11 @@ export class Computer {
     // it simply has no `x` and no `y`. `start_coordinate` was then omitted, the
     // drag ran from wherever the pointer happened to be, and it selected a
     // different region while succeeding and reporting nothing (OPL-4215).
-    if (from !== undefined && (typeof from.x !== 'number' || typeof from.y !== 'number')) {
+    // `!= null`, so a JavaScript `drag(x, y, null)` keeps reaching `from?.x` and
+    // meaning "no starting point". Tested with `!== undefined` this guard
+    // dereferenced null and threw a TypeError naming neither the argument nor
+    // the call — the failure `nameBody` is fixed for one file over.
+    if (from != null && (typeof from.x !== 'number' || typeof from.y !== 'number')) {
       throw new ValidationError(
         'drag() takes a { x, y } starting point; to pass CallOptions leave the point out — ' +
           'drag(toX, toY, undefined, { signal })',
@@ -1934,6 +1938,18 @@ export class Computer {
    * than scrolling the wrong way.
    */
   async scroll(x?: number, y?: number, opts: ScrollOptions = {}): Promise<void> {
+    // The mirror of the misbinding `requireModifiers` catches, and this method
+    // is the one place it lands. `click(100, 200, ['shift'])` is correct, so
+    // `scroll(100, 200, ['shift'])` is the natural thing to write next — and
+    // here `modifiers` is a NAMED option inside the third parameter, so the
+    // array binds to `opts`, `opts.modifiers` is undefined, and the scroll
+    // happened with nothing held down (OPL-4215).
+    if (Array.isArray(opts)) {
+      throw new ValidationError(
+        'scroll() takes its modifiers as an option, not a positional — ' +
+          "scroll(x, y, { modifiers: ['shift'] })",
+      );
+    }
     const { direction = 'down', amount = 3, modifiers } = opts;
     await this.#input(P.scrollBody({ direction, amount, x, y, modifiers }), opts);
   }
@@ -2118,12 +2134,18 @@ export class Computer {
     // rather than as the argument that set it. `holdKeyBody` caps its own
     // duration for the same reason (OPL-4215).
     const minTimeoutMs = (timeoutS + 30) * 1_000;
+    // Tested on `timeoutS` itself rather than on the deadline derived from it,
+    // because the derivation is where the evidence is lost: `(1e308 + 30) *
+    // 1000` overflows to Infinity, which is not greater than MAX_TIMER_MS, so a
+    // ceiling checked on the product let the largest arguments through to the
+    // very error this refusal exists to replace.
+    //
     // Finite AND too large. A NaN or an Infinity is a different mistake with a
     // better answer already written for it — `execBody` names the argument and
     // says it must be finite — and testing the ceiling first would have taken
     // that sentence away from every caller who reached here with
     // `timeoutS: Number(unsetEnvVar)`.
-    if (Number.isFinite(minTimeoutMs) && minTimeoutMs > MAX_TIMER_MS) {
+    if (Number.isFinite(timeoutS) && timeoutS > MAX_EXEC_TIMEOUT_S) {
       throw new ValidationError(
         `timeoutS must be no greater than ${MAX_EXEC_TIMEOUT_S} (got ${timeoutS}): the request ` +
           "has to outlive the command by 30s, and a longer deadline than that overflows Node's " +

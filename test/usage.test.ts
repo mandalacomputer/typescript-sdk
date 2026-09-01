@@ -57,30 +57,28 @@ describe('reading usage', () => {
     expect(report.period.source).toBe('subscription');
   });
 
-  it('caveats a report whose totals object was never sent (OPL-4215)', async () => {
-    // Every `num()` answers 0 for an absent totals object, and with `degraded`
-    // reading false those zeros are presented as a real and empty billing
-    // window — a bill nobody rendered, reported as a bill of nothing. This
-    // type's own docs tell callers the two flags are the only signal that the
-    // totals are short, so this is the flag to raise.
+  it('refuses a report whose totals object was never sent (OPL-4215)', async () => {
+    // Every `num()` answers 0 for an absent totals object, and both caveat
+    // flags read false, so a body carrying no figures at all came back as a
+    // real and empty billing window.
+    //
+    // Refused rather than caveated. `degraded` is documented as the shortfall
+    // that CLEARS — "retry when the host is back" — and `unmetered` as the one
+    // that does not; a body with no totals is neither, and a caller following
+    // either doc would wait for something that is not coming.
     const { client: c } = client(answering({ usage: undefined }));
-    const report = await c.usage.read();
-    expect(report.usage.runHours).toBe(0);
-    expect(report.degraded).toBe(true);
-    // Absent is not the same answer as withheld: `breakdown` still says the
-    // computers array was not sent.
-    expect(report.breakdown).toBe(false);
+    await expect(c.usage.read()).rejects.toThrow(/expected a usage report to carry its totals/);
   });
 
-  it('caveats a totals object that is not a record either', async () => {
+  it('refuses a totals object that is not a record either', async () => {
     const { client: c } = client(answering({ usage: [] }));
-    expect((await c.usage.read()).degraded).toBe(true);
+    await expect(c.usage.read()).rejects.toThrow(/carry its totals/);
   });
 
-  it('leaves a real empty window uncaveated', async () => {
-    // The distinction this is for: a totals object that WAS sent and holds
-    // zeros is an account that ran nothing, and saying otherwise would make the
-    // flag useless.
+  it('takes a real empty window as the answer it is', async () => {
+    // The distinction the refusal above is for: a totals object that WAS sent
+    // and holds zeros is an account that ran nothing, and neither refusing it
+    // nor caveating it would be true.
     const { client: c } = client(answering({ usage: { computers: [] } }));
     const report = await c.usage.read();
     expect(report.usage.runHours).toBe(0);

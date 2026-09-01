@@ -623,16 +623,29 @@ describe('an options object in a positional slot', () => {
     expect(() => P.clickBody('left_click', 1, 2, [null as never])).toThrow(/must be a string/);
   });
 
-  it('refuses a CallOptions bound to scroll() modifiers', () => {
-    expect(() =>
-      P.scrollBody({ direction: 'down', amount: 3, modifiers: { signal: undefined } as never }),
-    ).toThrow(/must be an array of key names/);
+  it('refuses a CallOptions bound to scroll() modifiers, with advice scroll can take', () => {
+    // The click advice is not merely unhelpful here, it is impossible: `scroll`
+    // takes its modifiers as a NAMED option, so the positional slot the click
+    // message describes does not exist on it.
+    const bad = () =>
+      P.scrollBody({ direction: 'down', amount: 3, modifiers: { signal: undefined } as never });
+    expect(bad).toThrow(/scroll\(\) modifiers must be an array of key names/);
+    expect(bad).toThrow(/already an option here/);
+    expect(bad).not.toThrow(/click\(x, y/);
+  });
+
+  it('names the click method the caller actually called', () => {
+    // Five methods reach `clickBody`, and a message naming `click()` at a
+    // `rightClick` call site sends the reader to the wrong line.
+    expect(() => P.clickBody('right_click', 1, 2, {} as never)).toThrow(/right_click\(x, y/);
+    expect(() => P.clickBody('double_click', 1, 2, {} as never)).toThrow(/double_click\(x, y/);
   });
 
   it('refuses a key windowAction() geometry does not have, rather than sending it', () => {
     // The builder spreads its argument onto the body, so an options object
     // bound to `geometry` reached the platform as part of the request.
-    expect(() => P.windowBody({ action: 'close', signal: undefined } as never)).toThrow(
+    const { signal } = new AbortController();
+    expect(() => P.windowBody({ action: 'close', signal } as never)).toThrow(
       /geometry takes only x, y, width, height/,
     );
     expect(P.windowBody({ action: 'close' })).toEqual({ action: 'close' });
@@ -640,6 +653,20 @@ describe('an options object in a positional slot', () => {
       action: 'move',
       x: 300,
       y: 200,
+    });
+  });
+
+  it('takes an undefined value, which was never going to reach the wire anyway', () => {
+    // Presence is not a value. The builder drops undefined keys on the way out,
+    // so refusing one turns away a request that was correct — and a caller
+    // spreading a partly-filled object is the same population the guard is for.
+    expect(P.windowBody({ action: 'close', signal: undefined } as never)).toEqual({
+      action: 'close',
+    });
+    expect(P.windowBody({ action: 'move', x: 1, y: 2, width: undefined })).toEqual({
+      action: 'move',
+      x: 1,
+      y: 2,
     });
   });
 });
