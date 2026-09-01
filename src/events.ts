@@ -449,6 +449,22 @@ export type EventSocket = {
   addEventListener(type: 'message', fn: (ev: { data: unknown }) => void): void;
   addEventListener(type: 'error', fn: () => void): void;
   addEventListener(type: 'close', fn: () => void): void;
+  /**
+   * Detach the message listener, when the implementation has one.
+   *
+   * OPTIONAL, so that a `webSocket` factory written against the four methods
+   * above still satisfies this type. The global `WebSocket` has it, which is
+   * the implementation that needs it: `close()` is asynchronous, the socket
+   * sits in CLOSING while frames already buffered still dispatch, and
+   * {@link EventStreamOptions.maxQueued} promises that closing means nothing
+   * more can arrive. Without this that promise held only against a test double
+   * that stopped delivering the instant it was closed.
+   *
+   * Only `message` is ever detached. The `close` listener is what pushes the
+   * `end` the read loop stops on, so removing that one would trade a bounded
+   * queue for a loop that never finishes.
+   */
+  removeEventListener?(type: 'message', fn: (ev: { data: unknown }) => void): void;
   close(): void;
 };
 
@@ -640,6 +656,21 @@ class Frames {
   }
 
   push(f: Frame): void {
+    // Refused once the cap has been crossed — and only for the two kinds that
+    // carry DATA. `end` and `error` are how the read loop learns the socket is
+    // finished, so a cap that swallowed those would bound the queue by hanging
+    // the caller.
+    //
+    // Refusing is not the silent loss `maxQueued` was written to avoid, and the
+    // cursor is why: it advances at the YIELD, never on arrival, so a frame
+    // turned away here was never handed to anybody, the position never reached
+    // it, and the reconnect that follows asks for it again. Everything already
+    // queued is still delivered, exactly as the option promises.
+    //
+    // The listener is detached at the same moment, so on the global WebSocket
+    // this is the second lock rather than the only one. It is the only one for
+    // a `webSocket` factory that has no `removeEventListener`.
+    if (this.#full && (f.kind === 'frame' || f.kind === 'event')) return;
     this.#items.push(f);
     const wake = this.#wake;
     this.#wake = undefined;
@@ -712,6 +743,7 @@ export class ComputerEvents implements AsyncIterable<ComputerEvent> {
   #frames?: Frames;
   /** The position to resume from: after the last event YIELDED, never received. */
   #cursor?: string;
+  #detachMessage?: () => void;
   #hello?: Hello;
   #types?: string[];
 
@@ -759,7 +791,19 @@ export class ComputerEvents implements AsyncIterable<ComputerEvent> {
    * rather than "nothing is open".
    */
   get hello(): Hello | undefined {
-    return this.#hello;
+    // A COPY, for the reason `eventTypes` and `windows` are each copied — and
+    // this getter is why those two copies were not enough on their own. Both
+    // guard one array against a caller who edits what they were handed;
+    // `hello` used to return the frame those arrays live ON, so
+    // `stream.hello.events.push('window.opened')` reached the vocabulary
+    // through the one door nobody had shut. That list decides whether a wait
+    // can ever end, and `waitFor` is the caller that asks.
+    //
+    // Shallow, and the arrays by hand: the windows inside are the decoder's own
+    // objects and are deliberately not deep-copied, as `windows` says.
+    const h = this.#hello;
+    if (!h) return undefined;
+    return { ...h, events: [...h.events], windows: h.windows ? [...h.windows] : undefined };
   }
 
   /**
@@ -814,7 +858,13 @@ export class ComputerEvents implements AsyncIterable<ComputerEvent> {
   #shutSocket(): void {
     const sock = this.#socket;
     this.#socket = undefined;
+    const detach = this.#detachMessage;
+    this.#detachMessage = undefined;
     if (!sock) return;
+    // BEFORE the close, and that order is the point: `close()` only starts the
+    // handshake, and everything the socket has already buffered dispatches
+    // while it is still CLOSING. Taken off first, none of it reaches the queue.
+    detach?.();
     try {
       sock.close();
     } catch {
@@ -958,7 +1008,7 @@ export class ComputerEvents implements AsyncIterable<ComputerEvent> {
     // `open` — a listener attached after the handshake resolves would miss it,
     // and this method would then wait out its whole connect timeout on a
     // perfectly healthy socket.
-    sock.addEventListener('message', (ev) => {
+    const onMessage = (ev: { data: unknown }) => {
       const frame = decode(ev.data);
       if (frame === undefined) return;
       if (settleHello) {
@@ -978,7 +1028,11 @@ export class ComputerEvents implements AsyncIterable<ComputerEvent> {
         }
       }
       frames.push({ kind: 'frame', value: frame });
-    });
+    };
+    sock.addEventListener('message', onMessage);
+    // Kept so `#shutSocket` can take it off again. See `removeEventListener` on
+    // {@link EventSocket} for why only this one is ever detached.
+    this.#detachMessage = () => sock.removeEventListener?.('message', onMessage);
 
     // ONE deadline across both phases, not one each. The option says
     // "milliseconds to wait for the handshake and the opening frame", and two
@@ -1086,7 +1140,10 @@ export class ComputerEvents implements AsyncIterable<ComputerEvent> {
   /** What the opening frame settles, in the order it has to settle it. */
   #acceptHello(hello: Hello, frames: Frames): void {
     this.#hello = hello;
-    this.#types = hello.events;
+    // SNAPSHOT, not the frame's own array. `eventTypes` copies on the way out
+    // so a caller cannot fake what this computer can emit; aliasing the frame
+    // here left `hello.events` pointing at the very array that copy protects.
+    this.#types = [...hello.events];
     // The cursor a client stores when it disconnects before seeing an event.
     // Adopted only when nothing has been consumed, because it names a position
     // BEFORE the backlog this connection is about to deliver: taken while

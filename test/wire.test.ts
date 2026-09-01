@@ -13,6 +13,7 @@ import {
   recorder,
   SNAPSHOT,
   USAGE,
+  WINDOW,
 } from './harness.js';
 
 // OPL-3850. The decoder these replace handled the stringified cases well —
@@ -746,5 +747,168 @@ describe('a coerced value cannot classify, on the fields it still decided', () =
     await expect(computer.waitUntilRunning({ timeoutMs: 60, pollMs: 10 })).rejects.toThrow(
       /still \["running"\]|was still/,
     );
+  });
+});
+
+describe('the agent loop reads its payload the way the rest of the SDK does', () => {
+  /**
+   * `src/agent.ts` carried its own `num` — a bare `Number()` behind a finite
+   * check — and reached for a bare `String()` five times, which is the pair
+   * `models.num` and `models.str` were written to replace in OPL-3850. It is
+   * the one route that decodes a LIVE stream, so every failure below lands in
+   * the middle of a run rather than on a result somebody can re-read.
+   */
+  it('does not invent token counts from a payload it cannot read', async () => {
+    for (const tokens of [[7], [], {}, ' ', true, null]) {
+      const { client: c } = client((call) =>
+        call.path.endsWith('/agent')
+          ? json({
+              steps: 1,
+              stop: 'end_turn',
+              text: 'ok',
+              usage: { input_tokens: tokens, output_tokens: 3 },
+            })
+          : anyRoute(call),
+      );
+      const res = await (await c.computers.get('vm-1')).agentOnce({ prompt: 'go', modelKey: 'sk' });
+      // `Number([7])` is 7 — a bill nobody was sent, on the field a caller
+      // reconciles against Anthropic's invoice.
+      expect(`${JSON.stringify(tokens)}: ${res.usage.inputTokens}`).toBe(
+        `${JSON.stringify(tokens)}: 0`,
+      );
+      expect(res.usage.outputTokens).toBe(3);
+    }
+  });
+
+  it('still reads the token counts the platform did send', async () => {
+    const { client: c } = client((call) =>
+      call.path.endsWith('/agent')
+        ? json({
+            steps: 2,
+            stop: 'end_turn',
+            text: 'ok',
+            usage: {
+              input_tokens: 120,
+              output_tokens: '34',
+              cache_read_tokens: 900,
+              cache_write_tokens: 12,
+            },
+          })
+        : anyRoute(call),
+    );
+    const res = await (await c.computers.get('vm-1')).agentOnce({ prompt: 'go', modelKey: 'sk' });
+    expect([
+      res.usage.inputTokens,
+      res.usage.outputTokens,
+      res.usage.cacheReadTokens,
+      res.usage.cacheWriteTokens,
+    ]).toEqual([120, 34, 900, 12]);
+  });
+
+  /**
+   * `finished` is the single check the docs tell callers to make instead of
+   * comparing `stop` themselves, so it is a CLASSIFICATION and cannot be made
+   * from a coerced value — `String(['end_turn'])` is `'end_turn'`, and a run
+   * that ran out of steps reported that the model had finished.
+   */
+  it('does not report a run finished on a stop reason it cannot read', async () => {
+    for (const stop of [['end_turn'], [['end_turn']], { toString: 'x' }, 42, true]) {
+      const { client: c } = client((call) =>
+        call.path.endsWith('/agent') ? json({ steps: 1, stop, text: 'ok' }) : anyRoute(call),
+      );
+      const res = await (await c.computers.get('vm-1')).agentOnce({ prompt: 'go', modelKey: 'sk' });
+      // Unreadable is the same "nobody said" as absent, and it reads that way
+      // on BOTH fields — a `stop` of `'end_turn'` beside `finished: false`
+      // would be this client contradicting itself.
+      expect(`${JSON.stringify(stop)}: ${res.stop}/${res.finished}`).toBe(
+        `${JSON.stringify(stop)}: unknown/false`,
+      );
+    }
+  });
+
+  it('still reports a run finished when the platform said end_turn', async () => {
+    for (const [stop, finished] of [
+      ['end_turn', true],
+      ['max_steps', false],
+      ['refusal', false],
+    ] as const) {
+      const { client: c } = client((call) =>
+        call.path.endsWith('/agent') ? json({ steps: 1, stop, text: 'ok' }) : anyRoute(call),
+      );
+      const res = await (await c.computers.get('vm-1')).agentOnce({ prompt: 'go', modelKey: 'sk' });
+      expect(`${stop}: ${res.stop}/${res.finished}`).toBe(`${stop}: ${stop}/${finished}`);
+    }
+  });
+
+  /**
+   * The OPL-3850 crash, on the one route where it ends a run rather than a
+   * read: `String()` throws a TypeError when `toString` is not callable, and
+   * this decoder is reached from inside the caller's `for await`.
+   */
+  it('does not throw out of a run over a field it cannot stringify', async () => {
+    const { client: c } = client((call) =>
+      call.path.endsWith('/agent')
+        ? json({ steps: 1, stop: 'end_turn', text: { toString: 1 } })
+        : anyRoute(call),
+    );
+    const res = await (await c.computers.get('vm-1')).agentOnce({ prompt: 'go', modelKey: 'sk' });
+    expect(res.text).toBe('');
+    // The run still reports what it did, and `raw` still carries the value
+    // that could not be read.
+    expect(res.finished).toBe(true);
+    expect(res.raw.text).toEqual({ toString: 1 });
+  });
+});
+
+describe('a row this client cannot read is not a row it may drop', () => {
+  /**
+   * `toWindowListing` says a prefix of a window list is a complete-looking
+   * answer that is wrong, and refuses a record whose `id` is empty for exactly
+   * that reason. A row that is not a record at all was dropped by
+   * `.filter(isRecord)` BEFORE that check could see it, so the shorter desktop
+   * came back with nothing to say it was short.
+   */
+  it('refuses a window listing carrying a row it cannot read', async () => {
+    for (const row of [null, 'window', 42, ['x'], true]) {
+      const { client: c } = client((call) =>
+        call.path.endsWith('/windows') ? json({ windows: [WINDOW, row] }) : anyRoute(call),
+      );
+      const computer = await c.computers.get('vm-1');
+      await expect(computer.windows()).rejects.toThrow(/is not an object \(row 1 of 2/);
+    }
+  });
+
+  it('still lists the windows the platform did describe', async () => {
+    const { client: c } = client((call) =>
+      call.path.endsWith('/windows')
+        ? json({ windows: [WINDOW, { ...WINDOW, id: '0x2', title: 'second' }] })
+        : anyRoute(call),
+    );
+    const windows = await (await c.computers.get('vm-1')).windows();
+    expect(windows.map((w) => w.id)).toEqual([WINDOW.id, '0x2']);
+  });
+
+  /**
+   * The same shape in `expectMoves`, where dropping does not shorten the list
+   * but EMPTIES it — and `waitForMove` reads an empty listing as the platform
+   * having reaped the move, which it does for one reason: the computer is
+   * gone. One malformed row reported a live computer as deleted.
+   */
+  it('refuses a moves listing carrying a row it cannot read', async () => {
+    const { client: c } = client((call) =>
+      call.path === '/moves' ? json({ moves: [null] }) : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    const err = await computer.waitForMove({ pollMs: 1 }).catch((e) => e);
+    expect(String(err)).toContain('row 0 of 1');
+    expect(String(err)).not.toContain('has no move any more');
+  });
+
+  it('still reads an empty moves listing as the move having been reaped', async () => {
+    const { client: c } = client((call) =>
+      call.path === '/moves' ? json({ moves: [] }) : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    await expect(computer.waitForMove({ pollMs: 1 })).rejects.toThrow(/has no move any more/);
   });
 });

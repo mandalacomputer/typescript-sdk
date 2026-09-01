@@ -837,6 +837,94 @@ describe('reconnecting', () => {
     expect(urls[1]).toContain('since=ep-1%3A4');
   });
 
+  it('holds the queue bound against a socket that goes on delivering while it closes', async () => {
+    // The test above closes the socket and the stub stops dead, which is not
+    // what a real one does: `close()` starts a handshake, the socket sits in
+    // CLOSING, and everything already buffered still dispatches. `linger`
+    // models that, so the bound has to come from the stream rather than from
+    // the double — the queue stops accepting data frames and the message
+    // listener is taken off the socket at the same moment.
+    //
+    // Refusing them is not silent loss: the cursor advances at the YIELD, so a
+    // frame turned away here was never handed to anybody and the reconnect asks
+    // for it again.
+    const { computer: c } = await computer();
+    const urls: string[] = [];
+    const got = await collect(
+      c.events({
+        maxQueued: 2,
+        backoffMs: 1,
+        webSocket: socketFactory((s, n) => {
+          urls.push(s.url);
+          s.linger = true;
+          s.emitOpen();
+          s.send(hello({ ready: false }));
+          if (n === 0) {
+            // The stream closes the socket on the third of these, from inside
+            // the push that crosses the cap. The socket is then CLOSING, not
+            // closed, so four and five are still delivered to the listener —
+            // and they arrive BEFORE the close handshake finishes, which is
+            // what puts them ahead of the `end` that stops the reader.
+            for (let i = 1; i <= 5; i++) s.send(event({ seq: i, cursor: `ep-1:${i + 1}` }));
+            expect(s.closing).toBe(true);
+            s.emitClose();
+          } else {
+            s.send(event({ seq: 9, cursor: 'ep-1:10', type: 'computer.stopped' }));
+          }
+        }),
+      }),
+      4,
+    );
+    // Exactly what the non-lingering socket delivers: three landed before the
+    // cap was crossed, and the two that arrived after it are the ones the
+    // reconnect asks for. Without the bound the lingering socket queues them
+    // both and the resume is from ep-1:6.
+    expect(got.map((e) => e.cursor)).toEqual(['ep-1:2', 'ep-1:3', 'ep-1:4', 'ep-1:10']);
+    expect(urls[1]).toContain('since=ep-1%3A4');
+  });
+
+  it('does not let a caller edit the vocabulary it was handed', async () => {
+    // `eventTypes` copies on the way out so a caller cannot fake what this
+    // computer can emit — that list is what decides whether a wait can ever
+    // end. `hello` used to return the frame those types live ON, which is the
+    // same array through a door nobody had shut.
+    const { computer: c } = await computer();
+    const stream = c.events({
+      webSocket: socketFactory((s) => {
+        s.emitOpen();
+        s.send(hello({ ready: false, events: ['process.exited'], windows: [WINDOW] }));
+        s.send(event());
+      }),
+    });
+    await collect(stream, 1);
+    const windowsBefore = stream.windows?.length ?? 0;
+    stream.hello?.events.push('window.opened');
+    const first = stream.hello?.windows?.[0];
+    if (first) stream.hello?.windows?.push({ ...first });
+    // Neither door reaches the stream's own copy: `eventTypes` is what a wait
+    // consults, and `windows` is the desktop it reports.
+    expect(stream.eventTypes).toEqual(['process.exited']);
+    expect(stream.hello?.events).toEqual(['process.exited']);
+    expect(stream.windows?.length ?? 0).toBe(windowsBefore);
+    expect(windowsBefore).toBe(1);
+    stream.close();
+  });
+
+  it('still reports a vocabulary the platform replaced mid-stream', async () => {
+    const { computer: c } = await computer();
+    const stream = c.events({
+      webSocket: socketFactory((s) => {
+        s.emitOpen();
+        s.send(hello({ ready: false, events: ['process.exited'] }));
+        s.send({ type: 'capabilities', events: ['process.exited', 'window.opened'] });
+        s.send(event());
+      }),
+    });
+    await collect(stream, 1);
+    expect(stream.eventTypes).toEqual(['process.exited', 'window.opened']);
+    stream.close();
+  });
+
   it('stops when the caller aborts, and does not throw for it', async () => {
     const { computer: c } = await computer();
     const stop = new AbortController();
@@ -1111,6 +1199,27 @@ describe('waitFor', () => {
     const err = await c
       .waitFor('window.opened', {
         timeoutMs: 30_000,
+        webSocket: socketFactory((s) => {
+          s.emitOpen();
+          s.send(hello({ ready: false, events: ['process.exited', 'computer.idle'] }));
+        }),
+      })
+      .catch((e) => e);
+    expect(String(err)).toContain('cannot emit window.opened');
+    expect(isSettled(err)).toBe(true);
+  });
+
+  it('refuses it even when a connect hook edited the vocabulary first', async () => {
+    // `waitFor` composes the caller's `onConnect` AHEAD of its own check, so
+    // the frame the hook is handed is the one the check then read. A hook that
+    // pushed the wanted type onto `hello.events` made this computer look able
+    // to emit the very thing the wait is about to prove it cannot, and the wait
+    // ran to its deadline instead of saying so.
+    const { computer: c } = await computer();
+    const err = await c
+      .waitFor('window.opened', {
+        timeoutMs: 30_000,
+        onConnect: (h) => h.events.push('window.opened'),
         webSocket: socketFactory((s) => {
           s.emitOpen();
           s.send(hello({ ready: false, events: ['process.exited', 'computer.idle'] }));

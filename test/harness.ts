@@ -323,7 +323,17 @@ export class FakeSocket {
     else if (type === 'close') this.#close.push(fn as unknown as () => void);
   }
 
+  removeEventListener(type: 'message', fn: (ev: { data: unknown }) => void): void {
+    if (type !== 'message') return;
+    const at = this.#message.indexOf(fn);
+    if (at !== -1) this.#message.splice(at, 1);
+  }
+
   close(): void {
+    if (this.linger) {
+      this.closing = true;
+      return;
+    }
     this.emitClose();
   }
 
@@ -337,11 +347,30 @@ export class FakeSocket {
     this.sendRaw(data);
   }
 
+  /**
+   * Model the CLOSING window a real socket has, instead of shutting instantly.
+   *
+   * `WebSocket.close()` only STARTS the closing handshake. The socket sits in
+   * CLOSING, everything already buffered still dispatches, and `close` fires
+   * afterwards. This stub collapsed all of that into one synchronous step, so
+   * the queue bound it appeared to prove was a property of the stub: frames
+   * stopped because `sendRaw` returned early, and the `end` pushed by the close
+   * listener reached the queue AHEAD of any late frame, where it stopped the
+   * reader before one could be read.
+   *
+   * With this set, `close()` enters CLOSING and returns. Frames sent after it
+   * are still delivered — the case a real socket presents and the stream has to
+   * bound itself — and the test says when the handshake completes by calling
+   * {@link emitClose}.
+   */
+  linger = false;
+  /** True between a `close()` that lingered and the {@link emitClose} that ends it. */
+  closing = false;
+
   /** One frame verbatim, including the binary shapes this stream drops. */
   sendRaw(data: unknown): void {
-    // A closed socket delivers nothing, which is the property a test of the
-    // queue bound depends on: the stream closes the socket to stop the flow,
-    // and a stub that went on delivering afterwards would prove nothing.
+    // A closed socket delivers nothing. A CLOSING one still does, which is the
+    // whole point of `linger`.
     if (this.closed) return;
     for (const fn of [...this.#message]) fn({ data });
   }
@@ -353,6 +382,7 @@ export class FakeSocket {
   emitClose(): void {
     if (this.closed) return;
     this.closed = true;
+    this.closing = false;
     for (const fn of [...this.#close]) fn();
   }
 }

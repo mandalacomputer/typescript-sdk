@@ -1432,8 +1432,15 @@ export class Computer {
       // that never sees the connection it was promised is the defect this is
       // fixing rather than a smaller version of it.
       onConnect: (hello) => {
+        // Read BEFORE their hook runs, not after it. `hello` is the live
+        // opening frame, so a hook that pushes onto `events` — the mutation
+        // `eventTypes` and `hello` are both copied to prevent — would
+        // otherwise fake this computer into naming the very type this wait is
+        // about to decide it can never emit, and the wait would run to its
+        // deadline instead of saying so.
+        const events = [...hello.events];
         streamOpts.onConnect?.(hello);
-        impossible = unreachableTypes(this.id, wanted, hello.events);
+        impossible = unreachableTypes(this.id, wanted, events);
         if (impossible) stream.close();
       },
     });

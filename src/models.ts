@@ -1160,7 +1160,20 @@ export function expectMoves(
       `expected a JSON object with a moves array from ${method} ${path}, got: ${`${JSON.stringify(data)}`.slice(0, 200)}`,
     );
   }
-  return data.moves.filter(isRecord);
+  // Refused rather than filtered, for the reason `toWindowListing` refuses a
+  // row it cannot read. Dropping one here does not shorten a list: it empties
+  // it, and `waitForMove` reads an empty listing as the platform having reaped
+  // the move — which it does for one reason, the computer being gone. So a
+  // single malformed row reported a live computer as deleted. The empty ARRAY
+  // still means reaped; empty after dropping junk is not the same sentence.
+  const bad = data.moves.findIndex((m) => !isRecord(m));
+  if (bad !== -1) {
+    throw new MandalaError(
+      `expected every move from ${method} ${path} to be a JSON object, but row ${bad} of ` +
+        `${data.moves.length} is ${JSON.stringify(data.moves[bad] ?? null)}`,
+    );
+  }
+  return data.moves as Record<string, unknown>[];
 }
 
 /**
@@ -1813,7 +1826,20 @@ export function toGuestWindow(d: Record<string, unknown>): GuestWindow {
  * empty id there as "did not say" rather than as an identity.
  */
 export function toWindowListing(rows: unknown[], what: string): GuestWindow[] {
-  const windows = rows.filter(isRecord).map(toGuestWindow);
+  // Refused BEFORE the decode, and this is the half the `id` check below could
+  // not reach. `rows.filter(isRecord)` dropped a row that is not an object at
+  // all, so it never became a window and never met the refusal — and what came
+  // back was a shorter desktop with nothing to say it was short, which is the
+  // exact answer the comment above calls wrong.
+  const bad = rows.findIndex((r) => !isRecord(r));
+  if (bad !== -1) {
+    throw new MandalaError(
+      `${what} answered a window that is not an object (row ${bad} of ${rows.length}, ` +
+        `got ${JSON.stringify(rows[bad] ?? null)}); a row this client cannot read is a window ` +
+        `it cannot leave out, so the listing is refused whole rather than returned one short`,
+    );
+  }
+  const windows = (rows as Record<string, unknown>[]).map(toGuestWindow);
   const nameless = windows.findIndex((w) => w.id === '');
   if (nameless !== -1) {
     throw new MandalaError(
