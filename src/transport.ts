@@ -715,7 +715,25 @@ export class Transport {
           swallowLf = false;
         }
         if (text.endsWith('\r')) swallowLf = true;
-        buffer += text.replace(/\r\n?/g, '\n');
+        const add = text.replace(/\r\n?/g, '\n');
+        // Refused BEFORE the concatenation, not after it — the cap exists to
+        // stop this client holding an unbounded event, and checking it once the
+        // string is built is the one moment it has already been held.
+        //
+        // Only when no boundary can come of the join, because the check below
+        // must still be able to drain. `buffer` carries no `\n\n` at this point
+        // — the loop under this one runs until `indexOf` fails — so when `add`
+        // brings none either, and none straddles the seam, the combined length
+        // is already final and nothing here is going to shorten it. A chunk
+        // that DOES carry a boundary falls through and is framed as before,
+        // however large it is.
+        const boundary = add.includes('\n\n') || (buffer.endsWith('\n') && add.startsWith('\n'));
+        if (!boundary && buffer.length + add.length > MAX_SSE_EVENT_CHARS) {
+          throw new MandalaError(
+            `event stream from ${method} ${path} exceeded ${MAX_SSE_EVENT_CHARS} characters without a boundary`,
+          );
+        }
+        buffer += add;
         for (;;) {
           const sep = buffer.indexOf('\n\n');
           if (sep === -1) break;

@@ -50,9 +50,9 @@ import type {
 import {
   belongsToComputer,
   count,
-  expectMoves,
   isWindowResult,
   latestFinishedMove,
+  moveRows,
   num,
   said,
   str,
@@ -858,7 +858,12 @@ export class Computer {
         const moves = await this.#t.json(`GET`, P.MOVES, {
           signal: deadlineSignal(deadline - Date.now(), signal),
         });
-        const ours = expectMoves(moves, 'GET', P.MOVES)
+        // `moveRows` rather than `expectMoves`, because this listing is
+        // account-WIDE: the filter below is here precisely because most of its
+        // rows are other computers'. Refusing the whole listing over one of
+        // those would abort a wait whose own move is present and readable.
+        const { rows, unreadable } = moveRows(moves, 'GET', P.MOVES);
+        const ours = rows
           .map(toMove)
           // THE RAW row, for the reason the snapshot filter gives: `str()` is a
           // coercion and `String(['vm-1'])` is `'vm-1'`, so a malformed row was
@@ -877,7 +882,20 @@ export class Computer {
         // reaps for one reason: the computer is gone. Not a state to keep
         // polling for — and distinguishable from "not started yet" because this
         // is only reached after a move was accepted.
+        //
+        // Only when the listing was READ, though. Rows this client could not
+        // decode are rows it cannot attribute, so any one of them might be the
+        // move being waited on: an empty result after dropping some is "nobody
+        // could tell", which is a different sentence from "the platform reaped
+        // it" and must not borrow that one's certainty.
         if (!mine) {
+          if (unreadable > 0) {
+            throw new MandalaError(
+              `${this.id} has no move among the rows of GET ${P.MOVES} this client could read, ` +
+                `and ${unreadable} of ${rows.length + unreadable} could not be read at all — so ` +
+                `whether its move is gone cannot be told from this listing`,
+            );
+          }
           throw new MandalaError(
             `${this.id} has no move any more; the platform reaps one when its computer is deleted`,
           );
@@ -1432,8 +1450,15 @@ export class Computer {
       // that never sees the connection it was promised is the defect this is
       // fixing rather than a smaller version of it.
       onConnect: (hello) => {
+        // Read BEFORE their hook runs, not after it. `hello` is the live
+        // opening frame, so a hook that pushes onto `events` — the mutation
+        // `eventTypes` and `hello` are both copied to prevent — would
+        // otherwise fake this computer into naming the very type this wait is
+        // about to decide it can never emit, and the wait would run to its
+        // deadline instead of saying so.
+        const events = [...hello.events];
         streamOpts.onConnect?.(hello);
-        impossible = unreachableTypes(this.id, wanted, hello.events);
+        impossible = unreachableTypes(this.id, wanted, events);
         if (impossible) stream.close();
       },
     });
