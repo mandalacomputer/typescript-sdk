@@ -65,11 +65,29 @@ import {
   toVncConnect,
   toWindowListing,
   toWindowResult,
+  vncEventsUrl,
   windowContradiction,
 } from './models.js';
 import * as P from './paths.js';
 import type { CallOptions } from './resources.js';
-import { type Bytes, MODEL_KEY_HEADER, type Query, type Transport } from './transport.js';
+import {
+  type Bytes,
+  MAX_TIMER_MS,
+  MODEL_KEY_HEADER,
+  type Query,
+  type Transport,
+} from './transport.js';
+
+/**
+ * The largest `timeoutS` {@link Computer.exec} can honour.
+ *
+ * Derived rather than chosen: the request deadline is the command's own budget
+ * plus 30 seconds, and Node cannot represent a longer one. Far past anything
+ * useful — a reverse proxy answers 524 long before two minutes — so this
+ * refuses an absurd argument by name rather than capping a plausible one.
+ */
+const MAX_EXEC_TIMEOUT_S = Math.floor(MAX_TIMER_MS / 1_000) - 30;
+
 import {
   checkWait,
   deadlineSignal,
@@ -321,13 +339,22 @@ export class Computer {
   }
 
   // --- fields ---------------------------------------------------------
+  //
+  // Every string here is read through `str()` rather than `String()`, which is
+  // OPL-3850's fix applied to the whole set. `String()` THROWS rather than
+  // coercing on a value with no primitive conversion — an object off the wire
+  // whose `toString` is not callable, or one made with `Object.create(null)` —
+  // and `computerRecord` requires only a truthy `id`, so such a record survives
+  // construction and takes down the listing it was read from at the first
+  // getter access. The fix reached `status` and stopped; `raw` still carries
+  // whatever could not be read (OPL-4215).
 
   get id(): string {
-    return String(this.#data.id ?? '');
+    return str(this.#data.id);
   }
 
   get name(): string {
-    return String(this.#data.name ?? '');
+    return str(this.#data.name);
   }
 
   /**
@@ -391,7 +418,7 @@ export class Computer {
   /** When this computer's session was saved, or `''` if it is not saved. */
   get suspendedAt(): string {
     const s = this.#data.suspended;
-    return P.isRecord(s) ? String(s.at ?? '') : '';
+    return P.isRecord(s) ? str(s.at) : '';
   }
 
   /**
@@ -406,7 +433,7 @@ export class Computer {
    * than the machine.
    */
   get startError(): string {
-    return String(this.#data.start_error ?? '');
+    return str(this.#data.start_error);
   }
 
   /**
@@ -442,15 +469,15 @@ export class Computer {
    */
   get buildError(): string {
     const b = this.#data.build;
-    return P.isRecord(b) ? String(b.failed ?? '') : '';
+    return P.isRecord(b) ? str(b.failed) : '';
   }
 
   get os(): string {
-    return String(this.#data.os ?? '');
+    return str(this.#data.os);
   }
 
   get template(): string {
-    return String(this.#data.template ?? '');
+    return str(this.#data.template);
   }
 
   // num() and not Number(), on all three: a field that is not a number at all
@@ -479,7 +506,7 @@ export class Computer {
    * any computer that asked for something else.
    */
   get resolution(): string {
-    return String(this.#data.resolution || DEFAULT_RESOLUTION);
+    return str(this.#data.resolution) || DEFAULT_RESOLUTION;
   }
 
   /**
@@ -519,7 +546,7 @@ export class Computer {
   }
 
   get createdAt(): string {
-    return String(this.#data.created_at ?? '');
+    return str(this.#data.created_at);
   }
 
   /**
@@ -1071,11 +1098,17 @@ export class Computer {
     // and the timeout sentence below then read the first answer of the wait as
     // the state of the machine now (OPL-4201).
     let fresh = false;
+    // Whether a poll was ever ATTEMPTED, which is not the same question as
+    // whether one answered. A `timeoutMs: 0` budget never enters the block
+    // below, so `observed` cannot become true however the machine actually is
+    // — see the success test.
+    let attempted = false;
     for (;;) {
       let delayMs = pollMs;
       // Guarded rather than unconditional, so the sleep at the bottom of the
       // loop cannot hand the clock to a poll with no time left to read it.
       if (Date.now() < deadline) {
+        attempted = true;
         try {
           // What is left of this wait, and not the client's own per-request
           // deadline: a wait told to give up after five seconds must not spend
@@ -1115,7 +1148,14 @@ export class Computer {
           delayMs = retryDelay(pollMs, err);
         }
       }
-      if (observed && this.#statusIs('running')) return this;
+      // `observed` is what stops this wait quoting pre-call data as a reading of
+      // its own — except where there was never going to be a poll. A
+      // `timeoutMs: 0` budget skips the refresh above, so success could not be
+      // reached however the machine actually was, and a handle already reading
+      // `running` came back as a `TimeoutError` claiming every refresh had
+      // failed when none was attempted. `waitUntilBuilt` special-cases the same
+      // budget, and for the same reason (OPL-4215).
+      if ((observed || !attempted) && this.#statusIs('running')) return this;
       // A computer with no disk will never start on its own, and waiting out
       // the full timeout to say so helps nobody.
       if (this.buildFailed) throw this.#buildFailure();
@@ -1145,12 +1185,15 @@ export class Computer {
         // refreshes, and one whose refreshes stopped answering says when it
         // last looked rather than pretending the reading is current.
         throw new TimeoutError(
-          !observed
-            ? `${this.id} could not be observed within ${timeoutMs}ms: every refresh failed`
-            : fresh
-              ? `${this.id} was still ${JSON.stringify(this.status)} after ${timeoutMs}ms`
-              : `${this.id} could not be reached for the last part of ${timeoutMs}ms; when it ` +
-                `last answered it was ${JSON.stringify(this.status)}`,
+          !attempted
+            ? `${this.id} was ${JSON.stringify(this.status)} and ${timeoutMs}ms left no time to ` +
+                'look again'
+            : !observed
+              ? `${this.id} could not be observed within ${timeoutMs}ms: every refresh failed`
+              : fresh
+                ? `${this.id} was still ${JSON.stringify(this.status)} after ${timeoutMs}ms`
+                : `${this.id} could not be reached for the last part of ${timeoutMs}ms; when it ` +
+                  `last answered it was ${JSON.stringify(this.status)}`,
         );
       }
       await sleepUntilNextPoll(delayMs, deadline, signal);
@@ -1442,12 +1485,25 @@ export class Computer {
       if (err instanceof Error && !isTransientForPoll(err)) throw settled(err);
       throw err;
     }
-    const url = this.vnc?.eventsUrl;
+    // Read off the RAW connect surface, not only the decoded one.
+    // `toVncConnect` answers `undefined` for a payload missing either desktop
+    // credential, which is the right rule for the two URLs it builds over them
+    // and the wrong one for this one: the platform sends `events_url` whole,
+    // with the controlling credential already in it. Taken together, a payload
+    // short a `view_token` and carrying a working stream URL fell into the
+    // unreachable-host branch below and reconnected against it forever, with
+    // `maxRetries` defaulting to never give up (OPL-4215).
+    const url = this.vnc?.eventsUrl || vncEventsUrl(this.#data.vnc);
     if (url) return url;
-    if (!this.vnc) {
+    if (!P.isRecord(this.#data.vnc)) {
       // The platform could not reach the host holding this computer, so it sent
       // no connect surface at all. Weather, and the stream's own backoff is the
       // right response to it — deliberately NOT settled.
+      //
+      // Tested on the RAW field for the same reason the read above is: a
+      // decoded `undefined` also means "present and short a credential", and
+      // that is a computer whose host answered, so retrying it says nothing new.
+      // Such a surface falls through to the settled throws below instead.
       throw new ConnectionError(
         `the platform did not return a connect surface for ${this.id}; its host may be unreachable`,
       );
@@ -1837,6 +1893,22 @@ export class Computer {
    * the wrong thing.
    */
   async drag(toX: number, toY: number, from?: Point, opts: CallOptions = {}): Promise<void> {
+    // `from` is an optional positional in front of `CallOptions`, so a
+    // JavaScript `drag(x, y, { signal })` binds the options object here — and
+    // an options object is a `Point` at runtime as far as anything could tell:
+    // it simply has no `x` and no `y`. `start_coordinate` was then omitted, the
+    // drag ran from wherever the pointer happened to be, and it selected a
+    // different region while succeeding and reporting nothing (OPL-4215).
+    // `!= null`, so a JavaScript `drag(x, y, null)` keeps reaching `from?.x` and
+    // meaning "no starting point". Tested with `!== undefined` this guard
+    // dereferenced null and threw a TypeError naming neither the argument nor
+    // the call — the failure `nameBody` is fixed for one file over.
+    if (from != null && (typeof from.x !== 'number' || typeof from.y !== 'number')) {
+      throw new ValidationError(
+        'drag() takes a { x, y } starting point; to pass CallOptions leave the point out — ' +
+          'drag(toX, toY, undefined, { signal })',
+      );
+    }
     await this.#input(P.dragBody(toX, toY, from?.x, from?.y), opts);
   }
 
@@ -1866,6 +1938,18 @@ export class Computer {
    * than scrolling the wrong way.
    */
   async scroll(x?: number, y?: number, opts: ScrollOptions = {}): Promise<void> {
+    // The mirror of the misbinding `requireModifiers` catches, and this method
+    // is the one place it lands. `click(100, 200, ['shift'])` is correct, so
+    // `scroll(100, 200, ['shift'])` is the natural thing to write next — and
+    // here `modifiers` is a NAMED option inside the third parameter, so the
+    // array binds to `opts`, `opts.modifiers` is undefined, and the scroll
+    // happened with nothing held down (OPL-4215).
+    if (Array.isArray(opts)) {
+      throw new ValidationError(
+        'scroll() takes its modifiers as an option, not a positional — ' +
+          "scroll(x, y, { modifiers: ['shift'] })",
+      );
+    }
     const { direction = 'down', amount = 3, modifiers } = opts;
     await this.#input(P.scrollBody({ direction, amount, x, y, modifiers }), opts);
   }
@@ -1913,6 +1997,7 @@ export class Computer {
           "key(['ctrl', 'c'], { signal })",
       );
     }
+    const keys = first == null ? [] : spread ? [first, ...(rest as string[])] : [...first];
     // A HOLE in the chord, which the check above deliberately let through and
     // should not have. `JSON.stringify` turns an `undefined` array entry into
     // `null`, so `key('ctrl', undefined, 'c')` reached the platform as
@@ -1920,13 +2005,17 @@ export class Computer {
     // rather than refused. Exactly the "JavaScript reaches here" case the
     // comment above is about: `key('ctrl', map.get('copy'))` is how one
     // arrives, and a caller who wrote that meant a two-key chord.
-    if (spread && rest.some((r) => r === undefined)) {
+    //
+    // Checked on the RESOLVED chord rather than on `rest`, because the hole is
+    // the same hole in either spelling and the guard was gated on `spread`:
+    // `key(['ctrl', undefined, 'c'])` is the array form of the very call this
+    // refuses, and it went on the wire (OPL-4215).
+    if (keys.some((k) => k === undefined)) {
       throw new ValidationError(
         'key(...) takes a key name in every position; one of them was undefined, which reaches ' +
           'the platform as a null keystroke rather than as the chord you asked for',
       );
     }
-    const keys = first == null ? [] : spread ? [first, ...(rest as string[])] : [...first];
     await this.#input(P.keyBody(keys), spread ? {} : ((rest[0] as CallOptions) ?? {}));
   }
 
@@ -2032,20 +2121,52 @@ export class Computer {
     } & CallOptions = {},
   ): Promise<ExecResult> {
     const { timeoutS = 30, desktop, cwd, env } = opts;
-    const data = await this.#t.json<Record<string, unknown>>(
-      'POST',
-      P.computerAction(this.id, 'exec'),
-      {
-        body: P.execBody({ command, timeoutS, desktop, cwd, env }),
-        // The guest was just granted timeoutS to finish, so the HTTP request
-        // has to outlive that. Under the fixed client deadline alone, any
-        // timeoutS past it was guaranteed to be aborted client-side while the
-        // command ran on in the guest with its output unreachable.
-        minTimeoutMs: (timeoutS + 30) * 1_000,
-        signal: opts.signal,
-      },
-    );
-    return toExecResult(data ?? {});
+    const path = P.computerAction(this.id, 'exec');
+    // The guest was just granted timeoutS to finish, so the HTTP request has to
+    // outlive that. Under the fixed client deadline alone, any timeoutS past it
+    // was guaranteed to be aborted client-side while the command ran on in the
+    // guest with its output unreachable.
+    //
+    // Checked against the timer ceiling HERE, where the deadline is derived,
+    // rather than left to the transport: `execBody` asks only that timeoutS be
+    // positive and finite, so a large one arrived at the transport as a
+    // request timeout past MAX_TIMER_MS and came back named as the deadline
+    // rather than as the argument that set it. `holdKeyBody` caps its own
+    // duration for the same reason (OPL-4215).
+    const minTimeoutMs = (timeoutS + 30) * 1_000;
+    // Tested on `timeoutS` itself rather than on the deadline derived from it,
+    // because the derivation is where the evidence is lost: `(1e308 + 30) *
+    // 1000` overflows to Infinity, which is not greater than MAX_TIMER_MS, so a
+    // ceiling checked on the product let the largest arguments through to the
+    // very error this refusal exists to replace.
+    //
+    // Finite AND too large. A NaN or an Infinity is a different mistake with a
+    // better answer already written for it — `execBody` names the argument and
+    // says it must be finite — and testing the ceiling first would have taken
+    // that sentence away from every caller who reached here with
+    // `timeoutS: Number(unsetEnvVar)`.
+    if (Number.isFinite(timeoutS) && timeoutS > MAX_EXEC_TIMEOUT_S) {
+      throw new ValidationError(
+        `timeoutS must be no greater than ${MAX_EXEC_TIMEOUT_S} (got ${timeoutS}): the request ` +
+          "has to outlive the command by 30s, and a longer deadline than that overflows Node's " +
+          'timer maximum',
+      );
+    }
+    const data = await this.#t.json<Record<string, unknown>>('POST', path, {
+      body: P.execBody({ command, timeoutS, desktop, cwd, env }),
+      minTimeoutMs,
+      signal: opts.signal,
+    });
+    // Checked rather than defaulted to `{}`. A 204 or an empty body decodes to
+    // `undefined` here, and `toExecResult({})` reads that as `exitCode: -1`,
+    // `ok: false` — a command that ran and failed, which is a sentence nobody
+    // said. Callers branch on `ok`, so inventing a failure is worse than
+    // saying the body could not be read; `clipboard()` and `agentOnce()` both
+    // refuse a non-record for the same reason (OPL-4215).
+    if (!P.isRecord(data)) {
+      throw new MandalaError(`expected an exec result from POST ${path}`);
+    }
+    return toExecResult(data);
   }
 
   /**
