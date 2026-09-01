@@ -31,6 +31,7 @@ import {
   type Responder,
   recorder,
   SNAPSHOT,
+  WAYLAND_COMPUTER,
   WINDOW,
 } from './harness.js';
 
@@ -883,6 +884,55 @@ describe('what a payload cannot be allowed to mean', () => {
     const computer = await c.computers.get('vm-1');
     expect(computer.cpu).toBe(0);
     expect(computer.idleSuspendMin).toBeUndefined();
+  });
+
+  /**
+   * OPL-4260. The field a caller reads before driving a window.
+   *
+   * `os` is `linux` for a Wayland guest and an X11 one alike, so this is the
+   * only thing on the payload that separates them — and two things a caller
+   * acts on change with it: a window id is a compositor address rather than an
+   * X window id, and a move or resize of a tiled window is refused rather than
+   * quietly applied to nothing. `publicComputer` publishes it on the computer
+   * as well as on the template because a computer keeps the image it was cut
+   * from while a template's version can advance.
+   */
+  it('says which display protocol the desktop speaks', async () => {
+    const { client: c } = client(() => json(WAYLAND_COMPUTER));
+    const computer = await c.computers.get('vm-1');
+    expect(computer.desktop).toBe('wayland');
+    // Not distinguishable by `os`, which is the reason the field exists.
+    expect(computer.os).toBe('linux');
+  });
+
+  /**
+   * ABSENT, and not `'x11'` and not `''`.
+   *
+   * The one getter on this handle that cannot be a plain `str()`. A host
+   * deployed before OPL-4223 does not send the field, and the platform passes
+   * that silence through rather than naming a value, because naming one would
+   * assert a property of an image nobody claimed. `str()`'s fallback would
+   * answer `''` — a display protocol no host speaks — and a fallback of `'x11'`
+   * would put the platform's refused assertion back on this side of the wire.
+   * The same fault `cursorPosition` and the window geometry decoder each refuse
+   * by name.
+   */
+  it('says nothing rather than x11 when the platform said nothing', async () => {
+    const { client: c } = client(anyRoute);
+    const computer = await c.computers.get('vm-1');
+    expect(computer.desktop).toBeUndefined();
+    // And explicitly not the empty string, which is what `str()` would give and
+    // which reads as a protocol that was named rather than one that was not.
+    expect(computer.desktop).not.toBe('');
+  });
+
+  it('keeps an x11 the platform did say', async () => {
+    // The absence above is a host that has not been told about the field; a
+    // host that HAS says so out loud, and flattening the two would lose the only
+    // evidence a caller has that the platform answered the question at all.
+    const { client: c } = client(() => json({ ...COMPUTER, desktop: 'x11' }));
+    const computer = await c.computers.get('vm-1');
+    expect(computer.desktop).toBe('x11');
   });
 
   it('refuses an answer that is not a computer, where the id would have gone missing', async () => {
