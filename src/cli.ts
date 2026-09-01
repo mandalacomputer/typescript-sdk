@@ -29,6 +29,7 @@ import { open, stat } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import process from 'node:process';
 import { Readable } from 'node:stream';
+import { isatty, WriteStream } from 'node:tty';
 import { pathToFileURL } from 'node:url';
 
 import type { Computer } from './computer.js';
@@ -55,6 +56,16 @@ const CONNECT_TIMEOUT_MS = 15_000;
 
 /** File copies have no intrinsic duration; caller cancellation is the bound. */
 const SCP_TRANSFER_TIMEOUT_MS = 0;
+
+/**
+ * The geometry the broker gives a PTY when the upgrade URL names none.
+ *
+ * Mirrored rather than left implicit so a terminal that cannot be measured is
+ * told to the guest as the size it is going to get anyway, instead of as
+ * nothing at all.
+ */
+const DEFAULT_COLS = 80;
+const DEFAULT_ROWS = 24;
 
 const USAGE = `mandala — your own terminal, against a Mandala computer.
 
@@ -162,6 +173,130 @@ export function flushOutput(
 /** Preserve diagnostics for a CLI bug that escaped the expected error path. */
 export function unexpectedErrorText(err: unknown): string {
   return err instanceof Error ? (err.stack ?? err.message) : String(err);
+}
+
+/**
+ * The descriptor to measure the local terminal on, or `undefined` if there is
+ * no terminal on any of them.
+ *
+ * stdin first: it is the descriptor raw mode is set from, and its terminal is
+ * the one SIGWINCH reports on. stdout is not the right answer on its own —
+ * `mandala ssh dev | tee session.log` is still a session in whatever window the
+ * user is sitting in, and sizing it from the pipe left the guest PTY at the
+ * broker's 80x24 default for the whole session, with `vim`, `htop` and `less`
+ * wrong all the way through (OPL-4264; OPL-4246 was the same defect in the
+ * Python SDK). The other two are tried after it so a redirected stdin
+ * (`mandala ssh dev < script`) still reports the window its output is drawn in.
+ *
+ * Descriptors rather than `process.stdin.isTTY`, because a descriptor is what
+ * the measurement below has to name.
+ */
+export function terminalFd(isTerminal: (fd: number) => boolean = isatty): number | undefined {
+  for (const fd of [0, 1, 2]) {
+    try {
+      if (isTerminal(fd)) return fd;
+    } catch {
+      // A descriptor isatty() will not answer for is not the terminal we want.
+    }
+  }
+  return undefined;
+}
+
+/**
+ * The process's own stream for a descriptor, when that stream is a terminal.
+ *
+ * Nothing to open for these: Node already holds a handle on their console, and
+ * refreshes its geometry on SIGWINCH itself — from a listener installed when the
+ * stream was built, so it has already run by the time ours does.
+ */
+function ownTerminal(fd: number): NodeJS.WriteStream | undefined {
+  if (fd === 1 && process.stdout.isTTY) return process.stdout;
+  if (fd === 2 && process.stderr.isTTY) return process.stderr;
+  return undefined;
+}
+
+/**
+ * Open a write handle on a descriptor purely to ask it for its window.
+ *
+ * `tty.ReadStream` — what `process.stdin` is when it is a terminal — has no
+ * `columns`/`rows`; those live on `tty.WriteStream` alone, so measuring stdin
+ * means building one on its descriptor. That is safe on the descriptor the
+ * process is already reading: libuv reopens the tty by name for a stdio
+ * descriptor rather than sharing the open file the reader holds, so this handle
+ * gets its own, and closing it leaves stdin readable with raw mode intact.
+ * Checked against a real pty rather than taken from the docs.
+ *
+ * Built and destroyed per measurement rather than kept alive: a live handle
+ * would be one more thing to unref and tear down on every exit path, and a
+ * resize is rare enough that reopening the tty for it costs nothing.
+ */
+function openedTerminal(fd: number): { columns?: number; rows?: number } | undefined {
+  let out: WriteStream | undefined;
+  try {
+    out = new WriteStream(fd);
+    return { columns: out.columns, rows: out.rows };
+  } catch {
+    return undefined;
+  } finally {
+    out?.destroy();
+  }
+}
+
+/** The window a descriptor is showing, or `undefined` when nothing can say. */
+function windowSize(fd: number): { columns?: number; rows?: number } | undefined {
+  // The chosen descriptor first, then whichever output stream still speaks for
+  // the same console. That tail is not redundant: a Windows console *input*
+  // handle carries no write handle at all, and stdout is then the only thing
+  // that can report the window — falling straight through to 80x24 there would
+  // trade this fix for a regression on the platform that never had the bug.
+  return ownTerminal(fd) ?? openedTerminal(fd) ?? ownTerminal(1) ?? ownTerminal(2);
+}
+
+/** A window dimension the guest can be told, or `undefined` for anything else. */
+function dimension(value: number | undefined): number | undefined {
+  return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : undefined;
+}
+
+/**
+ * The local terminal's geometry, measured on `fd`.
+ *
+ * Each half falls back on its own, because a handle that answers for one and
+ * not the other is still worth half an answer. No `COLUMNS`/`LINES` override:
+ * nothing in this command has ever consulted them — `process.stdout.columns` is
+ * the ioctl and nothing else — and adding one here would be a new feature
+ * riding along with a fix.
+ */
+export function terminalSize(
+  fd: number | undefined,
+  measure: (fd: number) => { columns?: number; rows?: number } | undefined = windowSize,
+): { cols: number; rows: number } {
+  const size = fd === undefined ? undefined : measure(fd);
+  return {
+    cols: dimension(size?.columns) ?? DEFAULT_COLS,
+    rows: dimension(size?.rows) ?? DEFAULT_ROWS,
+  };
+}
+
+/**
+ * The upgrade URL for a terminal session: the endpoint, plus the two things the
+ * broker can only learn before the PTY exists.
+ *
+ * `cols`/`rows` are the PTY's *initial* geometry. The broker defaults them to
+ * 80x24 and honours a `resize` frame only afterwards, so a URL without them
+ * draws the login prompt, the MOTD and any replayed scrollback 80 columns wide
+ * however wide the window is (OPL-4264). A broker too old to read them falls
+ * back to that same default, which is why they are sent rather than probed for.
+ */
+export function terminalSessionUrl(
+  base: string,
+  session: string,
+  size?: { cols: number; rows: number },
+): string {
+  const params: string[] = [];
+  if (session !== 'main') params.push(`session=${encodeURIComponent(session)}`);
+  if (size) params.push(`cols=${size.cols}`, `rows=${size.rows}`);
+  if (!params.length) return base;
+  return `${base}${base.includes('?') ? '&' : '?'}${params.join('&')}`;
 }
 
 /**
@@ -275,11 +410,13 @@ async function cmdSsh(target: string, session: string): Promise<number> {
     }
     die(`${c.name} has no terminal endpoint (platform too old?)`);
   }
-  let url = vnc.terminalUrl;
-  if (session !== 'main') {
-    url += `${url.includes('?') ? '&' : '?'}session=${encodeURIComponent(session)}`;
-  }
-  return interact(url);
+  // Measured here rather than left to the first resize frame: the broker sizes
+  // the PTY from the upgrade URL and everything it draws before that frame
+  // lands — the login prompt, the MOTD, any replayed scrollback — is drawn at
+  // whatever the URL said.
+  const fd = terminalFd();
+  const size = fd === undefined ? undefined : terminalSize(fd);
+  return interact(terminalSessionUrl(vnc.terminalUrl, session, size));
 }
 
 /**
@@ -302,14 +439,19 @@ async function interact(url: string): Promise<number> {
 
   const stdin = process.stdin;
   const stdout = process.stdout;
+  // The terminal this session is sized from, which is not necessarily the one
+  // its output is written to: a piped stdout is still a session in a window.
+  const ttyFd = terminalFd();
   let raw = false;
+  let winch = false;
   let exitCode: number | undefined;
   let pump: ReturnType<typeof setInterval> | undefined;
 
   const sendSize = () => {
-    if (ws.readyState !== WebSocket.OPEN || !stdout.isTTY) return;
+    if (ws.readyState !== WebSocket.OPEN || ttyFd === undefined) return;
     try {
-      ws.send(JSON.stringify({ type: 'resize', cols: stdout.columns, rows: stdout.rows }));
+      const { cols, rows } = terminalSize(ttyFd);
+      ws.send(JSON.stringify({ type: 'resize', cols, rows }));
     } catch {
       // Racing a close is fine; the close is the news, not this.
     }
@@ -370,7 +512,10 @@ async function interact(url: string): Promise<number> {
     }
     stdin.off('data', onStdin);
     stdin.off('end', onStdinEnd);
-    stdout.off('resize', sendSize);
+    if (winch) {
+      process.off('SIGWINCH', sendSize);
+      winch = false;
+    }
     // Restoring the terminal is the one thing that MUST happen. Skipping it
     // leaves the user's shell in raw mode with no echo, which reads as a hung
     // machine rather than as a crashed command.
@@ -388,8 +533,15 @@ async function interact(url: string): Promise<number> {
     stdin.resume();
     stdin.on('data', onStdin);
     stdin.on('end', onStdinEnd);
-    stdout.on('resize', sendSize);
-    sendSize();
+    if (ttyFd !== undefined) {
+      // Not `stdout.on('resize')`: Node emits that only on a tty WriteStream,
+      // so a piped stdout never fired it and a session sized from stdin has
+      // nothing there to listen to. SIGWINCH is what the terminal actually
+      // sends, and it arrives whatever this process's stdout is.
+      process.on('SIGWINCH', sendSize);
+      winch = true;
+      sendSize();
+    }
 
     await new Promise<void>((resolve) => {
       ws.addEventListener('message', (ev) => {
