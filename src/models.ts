@@ -1150,17 +1150,51 @@ export type Snapshot = {
  * array still means what it always did, which is the reaped row that branch is
  * for.
  */
-export function expectMoves(
+export function moveRows(
   data: unknown,
   method: string,
   path: string,
-): Record<string, unknown>[] {
+): { rows: Record<string, unknown>[]; unreadable: number } {
   if (!isRecord(data) || !Array.isArray(data.moves)) {
     throw new MandalaError(
       `expected a JSON object with a moves array from ${method} ${path}, got: ${`${JSON.stringify(data)}`.slice(0, 200)}`,
     );
   }
-  return data.moves.filter(isRecord);
+  const rows = data.moves.filter(isRecord);
+  return { rows, unreadable: data.moves.length - rows.length };
+}
+
+/**
+ * The rows, refused whole if any of them is not one.
+ *
+ * The posture {@link toWindowListing} takes, and it belongs to the LISTING
+ * callers: `Moves.list` answers "these are the moves on this account", and a
+ * row it dropped makes that answer short with nothing to say so.
+ *
+ * `Computer.waitForMove` deliberately does NOT come through here, and what
+ * makes the difference is what `/moves` is. It is account-WIDE — which is why
+ * that method filters it by computer id at all — so a row this client cannot
+ * read is most likely another computer's, and refusing on it would abort a
+ * wait over a move that is present, readable and running. It reads
+ * {@link moveRows} instead and spends `unreadable` only where the count
+ * changes the answer: whether an empty result means the move was reaped, or
+ * means nobody could tell.
+ */
+export function expectMoves(
+  data: unknown,
+  method: string,
+  path: string,
+): Record<string, unknown>[] {
+  const { rows, unreadable } = moveRows(data, method, path);
+  if (unreadable > 0) {
+    const all = (data as { moves: unknown[] }).moves;
+    const bad = all.findIndex((m) => !isRecord(m));
+    throw new MandalaError(
+      `expected every move from ${method} ${path} to be a JSON object, but row ${bad} of ` +
+        `${all.length} is ${`${JSON.stringify(all[bad] ?? null)}`.slice(0, 200)}`,
+    );
+  }
+  return rows;
 }
 
 /**
@@ -1813,7 +1847,21 @@ export function toGuestWindow(d: Record<string, unknown>): GuestWindow {
  * empty id there as "did not say" rather than as an identity.
  */
 export function toWindowListing(rows: unknown[], what: string): GuestWindow[] {
-  const windows = rows.filter(isRecord).map(toGuestWindow);
+  // Refused BEFORE the decode, and this is the half the `id` check below could
+  // not reach. `rows.filter(isRecord)` dropped a row that is not an object at
+  // all, so it never became a window and never met the refusal — and what came
+  // back was a shorter desktop with nothing to say it was short, which is the
+  // exact answer the comment above calls wrong.
+  const bad = rows.findIndex((r) => !isRecord(r));
+  if (bad !== -1) {
+    throw new MandalaError(
+      `${what} answered a window that is not an object (row ${bad} of ${rows.length}, ` +
+        `got ${`${JSON.stringify(rows[bad] ?? null)}`.slice(0, 200)}); a row this client cannot ` +
+        `read is a window ` +
+        `it cannot leave out, so the listing is refused whole rather than returned one short`,
+    );
+  }
+  const windows = (rows as Record<string, unknown>[]).map(toGuestWindow);
   const nameless = windows.findIndex((w) => w.id === '');
   if (nameless !== -1) {
     throw new MandalaError(
