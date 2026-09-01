@@ -1344,6 +1344,13 @@ npx mandala scp my-computer:/var/log/app.log ./app.log
 Disconnecting **detaches** rather than ending it; running the same command
 reattaches and replays recent output.
 
+The guest's PTY is sized from the first of stdin, stdout and stderr that is a
+terminal — stdin first, since that is the one raw mode is set from — and the
+size travels on the upgrade URL, so the login prompt and any replayed scrollback
+are drawn at the real width rather than at the broker's 80x24 default. Resizing
+the window re-sends it. That holds for `mandala ssh my-computer | tee out.log`
+too: a piped stdout is still a session in a window somebody is watching.
+
 `scp` rides the files API, so it needs no shell in the guest at all. The side
 spelled `<computer>:/path` is the guest, by scp's own rule: a colon marks the
 remote side unless a `/` comes before it, so `./odd:name` stays a local file.

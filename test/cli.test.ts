@@ -21,7 +21,10 @@ import {
   remoteSide,
   STDIN_HIGH_WATER,
   stdinBackpressure,
+  terminalFd,
   terminalFrameByteLength,
+  terminalSessionUrl,
+  terminalSize,
   unexpectedErrorText,
   uploadSize,
   waitForWebSocketOpen,
@@ -163,6 +166,83 @@ describe('terminal frames', () => {
     expect(terminalFrameByteLength('abc')).toBe(3);
     expect(terminalFrameByteLength('🚀')).toBe(4);
     expect(terminalFrameByteLength(new ArrayBuffer(7))).toBe(7);
+  });
+});
+
+describe('terminal geometry', () => {
+  const ttys = (fds: number[]) => (fd: number) => fds.includes(fd);
+
+  it('measures the terminal on stdin, not on a piped stdout', () => {
+    // `mandala ssh dev | tee session.log` — stdin is the window, stdout a pipe.
+    expect(terminalFd(ttys([0, 2]))).toBe(0);
+  });
+
+  it('falls back past a redirected stdin to the window the output is drawn in', () => {
+    expect(terminalFd(ttys([1, 2]))).toBe(1);
+    expect(terminalFd(ttys([2]))).toBe(2);
+  });
+
+  it('finds no terminal when none of the three is one', () => {
+    expect(terminalFd(ttys([]))).toBeUndefined();
+  });
+
+  it('keeps looking past a descriptor isatty refuses to answer for', () => {
+    const refuses = (fd: number) => {
+      if (fd < 2) throw new Error('bad file descriptor');
+      return true;
+    };
+    expect(terminalFd(refuses)).toBe(2);
+  });
+
+  it('reads the geometry off the descriptor it was given', () => {
+    const sizes: Record<number, { columns: number; rows: number }> = {
+      0: { columns: 203, rows: 51 },
+      1: { columns: 80, rows: 24 },
+    };
+    expect(terminalSize(0, (fd) => sizes[fd])).toEqual({ cols: 203, rows: 51 });
+  });
+
+  it('falls back to the broker default when there is no terminal to measure', () => {
+    expect(terminalSize(undefined, () => ({ columns: 203, rows: 51 }))).toEqual({
+      cols: 80,
+      rows: 24,
+    });
+  });
+
+  it('falls back per half, so a partial answer is still half an answer', () => {
+    expect(terminalSize(0, () => undefined)).toEqual({ cols: 80, rows: 24 });
+    expect(terminalSize(0, () => ({ columns: 203 }))).toEqual({ cols: 203, rows: 24 });
+    // Nothing the guest could use as a width: zero, a fraction, a missing ioctl
+    // reported as NaN. The default is a size; these are not.
+    expect(terminalSize(0, () => ({ columns: 0, rows: 51 }))).toEqual({ cols: 80, rows: 51 });
+    expect(terminalSize(0, () => ({ columns: 100.5, rows: Number.NaN }))).toEqual({
+      cols: 80,
+      rows: 24,
+    });
+  });
+});
+
+describe('terminalSessionUrl', () => {
+  const base = 'wss://host/api/v1/computers/c1/terminal';
+
+  it('names nothing when the session is the default and there is no terminal', () => {
+    expect(terminalSessionUrl(base, 'main')).toBe(base);
+  });
+
+  it('carries the initial geometry, which the broker cannot learn any later way', () => {
+    expect(terminalSessionUrl(base, 'main', { cols: 203, rows: 51 })).toBe(
+      `${base}?cols=203&rows=51`,
+    );
+  });
+
+  it('joins onto an endpoint that already carries a query', () => {
+    expect(terminalSessionUrl(`${base}?token=abc`, 'build', { cols: 203, rows: 51 })).toBe(
+      `${base}?token=abc&session=build&cols=203&rows=51`,
+    );
+  });
+
+  it('escapes a session name that would otherwise be two parameters', () => {
+    expect(terminalSessionUrl(base, 'a&b=c')).toBe(`${base}?session=a%26b%3Dc`);
   });
 });
 
