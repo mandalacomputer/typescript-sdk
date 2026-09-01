@@ -739,7 +739,14 @@ export class ComputerEvents implements AsyncIterable<ComputerEvent> {
       connectTimeoutMs: this.#connectTimeoutMs,
       maxQueued: this.#maxQueued,
     });
-    this.#cursor = opts.since;
+    // An EMPTY `since` is the absence of one, not a position. Stored as it
+    // arrived it was set as far as the hello frame's adoption test could tell
+    // — `if (this.#cursor === undefined)` — and falsy as far as `withCursor`
+    // could tell, so it was never put on the URL either. The stream believed it
+    // held a position, refused the one the platform offered, and rejoined at
+    // the head on every reconnect, replaying events the caller had already been
+    // given. `?? ''` on a caller's own option is how one arrives (OPL-4215).
+    this.#cursor = opts.since || undefined;
   }
 
   /**
@@ -840,7 +847,15 @@ export class ComputerEvents implements AsyncIterable<ComputerEvent> {
 
   async *#run(): AsyncGenerator<ComputerEvent> {
     let failures = 0;
-    let backoff = this.#backoffMs;
+    // Capped from the FIRST sleep, and from every RESET of it. The doubling
+    // below is clamped to `maxBackoffMs`; the starting value was taken raw in
+    // both places it is set, so a caller who set both got a wait past the
+    // ceiling they had just named — `checkStreamNumbers` validates each of
+    // these numbers independently and never compares the two. Named once
+    // rather than clamped at each site, because the two sites drifting apart
+    // is how the first fix for this missed the second one (OPL-4215).
+    const first = Math.min(this.#backoffMs, this.#maxBackoffMs);
+    let backoff = first;
     for (;;) {
       if (this.#stopped()) return;
       // Closing the socket is the whole response to a queue that is filling:
@@ -910,7 +925,7 @@ export class ComputerEvents implements AsyncIterable<ComputerEvent> {
       }
       if (delivered > 0) {
         failures = 0;
-        backoff = this.#backoffMs;
+        backoff = first;
       }
       failures += 1;
       if (this.#maxRetries > 0 && failures > this.#maxRetries) {

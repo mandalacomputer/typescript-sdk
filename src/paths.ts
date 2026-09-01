@@ -387,6 +387,15 @@ export function createBody(args: CreateArgs): Json {
   if (name !== undefined && !requireString(name, 'name').trim()) {
     throw new ValidationError('name must not be empty');
   }
+  // The other three strings on this body, checked for the reason `name` is.
+  // They are not trimmed, so a non-string does not throw here — it passes
+  // through `omitUndefined` into `JSON.stringify` and reaches the platform as
+  // a JSON object where a size was meant. A 400 naming a field the caller did
+  // not knowingly send is a worse answer than a refusal naming the argument
+  // they did (OPL-4215).
+  if (size !== undefined) requireString(size, 'size');
+  if (template !== undefined) requireString(template, 'template');
+  if (resolution !== undefined) requireString(resolution, 'resolution');
   return {
     ...omitUndefined({
       name,
@@ -496,7 +505,7 @@ export function updateBody(args: UpdateArgs): Json {
     // `null` is a value here and `undefined` is the absence.
     idle_suspend_min: args.idleSuspendMin,
   });
-  if (args.name !== undefined && !args.name.trim()) {
+  if (args.name !== undefined && !requireString(args.name, 'name').trim()) {
     // On create an omitted name means "you pick one"; in an update an empty one
     // can only mean a caller cleared the field.
     throw new ValidationError('name must not be empty');
@@ -520,7 +529,11 @@ export function updateBody(args: UpdateArgs): Json {
  */
 export const nameBody = (name?: string): Json => {
   if (name === undefined) return {};
-  if (!name.trim()) throw new ValidationError('name must not be empty');
+  // Through {@link requireString}, the way {@link snapshotBody} reads the same
+  // optional name. Trimming an unchecked value is a `TypeError` from inside
+  // this SDK naming neither the argument nor the call, and a JavaScript
+  // `clone({ signal })` is how one arrives (OPL-4215).
+  if (!requireString(name, 'name').trim()) throw new ValidationError('name must not be empty');
   return { name };
 };
 
@@ -874,6 +887,29 @@ function wholePoint(x?: number, y?: number): void {
 }
 
 /**
+ * A list of modifier names, refused when it is not a list.
+ *
+ * The guard on an options object reaching the `modifiers` slot. `click` takes
+ * `(x, y, modifiers, opts)`, so a JavaScript caller writing the natural
+ * `click(100, 200, { signal })` — every other input method on this surface
+ * takes `CallOptions` last — bound the options object to `modifiers` instead.
+ * Nothing then failed: `{ signal }.length` is `undefined`, so no `text` went on
+ * the wire, the click was sent, and the only thing lost was the ability to
+ * cancel it. A gesture that happens anyway is the shape of mistake nothing
+ * reports (OPL-4215).
+ *
+ * Refused rather than peeled, for the reason `key()` gives about its own
+ * trailing object: quietly accepting a second spelling is how two spellings
+ * drift apart, and the message can name the one that works.
+ */
+function requireModifiers(v: unknown, what: string, spelling: string): void {
+  if (!Array.isArray(v)) {
+    throw new ValidationError(`${what} must be an array of key names — ${spelling}`);
+  }
+  for (const m of v) requireString(m, `${what} entry`);
+}
+
+/**
  * A click, optionally at a point and optionally with keys held down.
  *
  * No coordinate means "where the pointer already is", which is a real and
@@ -887,6 +923,15 @@ export function clickBody(
   y?: number,
   modifiers: readonly string[] = [],
 ): Json {
+  // The spelling is the CALLER'S, not this builder's. Five click methods reach
+  // here and `scroll` reaches it too, where the advice a click needs is not
+  // merely unhelpful but impossible: `scroll` takes its modifiers as a named
+  // option, so the positional slot the click message describes does not exist.
+  requireModifiers(
+    modifiers,
+    `${action}() modifiers`,
+    `to pass CallOptions give the modifiers first — ${action}(x, y, [], { signal })`,
+  );
   wholePoint(x, y);
   const body: Json = { action };
   if (x !== undefined && y !== undefined) {
@@ -962,6 +1007,11 @@ export function scrollBody(args: {
   if (!SCROLL_DIRECTIONS.includes(args.direction)) {
     throw new ValidationError(`direction must be one of ${SCROLL_DIRECTIONS.join(', ')}`);
   }
+  requireModifiers(
+    args.modifiers ?? [],
+    'scroll() modifiers',
+    "they are already an option here — scroll(x, y, { modifiers: ['shift'], signal })",
+  );
   wholePoint(args.x, args.y);
   const body: Json = {
     action: 'scroll',
@@ -981,13 +1031,40 @@ export const typeBody = (text: string): Json => ({
   text: requireString(text, 'type() text'),
 });
 
+/**
+ * The chord itself, refused when it is not a list of key names.
+ *
+ * Two holes, both reached from JavaScript. A bare string is iterable, so
+ * `holdKey('shift', 1)` spread into `['s','h','i','f','t']` — five keys held
+ * down, none of them the one that was asked for, and no error anywhere. And an
+ * empty entry copied straight through: `key(['ctrl', ''])` named a keystroke
+ * that is not a key. Length was the only thing either builder checked
+ * (OPL-4215).
+ */
+function requireKeys(keys: readonly string[], what: string): readonly string[] {
+  if (!Array.isArray(keys)) {
+    const bare = typeof (keys as unknown) === 'string';
+    throw new ValidationError(
+      `${what} takes an array of key names` +
+        (bare ? ', not a bare string, which spreads into one key per character' : ''),
+    );
+  }
+  if (!keys.length) throw new ValidationError(`${what} needs at least one key`);
+  for (const k of keys) {
+    if (!requireString(k, `${what} entry`).length) {
+      throw new ValidationError(`${what} takes a key name in every position; one was empty`);
+    }
+  }
+  return keys;
+}
+
 export function keyBody(keys: readonly string[]): Json {
-  if (!keys.length) throw new ValidationError('key() needs at least one key');
+  requireKeys(keys, 'key()');
   return { action: 'key', keys: [...keys] };
 }
 
 export function holdKeyBody(keys: readonly string[], seconds: number): Json {
-  if (!keys.length) throw new ValidationError('holdKey() needs at least one key');
+  requireKeys(keys, 'holdKey()');
   finite(seconds, 'seconds');
   if (seconds <= 0) throw new ValidationError('seconds must be positive');
   // Same cap, and the same reason, as {@link waitBody}: a hold is a held HTTP
@@ -1155,6 +1232,17 @@ export const WINDOW_ACTIONS = [
 ] as const;
 export type WindowAction = (typeof WINDOW_ACTIONS)[number];
 
+/**
+ * Every key {@link windowBody} will put on the wire.
+ *
+ * Named as a list rather than picked field by field because the builder spreads
+ * its argument, so an unnamed key is a key the platform is asked to read. The
+ * refusal that uses this also catches the one way an unnamed key arrives in
+ * practice — a `CallOptions` bound to the `geometry` parameter — and can name
+ * the spelling that works.
+ */
+const WINDOW_BODY_KEYS: readonly string[] = ['action', 'x', 'y', 'width', 'height'];
+
 export function windowBody(args: {
   action: WindowAction;
   x?: number;
@@ -1164,6 +1252,24 @@ export function windowBody(args: {
 }): Json {
   if (!WINDOW_ACTIONS.includes(args.action)) {
     throw new ValidationError(`action must be one of ${WINDOW_ACTIONS.join(', ')}`);
+  }
+  // Every key named, because the return spreads `args` onto the body. A
+  // JavaScript `windowAction(id, 'close', { signal })` binds the options object
+  // to the `geometry` parameter, and an unnamed key went to the platform as
+  // part of the request while the signal it carried was dropped — a close that
+  // could not be cancelled and said nothing about it (OPL-4215).
+  for (const [key, value] of Object.entries(args)) {
+    // An `undefined` value is not a key on the wire — the return below drops it
+    // — so refusing one would refuse a correct request. A JavaScript caller
+    // spreading a partially-filled geometry object is the same population this
+    // guard is for, and it must not be the one it turns away.
+    if (value !== undefined && !WINDOW_BODY_KEYS.includes(key)) {
+      throw new ValidationError(
+        `windowAction() geometry takes only ${WINDOW_BODY_KEYS.slice(1).join(', ')} (got ` +
+          `${JSON.stringify(key)}); to pass CallOptions give the geometry first — ` +
+          'windowAction(id, action, {}, { signal })',
+      );
+    }
   }
   finiteIf(args.x, 'x');
   finiteIf(args.y, 'y');
@@ -1263,7 +1369,9 @@ export function agentBody(args: {
   model?: string;
   stream: boolean;
 }): Json {
-  if (!args.prompt.trim()) throw new ValidationError('prompt must not be empty');
+  if (!requireString(args.prompt, 'prompt').trim()) {
+    throw new ValidationError('prompt must not be empty');
+  }
   if (args.maxSteps !== undefined && (!Number.isInteger(args.maxSteps) || args.maxSteps < 1)) {
     throw new ValidationError(`maxSteps must be a positive integer (got ${args.maxSteps})`);
   }

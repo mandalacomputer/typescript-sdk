@@ -2770,3 +2770,232 @@ describe('answers that would leave a handle worse off', () => {
     ).rejects.toThrow(/changed their mind/);
   });
 });
+
+/**
+ * The findings of the OPL-4215 hunt, at the level each one actually bites.
+ *
+ * Grouped by what went wrong rather than by file, because several of them are
+ * one defect wearing two faces. The stream half of the hunt lives in
+ * `events.test.ts`, where the fake socket is.
+ */
+describe('a chord with a hole in it', () => {
+  it('refuses an undefined key in the array spelling, not only the rest-args one', async () => {
+    // `JSON.stringify` turns an `undefined` array entry into `null`, so this
+    // reached the platform as a chord with a keystroke nobody named. The guard
+    // written for `key('ctrl', undefined, 'c')` was gated on the rest-args
+    // spelling, and the array form is the DOCUMENTED one — it is the spelling
+    // that carries CallOptions.
+    const { client: c } = client(anyRoute);
+    const computer = await c.computers.get('vm-1');
+    await expect(computer.key(['ctrl', undefined as never, 'c'])).rejects.toThrow(ValidationError);
+    await expect(computer.key('ctrl', undefined as never, 'c')).rejects.toThrow(ValidationError);
+  });
+
+  it('still sends the chords both spellings were always for', async () => {
+    const { client: c, rec } = client(anyRoute);
+    const computer = await c.computers.get('vm-1');
+    await computer.key(['ctrl', 'c']);
+    await computer.key('ctrl', 'v');
+    expect(rec.last().body).toMatchObject({ action: 'key', keys: ['ctrl', 'v'] });
+  });
+});
+
+describe('an options object where a point was expected', () => {
+  it('refuses drag({ signal }) rather than dragging from wherever the pointer is', async () => {
+    // An options object IS a `Point` at runtime as far as anything could tell:
+    // it simply has no `x` and no `y`, so `start_coordinate` was omitted and
+    // the drag selected a different region while succeeding.
+    const { client: c } = client(anyRoute);
+    const computer = await c.computers.get('vm-1');
+    await expect(computer.drag(10, 20, { signal: undefined } as never)).rejects.toThrow(
+      /takes a \{ x, y \} starting point/,
+    );
+  });
+
+  it('still drags from a real point, and from none at all', async () => {
+    const { client: c, rec } = client(anyRoute);
+    const computer = await c.computers.get('vm-1');
+    await computer.drag(10, 20, { x: 1, y: 2 });
+    expect(rec.last().body).toMatchObject({ start_coordinate: [1, 2] });
+    await computer.drag(30, 40);
+    expect(rec.last().body).not.toHaveProperty('start_coordinate');
+    // `null` is a point nobody gave, and reaches `from?.x` exactly as
+    // `undefined` does. Guarded with `!== undefined` this dereferenced null and
+    // threw a TypeError naming neither the argument nor the call.
+    await computer.drag(50, 60, null as never);
+    expect(rec.last().body).not.toHaveProperty('start_coordinate');
+  });
+
+  it('refuses an array bound to scroll()\u2019s options, which holds no modifiers', async () => {
+    // The mirror of the click misbinding: `click(100, 200, ['shift'])` is
+    // correct, so `scroll(100, 200, ['shift'])` is the natural next line — and
+    // here `modifiers` is a named option, so the array binds to `opts` and the
+    // scroll happened with nothing held down.
+    const { client: c } = client(anyRoute);
+    const computer = await c.computers.get('vm-1');
+    await expect(computer.scroll(100, 200, ['shift'] as never)).rejects.toThrow(
+      /takes its modifiers as an option/,
+    );
+    await computer.scroll(100, 200, { modifiers: ['shift'] });
+  });
+
+  it('refuses click({ signal }) rather than sending an uncancellable click', async () => {
+    const { client: c } = client(anyRoute);
+    const computer = await c.computers.get('vm-1');
+    for (const call of [
+      () => computer.click(1, 2, { signal: undefined } as never),
+      () => computer.rightClick(1, 2, { signal: undefined } as never),
+      () => computer.doubleClick(1, 2, { signal: undefined } as never),
+    ]) {
+      await expect(call()).rejects.toThrow(/must be an array of key names/);
+    }
+  });
+
+  it('refuses windowAction(id, action, { signal }) rather than closing uncancellably', async () => {
+    const { client: c } = client(anyRoute);
+    const computer = await c.computers.get('vm-1');
+    const { signal } = new AbortController();
+    await expect(computer.windowAction('w-1', 'close', { signal } as never)).rejects.toThrow(
+      /geometry takes only/,
+    );
+  });
+});
+
+describe('a body the route did not send', () => {
+  it('refuses an empty exec body rather than reporting a command that failed', async () => {
+    // `toExecResult({})` is `exitCode: -1, ok: false` — a command that ran and
+    // failed, which is a sentence nobody said. Callers branch on `ok`.
+    const { client: c } = client((call) =>
+      call.path.endsWith('/exec') ? new Response(null, { status: 204 }) : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    await expect(computer.exec('true')).rejects.toThrow(/expected an exec result/);
+  });
+
+  it('refuses a snapshot row that names nothing, the way a build row is refused', async () => {
+    const { client: c } = client((call) =>
+      call.path === '/snapshots' ? json([{ ...SNAPSHOT, id: undefined }]) : anyRoute(call),
+    );
+    await expect(c.snapshots.list()).rejects.toThrow(/expected a snapshot to carry an id/);
+  });
+
+  it('still admits the unreachable placeholder this listing exists to surface', async () => {
+    // The row that fear about the refusal above lands on, and it is safe:
+    // `projection.ts` sets `id` on every row it emits, bare ones included. What
+    // a placeholder drops is `computer_id`, `state` and the rest — which is
+    // what it is recognised by.
+    const { client: c } = client((call) =>
+      call.path === '/snapshots'
+        ? json([{ id: 'snap-9', name: 'nightly', unreachable: true }])
+        : anyRoute(call),
+    );
+    const [snap] = await c.snapshots.list();
+    expect(snap?.id).toBe('snap-9');
+    expect(snap?.unreachable).toBe(true);
+  });
+});
+
+describe('a payload whose strings cannot be read', () => {
+  it('answers the fallback rather than taking down the listing it was read from', async () => {
+    // OPL-3850's own failure, on the getters the fix did not reach: `String()`
+    // THROWS on a value with no primitive conversion, and `computerRecord`
+    // requires only a truthy id, so such a row survives construction.
+    const unreadable = { toString: 'not a function' };
+    const { client: c } = client(() =>
+      json({
+        ...COMPUTER,
+        name: unreadable,
+        os: unreadable,
+        template: unreadable,
+        resolution: unreadable,
+        created_at: unreadable,
+        start_error: unreadable,
+      }),
+    );
+    const computer = await c.computers.get('vm-1');
+    expect(computer.id).toBe('vm-1');
+    expect(computer.name).toBe('');
+    expect(computer.os).toBe('');
+    expect(computer.template).toBe('');
+    expect(computer.createdAt).toBe('');
+    expect(computer.startError).toBe('');
+    // The default, not a throw and not an empty string: an unreadable
+    // resolution is a resolution nobody sent.
+    expect(computer.resolution).toBe('1280x800x24');
+    // `raw` still carries what could not be read.
+    expect(computer.raw.name).toEqual(unreadable);
+  });
+});
+
+describe('a wait with no time to look', () => {
+  it('returns a handle that already reads running rather than timing out on it', async () => {
+    // Success required `observed`, and a zero budget skips the refresh that
+    // would set it — so this came back as a TimeoutError claiming every refresh
+    // had failed when none was attempted. `waitUntilBuilt` special-cases the
+    // same budget.
+    const { client: c, rec } = client(anyRoute);
+    const computer = await c.computers.get('vm-1');
+    const before = rec.calls.length;
+    expect(await computer.waitUntilRunning({ timeoutMs: 0 })).toBe(computer);
+    expect(rec.calls.length).toBe(before);
+  });
+
+  it('says a zero budget left no time, rather than blaming refreshes it never made', async () => {
+    const { client: c } = client(() => json({ ...COMPUTER, status: 'building' }));
+    const computer = await c.computers.get('vm-1');
+    await expect(computer.waitUntilRunning({ timeoutMs: 0 })).rejects.toThrow(
+      /left no time to look again/,
+    );
+  });
+
+  it('still reports a real wait that never got an answer as refreshes failing', async () => {
+    let first = true;
+    const { client: c } = client((call) => {
+      if (first) {
+        first = false;
+        return json(COMPUTER);
+      }
+      return errorJson(503, 'host could not be reached');
+    });
+    const computer = await c.computers.get('vm-1');
+    await expect(computer.waitUntilRunning({ timeoutMs: 30, pollMs: 1 })).rejects.toThrow(
+      TimeoutError,
+    );
+  });
+});
+
+describe('an exec deadline that cannot be represented', () => {
+  it('names timeoutS rather than the request deadline derived from it', async () => {
+    const { client: c } = client(anyRoute);
+    const computer = await c.computers.get('vm-1');
+    await expect(computer.exec('sleep 1', { timeoutS: 3_000_000 })).rejects.toThrow(
+      /timeoutS must be no greater than/,
+    );
+  });
+
+  it('catches the arguments whose derived deadline overflows to Infinity', async () => {
+    // Tested on the product, `(1e308 + 30) * 1000` is Infinity, which is not
+    // greater than MAX_TIMER_MS — so the largest arguments walked through the
+    // ceiling and got the transport's generic sentence about the deadline,
+    // which is the message this refusal exists to replace.
+    const { client: c } = client(anyRoute);
+    const computer = await c.computers.get('vm-1');
+    await expect(computer.exec('sleep 1', { timeoutS: 1e308 })).rejects.toThrow(
+      /timeoutS must be no greater than/,
+    );
+  });
+
+  it('leaves a non-finite timeoutS to the refusal already written for it', async () => {
+    const { client: c } = client(anyRoute);
+    const computer = await c.computers.get('vm-1');
+    await expect(computer.exec('sleep 1', { timeoutS: Number.POSITIVE_INFINITY })).rejects.toThrow(
+      /finite/,
+    );
+  });
+
+  it('still runs an ordinary command', async () => {
+    const { client: c } = client(anyRoute);
+    const computer = await c.computers.get('vm-1');
+    expect((await computer.exec('true', { timeoutS: 60 })).ok).toBe(true);
+  });
+});
