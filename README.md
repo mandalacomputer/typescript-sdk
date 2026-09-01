@@ -619,8 +619,13 @@ coming to say so, because the guest answers a nomination once and somebody else
 got there first. `stream.watching` is each tree's state rather than the opening
 frame's claim about it: an `armed` moves an entry to live and an `unwatchable`
 moves it back, while `flood` and `budget` leave it, because under those the tree
-*is* watched and is merely being reported incompletely. Same split as `ready`: state in the opening frame, transitions
-on the stream. An `armed` also comes again after anything that re-arms the watch
+*is* watched and is merely being reported incompletely. `stream.hello.watching`
+stays what the connection was told when it joined, the same way `hello.events`
+stays the opening vocabulary and `stream.eventTypes` is the live one — read
+`stream.watching` to decide what silence means.
+
+Same split as `ready`: state in the opening frame, transitions on the stream.
+An `armed` also comes again after anything that re-arms the watch
 — a stop and a start, a guest reboot — and means what the first one did:
 reporting starts *here*, so re-read the tree if the interruption mattered.
 

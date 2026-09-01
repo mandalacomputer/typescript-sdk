@@ -1523,19 +1523,24 @@ export class Computer {
     // the rule `waitUntilRunning` follows in every catch it has.
     if (caller?.aborted) throw caller.reason;
     if (deadline.aborted) {
-      // The trees that never went live, named. A watch that did not arm is
-      // silent in exactly the way a tree where nothing happened is, and without
-      // this the difference — which is the whole of what `armed` is for —
-      // reaches a caller as an ordinary timeout with nothing in it to explain
-      // the wait. A sentence rather than an early refusal: `unwatchable`
-      // recovers on its own, and this SDK cannot tell a typo from a directory a
-      // job is about to create.
-      const never = unarmedTrees(stream.watching);
+      // The trees that were not being watched when this ended, named. A watch
+      // that is not armed is silent in exactly the way a tree where nothing
+      // happened is, and without this the difference — which is the whole of
+      // what `armed` is for — reaches a caller as an ordinary timeout with
+      // nothing in it to explain the wait. A sentence rather than an early
+      // refusal: `unwatchable` recovers on its own, and this SDK cannot tell a
+      // typo from a directory a job is about to create.
+      //
+      // "was not armed" rather than "never armed", because both a tree that
+      // stayed dark and one that went live and was then taken back out by an
+      // `unwatchable` end up here, and only the first never armed. The state at
+      // the deadline is the claim this can actually make.
+      const dark = unarmedTrees(stream.watching);
       throw new TimeoutError(
         `${this.id} did not emit ${[...wanted].join(' or ')} within ${timeoutMs}ms` +
-          (never.length > 0
-            ? `. Its watch on ${never.join(', ')} never armed, so nothing under it was being ` +
-              `reported`
+          (dark.length > 0
+            ? `. Its watch on ${dark.join(', ')} was not armed when this ended, so changes ` +
+              `under it were not being reported`
             : ''),
       );
     }

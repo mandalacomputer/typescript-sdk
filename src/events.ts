@@ -473,6 +473,10 @@ export type Hello = {
    * host normalised it and is the form every event carries, and its `armed`
    * says whether that tree is live already or has an `armed` event still to
    * come. See {@link WatchedTree}.
+   *
+   * This is the frame's answer AT CONNECT and stays it. The markers that arrive
+   * afterwards move {@link ComputerEvents.watching}, which is the one to read
+   * for what is true now.
    */
   watching?: WatchedTree[];
   raw: Record<string, unknown>;
@@ -1018,6 +1022,7 @@ export class ComputerEvents implements AsyncIterable<ComputerEvent> {
   #detachMessage?: () => void;
   #hello?: Hello;
   #types?: string[];
+  #watching?: WatchedTree[];
 
   /** @internal — obtain one from `Computer.events()`. */
   constructor(url: EventUrlSource, refusal: EventRefusal, opts: EventStreamOptions = {}) {
@@ -1120,7 +1125,12 @@ export class ComputerEvents implements AsyncIterable<ComputerEvent> {
    * event moves the entry to live, and the one loss that means the tree is not
    * being watched — `unwatchable` — moves it back; `flood` and `budget` leave
    * it, because under those the tree IS watched and is merely being reported
-   * incompletely. That is the platform's own division.
+   * incompletely.
+   *
+   * This is the live answer and {@link hello}'s `watching` is the frame's, the
+   * same way {@link eventTypes} is live and `hello.events` is the frame's. Read
+   * this one to decide what silence means; read that one to see what the
+   * connection was told when it joined.
    *
    * `undefined` until the first opening frame lands, which is when the socket
    * is opened — and the socket is opened by the first pull on the iterator. To
@@ -1145,7 +1155,7 @@ export class ComputerEvents implements AsyncIterable<ComputerEvent> {
     // why this one goes deeper than `windows` does. Shared, an entry handed to
     // a caller was the same object `#hello` holds and the one `onConnect` was
     // given, so editing it changed what the next read of any of the three said.
-    return copyWatching(this.#hello?.watching);
+    return copyWatching(this.#watching);
   }
 
   /** The desktop the newest connection joined, when it was sent one. */
@@ -1496,6 +1506,20 @@ export class ComputerEvents implements AsyncIterable<ComputerEvent> {
     // The vocabulary is snapshotted for the same reason and separately, because
     // a `capabilities` frame replaces this one without touching `#hello`.
     this.#types = [...hello.events];
+    // The nominations, snapshotted separately for exactly that reason: an
+    // `armed` marker and an `unwatchable` loss move THIS list and must not
+    // reach `#hello`, which is documented as the opening frame of the
+    // connection currently open and has to stay the frame. Same split as
+    // `events` and `eventTypes`, and the same one `windows` keeps. Written into
+    // the frame instead, `stream.hello.watching` drifted into live state while
+    // the `hello` a connect hook was handed stayed the original, so the two
+    // doors disagreed about the same tree (OPL-4255).
+    //
+    // Replaced per connection, like the two beside it: a reconnect
+    // re-nominates and is answered afresh, and the answer can differ — a guest
+    // reboot in between disarms a tree that was live on the last socket — so
+    // carrying the old list forward would report a watch that is not running.
+    this.#watching = copyWatching(hello.watching);
     // The cursor a client stores when it disconnects before seeing an event.
     // Adopted only when nothing has been consumed, because it names a position
     // BEFORE the backlog this connection is about to deliver: taken while
@@ -1581,11 +1605,9 @@ export class ComputerEvents implements AsyncIterable<ComputerEvent> {
       // The ONE loss that means the tree is not being watched, and therefore
       // the one that moves this record. `flood` and `budget` say the tree IS
       // watched and is being reported incompletely, so a client is still right
-      // to read silence under them as nothing having changed. That is the
-      // platform's own division and its own armed set moves on exactly this
-      // reason — `delete(r.armed, ev.Watch)` under `case ev.Lost ==
-      // fileLostUnwatchable` in `emitFile`, server/fileevents.go, with no case
-      // for the other two.
+      // to read silence under them as nothing having changed — see
+      // {@link WatchLost}, where that division is the whole difference between
+      // the three.
       else if (ev.lostReason === 'unwatchable') this.#recordArmed(ev.watch, false);
     }
     return ev;
@@ -1608,7 +1630,7 @@ export class ComputerEvents implements AsyncIterable<ComputerEvent> {
    * thing that list is relied on to mean.
    */
   #recordArmed(tree: string, armed: boolean): void {
-    const watching = this.#hello?.watching;
+    const watching = this.#watching;
     if (!watching) return;
     for (const w of watching) {
       if (w.path === tree) w.armed = armed;
@@ -1701,13 +1723,20 @@ export function answersWait(ev: ComputerEvent, wanted: ReadonlySet<string>): boo
 }
 
 /**
- * The nominated trees that were never live, for a wait that ran out of time.
+ * The nominated trees that were not being watched when a wait ran out of time.
  *
- * A watch that never arms is silent in exactly the way a tree where nothing
+ * A watch that is not armed is silent in exactly the way a tree where nothing
  * happened is, and the difference is the whole of what `armed` is for. Left
  * unsaid, a nomination the guest could not honour — a directory that is not
  * there, or is a symlink — reaches a caller as an ordinary timeout with nothing
  * in it to explain the wait.
+ *
+ * The state AT THE DEADLINE, and the sentence built from it says exactly that
+ * rather than "never armed". Two different histories end here: a tree that
+ * stayed dark from the start, and one that went live and was then taken back
+ * out by an `unwatchable`. Only the first never armed, and a diagnosis that
+ * claimed it of the second would be false about the one thing this sentence
+ * exists to be true about.
  *
  * Not an error, and deliberately: `unwatchable` recovers on its own, and
  * nominating the directory a job is about to create is a supported thing to do.

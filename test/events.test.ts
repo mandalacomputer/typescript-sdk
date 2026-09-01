@@ -1450,6 +1450,16 @@ describe('nominating a tree to watch', () => {
       { path: '/a', armed: true },
       { path: '/b', armed: false },
     ]);
+    // And `hello` stays the FRAME. The markers move the live list and must not
+    // reach the opening frame, which is documented as what this connection was
+    // told when it joined — the same split `events` and `eventTypes` keep.
+    // Written into the frame instead, `stream.hello.watching` drifted into live
+    // state while the `hello` a connect hook was handed stayed the original, so
+    // the two doors disagreed about the same tree.
+    expect(stream.hello?.watching).toEqual([
+      { path: '/a', armed: false },
+      { path: '/b', armed: false },
+    ]);
   });
 
   it('invents no row for a tree the opening frame never named', async () => {
@@ -2029,8 +2039,44 @@ describe('waitFor', () => {
       })
       .catch((e) => e);
     expect(err).toBeInstanceOf(TimeoutError);
-    expect(String(err)).toContain('watch on /out never armed');
+    expect(String(err)).toContain('watch on /out was not armed when this ended');
     expect(String(err)).not.toContain('/live');
+  });
+
+  it('does not call a tree that armed and then went unwatchable one that never armed', async () => {
+    // Two histories end at the same place — a tree that stayed dark, and one
+    // that went live and was taken back out — and only the first never armed.
+    // The sentence claims the state at the deadline, which is true of both.
+    const { computer: c } = await computer();
+    const err = await c
+      .waitFor('file.changed', {
+        timeoutMs: 80,
+        backoffMs: 1,
+        watch: '/out',
+        webSocket: socketFactory((s) => {
+          s.emitOpen();
+          s.send(
+            hello({
+              ready: false,
+              events: ['file.changed'],
+              watching: [{ path: '/out', armed: false }],
+            }),
+          );
+          s.send(
+            event({ type: 'file.changed', source: 'guest', data: { watch: '/out', armed: true } }),
+          );
+          s.send(
+            event({
+              type: 'file.changed',
+              source: 'guest',
+              data: { watch: '/out', lost: 'unwatchable' },
+            }),
+          );
+        }),
+      })
+      .catch((e) => e);
+    expect(String(err)).toContain('was not armed when this ended');
+    expect(String(err)).not.toContain('never');
   });
 
   it('says nothing about watches on a timeout that nominated none', async () => {
@@ -2046,7 +2092,7 @@ describe('waitFor', () => {
       })
       .catch((e) => e);
     expect(String(err)).toContain('within 80ms');
-    expect(String(err)).not.toContain('never armed');
+    expect(String(err)).not.toContain('was not armed');
   });
 
   it('does not send a caller after a watch when the computer cannot emit it at all', async () => {
