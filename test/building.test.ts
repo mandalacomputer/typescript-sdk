@@ -434,6 +434,15 @@ describe('deleteQuery', () => {
 describe('scheduleBody', () => {
   it('bounds the clock', () => {
     expect(() => P.scheduleBody({ enabled: true, hour: 24 })).toThrow(/0-23/);
+    // `tz` was the one field in this builder taken as given, between two that
+    // are range-checked. TypeScript refuses these; this file is what a
+    // JavaScript caller gets instead of `"[object Object]"` on the wire.
+    for (const tz of [{}, 42, ['UTC'], null, true]) {
+      expect(() => P.scheduleBody({ enabled: true, tz: tz as unknown as string })).toThrow(
+        /tz must be a string/,
+      );
+    }
+    expect(P.scheduleBody({ enabled: true, tz: 'Europe/London' }).tz).toBe('Europe/London');
     expect(() => P.scheduleBody({ enabled: true, hour: 4, minute: 60 })).toThrow(/0-59/);
     expect(P.scheduleBody({ enabled: true, hour: 4 })).toEqual({
       enabled: true,
