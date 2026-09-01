@@ -981,6 +981,34 @@ describe('what a payload cannot be allowed to mean', () => {
     expect(seen).toEqual([undefined, undefined, 0, undefined, undefined, undefined]);
   });
 
+  it('refuses a number that could not be a pid, rather than publishing it', async () => {
+    // `count` is this file's general optional number and a pid is narrower: it
+    // answers -5 for `-5` and 3.7 for `3.7`, and neither is a process on either
+    // guest OS. The field is typed as a pid, so a caller is entitled to `kill`
+    // what it finds there — which is why toBackgroundExec already draws this
+    // line with `Number.isInteger` for the exec handle. Absent is a legitimate
+    // answer here, so this refuses where that one throws.
+    const bodies = [
+      { ...WINDOW, pid: -5 },
+      { ...WINDOW, pid: 3.7 },
+      { ...WINDOW, pid: Number.NaN },
+      // The decimal spellings a backend that stringifies its numbers really
+      // sends ARE still read, which is the other half of the rule: the guard
+      // must not tell such a host every pid it sends is unreadable.
+      { ...WINDOW, pid: '1090' },
+      { ...WINDOW, pid: 0 },
+    ];
+    const seen: (number | undefined)[] = [];
+    for (const body of bodies) {
+      const { client: c } = client((call) =>
+        call.path.endsWith('/windows') ? json({ windows: [body] }) : anyRoute(call),
+      );
+      const [w] = await (await c.computers.get('vm-1')).windows();
+      seen.push(w?.pid);
+    }
+    expect(seen).toEqual([undefined, undefined, undefined, 1090, 0]);
+  });
+
   it('reads an empty desktop as empty and a body with no windows key as broken', async () => {
     // `{"windows":[]}` is the platform's answer for a desktop with nothing on
     // it, so it must decode; `{}` is not a window list, and calling it "nothing

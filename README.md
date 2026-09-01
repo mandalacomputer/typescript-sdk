@@ -280,7 +280,7 @@ yet. Linux only.
 
 ```ts
 for (const w of await c.windows()) {
-  console.log(w.id, w.windowClass, w.title, w.focused, w.visible);
+  console.log(w.id, w.windowClass, w.title, w.focused, w.visible, w.pid);
 }
 const moved = await c.windowAction('0x2600003', 'move', { x: 100, y: 100 });
 console.log(moved.window?.x, moved.window?.y);          // 105, 129, probably
@@ -298,9 +298,10 @@ whatever is actually there.
 did not say — never `0`, which is a pid a guest may genuinely advertise. It
 does **not** identify the window: an application that keeps one process for
 several windows — `xfce4-terminal` is one — reports the same pid on all of
-them, so killing this pid can take windows you never asked about. Prefer `focus` over `raise`: raising without
-focusing gives a window that is visibly in front and silently not receiving
-keystrokes.
+them, so killing this pid can take windows you never asked about.
+
+Prefer `focus` over `raise`: raising without focusing gives a window that is
+visibly in front and silently not receiving keystrokes.
 
 The reply is the window *afterwards*, not an acknowledgement — window managers
 snap to their own grid, so a move to 300,200 routinely lands at 305,229 —

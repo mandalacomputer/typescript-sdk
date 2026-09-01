@@ -1556,17 +1556,40 @@ export type GuestWindow = {
   raw: Record<string, unknown>;
 };
 
+/**
+ * A window's pid, or nothing that could not be one.
+ *
+ * {@link count} is the right starting point — absent, null, a boolean and an
+ * array all answer `undefined`, and 0 survives as the real answer the daemon's
+ * `PID *int` exists to preserve. It is not the whole guard, because `count` is
+ * this file's general optional number and a pid is narrower than that: it
+ * answers -5 for `-5` and 3.7 for `3.7`, and neither is a process on either
+ * guest OS. Publishing one puts a number a caller may `kill` behind a field
+ * typed as a pid.
+ *
+ * A NON-NEGATIVE INTEGER, therefore, and nothing else. `toBackgroundExec`
+ * already draws this line for the exec handle with `Number.isInteger` — it
+ * THROWS there, because that pid is what every poll and every kill is aimed at
+ * and a wrong one is unrecoverable. Here the field is informational and absent
+ * is a legitimate answer, so the same test refuses rather than raises: a window
+ * whose pid could not be read is a window that did not say, which is the
+ * reading the rest of this decoder gives.
+ */
+const windowPid = (v: unknown): number | undefined => {
+  const n = count(v);
+  return n !== undefined && Number.isInteger(n) && n >= 0 ? n : undefined;
+};
+
 export function toGuestWindow(d: Record<string, unknown>): GuestWindow {
   return {
     id: str(d.id),
     title: str(d.title),
     windowClass: str(d.class),
     type: str(d.type),
-    // {@link count} rather than {@link num}, and the difference is the whole
-    // of the field: `num` answers 0 for an absent key, and 0 is a pid a guest
-    // may genuinely advertise. Both refuse a boolean and an array, so the only
-    // thing this changes is that a window with no pid says so.
-    pid: count(d.pid),
+    // NOT `num`, and the difference is the whole of the field: `num` answers 0
+    // for an absent key, and 0 is a pid a guest may genuinely advertise. See
+    // {@link windowPid} for the rest of what it refuses.
+    pid: windowPid(d.pid),
     x: num(d.x),
     y: num(d.y),
     width: num(d.width),
