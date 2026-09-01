@@ -217,6 +217,43 @@ describe('waiting', () => {
     expect(err.message).not.toMatch(/was still/);
   });
 
+  it('does not quote a status in the present tense after the polls stopped answering', async () => {
+    // One refresh answers, then every later one fails to the deadline. `was
+    // still "starting"` is a claim about now, made from a reading that is by
+    // then as old as the wait itself — the flag that gates it means "any poll
+    // in this wait saw a status", which is the wrong question for a tense
+    // (OPL-4201).
+    let gets = 0;
+    const { client: c } = client((call) => {
+      if (call.method === 'GET' && call.path === '/computers/vm-1') {
+        gets += 1;
+        return gets <= 2
+          ? json({ ...COMPUTER, status: 'starting' })
+          : errorJson(503, 'host could not be reached');
+      }
+      return anyRoute(call);
+    });
+    const computer = await c.computers.get('vm-1');
+    const err = await computer.waitUntilRunning({ timeoutMs: 40, pollMs: 1 }).catch((e) => e);
+    expect(err).toBeInstanceOf(TimeoutError);
+    expect(err.message).toContain('could not be reached for the last part');
+    expect(err.message).toContain('when it last answered it was "starting"');
+    expect(err.message).not.toMatch(/was still/);
+    // Still the timeout it always was: only the sentence changed.
+    expect(err.message).not.toMatch(/every refresh failed/);
+  });
+
+  it('still says a machine was still X when the last poll is the one that saw it', async () => {
+    // The past tense is for a wait that lost the host, not for every timeout:
+    // when the refreshes keep answering, the reading is current and the
+    // present tense is the accurate one.
+    const { client: c } = client(() => json({ ...COMPUTER, status: 'starting' }));
+    const computer = await c.computers.get('vm-1');
+    const err = await computer.waitUntilRunning({ timeoutMs: 20, pollMs: 1 }).catch((e) => e);
+    expect(err).toBeInstanceOf(TimeoutError);
+    expect(err.message).toContain('was still "starting"');
+  });
+
   it('fails fast on a suspended machine even while every refresh is failing', async () => {
     // The handle's data may be fresh from the get() one line before the wait,
     // and suspended does not become "running" on its own — spinning out the
@@ -642,6 +679,42 @@ describe('waiting', () => {
     expect(err).toBeInstanceOf(TimeoutError);
     expect(err.message).toMatch(/could not be observed/);
     expect(err.message).not.toMatch(/was still building/);
+  });
+
+  it('does not claim a build is still running from a reading the wait outlived', async () => {
+    // waitUntilRunning's rule, in the tense: one refresh answers "building" and
+    // every later one 503s, so "is still building" is asserted about a computer
+    // whose last actual reading is the whole budget old. builds.wait already
+    // drops to "when it last answered" here (OPL-4201).
+    let gets = 0;
+    const { client: c } = client((call) => {
+      if (call.method === 'GET' && call.path === '/computers/vm-1') {
+        gets += 1;
+        return gets <= 2
+          ? json({ ...COMPUTER, status: 'building' })
+          : errorJson(503, 'host could not be reached');
+      }
+      return anyRoute(call);
+    });
+    const computer = await c.computers.get('vm-1');
+    const err = await computer.waitUntilBuilt({ timeoutMs: 40, pollMs: 1 }).catch((e) => e);
+    expect(err).toBeInstanceOf(TimeoutError);
+    expect(err.message).toContain('could not be reached for the last part');
+    expect(err.message).toContain('when it last answered its disk was still being copied');
+    expect(err.message).not.toMatch(/was still building/);
+    // The copy is the platform's, not this wait's, and that survives the tense.
+    expect(err.message).toContain('only this wait has');
+  });
+
+  it('keeps the present tense for a build whose last poll answered', async () => {
+    // Every refresh answers "building" to the deadline, so the reading quoted
+    // is the current one and there is nothing to hedge.
+    const { client: c } = client(() => json({ ...COMPUTER, status: 'building' }));
+    const computer = await c.computers.get('vm-1');
+    const err = await computer.waitUntilBuilt({ timeoutMs: 20, pollMs: 1 }).catch((e) => e);
+    expect(err).toBeInstanceOf(TimeoutError);
+    expect(err.message).toMatch(/was still building/);
+    expect(err.message).not.toMatch(/could not be reached/);
   });
 
   it('polls a build before its first sleep, not after it', async () => {
