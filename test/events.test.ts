@@ -1292,3 +1292,137 @@ describe('the numbers a stream is given', () => {
     expect(() => c.events({ maxRetries: 0 })).not.toThrow();
   });
 });
+
+/**
+ * A connect surface the platform sent short a desktop credential (OPL-4215).
+ *
+ * `toVncConnect` treats `token` and `view_token` as atomic, which is right for
+ * the two URLs it builds over them: one built over a missing credential is a
+ * string indistinguishable from a working one that answers 401 forever.
+ * `events_url` is not one of those. The platform sends it whole, with the
+ * controlling credential already in it, and taking the three together threw
+ * away a stream that was answering.
+ */
+describe('a vnc surface short a view_token', () => {
+  const partial = { ...COMPUTER.vnc, view_token: '' };
+  const withVnc =
+    (vnc: unknown): Responder =>
+    (call) =>
+      call.path === '/computers/vm-1' ? json({ ...COMPUTER, vnc }) : anyRoute(call);
+
+  it('still offers no vnc surface, which is the rule that was always right', async () => {
+    const { computer: c } = await computer(withVnc(partial));
+    expect(c.vnc).toBeUndefined();
+  });
+
+  it('opens the stream anyway, rather than reconnecting against a live one forever', async () => {
+    // The failure this replaces: the drop read as "the platform sent no connect
+    // surface", which is deliberately NOT settled, and `maxRetries` defaults to
+    // never give up. A reachable stream reconnected forever.
+    const { computer: c } = await computer(withVnc(partial));
+    const urls: string[] = [];
+    const got = await collect(
+      c.events({
+        reconnect: false,
+        webSocket: socketFactory((s) => {
+          urls.push(s.url);
+          s.emitOpen();
+          s.send(hello({ ready: false }));
+          s.send(event({ cursor: 'ep-1:2' }));
+          s.close();
+        }),
+      }),
+    );
+    expect(got).toHaveLength(1);
+    expect(urls[0]).toContain('wss://host/events');
+  });
+
+  it('settles a surface that answered and has no stream, rather than retrying it', async () => {
+    // A host that answered is not weather. Windows and a watch-only credential
+    // both arrive this way, and both throws were unreachable while a partial
+    // surface decoded to `undefined`.
+    const { computer: c } = await computer(withVnc({ ...partial, events_url: '' }));
+    const err = await collect(
+      c.events({ reconnect: false, webSocket: socketFactory(() => {}) }),
+    ).catch((e) => e);
+    expect(err).toBeInstanceOf(MandalaError);
+    expect(String(err)).toContain('has no events_url');
+    expect(isSettled(err)).toBe(true);
+  });
+
+  it('keeps calling a genuinely absent surface an unreachable host', async () => {
+    const { computer: c } = await computer(withVnc(undefined));
+    const err = await collect(
+      c.events({ reconnect: false, webSocket: socketFactory(() => {}) }),
+    ).catch((e) => e);
+    expect(err).toBeInstanceOf(ConnectionError);
+    expect(isSettled(err)).toBe(false);
+  });
+});
+
+describe('the stream numbers a caller sets', () => {
+  it('treats an empty `since` as no position rather than as one it holds', async () => {
+    // `since: ''` was stored, which blocked the hello frame's cursor from being
+    // adopted, and was falsy in `withCursor`, so it never reached the URL
+    // either. The stream believed it held a position and rejoined at the head
+    // on every reconnect, replaying events the caller had already been given.
+    // `?? ''` on a caller's own option is how one arrives.
+    const { computer: c } = await computer();
+    const urls: string[] = [];
+    const stream = c.events({
+      since: '',
+      maxRetries: 2,
+      backoffMs: 1,
+      webSocket: socketFactory((s, n) => {
+        urls.push(s.url);
+        s.emitOpen();
+        s.send(hello({ ready: false, cursor: 'ep-1:1' }));
+        if (n === 0) s.send(event({ seq: 1, cursor: 'ep-1:2' }));
+        if (n === 1) s.send(event({ seq: 2, cursor: 'ep-1:3' }));
+        s.close();
+      }),
+    });
+    await collect(stream, 2);
+    expect(urls[0]).not.toContain('since=');
+    expect(urls[1]).toContain('since=ep-1%3A2');
+  });
+
+  it('adopts the hello cursor for an empty `since`, as it does for an omitted one', async () => {
+    const { computer: c } = await computer();
+    const stream = c.events({
+      since: '',
+      reconnect: false,
+      webSocket: socketFactory((s) => {
+        s.emitOpen();
+        s.send(hello({ ready: false, cursor: 'ep-1:1' }));
+        s.close();
+      }),
+    });
+    await collect(stream);
+    expect(stream.cursor).toBe('ep-1:1');
+  });
+
+  it('caps the FIRST reconnect sleep at maxBackoffMs, not only the ones after it', async () => {
+    // The doubling was clamped and the initial value was not, so a caller who
+    // set both got one wait past the ceiling they had just named.
+    // `checkStreamNumbers` validates each number independently and never
+    // compares the two.
+    const { computer: c } = await computer();
+    const started = Date.now();
+    await collect(
+      c.events({
+        maxRetries: 1,
+        backoffMs: 5_000,
+        maxBackoffMs: 5,
+        webSocket: socketFactory((s, n) => {
+          s.emitOpen();
+          s.send(hello({ ready: false }));
+          if (n > 0) s.send(event({ cursor: 'ep-1:9' }));
+          s.close();
+        }),
+      }),
+      1,
+    );
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+});

@@ -598,3 +598,116 @@ describe('rangeHeader', () => {
     expect(() => P.rangeHeader(Number.MAX_SAFE_INTEGER, 2)).toThrow(/whole number of bytes/);
   });
 });
+
+/**
+ * The bodies a JavaScript caller can reach that TypeScript's overloads refuse.
+ *
+ * All of it one shape of mistake: this surface puts an optional positional
+ * argument in front of `CallOptions`, and every other input method takes
+ * `CallOptions` last, so `{ signal }` in the natural place binds to the
+ * positional instead. Nothing threw, the gesture was sent, and the only thing
+ * lost was the ability to cancel it — see OPL-4215.
+ */
+describe('an options object in a positional slot', () => {
+  it('refuses a CallOptions bound to click() modifiers, rather than clicking uncancellably', () => {
+    // `{ signal }.length` is undefined, so no `text` went on the wire and the
+    // click was sent exactly as if no modifiers had been asked for.
+    expect(() => P.clickBody('left_click', 100, 200, { signal: undefined } as never)).toThrow(
+      /must be an array of key names/,
+    );
+    expect(() => P.clickBody('left_click', 100, 200, ['shift'])).not.toThrow();
+    expect(P.clickBody('left_click', 100, 200).text).toBeUndefined();
+  });
+
+  it('refuses a non-string inside the modifier list too', () => {
+    expect(() => P.clickBody('left_click', 1, 2, [null as never])).toThrow(/must be a string/);
+  });
+
+  it('refuses a CallOptions bound to scroll() modifiers', () => {
+    expect(() =>
+      P.scrollBody({ direction: 'down', amount: 3, modifiers: { signal: undefined } as never }),
+    ).toThrow(/must be an array of key names/);
+  });
+
+  it('refuses a key windowAction() geometry does not have, rather than sending it', () => {
+    // The builder spreads its argument onto the body, so an options object
+    // bound to `geometry` reached the platform as part of the request.
+    expect(() => P.windowBody({ action: 'close', signal: undefined } as never)).toThrow(
+      /geometry takes only x, y, width, height/,
+    );
+    expect(P.windowBody({ action: 'close' })).toEqual({ action: 'close' });
+    expect(P.windowBody({ action: 'move', x: 300, y: 200 })).toEqual({
+      action: 'move',
+      x: 300,
+      y: 200,
+    });
+  });
+});
+
+/**
+ * The builders that trimmed a value they had not checked was a string.
+ *
+ * Each of these failed closed — a `TypeError` from inside this SDK naming
+ * neither the argument nor the call, which is the thing `requireString` exists
+ * to end. `snapshotBody` and `createBody`'s own `name` were already right;
+ * these were the ones the sweep missed (OPL-4215).
+ */
+describe('strings refused rather than trimmed unchecked', () => {
+  it('names the argument when clone() is given an options object as a name', () => {
+    expect(() => P.nameBody({ signal: undefined } as never)).toThrow(/name must be a string/);
+    expect(P.nameBody('copy')).toEqual({ name: 'copy' });
+    expect(P.nameBody()).toEqual({});
+    expect(() => P.nameBody('   ')).toThrow(/must not be empty/);
+  });
+
+  it('names the argument when an update carries a non-string name', () => {
+    expect(() => P.updateBody({ name: 42 as never })).toThrow(/name must be a string/);
+  });
+
+  it('names the argument when an agent run carries a non-string prompt', () => {
+    expect(() => P.agentBody({ prompt: 42 as never, stream: false })).toThrow(
+      /prompt must be a string/,
+    );
+  });
+
+  it('refuses a create whose size, template or resolution is not a string', () => {
+    // Not trimmed, so none of these threw locally: they passed through
+    // `omitUndefined` into `JSON.stringify` and reached the platform as a JSON
+    // object where a name was meant.
+    expect(() => P.createBody({ size: { cpu: 2 } as never })).toThrow(/size must be a string/);
+    expect(() => P.createBody({ template: 7 as never })).toThrow(/template must be a string/);
+    expect(() => P.createBody({ resolution: [] as never })).toThrow(/resolution must be a string/);
+    // `size` and `template` are mutually exclusive, so the valid case is one
+    // of each rather than both.
+    expect(P.createBody({ size: 'small' }).size).toBe('small');
+    expect(P.createBody({ template: 'base', resolution: '1920x1080x24' }).template).toBe('base');
+  });
+});
+
+describe('the chord itself', () => {
+  it('refuses a bare string, which spreads into one key per character', () => {
+    // `holdKey('shift', 1)` from JavaScript: a string is iterable, so `[...keys]`
+    // was `['s','h','i','f','t']` — five keys held down, none of them the one
+    // that was asked for, and nothing anywhere said so.
+    expect(() => P.holdKeyBody('shift' as never, 1)).toThrow(/not a bare string/);
+    expect(() => P.keyBody('ctrl' as never)).toThrow(/array of key names/);
+  });
+
+  it('refuses an empty key name, which is not a key', () => {
+    expect(() => P.keyBody(['ctrl', ''])).toThrow(/one was empty/);
+    expect(() => P.holdKeyBody(['shift', ''], 1)).toThrow(/one was empty/);
+  });
+
+  it('refuses a non-string keystroke rather than serializing it', () => {
+    expect(() => P.keyBody(['ctrl', 3 as never])).toThrow(/must be a string/);
+  });
+
+  it('still takes the chords that were always valid', () => {
+    expect(P.keyBody(['ctrl', 'c'])).toEqual({ action: 'key', keys: ['ctrl', 'c'] });
+    expect(P.holdKeyBody(['shift'], 2)).toEqual({
+      action: 'hold_key',
+      keys: ['shift'],
+      duration: 2,
+    });
+  });
+});

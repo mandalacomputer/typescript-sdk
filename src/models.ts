@@ -362,6 +362,28 @@ export function toVncConnect(d: unknown): VncConnect | undefined {
   };
 }
 
+/**
+ * The `events_url` off a raw connect surface, read WITHOUT the two desktop
+ * credentials {@link toVncConnect} requires.
+ *
+ * Both readings are correct and they are about different URLs. `url` and
+ * `view_url` are built here over `token` and `view_token`, so half a set is no
+ * connect surface at all — that is {@link toVncConnect}'s rule and it stays.
+ * `events_url` is not built over either of them: the platform sends it whole,
+ * with the controlling credential already in it, which is why its own doc
+ * comment tells a caller to treat it as that credential.
+ *
+ * Taking the two together cost the one thing this URL is for. A payload that
+ * carried a complete `events_url` and was short a `view_token` decoded to
+ * `undefined`, and {@link Computer.events} then read the absence as "the
+ * platform could not reach the host" — weather, retried forever, against a
+ * stream that was answering. This reads the field that was actually sent
+ * (OPL-4215).
+ */
+export function vncEventsUrl(d: unknown): string {
+  return isRecord(d) ? str(d.events_url) : '';
+}
+
 export type Template = {
   name: string;
   /**
@@ -978,7 +1000,16 @@ export type UsageReport = {
 
 export function toUsageReport(d: Record<string, unknown>): UsageReport {
   const period = isRecord(d.period) ? d.period : {};
-  const totals = isRecord(d.usage) ? d.usage : {};
+  // Whether the totals object was SENT, which is a different question from
+  // whether the figures in it are zero. Absent, every `num()` below answers 0,
+  // and with `degraded` reading false those zeros are presented as a real and
+  // empty billing window — a bill nobody rendered, reported as a bill of
+  // nothing. This type's own docs tell callers the two caveat flags are the
+  // only signal that the totals are short, so this is the flag to raise
+  // (OPL-4215).
+  const sent = isRecord(d.usage) ? d.usage : undefined;
+  const metered = sent !== undefined;
+  const totals = sent ?? {};
   const rows = Array.isArray(totals.computers) ? totals.computers.filter(isRecord) : [];
   const through = d.reported_through;
   return {
@@ -1006,7 +1037,7 @@ export function toUsageReport(d: Record<string, unknown>): UsageReport {
     // Caveats on every figure above, and the reason this type tells callers to
     // read them first. An unreadable one leaves the totals unexplained, which is
     // the state these two exist to make impossible.
-    degraded: caveat(d.degraded),
+    degraded: caveat(d.degraded) || !metered,
     unmetered: caveat(d.unmetered),
     // Presence, not emptiness. The platform drops the key for a scoped
     // credential and sends `[]` for an account that ran nothing, and those are
@@ -1220,9 +1251,22 @@ const snapshotUnreachable = (d: Record<string, unknown>): boolean => {
   return (w === WIRE.NULL || w === WIRE.MALFORMED) && isUnreachableStub(d);
 };
 
+const snapshotId = (d: Record<string, unknown>): string => {
+  const id = str(d.id);
+  if (!id) throw new MandalaError('expected a snapshot to carry an id');
+  return id;
+};
+
 export function toSnapshot(d: Record<string, unknown>): Snapshot {
   return {
-    id: str(d.id),
+    // Refused rather than coerced to `''`, the way {@link buildId} refuses a
+    // build with no id and `toWindowListing` refuses a listing carrying one.
+    // A snapshot is the thing a restore names, so a row that names nothing is
+    // a row nothing can be done with — and `snapshots.list()` handed it back
+    // looking as well-formed as every other row beside it. The same drift
+    // OPL-3835 and OPL-4200 refused elsewhere, on the inventory they missed
+    // (OPL-4215).
+    id: snapshotId(d),
     computerId: str(d.computer_id),
     computerName: str(d.computer_name),
     name: str(d.name),
