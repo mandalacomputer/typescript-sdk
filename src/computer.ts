@@ -42,6 +42,7 @@ import {
   belongsToComputer,
   count,
   expectMoves,
+  isWindowResult,
   latestFinishedMove,
   num,
   said,
@@ -53,7 +54,6 @@ import {
   toMove,
   toSchedule,
   toSnapshot,
-  isWindowResult,
   toVncConnect,
   toWindowResult,
 } from './models.js';
