@@ -97,6 +97,20 @@ export const ALLOWED: ReadonlySet<string> = new Set(
       // scoped like `usage` and `moves`, and read-only on every surface: the
       // plan owns retention.
       ['GET', 'retention'],
+
+      // Account webhooks (platform OPL-4300): the transport for a caller that
+      // wants to be woken rather than to wait. Account-scoped like `usage`,
+      // and for a related reason: one subscription hears from many computers,
+      // some of which do not exist yet. The secret is answered by exactly two
+      // of these — the create and the rotate — and never by a read.
+      ['GET', 'webhooks'],
+      ['POST', 'webhooks'],
+      ['GET', 'webhooks/:id'],
+      ['PATCH', 'webhooks/:id'],
+      ['DELETE', 'webhooks/:id'],
+      ['POST', 'webhooks/:id/rotate'],
+      ['POST', 'webhooks/:id/test'],
+      ['GET', 'webhooks/:id/deliveries'],
     ] as Route[]
   ).map(([m, p]) => `${m} ${p}`),
 );
@@ -272,6 +286,24 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
   ['GET usage', ['query:from', 'query:to']],
 
   ['GET retention', []],
+
+  // The same five fields on the create and the update, with `url` the one the
+  // create cannot omit. `events` and `computers` are lists, and an EMPTY one is
+  // the platform's spelling of "every one" — sent as itself, never dropped.
+  ['GET webhooks', []],
+  [
+    'POST webhooks',
+    ['body:url', 'body:description', 'body:events', 'body:computers', 'body:enabled'],
+  ],
+  ['GET webhooks/:id', []],
+  [
+    'PATCH webhooks/:id',
+    ['body:url', 'body:description', 'body:events', 'body:computers', 'body:enabled'],
+  ],
+  ['DELETE webhooks/:id', []],
+  ['POST webhooks/:id/rotate', []],
+  ['POST webhooks/:id/test', []],
+  ['GET webhooks/:id/deliveries', []],
 ]);
 
 /**
@@ -320,7 +352,13 @@ export function patternFor(path: string): string {
     // already became a parameter is an id, and what follows an id is a literal.
     const prev = out[out.length - 1];
     if (prev === undefined || PATH_PARAMETERS.has(prev)) out.push(seg);
-    else if (prev === 'computers' || prev === 'snapshots' || prev === 'builds') out.push(':id');
+    else if (
+      prev === 'computers' ||
+      prev === 'snapshots' ||
+      prev === 'builds' ||
+      prev === 'webhooks'
+    )
+      out.push(':id');
     else if (prev === 'exec') out.push(':pid');
     else if (prev === 'windows') out.push(':window');
     else out.push(seg);

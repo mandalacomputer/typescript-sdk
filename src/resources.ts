@@ -14,6 +14,9 @@ import type {
   TemplateBuild,
   TemplateCheck,
   UsageReport,
+  Webhook,
+  WebhookCreated,
+  WebhookDelivery,
 } from './models.js';
 import {
   belongsToComputer,
@@ -33,6 +36,9 @@ import {
   toTemplateBuild,
   toTemplateCheck,
   toUsageReport,
+  toWebhook,
+  toWebhookCreated,
+  toWebhookDelivery,
 } from './models.js';
 import * as P from './paths.js';
 import type { Listing, SSEEvent, Transport } from './transport.js';
@@ -966,5 +972,163 @@ export class Usage {
     });
     if (!P.isRecord(data)) throw new MandalaError(`expected a usage report from GET ${P.USAGE}`);
     return toUsageReport(data);
+  }
+}
+
+/**
+ * The account's webhook subscriptions: the other transport for events.
+ *
+ * The socket on a computer is for a caller that is attached to it and waiting.
+ * This is for one that is not — CI, a queue worker, anything that wants to be
+ * WOKEN rather than to wait. Each delivery is one `POST` per event to the URL
+ * you name, whose body is the event object exactly as the socket would frame
+ * it, signed with Standard Webhooks v1; `verify` from this package checks one.
+ *
+ * Its own collection because `GET /webhooks` is its own route, account-scoped
+ * like `moves` and `usage`: a subscription receives events from many
+ * computers, including ones that do not exist yet, so there is no computer for
+ * it to hang off.
+ *
+ * `file.changed` never arrives here. It exists only because a socket nominated
+ * a tree, and a subscription has nothing to nominate against.
+ */
+export class Webhooks {
+  #t: Transport;
+
+  /** @internal */
+  constructor(transport: Transport) {
+    this.#t = transport;
+  }
+
+  /**
+   * Every subscription on the account, oldest first, with its health — and
+   * never a secret.
+   *
+   * An API key issued against a workspace sees the subscriptions confined to
+   * that workspace only.
+   */
+  async list(opts: CallOptions = {}): Promise<Webhook[]> {
+    const data = await this.#t.jsonArray('GET', P.WEBHOOKS, { signal: opts.signal });
+    return data.filter(P.isRecord).map(toWebhook);
+  }
+
+  /**
+   * Subscribe an HTTPS endpoint to this account's events.
+   *
+   * The answer carries the signing `secret` ONCE. Store it before doing
+   * anything else; it is not readable again, and {@link rotate} is the only
+   * way to get another.
+   *
+   * ```ts
+   * const hook = await client.webhooks.create({
+   *   url: 'https://ci.example.com/mandala',
+   *   events: ['process.exited', 'computer.ready'],
+   * });
+   * await vault.put('mandala-webhook-secret', hook.secret);
+   * ```
+   *
+   * Every paid plan allows ten subscriptions per account; the eleventh is a
+   * `ConflictError` naming the cap, and an account with no plan gets a
+   * `PlanLimitError`. Acknowledge each delivery with a 2xx before doing the
+   * work: an attempt is cut at ten seconds, and anything but a 2xx is retried
+   * eight times over about fourteen hours before the delivery is `exhausted`
+   * — visible in {@link deliveries}, never dropped silently. An endpoint that
+   * keeps failing is disabled after a day; `update({ enabled: true })` starts
+   * it again.
+   */
+  async create(args: P.WebhookCreateArgs, opts: CallOptions = {}): Promise<WebhookCreated> {
+    const data = await this.#t.json('POST', P.WEBHOOKS, {
+      body: P.webhookCreateBody(args),
+      signal: opts.signal,
+    });
+    if (!P.isRecord(data)) throw new MandalaError(`expected a webhook from POST ${P.WEBHOOKS}`);
+    return toWebhookCreated(data, 'POST', P.WEBHOOKS);
+  }
+
+  /** One subscription, with its health. Never the secret. */
+  async get(webhookId: string, opts: CallOptions = {}): Promise<Webhook> {
+    const path = P.webhook(webhookId);
+    const data = await this.#t.json('GET', path, { signal: opts.signal });
+    if (!P.isRecord(data)) throw new MandalaError(`expected a webhook from GET ${path}`);
+    return toWebhook(data);
+  }
+
+  /**
+   * Change the endpoint, the description, the filters, or `enabled`. Fields
+   * you omit are left as they are; an empty update is refused before it is
+   * sent.
+   *
+   * A new `url` is checked exactly as on create. `enabled: true` clears a
+   * `failing` disable and starts fresh; `enabled: false` stops deliveries and
+   * records that you chose to. `events: []` or `computers: []` CLEARS that
+   * filter — the empty list is the platform's spelling of "every one".
+   */
+  async update(
+    webhookId: string,
+    args: P.WebhookUpdateArgs,
+    opts: CallOptions = {},
+  ): Promise<Webhook> {
+    const path = P.webhook(webhookId);
+    const data = await this.#t.json('PATCH', path, {
+      body: P.webhookUpdateBody(args),
+      signal: opts.signal,
+    });
+    if (!P.isRecord(data)) throw new MandalaError(`expected a webhook from PATCH ${path}`);
+    return toWebhook(data);
+  }
+
+  /**
+   * Remove the subscription and every delivery record it holds, pending ones
+   * included. Nothing more is sent to the endpoint.
+   */
+  async delete(webhookId: string, opts: CallOptions = {}): Promise<void> {
+    await this.#t.json('DELETE', P.webhook(webhookId), { signal: opts.signal });
+  }
+
+  /**
+   * Mint a new secret, answered once like a create.
+   *
+   * The old one goes on being honoured for 24 hours: every delivery in that
+   * window carries a signature under each secret on the one header, and
+   * `verify` with either passes throughout — so switch the receiver over at
+   * leisure, and never in a hurry. Rotating again inside the window replaces
+   * the previous secret rather than keeping three.
+   */
+  async rotate(webhookId: string, opts: CallOptions = {}): Promise<WebhookCreated> {
+    const path = P.webhookAction(webhookId, 'rotate');
+    const data = await this.#t.json('POST', path, { signal: opts.signal });
+    if (!P.isRecord(data)) throw new MandalaError(`expected a webhook from POST ${path}`);
+    return toWebhookCreated(data, 'POST', path);
+  }
+
+  /**
+   * Queue one signed delivery of a synthetic `webhook.test` event through the
+   * ordinary path, so it is signed, retried and recorded exactly as a real one.
+   *
+   * The answer is the delivery ACCEPTED, not finished: read what the endpoint
+   * said back from {@link deliveries}, by the id returned here. A disabled
+   * subscription is a `ConflictError`; enable it first.
+   */
+  async test(webhookId: string, opts: CallOptions = {}): Promise<WebhookDelivery> {
+    const path = P.webhookAction(webhookId, 'test');
+    const data = await this.#t.json('POST', path, { signal: opts.signal });
+    if (!P.isRecord(data)) throw new MandalaError(`expected a delivery from POST ${path}`);
+    return toWebhookDelivery(data);
+  }
+
+  /**
+   * The newest hundred deliveries to this subscription, newest first, each
+   * with its state, its attempt count and the status or one-line error of its
+   * newest attempt.
+   *
+   * This is where an `exhausted` delivery shows up — nothing is dropped
+   * silently — and where a receiver that logged a `webhook-id` it refused can
+   * find out what it was. Finished deliveries are kept for seven days; pending
+   * ones until they finish.
+   */
+  async deliveries(webhookId: string, opts: CallOptions = {}): Promise<WebhookDelivery[]> {
+    const path = P.webhookAction(webhookId, 'deliveries');
+    const data = await this.#t.jsonArray('GET', path, { signal: opts.signal });
+    return data.filter(P.isRecord).map(toWebhookDelivery);
   }
 }

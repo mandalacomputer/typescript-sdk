@@ -531,6 +531,52 @@ export const PUBLISHED_TEMPLATE = {
   published_at: '2026-08-26T12:00:00.000Z',
 };
 
+/**
+ * One webhook subscription, in the platform's own spelling (platform OPL-4300).
+ *
+ * The nullable health fields as `null`, which is what the platform sends
+ * before there is anything to say, so a decoder that turned `null` into `''`
+ * or `0` would be caught here rather than by a caller reading a timestamp of
+ * the empty string.
+ */
+export const WEBHOOK = {
+  id: 'whk-2b7d4c809f3c1a7e',
+  url: 'https://ci.example.com/mandala',
+  description: '',
+  events: ['process.exited', 'computer.ready'],
+  computers: [],
+  enabled: true,
+  disabled_reason: null,
+  disabled_at: null,
+  last_success_at: null,
+  last_failure_at: null,
+  last_status: null,
+  created_at: '2026-09-01T12:00:00.000Z',
+  updated_at: '2026-09-01T12:00:00.000Z',
+};
+
+/** The same subscription as a create or a rotate answers it: with the secret, once. */
+export const WEBHOOK_CREATED = {
+  ...WEBHOOK,
+  secret: 'whsec_bWFuZGFsYS13ZWJob29rLXRlc3QtdmVjdG9yLWtleSE=',
+};
+
+/** One delivery, as a test queues it: accepted, not yet attempted. */
+export const WEBHOOK_DELIVERY = {
+  id: 'whd-9f3c1a7e5b2d4c80',
+  event_type: 'webhook.test',
+  computer: '',
+  cursor: '',
+  state: 'pending',
+  attempts: 0,
+  next_at: '2026-09-01T12:00:00.000Z',
+  attempted_at: null,
+  last_status: null,
+  last_error: null,
+  delivered_at: null,
+  created_at: '2026-09-01T12:00:00.000Z',
+};
+
 /** What a retire took away (platform OPL-3830). */
 export const RETIRED_TEMPLATES = {
   retired: ['acc-1/devbox@1.0.0'],
@@ -724,6 +770,16 @@ export const anyRoute: Responder = (call) => {
   // A stub that answered one shape for both would let a caller reading `live`
   // off the wrong response pass.
   if (path === '/usage') return json(USAGE);
+  // The secret is on exactly two answers, and a mock that put it on every one
+  // would let a decoder that read it off a GET pass. The delete is an ack, and
+  // the two POST actions answer different shapes: a rotate is the subscription
+  // again with a new secret, a test is a delivery.
+  if (path === '/webhooks')
+    return json(get ? [WEBHOOK] : WEBHOOK_CREATED, get ? {} : { status: 201 });
+  if (path.endsWith('/webhooks/whk-1/rotate')) return json(WEBHOOK_CREATED);
+  if (path.endsWith('/webhooks/whk-1/test')) return json(WEBHOOK_DELIVERY, { status: 202 });
+  if (path.endsWith('/webhooks/whk-1/deliveries')) return json([WEBHOOK_DELIVERY]);
+  if (/^\/webhooks\/[^/]+$/.test(path)) return json(method === 'DELETE' ? { ok: true } : WEBHOOK);
   if (path === '/moves') return json({ moves: [MOVE_DONE] });
   if (path.endsWith('/move')) return json(MOVE_STARTED, { status: 202 });
   if (path === '/computers') return json(get ? [COMPUTER] : COMPUTER);
