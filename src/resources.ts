@@ -21,6 +21,7 @@ import {
   expectMoves,
   isBuildTerminal,
   isUnreachableStub,
+  str,
   toBuildProgress,
   toMove,
   toPublishedTemplate,
@@ -681,7 +682,7 @@ export class Builds {
         // The stream's own failure, not the build's. Named as such, because a
         // caller told "the build failed" would go and read a document that is
         // fine.
-        const detail = P.isRecord(ev.data) ? String(ev.data.error ?? '') : String(ev.data ?? '');
+        const detail = P.isRecord(ev.data) ? str(ev.data.error) : str(ev.data);
         throw new MandalaError(
           `the build event stream for ${id} ended: ${detail || 'no reason given'} ` +
             `(this says nothing about the build itself — read builds.progress(${JSON.stringify(id)}))`,

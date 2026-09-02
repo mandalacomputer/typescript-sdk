@@ -2922,6 +2922,32 @@ describe('a body the route did not send', () => {
     await expect(computer.exec('true')).rejects.toThrow(/expected an exec result/);
   });
 
+  it('refuses an empty background-exec body, naming the route', async () => {
+    // `toBackgroundExec({})` throws "expected a background command's pid, got
+    // null" — correct refusal of a fabricated success, but it does not name
+    // the method or path the way `exec()` was fixed to (OPL-4215 leftover).
+    const { client: c } = client((call) =>
+      call.path.endsWith('/exec') ? new Response(null, { status: 204 }) : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    await expect(computer.execBackground('sleep 60')).rejects.toThrow(
+      /expected a background command from POST computers\/vm-1\/exec/,
+    );
+  });
+
+  it('refuses an empty poll or kill body, naming the method', async () => {
+    const { client: c } = client((call) =>
+      /\/exec\/\d+$/.test(call.path) ? new Response(null, { status: 204 }) : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    await expect(computer.execPoll(42)).rejects.toThrow(
+      /expected a background command from GET computers\/vm-1\/exec\/42/,
+    );
+    await expect(computer.execKill(42)).rejects.toThrow(
+      /expected a background command from DELETE computers\/vm-1\/exec\/42/,
+    );
+  });
+
   it('refuses a snapshot row that names nothing, the way a build row is refused', async () => {
     const { client: c } = client((call) =>
       call.path === '/snapshots' ? json([{ ...SNAPSHOT, id: undefined }]) : anyRoute(call),

@@ -482,6 +482,27 @@ describe('watching a build', () => {
     expect((err as Error).message).toContain('says nothing about the build itself');
   });
 
+  it('throws MandalaError, not TypeError, when an error frame cannot be stringified', async () => {
+    // OPL-3850 leftover: `String()` throws on `{"toString":"x"}`, and this
+    // generator is reached from inside the caller's `for await`. `str()` is
+    // the reading every other live stream already uses.
+    const { client: c } = client((call) =>
+      call.path.endsWith('/events')
+        ? new Response(`event: error\ndata: ${JSON.stringify({ error: { toString: 'x' } })}\n\n`, {
+            status: 200,
+            headers: { 'content-type': 'text/event-stream' },
+          })
+        : anyRoute(call),
+    );
+    const read = async () => {
+      for await (const _ of c.builds.events('bld-1')) break;
+    };
+    const err = await read().catch((e) => e);
+    expect(err).toBeInstanceOf(MandalaError);
+    expect(err).not.toBeInstanceOf(TypeError);
+    expect((err as Error).message).toContain('says nothing about the build itself');
+  });
+
   it('returns when the build is done', async () => {
     const { client: c } = client();
     const out = await c.builds.wait('bld-1', { pollMs: 1 });

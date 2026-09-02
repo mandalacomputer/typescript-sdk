@@ -2350,21 +2350,26 @@ export class Computer {
       env?: Readonly<Record<string, string>>;
     } & CallOptions = {},
   ): Promise<BackgroundExec> {
-    const data = await this.#t.json<Record<string, unknown>>(
-      'POST',
-      P.computerAction(this.id, 'exec'),
-      {
-        body: P.execBody({
-          command,
-          background: true,
-          desktop: opts.desktop,
-          cwd: opts.cwd,
-          env: opts.env,
-        }),
-        signal: opts.signal,
-      },
-    );
-    return toBackgroundExec(data ?? {});
+    const path = P.computerAction(this.id, 'exec');
+    const data = await this.#t.json<Record<string, unknown>>('POST', path, {
+      body: P.execBody({
+        command,
+        background: true,
+        desktop: opts.desktop,
+        cwd: opts.cwd,
+        env: opts.env,
+      }),
+      signal: opts.signal,
+    });
+    // Checked rather than defaulted to `{}`. A 204 or an empty body decodes to
+    // `undefined` here, and `toBackgroundExec({})` throws "expected a
+    // background command's pid, got null" — correct refusal of a fabricated
+    // success, but it does not name the route the way `exec()` was fixed to
+    // (OPL-4215).
+    if (!P.isRecord(data)) {
+      throw new MandalaError(`expected a background command from POST ${path}`);
+    }
+    return toBackgroundExec(data);
   }
 
   /**
@@ -2377,10 +2382,14 @@ export class Computer {
    * further output waiting — poll again straight away.
    */
   async execPoll(pid: number, opts: CallOptions = {}): Promise<BackgroundExec> {
-    const data = await this.#t.json<Record<string, unknown>>('GET', P.execHandle(this.id, pid), {
+    const path = P.execHandle(this.id, pid);
+    const data = await this.#t.json<Record<string, unknown>>('GET', path, {
       signal: opts.signal,
     });
-    return toBackgroundExec(data ?? {});
+    if (!P.isRecord(data)) {
+      throw new MandalaError(`expected a background command from GET ${path}`);
+    }
+    return toBackgroundExec(data);
   }
 
   /**
@@ -2390,10 +2399,14 @@ export class Computer {
    * read.
    */
   async execKill(pid: number, opts: CallOptions = {}): Promise<BackgroundExec> {
-    const data = await this.#t.json<Record<string, unknown>>('DELETE', P.execHandle(this.id, pid), {
+    const path = P.execHandle(this.id, pid);
+    const data = await this.#t.json<Record<string, unknown>>('DELETE', path, {
       signal: opts.signal,
     });
-    return toBackgroundExec(data ?? {});
+    if (!P.isRecord(data)) {
+      throw new MandalaError(`expected a background command from DELETE ${path}`);
+    }
+    return toBackgroundExec(data);
   }
 
   /**

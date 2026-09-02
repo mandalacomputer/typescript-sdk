@@ -16,7 +16,7 @@ workers, the edge. (The `mandala` CLI is Node-only; the library is not.)
 ## Install
 
 ```sh
-npm install mandala-computer
+npm install mandala-computer       # not yet published
 ```
 
 You need an API key from the dashboard — **Settings → API keys**, a `com_…`
