@@ -6,9 +6,8 @@ for AI agents.
 A real Linux desktop your code can **see and drive**: screenshots come back as
 bytes, clicks go in as coordinates, and a shell in the guest is one call away.
 
-> **Status: alpha, unpublished.** The surface is settling; expect breaking
-> changes before 1.0. Tracks the platform's `/api/v1`, which is itself still
-> moving.
+> **Status: alpha.** The surface is settling; expect breaking changes before
+> 1.0. Tracks the platform's `/api/v1`, which is itself still moving.
 
 Zero runtime dependencies. Node 22+, and anywhere else with `fetch` — Bun, Deno,
 workers, the edge. (The `mandala` CLI is Node-only; the library is not.)
@@ -16,8 +15,11 @@ workers, the edge. (The `mandala` CLI is Node-only; the library is not.)
 ## Install
 
 ```sh
-npm install mandala-computer       # not yet published
+npm install mandala-computer
 ```
+
+Published as ES modules, with type declarations alongside. The install also
+puts a `mandala` command on your PATH; see [The `mandala` CLI](#the-mandala-cli).
 
 You need an API key from the dashboard — **Settings → API keys**, a `com_…`
 string. It is scoped to your account and it *is* every computer on it, so treat
@@ -26,6 +28,13 @@ it the way you would treat a password. Never ship it to a browser.
 ```sh
 export MANDALA_API_KEY=com_…
 ```
+
+Requests go to `https://app.mandala.computer/api/v1`; `MANDALA_BASE_URL` or
+`new Client({ baseUrl })` points them elsewhere, and `apiKey` is the same
+option for the key. `timeoutMs` is the per-request budget — 60 seconds unless a
+call knows it needs longer, `0` to disable — and `fetch` takes an implementation
+of your own if you have proxies or certificates to configure. Each method takes
+a `signal` among its options, so any one request can be cancelled.
 
 ## Use
 
@@ -52,6 +61,12 @@ const c = await client.computers.create({ size: 'large' });
 await c.waitForGuest();
 // ... it outlives this function. Delete it when you mean to.
 ```
+
+A create takes a `name`, and `start: false` leaves the computer stopped. Finding
+one again is `computers.get(id)` or `computers.list()`; a handle you already
+hold is re-read with `c.refresh()`, and renamed with `c.rename('staging')`. Every
+field on the handle — `status`, `os`, `cpu`, `ramMb`, `createdAt` and the rest —
+is what the last payload said, and `c.raw` is that payload.
 
 On a runtime with explicit resource management, `ephemeral` also works as a
 disposable:
@@ -150,6 +165,12 @@ const pinned = await client.templates.get(namespace, 'devbox', { version: '1.0.0
 Without `version` you get the newest, which is also what a create naming the
 unpinned `namespace/name` resolves to.
 
+`templates.list()` is the catalogue — the images a computer can be created
+from, each with the `ref` a create names it by — and `templates.schema()` is
+the JSON Schema for a `mandala/v1` document, returned as it is so an editor or
+a validator can be pointed at it. Its `$id` is the URL it came from, so a `$ref`
+to it resolves.
+
 #### Retiring one
 
 ```ts
@@ -193,6 +214,14 @@ if (out.status !== 'succeeded') {
 `wait` does **not** throw for a build that failed. `succeeded` and `failed` are
 two situations with two remedies — one has an image, the other has a step to fix
 — and an exception flattens them into "something went wrong". Read `status`.
+
+Identical documents share an image, which is what makes a repeated build cheap;
+`builds.start(doc, { noReuse: true })` builds again regardless. The namespace
+and the `spec.family` both have to be yours, and either one that is not is a
+`PermissionDeniedError`; a `ConflictError` means the host is busy — one build
+runs per host at a time — and is worth retrying. `builds.get(id)` is the job,
+`builds.progress(id)` is what it is doing and stays readable after it has
+finished, and `builds.list()` is every build the fleet still holds a record of.
 
 For a terminal, stream it instead of polling:
 
@@ -259,12 +288,14 @@ await c.click(100, 200);
 await c.click();                              // where the pointer already is
 await c.click(100, 200, ['shift']);           // held for the click
 await c.rightClick(100, 200);
+await c.middleClick(100, 200);
 await c.doubleClick(100, 200);
 await c.tripleClick(100, 200);                // selects a line in most editors
 await c.drag(400, 300, { x: 100, y: 200 });   // one gesture, not two clicks
 await c.mouseDown(100, 200);
 await c.mouseUp(400, 300);
 await c.scroll(640, 400, { direction: 'down', amount: 3 });
+await c.scroll(640, 400, { direction: 'right', modifiers: ['shift'] });
 await c.type('hello');
 await c.key('ctrl', 'c');                     // X11 keysyms work too: Page_Down, BackSpace
 await c.key(['ctrl', 'c'], { signal });       // the same chord, cancellable
@@ -276,7 +307,10 @@ const at = await c.cursorPosition();          // undefined if nothing has placed
 No coordinate means "where the pointer already is", which is a real and different
 request from clicking (0, 0). Half a coordinate — `click(5)` — is refused rather
 than completed with a zero: it would succeed, at the wrong place, and nothing
-would say so.
+would say so. Modifiers are a positional on the clicks and an option on
+`scroll`, and the wrong spelling of either is refused rather than sent with
+nothing held down. A `drag` with no `from` starts where the pointer is, and is
+refused if nothing has placed it yet.
 
 ### Screenshots, and the one flag a drive loop needs
 
@@ -317,7 +351,14 @@ shut.gone;                                              // true — there is no 
 Match on `windowClass`, not `title`: the class is the application, the title is
 whatever page it is showing. `visible` is false for a **minimised** window,
 which stays on the list — clicking at the coordinates of one puts the click on
-whatever is actually there.
+whatever is actually there. Panels, the wallpaper and the rest of the desktop's
+furniture are left off by default — a stock guest with one terminal open has
+five windows, four of which are not applications — and
+`windows({ includeAll: true })` puts them back.
+
+The actions are `focus`, `raise`, `minimize`, `maximize`, `unmaximize`,
+`close`, `move` and `resize`; the geometry argument — `x`, `y`, `width`,
+`height` — is what `move` and `resize` read.
 
 `pid` is the process that owns the window, and is `undefined` where the guest
 did not say — never `0`, which is a pid a guest may genuinely advertise. It
@@ -371,7 +412,7 @@ rather than an X window id. Both are `0x` and hex and both are what
 The desktop's `CLIPBOARD` selection — what Ctrl-C writes and Ctrl-V pastes — read
 and written from outside the guest. Linux only, and it needs nothing of the
 *hardware*: no cold boot, no permission from a browser. What it does need is
-`xclip` in the guest, which every golden built since August 2026 carries — so in
+`xclip` in the guest, which every image built since August 2026 carries — so in
 practice this is the road that works on every computer, and where it is not, the
 refusal says so. (The other road is RFB extended cut text over the desktop
 socket, which is live and conditional; see
@@ -412,7 +453,7 @@ deadline. An unclassified refusal falls back to the old type answer, so bound a
 loop that meets one.
 
 A **400** is the other one to know, because it never clears: a computer built
-from a golden that predates `xclip` is refused permanently. Install `xclip` in
+from an image that predates `xclip` is refused permanently. Install `xclip` in
 the guest — you have root there — or create a new computer.
 
 The two differ on one thing worth knowing: `setClipboard()` **resumes a
@@ -424,25 +465,18 @@ computer is a 409 rather than a start you did not ask for.
 A read failure is an exception, not an empty string. That is the distinction the
 `exec` recipe these replace could not make.
 
-#### What these replace
+#### Why not `exec` and `xclip` yourself
 
-Until platform OPL-3768 the only public road was a recipe over `exec` with
-`desktop: true`, documented at length in this README. Do not go back to it.
-`exec` runs a **login shell**, so the desktop user's profile is sourced and
-anything it prints lands on the same stdout as your command's output, ahead of
-it. That is wanted when you asked to run a command the way the user would, and
-fatal when you are reading a value: an `echo` in the guest's `.profile` corrupts
-the answer and a deliberate one forges it. No framing you add fixes that — a
-profile that prints your frame owns everything after it. The clipboard endpoints
-do not share that stream.
-
-The write was worse. An X selection belongs to a live process, so the holder had
-to outlive the exec under `setsid` and have its output redirected, or the
-resident `xclip` held the pipe the guest agent reads and the call ran to its
-full timeout before answering. The text had to travel base64 and quoted, since
-an apostrophe would otherwise end the shell word. And because being granted a
-selection is asynchronous, the result had to be polled for in a loop bounded in
-*attempts* — each one a billable exec — rather than trusted. `setClipboard()`
+Because `exec` runs a **login shell**: the desktop user's profile is sourced,
+and anything it prints lands on the same stdout as your command's output, ahead
+of it. That is wanted when you asked to run a command the way the user would,
+and fatal when you are reading a value — an `echo` in the guest's `.profile`
+corrupts the answer and a deliberate one forges it, and no framing you add
+fixes that, since a profile that prints your frame owns everything after it.
+The clipboard endpoints do not share that stream. The write is worse still: an
+X selection belongs to a live process, so the holder has to outlive the exec,
+the text has to travel quoted, and being granted a selection is asynchronous,
+so the result has to be polled for — each poll a billable exec. `setClipboard()`
 does all of it in one call.
 
 ### Running commands
@@ -453,8 +487,10 @@ if (!res.ok) console.error(res.stderr);
 if (res.truncated) { /* the guest agent capped output at 16 MiB */ }
 ```
 
-A non-zero exit is returned, not thrown. By default the command runs as `root`
-with no display; anything with a window needs the desktop session:
+A non-zero exit is returned, not thrown. The guest gets `timeoutS` to finish —
+30 seconds unless you say otherwise — and a command that outlives it keeps
+running in the guest with its output unreachable. By default the command runs
+as `root` with no display; anything with a window needs the desktop session:
 
 ```ts
 await c.exec('nohup firefox https://example.com >/dev/null 2>&1 &', { desktop: true });
@@ -573,6 +609,19 @@ Where the host can no longer replay that far you get a `gap` event rather than
 silence. It is not an error and it is not swallowed: it is the signal that what
 you missed is unrecoverable, and to reconcile against `windows()` or
 `execPoll()` instead of assuming nothing happened.
+
+Reconnecting is on by default and is most of what `events()` is for. `backoffMs`
+doubles up to `maxBackoffMs` between attempts, `maxRetries` gives up after that
+many *consecutive* failures to reopen (`0`, the default, never does — one
+connection that reaches its opening frame resets the count), and
+`connectTimeoutMs` bounds the handshake. `maxQueued` is how many frames may sit
+unread before the socket is closed and reopened from where you had got to —
+nothing dropped, nothing sent twice — because a websocket cannot be paused and
+something has to bound a consumer that is not keeping up. `reconnect: false`
+ends the iteration when the socket does, for a caller running their own
+supervision; `signal` ends it on demand, without throwing. The defaults are
+exported as `EVENT_STREAM_DEFAULTS`; `waitFor` takes the same options plus a
+`timeoutMs`, three minutes unless you say otherwise.
 
 **`computer.ready` has a trap in it, and this SDK takes it out.** It fires once
 per desktop *session*, so a machine that has been up for an hour will never send
@@ -835,6 +884,13 @@ Paths are absolute, inside the guest. There is no shell and no working directory
 behind a transfer, so a relative path is refused before the request is made.
 Works while the computer is running or suspended.
 
+`writeFile` takes a string, bytes, or a `ReadableStream` — so a large local
+file goes up as the request body rather than living as one Buffer first; pass
+`contentLength` when you know it — and answers with how many bytes the platform
+says it wrote, or `undefined` if it did not say. Every transfer takes a
+`timeoutMs` for the one request, since a big file can legitimately outlive the
+default 60 seconds; `0` disables the deadline for that transfer.
+
 #### Files bigger than one request
 
 One transfer moves at most **64 MiB** — the bytes cross the guest agent in
@@ -901,7 +957,9 @@ console.log(result.text, result.usage);
 
 Ten clicks stop being ten images in *your* context. Each step is a model call
 plus a screenshot billed to your key, so `maxSteps` is a spending cap as much as
-a loop bound.
+a loop bound. `system` carries standing instructions into the run and `model`
+overrides the one the platform would pick. The computer must already be
+running.
 
 Stream it when the run is long enough that silence looks like a hang:
 
@@ -922,6 +980,14 @@ ran out of API budget (`rate_limited`), or was declined (`refusal`) is **not**
 raised as an error — the steps already taken are real and what they did to the
 desktop stands. They say the run did not finish, which is a different thing from
 the run having gone wrong.
+
+`agent()` is itself the stream, read to its `done`. `agentOnce()` is the same
+run as a single non-streaming request — simpler, and worse for anything long,
+since nothing is reported until the whole run is over and a proxy between you
+and the platform may well close a request held open for minutes. There is also
+an OpenAI-shaped door onto the same loop, `POST /chat/completions`, which this
+SDK deliberately does not wrap: a caller who wants it already has an OpenAI
+client and points its `baseURL` here.
 
 ### Power
 
@@ -1077,8 +1143,8 @@ get.
 [`clipboard()` and `setClipboard()`](#clipboard) are the route to build on — the
 reliable one, not merely the fallback — because they need nothing of the
 *hardware*: no cold boot, no permission from a browser. They ask one thing of
-the image (`xclip`, in every golden since August 2026) and say so in the answer
-when it is missing, which is one condition stated instead of two inferred. Where
+the image (`xclip`, in every image built since August 2026) and say so in the
+answer when it is missing, which is one condition stated instead of two inferred. Where
 the socket *does* carry the clipboard the two do not fight over it: those
 methods write the same X `CLIPBOARD` selection the agent then offers onward.
 
@@ -1149,6 +1215,15 @@ await client.snapshots.restore(snap.id);            // back onto its source
 await client.snapshots.delete(snap.id);
 await c.setSchedule({ enabled: true, hour: 4, tz: 'America/New_York' });
 ```
+
+`c.schedule()` reads the daily schedule back. `setSchedule({ enabled: false })`
+keeps the chosen time so toggling it on again restores it; `c.clearSchedule()`
+returns the computer to never having had one.
+
+`client.snapshots.list()` is every snapshot on the account;
+`{ computerId }` narrows it to one computer's, and `{ includeUnfinished: true }`
+adds deletions that began and did not finish — nothing can be restored or
+cloned from one, but they still hold storage and are still billed.
 
 A schedule says when they are taken and not how long they survive. That is your
 plan's, account-wide, and read-only:
@@ -1420,8 +1495,8 @@ replay blind: `ConflictError`, `RateLimitError`, `UnavailableError`,
 The wait helpers do not ask it. They replay idempotent reads under a deadline
 you set, so they ride out every status above — including the ones here — and
 give up only on a failure that describes the *request* rather than the moment.
-Two audiences, two predicates; the same three classes and the same four now
-answer identically in `mandala-computer-mcp` and `mandala-computer-python`.
+Two audiences, two predicates; the same three classes and the same four
+answer identically in the Python SDK and the MCP server.
 
 ## The `mandala` CLI
 
@@ -1464,11 +1539,11 @@ than a failure in CI.
 **Pinned to the platform's surface.** The platform allowlists routes server-side
 and 404s everything else. `test/allowlist.ts` mirrors that table in full,
 `test/surface.test.ts` asserts every request this SDK can issue lands inside it,
-and `scripts/check-surface.mjs` diffs the mirror against `web/lib/surface.ts`
-whenever both repos are checked out. A mirror nobody compares is just a comment:
-that is exactly how three routes reached the platform without the Python SDK's
-surface test noticing, because "every call lands on an allowlisted route" stays
-true when the allowlist is the stale one.
+and `scripts/check-surface.mjs` diffs the mirror against the platform's own
+table whenever the platform repository is checked out beside this one. A mirror
+nobody compares is just a comment: that is exactly how three routes reached the
+platform without the Python SDK's surface test noticing, because "every call
+lands on an allowlisted route" stays true when the allowlist is the stale one.
 
 **Pinned to its parameters too, because routes were not enough.** A route table
 cannot see a call that lands in the right place without the argument that made
@@ -1503,9 +1578,9 @@ a different implementation.
 member for "a type this build has never heard of", and in TypeScript that
 member's discriminant can only be `string` — which puts it back inside every
 narrowing, so `ev.type === 'process.exited'` stops implying `ev.pid`. It would
-buy exactness on the eleven types named today and lose it on every type added
-after, which is the wrong way round for a stream whose reference says the
-vocabulary grows.
+buy exactness on the types named today and lose it on every type added after,
+which is the wrong way round for a stream whose reference says the vocabulary
+grows.
 
 **A refused websocket says nothing, so the SDK asks.** Measured on Node 22 and
 26: a 409, a 401 and a TCP reset all arrive as an `error` carrying a `TypeError`
@@ -1529,8 +1604,8 @@ widening either is a deliberate act rather than a quiet one.
 
 | | |
 |---|---|
-| [`mandala-computer-python`](https://github.com/mandalacomputer/python-sdk) | the Python SDK, sync and async |
-| [`mandala-computer-mcp`](https://github.com/mandalacomputer/mcp) | an MCP server, for Claude Code / Claude Desktop |
+| [Python SDK](https://github.com/mandalacomputer/python-sdk) | `pip install mandala-computer` — sync and async |
+| [MCP server](https://github.com/mandalacomputer/mcp) | `mandala-computer-mcp`, for Claude Code / Claude Desktop |
 
 All three bind to the same `/api/v1` and share the same status-to-error mapping,
 deliberately: three clients disagreeing about what a 402 is means the same
