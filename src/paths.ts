@@ -55,6 +55,15 @@ export const USAGE = 'usage';
  * write on any surface.
  */
 export const RETENTION = 'retention';
+/**
+ * The account's webhook subscriptions (platform OPL-4300).
+ *
+ * Account-scoped like {@link MOVES} and {@link USAGE}, and for the reason the
+ * design gives: a subscription receives events from MANY computers, some of
+ * which do not exist yet, so there is no computer for it to hang off. Answered
+ * by the control plane from its own tables, never by a hypervisor.
+ */
+export const WEBHOOKS = 'webhooks';
 
 /**
  * One id, in a path, refused when it is empty.
@@ -278,6 +287,8 @@ export function noReuse(v: boolean | undefined): Query {
 }
 
 export const build = (id: string): string => `${BUILDS}/${pathId(id, 'build id')}`;
+export const webhook = (id: string): string => `${WEBHOOKS}/${pathId(id, 'webhook id')}`;
+export const webhookAction = (id: string, action: string): string => `${webhook(id)}/${action}`;
 
 /** progress | events */
 export const buildAction = (id: string, action: string): string => `${build(id)}/${action}`;
@@ -1396,4 +1407,165 @@ export function agentBody(args: {
     model: args.model,
     stream: args.stream,
   });
+}
+
+// --- webhooks -------------------------------------------------------------
+
+/**
+ * What a subscription is created with.
+ *
+ * The filters are the platform's, in the platform's spelling: `events` is a
+ * list of event types and `computers` a list of computer ids, and EMPTY OR
+ * OMITTED MEANS EVERY ONE. The vocabulary is the socket's less `file.changed`
+ * — a subscription has no tree to nominate — and an unknown type is a 400
+ * that lists the ones there are, so it is left to the platform rather than
+ * pinned here, where the list would go stale the first time it grew.
+ */
+export type WebhookCreateArgs = {
+  /**
+   * Where deliveries are POSTed. `https://` only, with no username or password
+   * in it, resolving to a public address — a private, loopback or link-local
+   * answer is refused, and so is a literal one. Any port.
+   */
+  url: string;
+  /** Free text for your listing, up to 200 characters. */
+  description?: string;
+  /** Event types to deliver. Omit for every type. */
+  events?: readonly string[];
+  /** Computer ids to deliver for, up to 64. Omit for every computer in scope. */
+  computers?: readonly string[];
+  /** Start it disabled with `false`, to enable later. The platform defaults to `true`. */
+  enabled?: boolean;
+};
+
+/**
+ * What a PATCH may change. Every field optional and an omitted one left alone,
+ * so a `url` alone is a redirect and an `enabled` alone is a switch.
+ */
+export type WebhookUpdateArgs = Partial<WebhookCreateArgs>;
+
+/**
+ * A delivery URL, refused for what the platform would refuse it for and this
+ * SDK can see without a round trip: not a URL, not `https:`, or carrying a
+ * username or password.
+ *
+ * The address check — that the hostname resolves somewhere public — is the
+ * platform's, because the platform is what resolves it: an answer this SDK
+ * got from the caller's resolver says nothing about the one the sender uses.
+ *
+ * Userinfo is refused rather than stripped for the reason the design gives:
+ * the signature is the authentication, and a URL that carries a credential is
+ * a caller expecting one to be sent, which it never will be.
+ */
+function webhookUrl(url: unknown): string {
+  const text = requireString(url, 'url');
+  let parsed: URL;
+  try {
+    parsed = new URL(text);
+  } catch {
+    throw new ValidationError(`url must be an absolute https:// URL (got ${JSON.stringify(text)})`);
+  }
+  if (parsed.protocol !== 'https:') {
+    throw new ValidationError(`url must be https://, not ${parsed.protocol}//`);
+  }
+  if (parsed.username || parsed.password) {
+    throw new ValidationError(
+      'url must not carry a username or password: deliveries are authenticated by their signature',
+    );
+  }
+  return text;
+}
+
+/**
+ * One of the two id lists, refused when it is not a list of non-empty strings.
+ *
+ * The PLATFORM's spelling of "every one" is an empty list, and the platform
+ * treats an omitted key the same way, so `[]` is passed through as itself
+ * rather than dropped: on a PATCH the two differ — omitted leaves the filter
+ * alone and `[]` clears it — and a builder that turned one into the other
+ * would make a filter impossible to clear.
+ */
+function idList(v: unknown, what: string): string[] {
+  if (!Array.isArray(v)) {
+    throw new ValidationError(
+      `${what} must be an array of strings, not ${v === null ? 'null' : typeof v}`,
+    );
+  }
+  return v.map((item, i) => {
+    if (typeof item !== 'string' || !item.trim()) {
+      throw new ValidationError(`${what}[${i}] must be a non-empty string`);
+    }
+    return item;
+  });
+}
+
+/** The most characters a subscription's description may hold — the platform's DESCRIPTION_MAX. */
+export const WEBHOOK_DESCRIPTION_MAX = 200;
+/**
+ * The most computer ids one subscription may name — the platform's
+ * COMPUTERS_MAX. A bound, not a design number: past it, filter at the receiver.
+ */
+export const WEBHOOK_COMPUTERS_MAX = 64;
+
+/**
+ * The optional fields the create and the update share, validated once.
+ *
+ * The two caps are the platform's own, measured the way it measures them —
+ * `.length` on the string and on the list as given, before it de-duplicates —
+ * so a body refused here is one it would have refused, and one it would accept
+ * is never refused here. Knowable without the round trip, and named for the
+ * argument rather than as a 400 three tiers away.
+ */
+function webhookFields(args: WebhookUpdateArgs): Json {
+  if (args.description !== undefined) {
+    if (requireString(args.description, 'description').length > WEBHOOK_DESCRIPTION_MAX) {
+      throw new ValidationError(
+        `description is at most ${WEBHOOK_DESCRIPTION_MAX} characters (got ${args.description.length})`,
+      );
+    }
+  }
+  const computers = args.computers === undefined ? undefined : idList(args.computers, 'computers');
+  if (computers !== undefined && computers.length > WEBHOOK_COMPUTERS_MAX) {
+    throw new ValidationError(
+      `computers names at most ${WEBHOOK_COMPUTERS_MAX} computers (got ${computers.length}); filter at the receiver instead`,
+    );
+  }
+  return omitUndefined({
+    url: args.url === undefined ? undefined : webhookUrl(args.url),
+    description: args.description,
+    events: args.events === undefined ? undefined : idList(args.events, 'events'),
+    computers,
+    enabled: flag(args.enabled, 'enabled'),
+  });
+}
+
+/** The body for `POST webhooks`. `url` is the one field it cannot do without. */
+export function webhookCreateBody(args: WebhookCreateArgs): Json {
+  if (!isRecord(args)) {
+    throw new ValidationError(
+      `webhook arguments must be an object with a url (got ${typeof args})`,
+    );
+  }
+  if (args.url === undefined) throw new ValidationError('url is required');
+  return webhookFields(args);
+}
+
+/**
+ * The body for `PATCH webhooks/:id`.
+ *
+ * An empty patch is refused here, the way {@link updateBody} refuses one: it
+ * can only mean the caller built the arguments from something that turned out
+ * to be empty, and the platform's answer is a 400 that reads as malformed.
+ */
+export function webhookUpdateBody(args: WebhookUpdateArgs): Json {
+  if (!isRecord(args)) {
+    throw new ValidationError(`webhook arguments must be an object (got ${typeof args})`);
+  }
+  const body = webhookFields(args);
+  if (!Object.keys(body).length) {
+    throw new ValidationError(
+      'nothing to update: give at least one of url, description, events, computers, enabled',
+    );
+  }
+  return body;
 }
