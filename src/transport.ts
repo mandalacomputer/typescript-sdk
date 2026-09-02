@@ -388,6 +388,15 @@ export class Transport {
         // though undici accepts it.
         body: body as RequestInit['body'],
         signal: this.#signal(opts.signal, timeoutMs),
+        // Fetch follows redirects by default. A 301/302 on POST is converted
+        // to GET with the body dropped, and Authorization is stripped on a
+        // cross-origin hop — including `http://` → `https://`. The SDK then
+        // sees only the final response, so a baseUrl missing its trailing path
+        // — the case the poll predicate already treats as fatal — is followed
+        // instead of reported. Manual so the 3xx reaches `!resp.ok`.
+        // `redirect: 'error'` throws a TypeError and would hide the 301 as a
+        // connection failure.
+        redirect: 'manual',
       };
       if (body instanceof ReadableStream) init.duplex = 'half';
       resp = await this.#fetch(this.#url(path, opts.query), init);
