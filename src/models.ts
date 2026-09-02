@@ -2116,3 +2116,178 @@ export function toRetention(d: Record<string, unknown>): Retention {
 
 /** Where the pointer is. */
 export type Point = { x: number; y: number };
+
+// --- webhooks -------------------------------------------------------------
+
+/**
+ * A webhook subscription, as the platform projects it: never with its secret.
+ *
+ * The secret is on {@link WebhookCreated} and nowhere else, answered once at
+ * create and once at rotate. A listing or a read that carried it would be a
+ * credential readable forever by anything that can read the account, which is
+ * the property an API key has and this deliberately does not.
+ *
+ * The four `last*` fields and `disabledAt` are absent rather than empty until
+ * there is something to say — the platform sends `null`, and `''` for "never
+ * succeeded" reads exactly like a timestamp that was lost.
+ */
+export type Webhook = {
+  /** `whk-` and sixteen hex characters. */
+  id: string;
+  /** Where deliveries are POSTed. */
+  url: string;
+  /** Free text, for your listing. Empty when none was given. */
+  description: string;
+  /** The event types delivered. EMPTY MEANS EVERY TYPE. */
+  events: string[];
+  /** The computer ids delivered for. EMPTY MEANS EVERY COMPUTER IN SCOPE. */
+  computers: string[];
+  /**
+   * Whether deliveries are made. Set `false` by the platform when the endpoint
+   * has failed for a day — see {@link disabledReason} — and back to `true` by
+   * you with an update, which starts fresh.
+   */
+  enabled: boolean;
+  /**
+   * Why {@link enabled} is false: `customer` when you disabled it, `failing`
+   * when the platform did. Absent while enabled.
+   */
+  disabledReason?: string;
+  disabledAt?: string;
+  /** When the endpoint last answered 2xx to any delivery. */
+  lastSuccessAt?: string;
+  /** When a delivery attempt last failed. */
+  lastFailureAt?: string;
+  /** The HTTP status of the newest attempt. Absent before any, or when the newest got no answer. */
+  lastStatus?: number;
+  /** Present only on a subscription confined to a workspace. */
+  workspaceId?: string;
+  createdAt: string;
+  updatedAt: string;
+  raw: Record<string, unknown>;
+};
+
+/** {@link Webhook} with the one thing only a create or a rotate answers. */
+export type WebhookCreated = Webhook & {
+  /**
+   * The signing secret: `whsec_` and 44 characters of base64. SHOWN HERE AND
+   * NEVER AGAIN — store it now. It is what `verify` takes.
+   */
+  secret: string;
+};
+
+/**
+ * A list of strings off the wire, keeping only the strings.
+ *
+ * Not `str()` per element: a `null` in an id list would become `''`, which is
+ * not an id and would read as one, and this list is what decides which
+ * computers a subscription hears about.
+ */
+const strings = (v: unknown): string[] =>
+  Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
+
+export function toWebhook(d: Record<string, unknown>): Webhook {
+  return {
+    id: str(d.id),
+    url: str(d.url),
+    description: str(d.description),
+    events: strings(d.events),
+    computers: strings(d.computers),
+    // Read strictly, and unreadable is FALSE: an `enabled` this client cannot
+    // read is not one it should report as delivering.
+    enabled: said(d.enabled),
+    ...(d.disabled_reason == null ? {} : { disabledReason: str(d.disabled_reason) }),
+    ...(d.disabled_at == null ? {} : { disabledAt: str(d.disabled_at) }),
+    ...(d.last_success_at == null ? {} : { lastSuccessAt: str(d.last_success_at) }),
+    ...(d.last_failure_at == null ? {} : { lastFailureAt: str(d.last_failure_at) }),
+    ...(d.last_status == null ? {} : { lastStatus: num(d.last_status) }),
+    ...(d.workspace_id == null ? {} : { workspaceId: str(d.workspace_id) }),
+    createdAt: str(d.created_at),
+    updatedAt: str(d.updated_at),
+    raw: { ...d },
+  };
+}
+
+/**
+ * The answer to a create or a rotate, refused when the secret is not in it.
+ *
+ * This is the one decoder in this file that throws on an absent field, and it
+ * is the one field that justifies it: the secret is shown once, so a caller
+ * handed a subscription without one has a webhook nothing can ever verify and
+ * no way to get the secret short of rotating — which is what the caller would
+ * learn three tiers away, on the first delivery, from a 401 in their own logs.
+ */
+export function toWebhookCreated(
+  d: Record<string, unknown>,
+  method: string,
+  path: string,
+): WebhookCreated {
+  const secret = d.secret;
+  if (typeof secret !== 'string' || !secret) {
+    throw new MandalaError(
+      `expected a secret from ${method} ${path}: the platform answers it once, and it is not here`,
+    );
+  }
+  return { ...toWebhook(d), secret };
+}
+
+/**
+ * One delivery — one event to one subscription — and what became of it.
+ *
+ * `id` is the `webhook-id` header the delivery carried, unchanged across its
+ * attempts, which makes this the record to look up when a receiver logs one
+ * it refused.
+ */
+export type WebhookDelivery = {
+  /** `whd-` and sixteen hex characters: the `webhook-id` header, fixed across attempts. */
+  id: string;
+  /** The event's `type`. `gap` for a gap frame; `webhook.test` for a test delivery. */
+  eventType: string;
+  /** The computer the event is about. Empty on a test delivery. */
+  computer: string;
+  /** The event's own cursor — what to pass as `since` to the socket to read on from it. */
+  cursor: string;
+  /**
+   * `pending` (an attempt is scheduled), `in_flight` (one is running),
+   * `delivered` (a 2xx came back), `exhausted` (eight attempts failed) or
+   * `dropped` (the subscription was disabled or deleted first).
+   */
+  state: string;
+  /** How many times it has been sent. Eight is the last. */
+  attempts: number;
+  /** When the next attempt is due. Absent once the delivery is finished. */
+  nextAt?: string;
+  /** When the newest attempt started. Absent before the first. */
+  attemptedAt?: string;
+  /** The HTTP status of the newest attempt. Absent when it got no answer. */
+  lastStatus?: number;
+  /**
+   * One line about the newest failure: `timeout`, `dns`, `refused`, `tls`,
+   * `redirect`, `address refused`, or `status NNN`. Absent after a success and
+   * before any attempt.
+   */
+  lastError?: string;
+  /** When the 2xx came back. */
+  deliveredAt?: string;
+  /** When the event reached the queue. */
+  createdAt: string;
+  raw: Record<string, unknown>;
+};
+
+export function toWebhookDelivery(d: Record<string, unknown>): WebhookDelivery {
+  return {
+    id: str(d.id),
+    eventType: str(d.event_type),
+    computer: str(d.computer),
+    cursor: str(d.cursor),
+    state: str(d.state),
+    attempts: num(d.attempts),
+    ...(d.next_at == null ? {} : { nextAt: str(d.next_at) }),
+    ...(d.attempted_at == null ? {} : { attemptedAt: str(d.attempted_at) }),
+    ...(d.last_status == null ? {} : { lastStatus: num(d.last_status) }),
+    ...(d.last_error == null ? {} : { lastError: str(d.last_error) }),
+    ...(d.delivered_at == null ? {} : { deliveredAt: str(d.delivered_at) }),
+    createdAt: str(d.created_at),
+    raw: { ...d },
+  };
+}

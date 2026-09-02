@@ -55,6 +55,15 @@ export const USAGE = 'usage';
  * write on any surface.
  */
 export const RETENTION = 'retention';
+/**
+ * The account's webhook subscriptions (platform OPL-4300).
+ *
+ * Account-scoped like {@link MOVES} and {@link USAGE}, and for the reason the
+ * design gives: a subscription receives events from MANY computers, some of
+ * which do not exist yet, so there is no computer for it to hang off. Answered
+ * by the control plane from its own tables, never by a hypervisor.
+ */
+export const WEBHOOKS = 'webhooks';
 
 /**
  * One id, in a path, refused when it is empty.
@@ -278,6 +287,8 @@ export function noReuse(v: boolean | undefined): Query {
 }
 
 export const build = (id: string): string => `${BUILDS}/${pathId(id, 'build id')}`;
+export const webhook = (id: string): string => `${WEBHOOKS}/${pathId(id, 'webhook id')}`;
+export const webhookAction = (id: string, action: string): string => `${webhook(id)}/${action}`;
 
 /** progress | events */
 export const buildAction = (id: string, action: string): string => `${build(id)}/${action}`;
@@ -1396,4 +1407,137 @@ export function agentBody(args: {
     model: args.model,
     stream: args.stream,
   });
+}
+
+// --- webhooks -------------------------------------------------------------
+
+/**
+ * What a subscription is created with.
+ *
+ * The filters are the platform's, in the platform's spelling: `events` is a
+ * list of event types and `computers` a list of computer ids, and EMPTY OR
+ * OMITTED MEANS EVERY ONE. The vocabulary is the socket's less `file.changed`
+ * — a subscription has no tree to nominate — and an unknown type is a 400
+ * that lists the ones there are, so it is left to the platform rather than
+ * pinned here, where the list would go stale the first time it grew.
+ */
+export type WebhookCreateArgs = {
+  /**
+   * Where deliveries are POSTed. `https://` only, with no username or password
+   * in it, resolving to a public address — a private, loopback or link-local
+   * answer is refused, and so is a literal one. Any port.
+   */
+  url: string;
+  /** Free text for your listing, up to 200 characters. */
+  description?: string;
+  /** Event types to deliver. Omit for every type. */
+  events?: readonly string[];
+  /** Computer ids to deliver for, up to 64. Omit for every computer in scope. */
+  computers?: readonly string[];
+  /** Start it disabled with `false`, to enable later. The platform defaults to `true`. */
+  enabled?: boolean;
+};
+
+/**
+ * What a PATCH may change. Every field optional and an omitted one left alone,
+ * so a `url` alone is a redirect and an `enabled` alone is a switch.
+ */
+export type WebhookUpdateArgs = Partial<WebhookCreateArgs>;
+
+/**
+ * A delivery URL, refused for what the platform would refuse it for and this
+ * SDK can see without a round trip: not a URL, not `https:`, or carrying a
+ * username or password.
+ *
+ * The address check — that the hostname resolves somewhere public — is the
+ * platform's, because the platform is what resolves it: an answer this SDK
+ * got from the caller's resolver says nothing about the one the sender uses.
+ *
+ * Userinfo is refused rather than stripped for the reason the design gives:
+ * the signature is the authentication, and a URL that carries a credential is
+ * a caller expecting one to be sent, which it never will be.
+ */
+function webhookUrl(url: unknown): string {
+  const text = requireString(url, 'url');
+  let parsed: URL;
+  try {
+    parsed = new URL(text);
+  } catch {
+    throw new ValidationError(`url must be an absolute https:// URL (got ${JSON.stringify(text)})`);
+  }
+  if (parsed.protocol !== 'https:') {
+    throw new ValidationError(`url must be https://, not ${parsed.protocol}//`);
+  }
+  if (parsed.username || parsed.password) {
+    throw new ValidationError(
+      'url must not carry a username or password: deliveries are authenticated by their signature',
+    );
+  }
+  return text;
+}
+
+/**
+ * One of the two id lists, refused when it is not a list of non-empty strings.
+ *
+ * The PLATFORM's spelling of "every one" is an empty list, and the platform
+ * treats an omitted key the same way, so `[]` is passed through as itself
+ * rather than dropped: on a PATCH the two differ — omitted leaves the filter
+ * alone and `[]` clears it — and a builder that turned one into the other
+ * would make a filter impossible to clear.
+ */
+function idList(v: unknown, what: string): string[] {
+  if (!Array.isArray(v)) {
+    throw new ValidationError(
+      `${what} must be an array of strings, not ${v === null ? 'null' : typeof v}`,
+    );
+  }
+  return v.map((item, i) => {
+    if (typeof item !== 'string' || !item.trim()) {
+      throw new ValidationError(`${what}[${i}] must be a non-empty string`);
+    }
+    return item;
+  });
+}
+
+/** The optional fields the create and the update share, validated once. */
+function webhookFields(args: WebhookUpdateArgs): Json {
+  if (args.description !== undefined) requireString(args.description, 'description');
+  return omitUndefined({
+    url: args.url === undefined ? undefined : webhookUrl(args.url),
+    description: args.description,
+    events: args.events === undefined ? undefined : idList(args.events, 'events'),
+    computers: args.computers === undefined ? undefined : idList(args.computers, 'computers'),
+    enabled: flag(args.enabled, 'enabled'),
+  });
+}
+
+/** The body for `POST webhooks`. `url` is the one field it cannot do without. */
+export function webhookCreateBody(args: WebhookCreateArgs): Json {
+  if (!isRecord(args)) {
+    throw new ValidationError(
+      `webhook arguments must be an object with a url (got ${typeof args})`,
+    );
+  }
+  if (args.url === undefined) throw new ValidationError('url is required');
+  return webhookFields(args);
+}
+
+/**
+ * The body for `PATCH webhooks/:id`.
+ *
+ * An empty patch is refused here, the way {@link updateBody} refuses one: it
+ * can only mean the caller built the arguments from something that turned out
+ * to be empty, and the platform's answer is a 400 that reads as malformed.
+ */
+export function webhookUpdateBody(args: WebhookUpdateArgs): Json {
+  if (!isRecord(args)) {
+    throw new ValidationError(`webhook arguments must be an object (got ${typeof args})`);
+  }
+  const body = webhookFields(args);
+  if (!Object.keys(body).length) {
+    throw new ValidationError(
+      'nothing to update: give at least one of url, description, events, computers, enabled',
+    );
+  }
+  return body;
 }

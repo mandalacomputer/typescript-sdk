@@ -731,6 +731,98 @@ exactly the way a tree where nothing happened is.
 Windows guests have no event stream at all: there is nowhere in the guest to run
 the watcher the guest half needs.
 
+### Webhooks
+
+**The other transport for events.** The socket above is for a caller attached
+to a computer and waiting. A webhook is for one that is not — CI, a queue
+worker, anything that wants to be *woken* rather than to wait. The platform
+POSTs one request per event to a URL you name, and its body is the event object
+exactly as the socket would frame it, byte for byte, with nothing wrapped around
+it.
+
+```ts
+const hook = await client.webhooks.create({
+  url: 'https://ci.example.com/mandala',
+  events: ['process.exited', 'computer.ready'],   // omit for every type
+  computers: ['vm-3f9a1c2b7d4e'],                 // omit for every computer
+});
+await vault.put('mandala-webhook-secret', hook.secret);   // shown ONCE
+```
+
+The `secret` on that answer is the only time you will see it. It is not on a
+`get` or a `list`, and `rotate()` is the only way to get another — which mints a
+new one and keeps honouring the old for 24 hours, so a receiver can switch over
+at leisure.
+
+Verifying a delivery is one call. Hand it the secret, the request headers in
+whatever shape your framework holds them, and the **raw body** — the bytes as
+they arrived, never the parsed object:
+
+```ts
+import { verify } from 'mandala-computer';
+
+// Express: express.raw() so req.body is the bytes, not a parsed object.
+app.post('/mandala', express.raw({ type: 'application/json' }), async (req, res) => {
+  if (!(await verify(process.env.MANDALA_WEBHOOK_SECRET!, req.headers, req.body))) {
+    return res.status(401).end();
+  }
+  res.status(200).end();                        // acknowledge first, then work
+  const event = JSON.parse(req.body.toString('utf8'));
+  if (event.type === 'process.exited') queue.push(event.computer, event.data);
+});
+
+// fetch-shaped runtimes (Workers, Deno, Bun, Next route handlers):
+export async function POST(request: Request) {
+  const raw = await request.text();
+  if (!(await verify(secret, request.headers, raw))) return new Response(null, { status: 401 });
+  return new Response(null, { status: 200 });
+}
+```
+
+The scheme is [Standard Webhooks](https://www.standardwebhooks.com) v1,
+verbatim — HMAC-SHA256 over `webhook-id.webhook-timestamp.body` — so any of
+that specification's libraries verifies a Mandala delivery too; this one holds
+the platform's own test vector and needs no dependency. It is async because it
+uses WebCrypto, which is what lets it run on the edge, where webhook receivers
+tend to live.
+
+Three things the verifier does for you, and one it cannot. A delivery whose
+`webhook-timestamp` is more than five minutes from your clock is refused before
+the signature is checked. A header carrying two signatures — every delivery
+inside the rotation window — passes under either secret. And a secret pasted
+without its `whsec_` prefix throws rather than returning `false` forever, since
+that is a configuration error and not a bad delivery. What it cannot do is
+remember: **keep every `webhook-id` you accept for at least five minutes and
+refuse a repeat.** A retry carries the same id and a fresh signature, and
+verifies. The timestamp bounds how long a captured request can be replayed; the
+id is what stops a legitimate retry being processed twice; together they close
+every replay with a memory that is finite by construction.
+
+**Acknowledge with a 2xx before doing the work.** An attempt is cut at ten
+seconds and counted as a failure. Anything else — a non-2xx, a timeout, a
+redirect (never followed) — is retried eight times over about fourteen hours,
+then the delivery is `exhausted` and visible in `deliveries()`, never dropped
+silently. No ordering is promised: order by `seq` per computer if you care. An
+endpoint that runs out of attempts and has accepted nothing for a day is
+disabled with `disabledReason: 'failing'`; `update(id, { enabled: true })`
+starts it fresh.
+
+```ts
+const d = await client.webhooks.test(hook.id);            // one synthetic delivery, 202
+const rows = await client.webhooks.deliveries(hook.id);   // newest hundred, newest first
+for (const row of rows) {
+  if (row.state === 'exhausted') console.warn(row.id, row.eventType, row.lastError);
+}
+```
+
+`cursor` on every delivery — and on the event body itself — is the bridge back
+to the stream: a job woken by `process.exited` that wants everything since can
+open the socket with `since:` that cursor. `file.changed` never arrives here; it
+exists only because a socket nominated a tree, and a subscription has nothing to
+nominate against. Every paid plan allows ten subscriptions; the eleventh is a
+`ConflictError` naming the cap. Deleting one drops its pending deliveries with
+it.
+
 ### Files
 
 ```ts

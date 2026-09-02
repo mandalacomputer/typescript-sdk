@@ -19,7 +19,16 @@
  * hypervisor daemon's own routes — see the README for why that boundary exists.
  */
 
-import { Builds, Computers, Moves, Sizes, Snapshots, Templates, Usage } from './resources.js';
+import {
+  Builds,
+  Computers,
+  Moves,
+  Sizes,
+  Snapshots,
+  Templates,
+  Usage,
+  Webhooks,
+} from './resources.js';
 import { DEFAULT_BASE_URL, Transport, type TransportOptions } from './transport.js';
 
 export type ClientOptions = TransportOptions;
@@ -40,6 +49,7 @@ export class Client {
   readonly templates: Templates;
   readonly sizes: Sizes;
   readonly usage: Usage;
+  readonly webhooks: Webhooks;
   readonly #t: Transport;
 
   /**
@@ -55,6 +65,7 @@ export class Client {
     this.templates = new Templates(this.#t);
     this.sizes = new Sizes(this.#t);
     this.usage = new Usage(this.#t);
+    this.webhooks = new Webhooks(this.#t);
   }
 
   get baseUrl(): string {
@@ -156,6 +167,9 @@ export type {
   UsageReport,
   UsageTotals,
   VncConnect,
+  Webhook,
+  WebhookCreated,
+  WebhookDelivery,
   WindowResult,
 } from './models.js';
 export type {
@@ -164,13 +178,26 @@ export type {
   MoveArgs,
   ScrollDirection,
   UpdateArgs,
+  WebhookCreateArgs,
+  WebhookUpdateArgs,
   WindowAction,
 } from './paths.js';
 export { SCROLL_DIRECTIONS, WINDOW_ACTIONS } from './paths.js';
 export type { CallOptions, ListOptions, UsageOptions } from './resources.js';
-export { Builds, Computers, Moves, Sizes, Snapshots, Templates, Usage } from './resources.js';
+export {
+  Builds,
+  Computers,
+  Moves,
+  Sizes,
+  Snapshots,
+  Templates,
+  Usage,
+  Webhooks,
+} from './resources.js';
 export type { Bytes, ContentRange, Listing, SSEEvent, TransportOptions } from './transport.js';
 export { DEFAULT_BASE_URL, MODEL_KEY_HEADER } from './transport.js';
+export type { VerifyOptions, WebhookHeaders } from './webhooks.js';
+export { verify, WEBHOOK_SECRET_PREFIX, WEBHOOK_TOLERANCE_S } from './webhooks.js';
 
 export const VERSION = '0.1.0';
 

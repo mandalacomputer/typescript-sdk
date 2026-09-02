@@ -238,6 +238,30 @@ async function exerciseEverything(client: Client): Promise<void> {
   // long they are kept is the account's.
   await client.snapshots.retention();
 
+  // Account webhooks (platform OPL-4300, OPL-4301 here). Every field on the
+  // create, and every field again on the update — the parameter half of this
+  // file cannot tell a field the SDK never sends from one it cannot.
+  await client.webhooks.list();
+  await client.webhooks.create({
+    url: 'https://ci.example.com/mandala',
+    description: 'CI',
+    events: ['process.exited'],
+    computers: ['vm-1'],
+    enabled: false,
+  });
+  await client.webhooks.get('whk-1');
+  await client.webhooks.update('whk-1', {
+    url: 'https://ci.example.com/mandala-2',
+    description: 'CI, moved',
+    events: [],
+    computers: [],
+    enabled: true,
+  });
+  await client.webhooks.rotate('whk-1');
+  await client.webhooks.test('whk-1');
+  await client.webhooks.deliveries('whk-1');
+  await client.webhooks.delete('whk-1');
+
   // Last, and both shapes: the purge is what `expect` binds, and a delete that
   // keeps the snapshots sends neither key.
   await (await client.computers.get('vm-2')).delete({ deleteSnapshots: true, expect: 'abc123' });
