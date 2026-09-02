@@ -240,6 +240,23 @@ describe('the client deadline', () => {
     expect(err).toBeInstanceOf(ConnectionError);
     expect(err.cause).toBe(original);
   });
+
+  it('does not follow redirects, so a 301 is an error rather than a GET', async () => {
+    // Fetch's default is `redirect: 'follow'`. A 301/302 on POST is converted
+    // to GET with the body dropped, and Authorization is stripped on a
+    // cross-origin hop. The recorder cannot catch that: it never follows, so
+    // it would return the 301 either way. This one follows unless told not to.
+    const fetchImpl = (async (_url: unknown, init?: RequestInit) => {
+      if (init?.redirect === 'manual') {
+        return new Response('', { status: 301, headers: { location: 'https://elsewhere/api/v1' } });
+      }
+      return json([]);
+    }) as typeof globalThis.fetch;
+    const c = new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: fetchImpl });
+    const err = await c.computers.list().catch((e) => e);
+    expect(err).toBeInstanceOf(APIError);
+    expect(err.status).toBe(301);
+  });
 });
 
 describe('status mapping', () => {
