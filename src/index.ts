@@ -204,7 +204,7 @@ export { DEFAULT_BASE_URL, MODEL_KEY_HEADER } from './transport.js';
 export type { VerifyOptions, WebhookBody, WebhookHeaders } from './webhooks.js';
 export { verify, WEBHOOK_SECRET_PREFIX, WEBHOOK_TOLERANCE_S } from './webhooks.js';
 
-export const VERSION = '0.1.0';
+export const VERSION = '0.1.1';
 
 /** Re-exported so a caller can build a URL against the same default. */
 export { DEFAULT_BASE_URL as BASE_URL };
