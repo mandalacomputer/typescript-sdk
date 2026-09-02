@@ -1,6 +1,6 @@
 {
   "name": "mandala-computer",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "TypeScript SDK for Mandala Computer — cloud desktops for AI agents",
   "keywords": [
     "mandala",
