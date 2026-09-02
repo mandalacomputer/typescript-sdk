@@ -706,6 +706,21 @@ describe('strings refused rather than trimmed unchecked', () => {
     );
   });
 
+  it('names the argument when an agent run carries a non-string system or model', () => {
+    // Same hole createBody closed for size/template/resolution: a JS object or
+    // number passed through omitUndefined into JSON.stringify and reached the
+    // platform as a JSON value where a string was meant (OPL-4215 leftover).
+    expect(() => P.agentBody({ prompt: 'go', stream: false, system: 1 as never })).toThrow(
+      /system must be a string/,
+    );
+    expect(() =>
+      P.agentBody({ prompt: 'go', stream: false, model: { id: 'claude' } as never }),
+    ).toThrow(/model must be a string/);
+    expect(
+      P.agentBody({ prompt: 'go', stream: false, system: 'be brief', model: 'claude' }),
+    ).toEqual({ prompt: 'go', system: 'be brief', model: 'claude', stream: false });
+  });
+
   it('refuses a create whose size, template or resolution is not a string', () => {
     // Not trimmed, so none of these threw locally: they passed through
     // `omitUndefined` into `JSON.stringify` and reached the platform as a JSON

@@ -1378,6 +1378,14 @@ export function agentBody(args: {
   if (!requireString(args.prompt, 'prompt').trim()) {
     throw new ValidationError('prompt must not be empty');
   }
+  // The other two strings on this body, checked for the reason `prompt` is.
+  // They are not trimmed, so a non-string does not throw here — it passes
+  // through `omitUndefined` into `JSON.stringify` and reaches the platform as
+  // a JSON object where a prompt was meant. A 400 naming a field the caller
+  // did not knowingly send is a worse answer than a refusal naming the
+  // argument they did (OPL-4215, leftover on this builder).
+  if (args.system !== undefined) requireString(args.system, 'system');
+  if (args.model !== undefined) requireString(args.model, 'model');
   if (args.maxSteps !== undefined && (!Number.isInteger(args.maxSteps) || args.maxSteps < 1)) {
     throw new ValidationError(`maxSteps must be a positive integer (got ${args.maxSteps})`);
   }
