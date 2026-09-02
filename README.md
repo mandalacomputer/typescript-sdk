@@ -76,6 +76,10 @@ await using c = await client.computers.ephemeral({ template: 'base' });
 await c.waitForGuest();
 ```
 
+Every computer is a Linux desktop today. Windows guests are not offered on any
+plan; where this README mentions Windows it is describing behaviour the client
+already supports for when they are.
+
 ### Sizes
 
 `size` names a template and a CPU/RAM/disk shape together, and these are the
