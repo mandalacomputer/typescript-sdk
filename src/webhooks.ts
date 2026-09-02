@@ -69,6 +69,15 @@ export type VerifyOptions = {
   toleranceS?: number;
 };
 
+/**
+ * The request body as it arrived, in whatever container the runtime hands it
+ * over: the text (`request.text()`), a `Buffer` or `Uint8Array`
+ * (`express.raw`), an `ArrayBuffer` (`request.arrayBuffer()`), or any other
+ * view onto one. Every one of these is the wire bytes; a parsed object is the
+ * one thing that is not.
+ */
+export type WebhookBody = string | ArrayBuffer | ArrayBufferView;
+
 const SIGNATURE_VERSION = 'v1';
 
 /**
@@ -110,7 +119,7 @@ const SIGNATURE_VERSION = 'v1';
 export async function verify(
   secret: string,
   headers: WebhookHeaders,
-  rawBody: string | Uint8Array,
+  rawBody: WebhookBody,
   opts: VerifyOptions = {},
 ): Promise<boolean> {
   const key = secretBytes(secret);
@@ -179,17 +188,33 @@ function secretBytes(secret: string): Uint8Array {
   return key;
 }
 
-function bodyBytes(rawBody: string | Uint8Array): Uint8Array {
+function bodyBytes(rawBody: WebhookBody): Uint8Array {
   if (typeof rawBody === 'string') return encodeText(rawBody);
   if (rawBody instanceof Uint8Array) return rawBody;
+  if (rawBody instanceof ArrayBuffer) return new Uint8Array(rawBody);
+  // Any other view — a DataView, a Buffer from a runtime whose Buffer is not a
+  // Uint8Array subclass — is still the bytes; only its window onto them
+  // differs.
+  if (ArrayBuffer.isView(rawBody)) {
+    return new Uint8Array(rawBody.buffer, rawBody.byteOffset, rawBody.byteLength);
+  }
   // The parsed object is the mistake this whole file is about, and the one a
   // framework makes on the caller's behalf. Refusing it names the fix; letting
   // `String(rawBody)` produce `[object Object]` would fail every delivery with
-  // no clue why.
+  // no clue why. Named separately from a body of some other wrong type, so the
+  // message says which mistake was made.
+  const what: unknown = rawBody;
+  if (isRecord(what) || Array.isArray(what)) {
+    throw new ValidationError(
+      'rawBody is a parsed object, not the request body: read the raw body (express.raw, request.text(), request.arrayBuffer()) and pass it untouched',
+    );
+  }
   throw new ValidationError(
-    'rawBody must be the request body as bytes or a string, not a parsed object — read the raw body',
+    `rawBody must be the request body as a string, ArrayBuffer or byte view (got ${what === null ? 'null' : typeof what})`,
   );
 }
+
+const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null;
 
 /**
  * One header, by name, whatever the container.

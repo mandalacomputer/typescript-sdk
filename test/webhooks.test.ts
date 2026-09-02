@@ -8,6 +8,8 @@ import {
   PlanLimitError,
   ValidationError,
   verify,
+  WEBHOOK_COMPUTERS_MAX,
+  WEBHOOK_DESCRIPTION_MAX,
   WEBHOOK_TOLERANCE_S,
 } from '../src/index.js';
 import {
@@ -72,6 +74,23 @@ describe('verify: the §3.2 vector', () => {
     // because which one a framework offers is not the receiver's choice.
     const bytes = new TextEncoder().encode(BODY);
     expect(await verify(SECRET, headers(), bytes, { now: AT })).toBe(true);
+  });
+
+  it('accepts the vector as an ArrayBuffer, or any view onto one', async () => {
+    // `await request.arrayBuffer()` is the Fetch API's own spelling of "the raw
+    // body", and the doc comment names it. Reviewed on the first cut: it was
+    // refused as a parsed object, with a message naming the wrong mistake.
+    const bytes = new TextEncoder().encode(BODY);
+    const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+    expect(await verify(SECRET, headers(), buffer, { now: AT })).toBe(true);
+    expect(await verify(SECRET, headers(), new DataView(buffer), { now: AT })).toBe(true);
+    // A view that does not start at the buffer's beginning: the window is the
+    // body, not the buffer behind it.
+    const padded = new Uint8Array(bytes.length + 8);
+    padded.set(bytes, 4);
+    expect(
+      await verify(SECRET, headers(), new Uint8Array(padded.buffer, 4, bytes.length), { now: AT }),
+    ).toBe(true);
   });
 
   it('refuses the timestamp one second later: the timestamp is signed', async () => {
@@ -237,7 +256,11 @@ describe('verify: the configuration errors that are not deliveries', () => {
     // fail every delivery with no clue why.
     await expect(
       verify(SECRET, headers(), JSON.parse(BODY) as unknown as string, { now: AT }),
-    ).rejects.toThrow(/raw body/);
+    ).rejects.toThrow(/parsed object/);
+    // And a body of no usable kind at all says so, rather than calling it parsed.
+    await expect(verify(SECRET, headers(), 42 as unknown as string, { now: AT })).rejects.toThrow(
+      /got number/,
+    );
   });
 
   it('refuses a window that is not a number', async () => {
@@ -323,6 +346,28 @@ describe('webhooks: the subscriptions', () => {
       c.webhooks.create({ url, enabled: 'false' as unknown as boolean }),
     ).rejects.toThrow(/enabled must be a boolean/);
     expect(rec.calls).toEqual([]);
+  });
+
+  it("refuses the two caps the platform documents, at the platform's own lengths", async () => {
+    // `.length` on the string and on the list as given, before de-duplication,
+    // which is how the platform measures both — so the edge is accepted here
+    // exactly where it is accepted there.
+    const { rec, client: c } = client(anyRoute);
+    const url = 'https://ci.example.com/mandala';
+    await c.webhooks.create({ url, description: 'x'.repeat(WEBHOOK_DESCRIPTION_MAX) });
+    await expect(
+      c.webhooks.create({ url, description: 'x'.repeat(WEBHOOK_DESCRIPTION_MAX + 1) }),
+    ).rejects.toThrow(/description is at most 200 characters \(got 201\)/);
+    const ids = (n: number) => Array.from({ length: n }, (_, i) => `vm-${i}`);
+    await c.webhooks.create({ url, computers: ids(WEBHOOK_COMPUTERS_MAX) });
+    await expect(
+      c.webhooks.update('whk-1', { computers: ids(WEBHOOK_COMPUTERS_MAX + 1) }),
+    ).rejects.toThrow(/at most 64 computers \(got 65\)/);
+    // Duplicates count as given: the platform checks the raw length first.
+    await expect(
+      c.webhooks.create({ url, computers: Array(WEBHOOK_COMPUTERS_MAX + 1).fill('vm-1') }),
+    ).rejects.toThrow(/at most 64/);
+    expect(rec.calls.length).toBe(2);
   });
 
   it('lists and reads without ever seeing a secret', async () => {

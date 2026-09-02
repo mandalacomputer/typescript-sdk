@@ -182,7 +182,12 @@ export type {
   WebhookUpdateArgs,
   WindowAction,
 } from './paths.js';
-export { SCROLL_DIRECTIONS, WINDOW_ACTIONS } from './paths.js';
+export {
+  SCROLL_DIRECTIONS,
+  WEBHOOK_COMPUTERS_MAX,
+  WEBHOOK_DESCRIPTION_MAX,
+  WINDOW_ACTIONS,
+} from './paths.js';
 export type { CallOptions, ListOptions, UsageOptions } from './resources.js';
 export {
   Builds,
@@ -196,7 +201,7 @@ export {
 } from './resources.js';
 export type { Bytes, ContentRange, Listing, SSEEvent, TransportOptions } from './transport.js';
 export { DEFAULT_BASE_URL, MODEL_KEY_HEADER } from './transport.js';
-export type { VerifyOptions, WebhookHeaders } from './webhooks.js';
+export type { VerifyOptions, WebhookBody, WebhookHeaders } from './webhooks.js';
 export { verify, WEBHOOK_SECRET_PREFIX, WEBHOOK_TOLERANCE_S } from './webhooks.js';
 
 export const VERSION = '0.1.0';

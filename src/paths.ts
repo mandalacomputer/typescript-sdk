@@ -1499,14 +1499,42 @@ function idList(v: unknown, what: string): string[] {
   });
 }
 
-/** The optional fields the create and the update share, validated once. */
+/** The most characters a subscription's description may hold — the platform's DESCRIPTION_MAX. */
+export const WEBHOOK_DESCRIPTION_MAX = 200;
+/**
+ * The most computer ids one subscription may name — the platform's
+ * COMPUTERS_MAX. A bound, not a design number: past it, filter at the receiver.
+ */
+export const WEBHOOK_COMPUTERS_MAX = 64;
+
+/**
+ * The optional fields the create and the update share, validated once.
+ *
+ * The two caps are the platform's own, measured the way it measures them —
+ * `.length` on the string and on the list as given, before it de-duplicates —
+ * so a body refused here is one it would have refused, and one it would accept
+ * is never refused here. Knowable without the round trip, and named for the
+ * argument rather than as a 400 three tiers away.
+ */
 function webhookFields(args: WebhookUpdateArgs): Json {
-  if (args.description !== undefined) requireString(args.description, 'description');
+  if (args.description !== undefined) {
+    if (requireString(args.description, 'description').length > WEBHOOK_DESCRIPTION_MAX) {
+      throw new ValidationError(
+        `description is at most ${WEBHOOK_DESCRIPTION_MAX} characters (got ${args.description.length})`,
+      );
+    }
+  }
+  const computers = args.computers === undefined ? undefined : idList(args.computers, 'computers');
+  if (computers !== undefined && computers.length > WEBHOOK_COMPUTERS_MAX) {
+    throw new ValidationError(
+      `computers names at most ${WEBHOOK_COMPUTERS_MAX} computers (got ${computers.length}); filter at the receiver instead`,
+    );
+  }
   return omitUndefined({
     url: args.url === undefined ? undefined : webhookUrl(args.url),
     description: args.description,
     events: args.events === undefined ? undefined : idList(args.events, 'events'),
-    computers: args.computers === undefined ? undefined : idList(args.computers, 'computers'),
+    computers,
     enabled: flag(args.enabled, 'enabled'),
   });
 }
