@@ -290,6 +290,17 @@ export function balanced(text, from, open, close) {
 /** The keys of an object literal at its own depth only. */
 export function topLevelKeys(body) {
   const keys = [];
+  // A key sits at the start of the object or just after a comma; nothing else
+  // in an object literal is a key, whatever follows it. `tag: flag ? 'a' : 'b'`
+  // puts a string in front of a colon and `flag ? a : b` puts an identifier
+  // there, and neither names a field — but read as keys they become body fields
+  // the mirror is told to grow, so the operator is sent to add a parameter that
+  // does not exist. The body arrives here without its own braces, so offset 0 is
+  // key position too.
+  const inKeyPosition = (at) => {
+    const before = body.slice(0, at).trimEnd();
+    return before === '' || before.endsWith('{') || before.endsWith(',');
+  };
   let depth = 0;
   let i = 0;
   while (i < body.length) {
@@ -309,7 +320,7 @@ export function topLevelKeys(body) {
       // having no fields is a route documenting no body, which matches a mirror
       // that lists none. That match is the vacuous all-clear this whole gate is
       // built to refuse.
-      if (depth === 0) {
+      if (depth === 0 && inKeyPosition(i)) {
         const colon = body.slice(end).match(/^\s*:/);
         if (colon) {
           const inner = body.slice(i + 1, end - 1);
@@ -326,7 +337,7 @@ export function topLevelKeys(body) {
       i = regexEnd(body, i);
       continue;
     }
-    if (depth === 0) {
+    if (depth === 0 && inKeyPosition(i)) {
       const m = body.slice(i).match(/^([A-Za-z_][A-Za-z0-9_]*)\s*:/);
       if (m) {
         keys.push(m[1]);
@@ -404,6 +415,54 @@ export function topLevelField(body, name) {
     i++;
   }
   return undefined;
+}
+
+/**
+ * Where the value of one top-level key starts, or -1 when the key is not there
+ * at this depth.
+ *
+ * A sibling of `topLevelField` for the values it cannot read: the shape of a
+ * value is what decides how it is read — `object(...)` has named fields, a raw
+ * `{ type: 'string' }` schema has none to name, a bare identifier is a shape
+ * this cannot read at all — and telling those apart with a regex over the whole
+ * entry answers about whichever spelling turns up first at any depth. A
+ * `body: { … }` quoted in a response example then vouches for the entry's own
+ * `body: SHARED_BODY`, the unreadable shape passes as a readable one, and the
+ * route is compared against no fields at all.
+ *
+ * Quoted spellings of the key as well, for the reason `topLevelKeys` reads them:
+ * `'body':` names the same field as `body:` does, and a reader that insists on
+ * one of them reports the other as absent.
+ */
+export function topLevelValueAt(body, name) {
+  const lit = escapeRegExp(name);
+  const key = new RegExp(`(?:'${lit}'|"${lit}"|${lit})\\s*:\\s*`, 'y');
+  let depth = 0;
+  let i = 0;
+  while (i < body.length) {
+    // Before the literal skip below, so a quoted key is still seen; not
+    // mid-identifier, as in `topLevelField`, so `subbody:` is not read as
+    // `body:`.
+    if (depth === 0 && !/[\w$]/.test(body[i - 1] ?? '')) {
+      key.lastIndex = i;
+      if (key.exec(body)) return key.lastIndex;
+    }
+    const ch = body[i];
+    if (ch === '{' || ch === '[' || ch === '(') depth++;
+    else if (ch === '}' || ch === ']' || ch === ')') {
+      // As in its siblings: a depth that goes negative never comes back, so the
+      // key is reported missing rather than unreadable.
+      if (--depth < 0) throw new Error(`unbalanced ${ch} at offset ${i}`);
+    } else if (ch === "'" || ch === '"' || ch === '`') {
+      i = quotedEnd(body, i);
+      continue;
+    } else if (ch === '/' && regexCanStart(body, i)) {
+      i = regexEnd(body, i);
+      continue;
+    }
+    i++;
+  }
+  return -1;
 }
 
 /**

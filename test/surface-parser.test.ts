@@ -30,6 +30,18 @@ describe('the surface source scanner', () => {
     ).toEqual(['name', 'description', 'nested']);
   });
 
+  it('reads a colon as a key only where a key can be', () => {
+    // A key is at the start of the object or just after a comma. The colon of a
+    // ternary is neither, in both of the shapes that reach one: the quoted
+    // branch reads the consequent of `flag ? 'a' : 'b'` and the identifier
+    // branch reads the consequent of `flag ? a : b`. Either way the caller is
+    // handed a field the object does not have, and a body field nobody sends is
+    // a parameter the mirror is told to grow.
+    expect(topLevelKeys(`name: flag ? 'a' : 'b', size: 1`)).toEqual(['name', 'size']);
+    expect(topLevelKeys('name: flag ? a : b, size: 1')).toEqual(['name', 'size']);
+    expect(topLevelKeys(`'quoted': 1, plain: 2`)).toEqual(['quoted', 'plain']);
+  });
+
   it('strips real comments without truncating comment markers inside strings', () => {
     const source = `
       const docs = { url: 'https://example.com/a//b' }; // remove this
@@ -335,6 +347,19 @@ describe('the route table reader', () => {
     }
   };
 
+  /** The same fixture, for the apidocs whose answer is a refusal rather than a list. */
+  const refuseParams = async (apidoc: string) => {
+    const dir = fixture(
+      `export const V1_ROUTES: Route[] = [{ method: 'GET', pattern: 'sizes' }];\n`,
+      apidoc,
+    );
+    try {
+      return await runCheck(dir);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
   it('resolves a shared parameter constant however it is declared', async () => {
     // `export` and a leading indent change nothing about what the declaration
     // means, and a reader that insists on today's spelling reports every route
@@ -385,17 +410,89 @@ describe('the route table reader', () => {
     // Reported as no fields, the route reads as documenting no body at all —
     // and the mirror lists none for a route it cannot see either, so the two
     // agree over a body neither of them looked at.
-    const dir = fixture(
-      `export const V1_ROUTES: Route[] = [{ method: 'GET', pattern: 'sizes' }];\n`,
+    const { said, code } = await refuseParams(
       `export const DOCS: Record<string, Doc> = { 'GET sizes': { body: SHARED_BODY } };\n`,
     );
-    try {
-      const { said, code } = await runCheck(dir);
-      expect(code).toBe(1);
-      expect(said).toContain('documents a body in a form this reader does not know');
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+    expect(code).toBe(1);
+    expect(said).toContain('documents a body in a form this reader does not know');
+  });
+
+  it('does not let a nested body literal vouch for the entry’s own', async () => {
+    // The `{` was looked for anywhere in the entry while the key it belongs to
+    // was found at the top level, so a `body: {` in a response example answered
+    // for a `body:` the reader cannot read. The refusal is skipped, the route
+    // reports no fields, and it matches a mirror that lists none — the vacuous
+    // all-clear this guard was added to refuse, arriving through the guard.
+    const { said, code } = await refuseParams(`
+      export const DOCS: Record<string, Doc> = {
+        'GET sizes': { responses: { 200: { body: { ok: true } } }, body: SHARED_BODY },
+      };
+    `);
+    expect(code).toBe(1);
+    expect(said).toContain("'GET sizes' documents a body in a form this reader does not know");
+  });
+
+  it('names the route when an object body is spelled with an identifier', async () => {
+    // `object(SHARED_FIELDS)` has no literal for the field walk to start at, and
+    // the unchecked search for one handed `balanced` a -1 that came back as
+    // `started at offset -1, which is not a {` — an assertion naming neither the
+    // route nor the file it is in. It is the same unreadable shape as the case
+    // beside it and belongs in the same sentence.
+    const { said, code } = await refuseParams(
+      `export const DOCS: Record<string, Doc> = { 'GET sizes': { body: object(SHARED_FIELDS) } };\n`,
+    );
+    expect(code).toBe(1);
+    expect(said).toContain("'GET sizes' documents a body in a form this reader does not know");
+    expect(said).not.toContain('offset -1');
+  });
+
+  it('reads a query list whose bracket the formatter wrapped', async () => {
+    // The one space after the colon is a spelling, not a shape. Missed, the
+    // route's query and header parameters go unread with nothing said: a full
+    // table still counts parameters elsewhere, so the guard for a scan that
+    // found none stays quiet and the route's real parameters surface as ones the
+    // mirror invented.
+    expect(
+      await scanParams(`
+        export const DOCS: Record<string, Doc> = {
+          'GET sizes': {
+            query:
+              [{ name: 'limit', description: 'x' }],
+          },
+        };
+      `),
+    ).toEqual(['query:limit']);
+  });
+
+  it('does not resolve a shared constant to a copy of it quoted in a comment', async () => {
+    // Allowing an indent is what put the scan inside block comments, where a
+    // superseded declaration is indented under its `*`. The quoted copy comes
+    // last and wins the map, so every route citing the identifier reports one
+    // missing parameter and one extra, both naming a name nobody serves.
+    expect(
+      await scanParams(`
+        const PARTIAL: Query = { name: 'allow_partial', description: 'x' };
+        /* Superseded, kept for the reader:
+          const PARTIAL: Query = { name: 'stale_old_name', description: 'x' };
+        */
+        export const DOCS: Record<string, Doc> = {
+          'GET sizes': { query: [PARTIAL] },
+        };
+      `),
+    ).toEqual(['query:allow_partial']);
+  });
+
+  it('does not read a ternary’s consequent as a body field', async () => {
+    // `flag ? 'a' : 'b'` is a string in front of a colon and names nothing. Read
+    // as a key it becomes a body field the mirror is missing, and the operator
+    // is told to add a parameter that does not exist.
+    expect(
+      await scanParams(`
+        export const DOCS: Record<string, Doc> = {
+          'GET sizes': { body: object({ name: str('x'), tag: flag ? 'a' : 'b' }) },
+        };
+      `),
+    ).toEqual(['body:name', 'body:tag']);
   });
 
   it('does not let a comment quoting a route key stand in for the route', async () => {

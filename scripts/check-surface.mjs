@@ -42,7 +42,14 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { balanced, entries, stripComments, topLevelField, topLevelKeys } from './surface-text.mjs';
+import {
+  balanced,
+  entries,
+  stripComments,
+  topLevelField,
+  topLevelKeys,
+  topLevelValueAt,
+} from './surface-text.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = resolve(here, '..');
@@ -197,6 +204,13 @@ function main() {
   // --- parameters -----------------------------------------------------------
 
   const docSource = readFileSync(join(platform, 'web/lib/apidoc.ts'), 'utf8');
+  // Every scan below reads this rather than the raw file. A declaration or a
+  // route key quoted in a comment — which is how apidoc.ts explains itself, and
+  // its comment above ALLOW_PARTIAL spells out the very shape this file matches
+  // on — is source to a regex and prose to a reader, and the regex wins.
+  // Length-preserving by construction: comments are blanked, not deleted, so
+  // every offset here indexes the same character in either text.
+  const docClean = stripComments(docSource);
 
   /**
    * Module-level `const NAME: Query = {...}` entries.
@@ -211,10 +225,15 @@ function main() {
    * `export` and indentation are both allowed for, because neither changes what
    * the declaration means and a reader that insists on today's spelling reports
    * every route citing a re-spelled constant as taking no parameters at all.
+   * Allowing indentation is also why this reads `docClean`: a superseded copy of
+   * a declaration quoted in a block comment is indented under its `*`, so the
+   * relaxed pattern reaches it, and the later copy wins the Map. Every route
+   * citing the identifier then reports one missing and one extra parameter,
+   * both naming the name nobody serves.
    */
   const sharedParams = new Map();
-  for (const m of docSource.matchAll(/^\s*(?:export\s+)?const ([A-Z_]+):\s*Query\s*=\s*\{/gm)) {
-    const named = stripComments(balanced(docSource, m.index + m[0].length - 1, '{', '}')).match(
+  for (const m of docClean.matchAll(/^\s*(?:export\s+)?const ([A-Z_]+):\s*Query\s*=\s*\{/gm)) {
+    const named = balanced(docClean, m.index + m[0].length - 1, '{', '}').match(
       /name:\s*'([^']+)'/,
     );
     if (named) sharedParams.set(m[1], named[1]);
@@ -223,15 +242,14 @@ function main() {
   /** Every query, header and body field the platform documents, by route. */
   function platformParameters() {
     const decl = 'export const DOCS: Record<string, Doc> = {';
-    const start = docSource.indexOf(decl);
+    const start = docClean.indexOf(decl);
     if (start === -1) throw new Error('DOCS not found in web/lib/apidoc.ts');
-    // Comments out of the whole table before the entry scan rather than out of
-    // each entry after it. The key is captured by a regex over this text, and a
-    // comment quoting a route key — which is how apidoc.ts explains itself —
-    // reads as an entry of its own; `table.set` then puts its empty parameter
-    // set where the real route's belongs, and the route is compared against
-    // nothing.
-    const docs = stripComments(balanced(docSource, start + decl.length - 1, '{', '}'));
+    // The comments are already gone: the key is captured by a regex over this
+    // text, and a comment quoting a route key — which is how apidoc.ts explains
+    // itself — reads as an entry of its own; `table.set` then puts its empty
+    // parameter set where the real route's belongs, and the route is compared
+    // against nothing.
+    const docs = balanced(docClean, start + decl.length - 1, '{', '}');
 
     const table = new Map();
     const entry = /'([A-Z]+) ([^']+)':\s*\{/g;
@@ -246,9 +264,17 @@ function main() {
         ['query', 'query'],
         ['headers', 'header'],
       ]) {
-        const at = body.indexOf(`${key}: [`);
-        if (at === -1) continue;
-        const list = balanced(body, body.indexOf('[', at), '[', ']');
+        // Matched rather than spelled, for the reason the body below is: the one
+        // space after the colon is a spelling, not a shape. A list the formatter
+        // wrapped — `query:\n  [{ name: 'limit' }]` — is the same list, but an
+        // `indexOf` for today's spelling skips the route's query and header
+        // parameters entirely and says nothing. With a full table the guard for
+        // a scan that counted nothing does not fire either, because the other
+        // routes counted: the route's real parameters surface as ones the mirror
+        // invented, which sends the operator to the wrong file.
+        const at = new RegExp(`\\b${key}:\\s*\\[`).exec(body);
+        if (!at) continue;
+        const list = balanced(body, at.index + at[0].length - 1, '[', ']');
         for (const n of list.matchAll(/name:\s*'([^']+)'/g)) params.add(`${kind}:${n[1]}`);
         // `$` as well as a separator, and it is not decoration: `query:
         // [ALLOW_PARTIAL]` on one line is the whole list with nothing after the
@@ -269,17 +295,30 @@ function main() {
       // is a shape this cannot read, and reading it as no fields would say the
       // route documents no body at all: the mirror lists none for such a route
       // either, so the two agree about nothing.
-      const object = /\bbody:\s*object\s*\(/.exec(body);
-      if (object) {
-        const args = balanced(body, object.index + object[0].length - 1, '(', ')');
-        for (const k of topLevelKeys(balanced(args, args.indexOf('{'), '{', '}'))) {
-          params.add(`body:${k}`);
+      //
+      // All three cases are decided at the entry's own depth. Asking the whole
+      // entry text whether it holds a readable body lets a nested one answer:
+      // a `body: { … }` inside a response example vouches for the entry's own
+      // `body: SHARED_BODY`, the throw is skipped, and the route reports no
+      // fields — which matches a mirror that lists none. That is the vacuous
+      // all-clear this guard exists to refuse, arriving through the guard.
+      const bodyAt = topLevelValueAt(body, 'body');
+      if (bodyAt !== -1) {
+        const object = /^object\s*\(/.exec(body.slice(bodyAt));
+        const args = object && balanced(body, bodyAt + object[0].length - 1, '(', ')');
+        // An `object(SHARED_FIELDS)` is as unreadable as a bare identifier is,
+        // and it belongs in the message that names the route: fed to `balanced`
+        // unchecked, its missing `{` came back as an offset assertion naming
+        // neither the route nor the file it is in.
+        const brace = args === null ? -1 : args.indexOf('{');
+        if (brace !== -1) {
+          for (const k of topLevelKeys(balanced(args, brace, '{', '}'))) params.add(`body:${k}`);
+        } else if (body[bodyAt] !== '{') {
+          throw new Error(
+            `'${m[1]} ${m[2]}' documents a body in a form this reader does not know — ` +
+              'neither object(...) nor a raw schema literal.',
+          );
         }
-      } else if (topLevelKeys(body).includes('body') && !/\bbody:\s*\{/.test(body)) {
-        throw new Error(
-          `'${m[1]} ${m[2]}' documents a body in a form this reader does not know — ` +
-            'neither object(...) nor a raw schema literal.',
-        );
       }
       table.set(`${m[1]} ${m[2]}`, params);
     }
