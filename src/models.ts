@@ -1349,9 +1349,15 @@ export const moveFloor = (move: Move | string): number => {
  *
  * A minute covers both and costs little: it is 1440x smaller than the DAY of
  * finished rows this listing keeps, which is the window that makes a stale row
- * possible at all. What is left is that a move which began within a minute of
- * this one could be taken for it — as against one that began any time in the
- * last day, which is what there was before a floor.
+ * possible at all. It costs little only because it is a TOLERANCE ON THE MATCH
+ * and not a wider net — {@link moveAtOrAfter} takes the row NEAREST the floor,
+ * so the minute lets this move's own row through when the listing rounded it
+ * down, while a move that genuinely began within that minute sits further from
+ * the floor and loses. Admitting the minute and then taking the EARLIEST row
+ * would instead hand every wait to whichever move on this computer started
+ * first, which is the bug the floor exists to close, reopened at 1/1440 of its
+ * old size and with a finished row — one that answers `!live` at once — as the
+ * thing that wins.
  */
 const FLOOR_SLACK_MS = 60_000;
 
@@ -1366,13 +1372,26 @@ const FLOOR_SLACK_MS = 60_000;
  * crossing between hosts. The floor — the accepted move's own start — is what
  * tells them apart.
  *
- * The EARLIEST row at or after the floor is the one, and nothing else is
- * preferred ahead of it. A live row looks like a better answer and is not: with
- * the floor set at the accepted move's own start, the earliest qualifying row
- * already IS that move, so preferring a live one can only ever swap it for a
- * DIFFERENT, later row — another process starting a move on this computer
- * between two polls, whose `state` and `detail` would then be reported as the
- * outcome of the relocate the caller actually asked about.
+ * The row NEAREST the floor is the one, among those no more than
+ * {@link FLOOR_SLACK_MS} below it. Nearest rather than earliest, and the whole
+ * guarantee turns on that: this move's row sits AT its floor, or a fraction
+ * below where the listing renders coarser than the 202 did, so no row can be
+ * closer to the floor than it is. Every other row is a different operation
+ * minutes or hours away in one direction or the other, and distance is what
+ * puts each of them behind — an earlier one taken for this move answers `!live`
+ * on the first poll while the disk is still crossing between hosts, which is
+ * the failure the floor exists to prevent, and a later one — another process
+ * starting a move on this computer between two polls — reports the `state` and
+ * `detail` of a relocate the caller never asked about. A live row is not
+ * preferred ahead of the nearest either, for the second of those reasons: it is
+ * by definition the newer row, so preferring it can only swap this move for one
+ * that began after the wait did.
+ *
+ * An exact tie goes to the row AT OR AFTER the floor. A row below the floor may
+ * belong to an earlier operation; one at or after it cannot have begun before
+ * the move being waited on did, so it is the safer of two equally near rows —
+ * and of the two ways to be wrong, only the earlier row ends the wait early on
+ * a computer that is still moving.
  *
  * Rows whose `started_at` cannot be placed in time are counted as `undated`
  * rather than merely dropped: any one of them might be this move, so they are
@@ -1389,10 +1408,15 @@ export const moveAtOrAfter = (
 ): { move: Move | undefined; undated: number } => ({
   move: moves
     .filter((m) => startStamp(m) >= floor - FLOOR_SLACK_MS)
-    .reduce<Move | undefined>(
-      (best, m) => (best === undefined || startStamp(m) < startStamp(best) ? m : best),
-      undefined,
-    ),
+    .reduce<Move | undefined>((best, m) => {
+      if (best === undefined) return m;
+      const gap = Math.abs(startStamp(m) - floor);
+      const bestGap = Math.abs(startStamp(best) - floor);
+      // The `>` is the tie-break the doc block names: equally near, the later
+      // row wins, because a row at or after the floor cannot be an operation
+      // that began before this one.
+      return gap < bestGap || (gap === bestGap && startStamp(m) > startStamp(best)) ? m : best;
+    }, undefined),
   undated: moves.filter((m) => startStamp(m) === -Infinity).length,
 });
 

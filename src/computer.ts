@@ -357,11 +357,18 @@ function pointPastTheCeiling(err: unknown): unknown {
  * `started_at` cannot be placed against the floor — so it is dropped from the
  * selection, and a drop nobody counts is a listing reported as complete when it
  * was not. Empty string where there is neither, so a caller can test it.
+ *
+ * "THE LAST LISTING READ", said in the sentence rather than left to be assumed.
+ * These two counts are the most recent successful poll's, and the wait clears
+ * them when a later poll fails, so the span they describe is never longer than
+ * one listing and the reader is told which one.
  */
 const blindness = (w: { unreadable: number; undated: number }): string =>
   [
-    w.unreadable > 0 ? `${w.unreadable} row(s) of that listing could not be read at all` : '',
-    w.undated > 0 ? `${w.undated} of this computer's rows carry no readable start` : '',
+    w.unreadable > 0
+      ? `${w.unreadable} row(s) of the last listing read could not be read at all`
+      : '',
+    w.undated > 0 ? `${w.undated} of this computer's rows on it carry no readable start` : '',
   ]
     .filter(Boolean)
     .join(', and ');
@@ -369,13 +376,19 @@ const blindness = (w: { unreadable: number; undated: number }): string =>
 /**
  * What a move wait ran out of time doing, in the sentence that is true of it.
  *
- * Six different silences, and the wrong one sends somebody to the wrong place:
- * a copy still running is not a platform that stopped answering, that is not a
- * listing which answered every time and never carried this move, and none of
- * them is a wait whose every poll was cut short by its own clock. The ones about
- * a move known to exist are read off the MOST RECENT poll rather than off any
- * poll ever, for the reason `observed` exists — a wait whose later polls all
- * failed must not quote the first one and describe the present tense with it.
+ * Seven different silences, and the wrong one sends somebody to the wrong
+ * place: a copy still running is not a platform that stopped answering, that is
+ * not a listing which answered every time and never carried this move, none of
+ * them is a wait whose every poll was cut short by its own clock, and a wait
+ * that did some of each may claim neither whole.
+ *
+ * WHICH VALUES SPEAK FOR WHICH SPAN. `reads`, `failures` and `aborts` are
+ * cumulative and answer "was anything ever there to see", which is a question
+ * about the whole wait. Everything else — `last`, `observed`, `absent`,
+ * `unreadable`, `undated` — is the MOST RECENT poll's and no earlier one's, for
+ * the reason `observed` exists: those describe a listing in the present tense,
+ * and a wait whose later polls all failed must not quote its first one to do it.
+ * Which is why the loop clears the blindness counts wherever it clears `absent`.
  */
 const moveTimeoutText = (w: {
   id: string;
@@ -388,6 +401,7 @@ const moveTimeoutText = (w: {
   undated: number;
   reads: number;
   failures: number;
+  aborts: number;
 }): string => {
   if (w.last && w.observed) {
     return (
@@ -424,9 +438,12 @@ const moveTimeoutText = (w: {
   // wait on a computer that had never moved at all reported it as deleted.
   // Nothing here is decidable, so all of it is said and none of it asserted.
   //
-  // Counted rather than read off the last poll alone, unlike the branches above:
-  // those describe a move known to exist and so must speak in the present tense,
-  // while this one is about whether anything was ever there to see.
+  // Two spans in one sentence, and they are marked as such. Whether anything was
+  // EVER seen is the cumulative part — `reads`, `failures`, `aborts`, counted
+  // over the whole wait. What could not be made out is the last poll's alone and
+  // is worded "of the last listing read", because a poll that read two
+  // undecodable rows and was then followed by a quarter-hour of failures says
+  // nothing about the listing as it stands now.
   if (w.reads > 0) {
     const blind = blindness(w);
     return (
@@ -439,15 +456,24 @@ const moveTimeoutText = (w: {
       `that was never accepted never appears at all.`
     );
   }
-  // No poll ever finished, and the two ways that happens are not the same
+  // No poll ever finished, and the THREE ways that happens are not one
   // sentence. Every attempt failing is the platform or the network; every
-  // attempt being cut short by this wait's own deadline blames neither, and the
-  // branch that said "every poll failed" was reachable with nothing having
-  // failed at all — a deadline abort is a `continue` that increments no counter.
+  // attempt being cut short by this wait's own deadline blames neither; and a
+  // wait that did some of each blames only what it counted. "Every poll failed"
+  // over a wait with one 503 and three deadline aborts is a bill sent to the
+  // platform for three silences that were this deadline's own, so it is said
+  // only where `aborts` is zero and every attempt really is accounted for by
+  // `failures`.
+  const gaveUp = `${w.id}'s move could not be observed within ${w.timeoutMs}ms: `;
+  if (w.failures > 0 && w.aborts > 0) {
+    return (
+      `${gaveUp}no poll finished — ${w.failures} failed outright and ${w.aborts} were cut short ` +
+      `by this wait's own deadline`
+    );
+  }
   return w.failures > 0
-    ? `${w.id}'s move could not be observed within ${w.timeoutMs}ms: every poll failed`
-    : `${w.id}'s move could not be observed within ${w.timeoutMs}ms: no poll finished before ` +
-        `the deadline did, so nothing about the move was ever read`;
+    ? `${gaveUp}every poll failed`
+    : `${gaveUp}no poll finished before the deadline did, so nothing about the move was ever read`;
 };
 
 export class Computer {
@@ -1009,11 +1035,13 @@ export class Computer {
    * the new row was not yet in the account-wide listing, and the caller went on
    * to use a computer whose disk was still crossing between hosts. The move's
    * own `startedAt` is the floor; rows that began before it belong to some
-   * earlier operation and are not an answer to this one, and the earliest row at
-   * or after it is this move. A minute of slack sits under the floor, because
-   * the 202 and the listing are two renderings of the platform's clock and a
-   * listing that prints whole seconds would otherwise put this move's own row
-   * below its own floor forever.
+   * earlier operation and are not an answer to this one, and the row NEAREST the
+   * floor is this move. A minute of slack sits under the floor, because the 202
+   * and the listing are two renderings of the platform's clock and a listing
+   * that prints whole seconds would otherwise put this move's own row below its
+   * own floor forever — and nearest rather than earliest is what keeps that
+   * minute from readmitting the very rows the floor was added to exclude. See
+   * {@link moveAtOrAfter}.
    *
    * An RFC3339 timestamp with a zone is accepted in its place, so a process that
    * restarted can still wait on a `startedAt` it persisted. Anything else — a
@@ -1070,6 +1098,11 @@ export class Computer {
     // spell: `observed` false covers a listing nobody could fetch as well, and
     // those two end a wait with entirely different sentences.
     let absent = false;
+    // THE LAST SUCCESSFUL POLL'S, and cleared wherever `absent` is, which is
+    // what makes that true. Left standing across a failed poll they would let a
+    // timeout describe the listing as it was a quarter of an hour ago — two
+    // undecodable rows read once, then fifteen minutes of failures — in a
+    // sentence written in the present tense about what can be made out now.
     let unreadableLast = 0;
     let undatedLast = 0;
     // CONSECUTIVE, not cumulative. The listing is eventually consistent — that
@@ -1080,9 +1113,14 @@ export class Computer {
     let vanished = 0;
     // Cumulative, and only for the sentence a timeout that never saw the move
     // ends with: "every poll failed" is a different statement from "they
-    // answered and it was not there", and one wait can do both.
+    // answered and it was not there", and one wait can do both. `aborts` is the
+    // third of those, kept apart from `failures` because a poll this wait's own
+    // deadline cut short is not a poll the platform failed — counting the two
+    // together is how a wait with one 503 and three expired polls reported that
+    // every poll had failed.
     let reads = 0;
     let failures = 0;
+    let aborts = 0;
     for (;;) {
       if (Date.now() >= deadline) {
         throw new TimeoutError(
@@ -1097,6 +1135,7 @@ export class Computer {
             undated: undatedLast,
             reads,
             failures,
+            aborts,
           }),
         );
       }
@@ -1181,16 +1220,24 @@ export class Computer {
         // deadline as if the platform had failed. `observed` is deliberately
         // left alone for it, as in Builds.wait: this wait's own timer firing
         // inside a poll is not the platform failing to answer.
-        if (isDeadlineAbort(err)) continue;
+        if (isDeadlineAbort(err)) {
+          aborts += 1;
+          continue;
+        }
         if (!isTransientForPoll(err)) throw err;
         observed = false;
         // A poll that never got an answer says nothing about whether the move is
         // on the listing, so the flag that means "it answered and it was not
         // there" has to go with it — and the run of absences it would otherwise
         // be counted into, since a run broken by a poll nobody read is not two
-        // consecutive readings of anything.
+        // consecutive readings of anything. The blindness counts go too: they
+        // are what the LAST listing could not make out, and this poll read no
+        // listing, so keeping them would date the timeout's sentence to whenever
+        // the last successful poll happened to be.
         absent = false;
         vanished = 0;
+        unreadableLast = 0;
+        undatedLast = 0;
         failures += 1;
         delayMs = retryDelay(pollMs, err);
       }

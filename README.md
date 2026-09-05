@@ -1078,10 +1078,14 @@ in the last day beside the one running now, so the record from the 202 — or an
 RFC3339 `startedAt` a restarted process persisted — is the only thing that says
 which move a wait is watching. A listing with no row at or after that instant is
 one that has not caught up yet, so the wait goes on polling and its deadline,
-rather than yesterday's row, is what ends it. The earliest row at or after the
-instant is the move; a minute of slack sits under it, because the 202 and the
-listing are two renderings of the same platform clock and one of them printing
-whole seconds must not put a move's own row below its own floor.
+rather than yesterday's row, is what ends it. The row NEAREST that instant is
+the move; a minute of slack sits under it, because the 202 and the listing are
+two renderings of the same platform clock and one of them printing whole seconds
+must not put a move's own row below its own floor. Nearest and not earliest, so
+that the minute admits this move's own rounded-down row without also handing the
+wait to a move that really did start within it — one that finished seconds
+earlier would otherwise answer straight away, on a disk still crossing between
+hosts.
 
 A row that was listed and then is not, on two consecutive polls of a listing
 this client could read whole, ends the wait with a `MandalaError`: a move's row
