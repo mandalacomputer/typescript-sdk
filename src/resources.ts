@@ -845,8 +845,21 @@ export class Builds {
     // running" — a claim about the present tense, made from an observation that
     // may be half an hour old and followed by nothing but failures.
     let observed = false;
+    // Only for the sentence a timeout that never read a progress record ends
+    // with, and counted apart for the reason `Computer.waitForMove` counts them
+    // apart: a poll this wait's own deadline cut short is not a poll the
+    // platform failed. Both took the same silent path, so a wait whose every
+    // attempt expired mid-request reported that every poll had failed when none
+    // had — a bill sent to the platform for silences this deadline caused.
+    let failures = 0;
+    let aborts = 0;
     for (;;) {
       if (Date.now() >= deadline) {
+        // Three ways to reach a deadline having read nothing, and they are three
+        // sentences: the platform failing every time, this wait never allowing a
+        // poll to finish, and a wait that did some of each — which claims only
+        // what it counted.
+        const gaveUp = `build ${id} could not be observed within ${timeoutMs}ms: `;
         throw new TimeoutError(
           last && observed
             ? `build ${id} was still running after ${timeoutMs}ms (phase ${last.phase}, ` +
@@ -855,7 +868,13 @@ export class Builds {
               ? `build ${id} could not be reached for the last part of ${timeoutMs}ms; when it last ` +
                 `answered it was in phase ${last.phase}, step ${last.step} of ${last.of}. The build ` +
                 `has not stopped, only this wait has — read builds.progress for where it got to.`
-              : `build ${id} could not be observed within ${timeoutMs}ms: every poll failed`,
+              : failures > 0 && aborts > 0
+                ? `${gaveUp}no poll finished — ${failures} failed outright and ${aborts} were cut ` +
+                  `short by this wait's own deadline`
+                : failures > 0
+                  ? `${gaveUp}every poll failed`
+                  : `${gaveUp}no poll finished before the deadline did, so nothing about the ` +
+                    `build was ever read`,
         );
       }
       // The sleep comes before every poll but the first: a build that finished
@@ -888,7 +907,10 @@ export class Builds {
         // because the platform did not fail: counting it reported a build every
         // poll of which had succeeded as one that could not be reached, on the
         // ordinary path where the last poll is slower than what is left.
-        if (isDeadlineAbort(err)) continue;
+        if (isDeadlineAbort(err)) {
+          aborts += 1;
+          continue;
+        }
         // The one policy every poll in this SDK now shares. This comment used to
         // name two — waitForGuest's, which retried all but a handful of
         // permanent classes, and this one, which retried only a named few —
@@ -907,6 +929,7 @@ export class Builds {
         // instead of being replaced by a timeout.
         if (!isTransientForPoll(err)) throw err;
         observed = false;
+        failures += 1;
         delayMs = retryDelay(pollMs, err);
       }
     }

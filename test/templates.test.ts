@@ -1115,6 +1115,47 @@ describe('what the second review pass found', () => {
   });
 
   /**
+   * "Every poll failed" is a claim about the platform, and only the polls this
+   * wait counted as failures may support it.
+   *
+   * A poll cut short by the wait's own deadline took the same silent `continue`
+   * as a 503 and incremented nothing, so a wait none of whose polls ever
+   * finished — none of which the platform refused — reported that every one of
+   * them had failed. That is a fleet outage the reader is sent to look for and
+   * will not find.
+   */
+  it('does not say every poll failed when no poll failed', async () => {
+    const { client: c } = client((call) =>
+      call.path.endsWith('/progress') ? new Promise<Response>(() => {}) : anyRoute(call),
+    );
+    const err = await c.builds.wait('bld-1', { timeoutMs: 40, pollMs: 1 }).catch((e) => e);
+
+    expect(err).toBeInstanceOf(TimeoutError);
+    expect((err as Error).message).not.toContain('every poll failed');
+    expect((err as Error).message).toContain('no poll finished before the deadline');
+    expect((err as Error).message).toContain('nothing about the build was ever read');
+  });
+
+  /** The count that was observed is the most the sentence may claim. */
+  it('names the failures and the aborts apart when the wait did some of each', async () => {
+    let polls = 0;
+    const { client: c } = client((call) => {
+      if (!call.path.endsWith('/progress')) return anyRoute(call);
+      polls += 1;
+      return polls === 1
+        ? errorJson(503, 'no hypervisor could answer')
+        : new Promise<Response>(() => {});
+    });
+    const err = await c.builds.wait('bld-1', { timeoutMs: 60, pollMs: 1 }).catch((e) => e);
+
+    expect(err).toBeInstanceOf(TimeoutError);
+    expect(polls).toBeGreaterThan(1);
+    expect((err as Error).message).not.toContain('every poll failed');
+    expect((err as Error).message).toContain('1 failed outright');
+    expect((err as Error).message).toContain("cut short by this wait's own deadline");
+  });
+
+  /**
    * A permanent failure is judged by what it IS, not by when it arrived.
    *
    * The clause this was copied from reads `Date.now() < deadline && !isTransient`,

@@ -1353,6 +1353,13 @@ export class Computer {
     // reported a fifteen-minute-old reading in the present tense. Builds.wait
     // splits the same two meanings across its three messages (OPL-4201).
     let fresh = false;
+    // Kept apart, as `waitForMove` keeps them apart and for its reason: a
+    // refresh this wait's own deadline cut short is not a refresh the platform
+    // failed, and both left `observed` false without counting anything. A wait
+    // every attempt of which expired mid-request therefore told the caller that
+    // every refresh had failed when none had.
+    let failures = 0;
+    let aborts = 0;
     let polled = false;
     let delayMs = pollMs;
     for (;;) {
@@ -1384,7 +1391,19 @@ export class Computer {
                 ? `${this.id} answered within ${timeoutMs}ms without a status this client could ` +
                   `read (${JSON.stringify(this.#data.status)}), so whether its disk copy ` +
                   'finished is unknown'
-                : `${this.id} could not be observed within ${timeoutMs}ms: every refresh failed`,
+                : // Nothing was ever read, and the three ways that happens are
+                  // three sentences: the platform failing every time, this
+                  // wait cutting every attempt short, and a wait that did some
+                  // of each — which blames only what it counted.
+                  failures > 0 && aborts > 0
+                  ? `${this.id} could not be observed within ${timeoutMs}ms: no refresh ` +
+                    `finished — ${failures} failed outright and ${aborts} were cut short by ` +
+                    `this wait's own deadline`
+                  : failures > 0
+                    ? `${this.id} could not be observed within ${timeoutMs}ms: every refresh failed`
+                    : `${this.id} could not be observed within ${timeoutMs}ms: no refresh ` +
+                      `finished before the deadline did, so nothing about the disk copy was ` +
+                      `ever read`,
         );
       }
       // The sleep comes before every poll but the first. A clone that finished
@@ -1423,7 +1442,11 @@ export class Computer {
           // there, and the reading from the poll before it is one interval old
           // rather than a whole budget old. Builds.wait leaves its flag alone
           // in the same place, for the same reason.
-          if (!isDeadlineAbort(err)) fresh = false;
+          if (isDeadlineAbort(err)) aborts += 1;
+          else {
+            fresh = false;
+            failures += 1;
+          }
           delayMs = retryDelay(pollMs, err);
         }
       }
@@ -1470,6 +1493,13 @@ export class Computer {
     // below, so `observed` cannot become true however the machine actually is
     // — see the success test.
     let attempted = false;
+    // Counted apart, as `waitForMove` counts them apart: an attempt this wait's
+    // own deadline cut short is not an attempt the platform failed, and both
+    // leave `observed` false. Together they said every refresh had failed over a
+    // wait in which the host had refused nothing — the deadline had simply
+    // landed inside each request before the answer did.
+    let failures = 0;
+    let aborts = 0;
     for (;;) {
       let delayMs = pollMs;
       // Guarded rather than unconditional, so the sleep at the bottom of the
@@ -1511,7 +1541,11 @@ export class Computer {
           // tense. Not for this wait's own deadline arriving mid-request: that
           // is not the platform failing, and waitUntilBuilt and builds.wait
           // both hold their flag across it for the same reason.
-          if (!isDeadlineAbort(err)) fresh = false;
+          if (isDeadlineAbort(err)) aborts += 1;
+          else {
+            fresh = false;
+            failures += 1;
+          }
           delayMs = retryDelay(pollMs, err);
         }
       }
@@ -1556,7 +1590,18 @@ export class Computer {
             ? `${this.id} was ${JSON.stringify(this.status)} and ${timeoutMs}ms left no time to ` +
                 'look again'
             : !observed
-              ? `${this.id} could not be observed within ${timeoutMs}ms: every refresh failed`
+              ? // No refresh ever answered, and the three ways that happens are
+                // three sentences: the platform failing every time, this wait
+                // cutting every attempt short, and a wait that did some of each
+                // — which blames only what it counted.
+                failures > 0 && aborts > 0
+                ? `${this.id} could not be observed within ${timeoutMs}ms: no refresh ` +
+                  `finished — ${failures} failed outright and ${aborts} were cut short by ` +
+                  `this wait's own deadline`
+                : failures > 0
+                  ? `${this.id} could not be observed within ${timeoutMs}ms: every refresh failed`
+                  : `${this.id} could not be observed within ${timeoutMs}ms: no refresh finished ` +
+                    `before the deadline did, so nothing about the computer was ever read`
               : fresh
                 ? `${this.id} was still ${JSON.stringify(this.status)} after ${timeoutMs}ms`
                 : `${this.id} could not be reached for the last part of ${timeoutMs}ms; when it ` +
