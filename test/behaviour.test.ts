@@ -1881,26 +1881,95 @@ describe('files', () => {
     expect(rec.last().headers['Content-Length']).toBe('5');
   });
 
-  it('leaves the length alone for a stream this realm does not recognise', async () => {
-    // A body is measurable or it is not, and only the measurable shapes can be
-    // enumerated: asking instead whether it is a `ReadableStream` of THIS realm
-    // calls a polyfilled one, a cross-realm one, and the Node `Readable` undici
-    // accepts from an untyped caller measurable, reads `undefined` off each,
-    // and refuses the write while advising that the length is only worth
-    // passing for a stream — which this is.
+  it('measures a body by its size, not by which realm built it', async () => {
+    // Two questions turn on one answer, and they fail in opposite directions.
+    // `.length` alone calls an `ArrayBuffer` and a `Blob` unmeasurable — undici
+    // sends both with a size it counts itself, so a caller's short declaration
+    // would be framed against bytes nobody checked and the guest file would be
+    // truncated under a 200. An `instanceof ReadableStream` alone calls a
+    // foreign stream measurable, compares its length to `undefined` and refuses
+    // a write that would have worked. `byteLength` or `size` answers both.
     const { rec, client: c } = client(anyRoute);
     const computer = await c.computers.get('vm-1');
-    const foreign = {
-      pipe: () => {},
-      on: () => {},
-      read: () => null,
-    } as unknown as ReadableStream<Uint8Array>;
+    const twenty = new Uint8Array(20);
     await expect(
-      computer.writeFile('/tmp/a.bin', foreign, { contentLength: 20 }),
+      computer.writeFile('/tmp/a.bin', twenty.buffer as unknown as Uint8Array, {
+        contentLength: 5,
+      }),
+    ).rejects.toThrow(/contentLength is 5 but the data is 20 bytes/);
+    await expect(
+      computer.writeFile('/tmp/a.bin', new DataView(twenty.buffer) as unknown as Uint8Array, {
+        contentLength: 5,
+      }),
+    ).rejects.toThrow(/contentLength is 5 but the data is 20 bytes/);
+    await expect(
+      computer.writeFile('/tmp/a.bin', new Blob([twenty]) as unknown as Uint8Array, {
+        contentLength: 5,
+      }),
+    ).rejects.toThrow(/contentLength is 5 but the data is 20 bytes/);
+    expect(rec.calls.filter((call) => call.method === 'PUT')).toEqual([]);
+    // A stream this realm did not build has no size to read, so its caller's
+    // number is the only one there is and it goes out untouched.
+    await expect(
+      computer.writeFile('/tmp/a.bin', foreignStream(), { contentLength: 20 }),
     ).resolves.toBeDefined();
     expect(rec.last().headers['Content-Length']).toBe('20');
   });
+
+  it('marks a body it cannot measure half-duplex, whatever built it', async () => {
+    // undici refuses a body it cannot measure unless the request says
+    // `duplex: 'half'`, and for a shape it reads as neither stream nor bytes it
+    // does something worse than refuse — it stringifies the object to
+    // `[object Object]` and frames THAT against the caller's Content-Length.
+    // Asked as `instanceof ReadableStream`, every stream from another realm
+    // lands in one of those two. This stand-in fetch consumes whatever it is
+    // handed and enforces neither rule, so what the request asked for is all a
+    // test here can see; the rule itself is undici's and is exercised by
+    // `mandala scp`.
+    const { rec, client: c } = client(anyRoute);
+    const computer = await c.computers.get('vm-1');
+    await computer.writeFile('/tmp/a.bin', foreignStream(), { contentLength: 20 });
+    expect(rec.last().duplex).toBe('half');
+    await computer.writeFile('/tmp/a.bin', bodyStream('hello'), { contentLength: 5 });
+    expect(rec.last().duplex).toBe('half');
+    // A measurable body must not carry it: undici works the length out itself,
+    // and a custom fetch handed a duplex it never needed is being told
+    // something about the request that is not true of it.
+    await computer.writeFile('/tmp/a.bin', new Uint8Array(20), { contentLength: 20 });
+    expect(rec.last().duplex).toBeUndefined();
+    await computer.writeFile('/tmp/a.txt', 'hello');
+    expect(rec.last().duplex).toBeUndefined();
+    // Nor a JSON body, which is a string and never went near this.
+    await computer.click(1, 2);
+    expect(rec.last().duplex).toBeUndefined();
+  });
 });
+
+/** A stream of `text`, the shape a caller in this realm would build. */
+function bodyStream(text: string): ReadableStream<Uint8Array> {
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode(text));
+      controller.close();
+    },
+  });
+}
+
+/**
+ * A stream this realm did not build: a polyfill, another realm's, or the Node
+ * `Readable` undici accepts from an untyped caller. None is an instance of this
+ * realm's `ReadableStream` and none has a size.
+ */
+function foreignStream(): ReadableStream<Uint8Array> {
+  return {
+    pipe: () => {},
+    on: () => {},
+    read: () => null,
+    [Symbol.asyncIterator]: async function* () {
+      yield new TextEncoder().encode('x'.repeat(20));
+    },
+  } as unknown as ReadableStream<Uint8Array>;
+}
 
 /** `n` bytes whose value at every position says which position it is. */
 const filled = (n: number): Uint8Array => Uint8Array.from({ length: n }, (_, i) => i % 251);
@@ -2316,6 +2385,48 @@ describe('paging a file bigger than one request', () => {
     expect(await rebuilt(computer.readFileChunks('/tmp/big.bin', { offset: -5000 }))).toEqual(
       filled(1000),
     );
+  });
+
+  it('still bounds that whole file by what the probe measured', async () => {
+    // Taking a whole-file answer at byte zero is not taking it unmeasured. The
+    // probe measured this file to find where the tail began, so a guest file
+    // re-created between the two requests answers the second with every byte of
+    // a different file — more than the caller's window and starting before it,
+    // or the same window over contents that are no longer the ones the offset
+    // was resolved against. Both are the checks a 206 already gets, and both
+    // are affordable here for exactly the reason the forfeit was lifted: a
+    // total is known.
+    const wholeFileOf = (size: number): Responder => {
+      let probed = false;
+      return (call) => {
+        if (!(call.path.endsWith('/files') && call.method === 'GET')) return anyRoute(call);
+        if (!probed) {
+          probed = true;
+          return new Response(filled(1000).slice(999), {
+            status: 206,
+            headers: {
+              'content-type': 'application/octet-stream',
+              'accept-ranges': 'bytes',
+              'content-range': 'bytes 999-999/1000',
+            },
+          });
+        }
+        return new Response(filled(size), {
+          status: 200,
+          headers: { 'content-type': 'application/octet-stream', 'accept-ranges': 'bytes' },
+        });
+      };
+    };
+    const grew = await computerOn(wholeFileOf(6000));
+    await expect(
+      rebuilt(grew.computer.readFileChunks('/tmp/big.bin', { offset: -5000 })),
+    ).rejects.toThrow(/cannot hand back more than it asked for/);
+    // Shrunk instead, the byte count is inside the window and only the total
+    // says the file moved.
+    const shrank = await computerOn(wholeFileOf(500));
+    await expect(
+      rebuilt(shrank.computer.readFileChunks('/tmp/big.bin', { offset: -5000 })),
+    ).rejects.toThrow(/total for \/tmp\/big\.bin changed from 1000 to 500/);
   });
 
   it('refuses a window wider than the one it asked for', async () => {

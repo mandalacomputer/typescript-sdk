@@ -75,6 +75,7 @@ import * as P from './paths.js';
 import type { CallOptions } from './resources.js';
 import {
   type Bytes,
+  bodyByteLength,
   MAX_TIMER_MS,
   MODEL_KEY_HEADER,
   type Query,
@@ -2954,6 +2955,32 @@ export class Computer {
               'a paging read cannot go on from that',
           );
         }
+        // Taking it as the answer is not taking it unmeasured. Where a total is
+        // already known — the tail probe measured this file to work out where
+        // byte zero of the window was — the whole file is only that window
+        // while it is still the same file, and a guest file re-created larger
+        // between the probe and this request comes back as a 200 carrying every
+        // byte of the new one: more than the caller's `length`, and starting
+        // before the tail that was resolved against the old size. Both bounds
+        // every partial answer gets below are affordable here, and both are
+        // conditioned on having measured something, because a plain read that
+        // never did has neither number and keeps its documented behaviour of
+        // yielding once with `partial: false`.
+        if (total !== undefined) {
+          if (length !== undefined && chunk.bytes.length > length) {
+            throw new MandalaError(
+              `asked ${path} for ${length} bytes from ${offset} and was answered with the whole ` +
+                `file, ${chunk.bytes.length} bytes; a paging read cannot hand back more than it ` +
+                'asked for',
+            );
+          }
+          if (chunk.total !== undefined && chunk.total !== total) {
+            throw new MandalaError(
+              `the total for ${path} changed from ${total} to ${chunk.total} during a paging ` +
+                'read; the chunks may belong to different versions of the file',
+            );
+          }
+        }
         yield chunk;
         return;
       }
@@ -3052,20 +3079,20 @@ export class Computer {
       // body against the declaration, and a body cut to the declaration
       // agrees) — a truncated guest file reported as a complete write.
       //
-      // A stream is the only body whose length this cannot know, which is what
-      // the option is for, and it keeps the header unchecked. Which bodies
-      // those are is asked positively — a view over an ArrayBuffer is the one
-      // shape with a length, the string having become one above — because the
-      // negative form (anything that is not a realm-native `ReadableStream`)
-      // calls every stream this realm does not recognise measurable: a
-      // polyfilled or cross-realm stream, or the Node `Readable` an untyped
-      // caller can pass because undici accepts one. Each has no `.length`, so
-      // the check would fire on a body that IS a stream and tell its caller to
-      // pass the length only for a stream. An unrecognised stream keeping the
-      // header unchecked is the same trust a recognised one already gets.
-      if (ArrayBuffer.isView(bytes) && opts.contentLength !== bytes.length) {
+      // A body whose size cannot be read off it is the only one the option is
+      // for, and it is the only one that keeps the header unchecked. That set
+      // is `bodyByteLength`'s, shared with the transport so the body this
+      // client declines to measure is exactly the body it marks half-duplex —
+      // the two questions are one and answering them separately gets one of
+      // them wrong. Not `.length`, which an `ArrayBuffer` and a `Blob` do not
+      // have even though undici sends both with a size it counts itself: read
+      // off `.length` they would be waved through, and a caller who passed
+      // `contentLength: 5` for twenty bytes gets five of them written and a 200
+      // saying five, which is the truncation this check exists to stop.
+      const sending = bodyByteLength(bytes);
+      if (sending !== undefined && opts.contentLength !== sending) {
         throw new ValidationError(
-          `contentLength is ${opts.contentLength} but the data is ${bytes.length} bytes: ` +
+          `contentLength is ${opts.contentLength} but the data is ${sending} bytes: ` +
             'the length is only worth passing for a ReadableStream, whose size cannot be read ' +
             'off the body',
         );
