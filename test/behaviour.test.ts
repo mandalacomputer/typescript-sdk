@@ -2303,6 +2303,17 @@ describe('snapshots', () => {
   });
 });
 
+/**
+ * The three fields of a suppressed pair, read without naming a global.
+ *
+ * `SuppressedError` is a global in V8 13.4 and after, which is Node 24, and
+ * this package's floor is Node 22 — so `err instanceof SuppressedError` is
+ * itself a `ReferenceError` on the engine the fallback shape exists for, and a
+ * test written that way passes only on the engine that never needed it. `name`
+ * is what both shapes agree on.
+ */
+const pair = (err: unknown) => err as { name: string; error: unknown; suppressed: unknown };
+
 describe('ephemeral', () => {
   it('deletes the computer when the block ends', async () => {
     const { rec, client: c } = client(anyRoute);
@@ -2322,16 +2333,108 @@ describe('ephemeral', () => {
     expect(rec.routes()).toContainEqual(['DELETE', 'computers/vm-1']);
   });
 
-  it('does not let a cleanup failure replace the error the block was throwing', async () => {
-    // Hiding the actual fault behind a secondary one is the worst outcome here.
+  it('keeps BOTH errors when the block threw and the cleanup delete failed too', async () => {
+    // Two failures, and each one is unaffordable to lose. Replacing the block's
+    // error hides the actual fault behind a secondary one; dropping the cleanup
+    // failure — which is what a `.catch(() => {})` here did — strands a billable
+    // cloud machine with nothing anywhere naming it, so nobody can go and find
+    // it. `SuppressedError` is how the language already says both, and it is
+    // what the `await using` spelling of this same feature gets from the
+    // runtime: the two must not disagree about the one that costs money.
     const { client: c } = client((call) =>
       call.method === 'DELETE' ? errorJson(409, 'a snapshot is in flight') : anyRoute(call),
     );
-    await expect(
-      c.computers.ephemeral({ template: 'base' }, async () => {
+    const block = new Error('the work failed');
+    const err = await c.computers
+      .ephemeral({ template: 'base' }, async () => {
+        throw block;
+      })
+      .catch((e) => e);
+
+    expect(err).toBeInstanceOf(Error);
+    expect(pair(err).name).toBe('SuppressedError');
+    // The block's own error, by identity: it is the fault to read first and it
+    // arrives unwrapped.
+    expect(pair(err).suppressed).toBe(block);
+    // The cleanup failure, with the platform's reason and — the point of the
+    // whole branch — the id of the machine still being billed for. On `.error`
+    // and not only on the message, because `.error` is the field BOTH spellings
+    // fill: the runtime writes its own generic text over `.message` for
+    // `await using`, so a caller who reads the message there gets no id at all.
+    expect(pair(err).error).toBeInstanceOf(MandalaError);
+    expect((pair(err).error as Error).message).toMatch(/vm-1 was not deleted.*still billable/);
+    expect((pair(err).error as Error).message).toContain('a snapshot is in flight');
+  });
+
+  it('names the machine on `.error` in the same words under either spelling', async () => {
+    // The claim the README and the doc block both make, asserted rather than
+    // hoped for. The `await using` spelling's `.error` is whatever the disposer
+    // throws and its `.message` is the runtime's own text; if the callback
+    // spelling put the raw transport failure on `.error` instead, then a caller
+    // logging `err.error.message` would get the id under one spelling and a bare
+    // "409" under the other, for the same pair of failures.
+    const { client: c } = client((call) =>
+      call.method === 'DELETE' ? errorJson(409, 'a snapshot is in flight') : anyRoute(call),
+    );
+    const viaCallback = await c.computers
+      .ephemeral({ template: 'base' }, async () => {
         throw new Error('the work failed');
-      }),
-    ).rejects.toThrow('the work failed');
+      })
+      .catch((e) => e);
+    const handle = await c.computers.ephemeral({ template: 'base' });
+    const viaDisposer = await handle[Symbol.asyncDispose]().catch((e: unknown) => e);
+
+    expect(viaDisposer).toBeInstanceOf(MandalaError);
+    expect((pair(viaCallback).error as Error).message).toBe((viaDisposer as Error).message);
+  });
+
+  it('says both errors on an engine with no SuppressedError, which Node 22 is', async () => {
+    // The global landed in V8 13.4 — Node 24 — and this package declares
+    // `>=22`, where constructing it throws `ReferenceError` from inside the
+    // handler whose whole job is to stop two failures becoming one. Both are
+    // then destroyed and the caller is told about a missing global instead: a
+    // strictly worse outcome than the `.catch(() => {})` this replaced, on the
+    // engine at the very floor the package supports. The shape below is the one
+    // TypeScript's own downlevel helper synthesises, so the fields read the same
+    // either way.
+    vi.stubGlobal('SuppressedError', undefined);
+    try {
+      const { client: c } = client((call) =>
+        call.method === 'DELETE' ? errorJson(409, 'a snapshot is in flight') : anyRoute(call),
+      );
+      const block = new Error('the work failed');
+      const err = await c.computers
+        .ephemeral({ template: 'base' }, async () => {
+          throw block;
+        })
+        .catch((e) => e);
+
+      expect(err).toBeInstanceOf(Error);
+      expect(pair(err).name).toBe('SuppressedError');
+      expect(pair(err).suppressed).toBe(block);
+      expect((pair(err).error as Error).message).toMatch(/vm-1 was not deleted.*still billable/);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('does not wrap the block’s error when the cleanup delete 404s', async () => {
+    // A 404 is the goal state already reached — the block deleted the machine
+    // itself — so nothing is billable and there is no second failure to report.
+    // Wrapping here would announce a leak that does not exist and bury the only
+    // error that matters inside a `SuppressedError` nobody needed.
+    const { client: c } = client((call) =>
+      call.method === 'DELETE' ? errorJson(404, 'no such computer') : anyRoute(call),
+    );
+    const block = new Error('the work failed');
+    const err = await c.computers
+      .ephemeral({ template: 'base' }, async () => {
+        throw block;
+      })
+      .catch((e) => e);
+
+    expect(err).toBe(block);
+    expect(pair(err).name).not.toBe('SuppressedError');
   });
 
   it('reports a delete that failed after the block succeeded, naming the machine', async () => {

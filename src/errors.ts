@@ -822,3 +822,27 @@ export function isTransient(err: unknown): boolean {
     err instanceof ConnectionError
   );
 }
+
+/**
+ * Both errors as one object, on an engine that has `SuppressedError` and on one
+ * that does not.
+ *
+ * `SuppressedError` is a global in V8 13.4 and after, which is Node 24 — and
+ * this package declares Node 22 as its floor, where it is simply not defined.
+ * Constructing it unguarded there throws `ReferenceError` from inside the
+ * handler that exists to stop two failures becoming one, and destroys BOTH of
+ * them: the caller is told about a missing global instead of about the block
+ * that failed and the cloud machine that is still billing for it. The engine
+ * that cannot report two errors is exactly the engine that must not lose them.
+ *
+ * The fallback is the object TypeScript's own `__disposeResources` downlevel
+ * helper synthesises for the same gap, field for field, so `name`, `error` and
+ * `suppressed` read identically either way and nothing downstream has to ask
+ * which engine it is on. `instanceof SuppressedError` cannot be asked on Node
+ * 22 in any case — there is no constructor to ask about — so `name` is the
+ * portable test.
+ */
+export const suppressing = (error: unknown, suppressed: unknown, message: string): Error =>
+  typeof SuppressedError === 'function'
+    ? new SuppressedError(error, suppressed, message)
+    : Object.assign(new Error(message), { name: 'SuppressedError', error, suppressed });
