@@ -171,6 +171,27 @@ describe('relocate', () => {
     const post = rec.calls.find((call) => call.method === 'POST');
     expect(post?.body).toEqual({ ram_mb: 26000 });
   });
+
+  it('refuses a 202 with no readable started_at, naming the route', async () => {
+    // `toMove` coerces an absent `started_at` to `''`, so a 202 that omitted or
+    // renamed it returned from here looking perfectly well-formed — and then the
+    // very next documented line, `await c.waitForMove(move)`, threw a
+    // ValidationError about the value this method had just handed back, in the
+    // class reserved for caller mistakes. The platform's omission is the
+    // platform's, and a move with no start is a move nothing can be anchored to.
+    const { client: c } = client((call) =>
+      call.path.endsWith('/move') && call.method === 'POST'
+        ? json({ ...MOVE_STARTED, started_at: undefined }, { status: 202 })
+        : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    const err = await computer.relocate({ ramMb: 26000 }).catch((e) => e);
+
+    expect(err).toBeInstanceOf(MandalaError);
+    expect(err).not.toBeInstanceOf(ValidationError);
+    expect((err as Error).message).toContain('POST computers/vm-1/move');
+    expect((err as Error).message).toContain('started_at');
+  });
 });
 
 // The anchor every wait below is started from. `GET /moves` is account-wide and
@@ -261,11 +282,13 @@ describe('waitForMove', () => {
     expect((err as Error).message).toContain('no readable startedAt');
   });
 
-  it('says the move was reaped once its row has been seen and then is not', async () => {
-    // The one disappearance that is a fact rather than an inference: the row was
-    // there, so it existed, and the platform reaps one for a single reason.
-    // Waiting out the rest of a fifteen-minute deadline to say so is what this
-    // branch exists to avoid.
+  it('says the row is gone once it has been seen and then is not, twice running', async () => {
+    // The one disappearance that is evidence rather than inference: the row was
+    // there, so it existed, and a row leaves this listing for reasons that are
+    // all terminal for the wait. Waiting out the rest of a fifteen-minute
+    // deadline to say so is what this branch exists to avoid — and two polls
+    // rather than one is what keeps it from firing on a replica that is merely
+    // behind.
     let polls = 0;
     const { client: c } = client((call) => {
       if (call.path !== '/moves') return anyRoute(call);
@@ -278,7 +301,111 @@ describe('waitForMove', () => {
     expect(err).toBeInstanceOf(MandalaError);
     expect(err).not.toBeInstanceOf(TimeoutError);
     expect((err as Error).message).toContain('no longer listed');
-    expect(polls).toBe(2);
+    // The wording has to leave room for the second way a row leaves: `Moves.list`
+    // says this listing holds the finished moves that have not been DISMISSED,
+    // so "the computer was deleted" is one cause asserted off an observation
+    // that has two.
+    expect((err as Error).message).toContain('dismissed');
+    expect(polls).toBe(3);
+  });
+
+  it('keeps polling when the row is missing from one poll and back on the next', async () => {
+    // The listing is eventually consistent — that premise is the whole reason
+    // "not visible yet" is a branch at all — so a replica running behind can
+    // drop a row it served a moment ago. Ending a healthy wait on one such poll
+    // is the same false claim about a live computer, reached from the other
+    // side, and it is unrecoverable: a MandalaError, not a retry.
+    let polls = 0;
+    const { client: c } = client((call) => {
+      if (call.path !== '/moves') return anyRoute(call);
+      polls += 1;
+      if (polls === 1) return json({ moves: [MOVE_STARTED] });
+      if (polls === 2) return json({ moves: [] });
+      return json({ moves: [MOVE_DONE] });
+    });
+    const computer = await c.computers.get('vm-1');
+    const move = await computer.waitForMove(SINCE, { pollMs: 1, timeoutMs: 5_000 });
+
+    expect(move.state).toBe('done');
+    expect(polls).toBe(3);
+  });
+
+  it('does not let a row that started later answer for the one being waited on', async () => {
+    // One move runs per account at a time, but not one per WAIT: between two
+    // polls another process can start a move on this same computer, and a live
+    // row is the newer one by definition. Preferring it hands back the state and
+    // detail of a relocate the caller never asked about — as the outcome of the
+    // one they did. With the floor at the accepted move's own start, the
+    // earliest qualifying row already is that move.
+    const later = {
+      ...MOVE_STARTED,
+      state: 'moving',
+      detail: 'somebody else’s relocate',
+      started_at: '2026-08-23T02:40:00.000Z',
+    };
+    const { client: c } = client((call) =>
+      call.path === '/moves' ? json({ moves: [MOVE_DONE, later] }) : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    const move = await computer.waitForMove(SINCE, { pollMs: 1, timeoutMs: 300 });
+
+    expect(move.startedAt).toBe(MOVE_STARTED.started_at);
+    expect(move.state).toBe('done');
+    expect(move.detail).not.toBe('somebody else’s relocate');
+  });
+
+  it('matches a row the listing rendered at a coarser precision than the 202', async () => {
+    // The floor comes off a `POST …/move` body and the rows come out of a
+    // listing: two renderings of the same platform clock, and nothing says they
+    // print the same number of digits. A listing that truncates to whole seconds
+    // puts every row for this move a fraction of a second BELOW its own floor,
+    // at which point nothing ever matches and a wait that should answer in
+    // seconds burns the entire fifteen-minute deadline while the move runs fine.
+    const truncated = { ...MOVE_DONE, started_at: '2026-08-23T02:00:12Z' };
+    const { client: c } = client((call) =>
+      call.path === '/moves' ? json({ moves: [truncated] }) : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    const accepted = await computer.relocate({ ramMb: 26000 });
+    const move = await computer.waitForMove(accepted, { pollMs: 1, timeoutMs: 300 });
+
+    expect(move.state).toBe('done');
+    expect(move.live).toBe(false);
+  });
+
+  it('counts a row of this computer’s it could not place in time', async () => {
+    // A row with no readable `started_at` sorts below every floor and is
+    // dropped, and a drop nobody counts is a listing reported as complete when
+    // it was not: the row might BE this move. So it has to reach the sentence
+    // the wait ends with — and it has to keep the disappearance branch from
+    // claiming the row is gone, for the same reason an undecodable row does.
+    const { client: c } = client((call) =>
+      call.path === '/moves'
+        ? json({ moves: [{ ...MOVE_DONE, started_at: 'whenever' }] })
+        : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    const err = await computer.waitForMove(SINCE, { pollMs: 1, timeoutMs: 60 }).catch((e) => e);
+
+    expect(err).toBeInstanceOf(TimeoutError);
+    expect((err as Error).message).toContain('carry no readable start');
+  });
+
+  it('does not say every poll failed when no poll failed', async () => {
+    // A poll cut short by this wait's OWN deadline is a `continue` that
+    // increments nothing — not the reads, not the failures — so a wait whose
+    // only poll ended that way arrived at the last branch with both at zero and
+    // announced that every poll had failed. Nothing had failed; the wait had
+    // simply not been given long enough to finish one.
+    const { client: c } = client((call) =>
+      call.path === '/moves' ? new Promise<Response>(() => {}) : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    const err = await computer.waitForMove(SINCE, { pollMs: 1, timeoutMs: 40 }).catch((e) => e);
+
+    expect(err).toBeInstanceOf(TimeoutError);
+    expect((err as Error).message).not.toContain('every poll failed');
+    expect((err as Error).message).toContain('no poll finished before the deadline');
   });
 
   it('picks this computer’s move out of the account’s', async () => {

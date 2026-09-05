@@ -1212,10 +1212,11 @@ export type Snapshot = {
  * `{ moves: [...] }` is the shape. Anything else is the platform failing to
  * answer, and reading it as `[]` turned one malformed 200 into two different
  * false statements: a quiet account from {@link Moves.list}, and — in
- * `Computer.waitForMove`, which reaches its reaped-row branch only once a move
- * has been accepted — the claim that the computer had been DELETED. An empty
- * array still means what it always did, which is the reaped row that branch is
- * for.
+ * `Computer.waitForMove` — the claim that the computer had been DELETED. That
+ * second claim costs two consecutive polls of a listing this client could read
+ * whole, which is a good deal more than one malformed 200 can buy: an empty
+ * array is a listing that does not carry the move, and a listing nobody can
+ * parse is not one of those.
  */
 export function moveRows(
   data: unknown,
@@ -1244,8 +1245,9 @@ export function moveRows(
  * read is most likely another computer's, and refusing on it would abort a
  * wait over a move that is present, readable and running. It reads
  * {@link moveRows} instead and spends `unreadable` only where the count
- * changes the answer: whether an empty result means the move was reaped, or
- * means nobody could tell.
+ * changes the answer: a listing that has stopped carrying this move may be
+ * called a dropped row only if every row of it was decodable, because a row
+ * this client could not read might be that very move.
  */
 export function expectMoves(
   data: unknown,
@@ -1274,6 +1276,11 @@ export function expectMoves(
  * platform's and one unparseable row should not end a wait; below every floor
  * is where that puts it, because a row nobody can place in time is not evidence
  * about a move that started at a known instant.
+ *
+ * Not evidence, but not nothing either: such a row might BE the move, so
+ * {@link moveAtOrAfter} counts the ones it drops this way rather than letting
+ * them leave without a trace. One of them on a listing is why that listing
+ * cannot be read as saying the move's row has left it.
  */
 const startStamp = (m: Move): number => {
   const t = Date.parse(m.startedAt);
@@ -1328,7 +1335,29 @@ export const moveFloor = (move: Move | string): number => {
 };
 
 /**
- * The move a wait is watching, among rows already known to be one computer's.
+ * How far below its floor a row may have started and still be this wait's move.
+ *
+ * Both sides of the comparison are the platform's clock, but not the platform's
+ * same rendering of it: the floor is the `started_at` on a `POST …/move` 202 and
+ * the rows come out of a listing. A listing that prints seconds where the 202
+ * printed milliseconds — `…T02:00:12Z` against `…T02:00:12.699Z` — puts every
+ * row for this move a fraction of a second BELOW its own floor, whereupon
+ * nothing ever matches, and a wait that would have answered in seconds instead
+ * burns the whole fifteen-minute deadline while the move runs perfectly well.
+ * Any clock difference between the component that accepts a move and the one
+ * that lists it lands in the same place.
+ *
+ * A minute covers both and costs little: it is 1440x smaller than the DAY of
+ * finished rows this listing keeps, which is the window that makes a stale row
+ * possible at all. What is left is that a move which began within a minute of
+ * this one could be taken for it — as against one that began any time in the
+ * last day, which is what there was before a floor.
+ */
+const FLOOR_SLACK_MS = 60_000;
+
+/**
+ * The move a wait is watching, among rows already known to be one computer's,
+ * and how many rows had to be dropped to find it.
  *
  * `GET /moves` carries the moves that FINISHED IN THE LAST DAY beside the one
  * running now, so neither the first row for this computer nor the newest is the
@@ -1337,25 +1366,35 @@ export const moveFloor = (move: Move | string): number => {
  * crossing between hosts. The floor — the accepted move's own start — is what
  * tells them apart.
  *
- * A live row at or after it is the copy running now; one move runs per account
- * at a time, so there is only one it can be. Otherwise the EARLIEST row at or
- * after the floor is the one, because anything later began after this wait did
- * and answering with it would report an operation nobody asked about.
+ * The EARLIEST row at or after the floor is the one, and nothing else is
+ * preferred ahead of it. A live row looks like a better answer and is not: with
+ * the floor set at the accepted move's own start, the earliest qualifying row
+ * already IS that move, so preferring a live one can only ever swap it for a
+ * DIFFERENT, later row — another process starting a move on this computer
+ * between two polls, whose `state` and `detail` would then be reported as the
+ * outcome of the relocate the caller actually asked about.
+ *
+ * Rows whose `started_at` cannot be placed in time are counted as `undated`
+ * rather than merely dropped: any one of them might be this move, so they are
+ * the difference between a listing that does not carry it and a listing nobody
+ * could read well enough to say.
  *
  * `undefined` is NOT an outcome. It says this listing does not show the move
  * YET — see {@link Computer.waitForMove}, where telling that apart from a row
- * the platform reaped is the whole of the hard part.
+ * the platform dropped is the whole of the hard part.
  */
-export const moveAtOrAfter = (moves: Move[], floor: number): Move | undefined => {
-  const since = moves.filter((m) => startStamp(m) >= floor);
-  return (
-    since.find((m) => m.live) ??
-    since.reduce<Move | undefined>(
+export const moveAtOrAfter = (
+  moves: Move[],
+  floor: number,
+): { move: Move | undefined; undated: number } => ({
+  move: moves
+    .filter((m) => startStamp(m) >= floor - FLOOR_SLACK_MS)
+    .reduce<Move | undefined>(
       (best, m) => (best === undefined || startStamp(m) < startStamp(best) ? m : best),
       undefined,
-    )
-  );
-};
+    ),
+  undated: moves.filter((m) => startStamp(m) === -Infinity).length,
+});
 
 /**
  * Whether a ROW off the wire belongs to the computer named.

@@ -78,10 +78,18 @@ await c.waitForGuest();
 
 **If the block throws and the cleanup delete fails too, both errors arrive** —
 a `SuppressedError` whose `.suppressed` is the block's own error, the fault to
-read first, and whose `.error` names the machine that is still billable. Either
-spelling produces the same pair, so a cleanup failure is never the thing that
-goes unmentioned. A 404 from the cleanup is not one: the block deleted the
-machine itself, and its own error stands alone.
+read first, and whose `.error` is a `MandalaError` naming the machine that is
+still billable. Both spellings fill those two fields the same way, so a cleanup
+failure is never the thing that goes unmentioned.
+
+Read `.error`, not `.message`: the top-level message is the one field the two
+spellings cannot agree on, because the runtime writes its own generic text over
+it for `await using`. And on Node 22, where `SuppressedError` is not a global,
+the same three fields arrive on a plain `Error` named `SuppressedError` — so
+`err.name === 'SuppressedError'` is the portable test and `instanceof` is not.
+
+A 404 from the cleanup is not one of these: the block deleted the machine
+itself, and its own error stands alone.
 
 Every computer is a Linux desktop today. Windows guests are not offered on any
 plan; where this README mentions Windows it is describing behaviour the client
@@ -1070,7 +1078,16 @@ in the last day beside the one running now, so the record from the 202 — or an
 RFC3339 `startedAt` a restarted process persisted — is the only thing that says
 which move a wait is watching. A listing with no row at or after that instant is
 one that has not caught up yet, so the wait goes on polling and its deadline,
-rather than yesterday's row, is what ends it.
+rather than yesterday's row, is what ends it. The earliest row at or after the
+instant is the move; a minute of slack sits under it, because the 202 and the
+listing are two renderings of the same platform clock and one of them printing
+whole seconds must not put a move's own row below its own floor.
+
+A row that was listed and then is not, on two consecutive polls of a listing
+this client could read whole, ends the wait with a `MandalaError`: a move's row
+leaves that listing when its computer is deleted, and when a finished move is
+dismissed. Two polls rather than one because the listing is eventually
+consistent, and a replica running behind can drop a row that is still there.
 
 **`waitForMove()` does not throw for a move that ended badly**, because the ways
 it can end are not one thing:

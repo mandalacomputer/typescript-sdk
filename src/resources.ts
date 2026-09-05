@@ -1,7 +1,7 @@
 /** Resource collections hanging off the client. */
 
-import { Computer, EphemeralComputer } from './computer.js';
-import { MandalaError, NotFoundError, TimeoutError } from './errors.js';
+import { Computer, EphemeralComputer, strandedText } from './computer.js';
+import { MandalaError, NotFoundError, suppressing, TimeoutError } from './errors.js';
 import type {
   BuildProgress,
   Move,
@@ -209,12 +209,23 @@ export class Computers {
    *
    * WHEN THE BLOCK THROWS AND THE CLEANUP DELETE FAILS TOO, both errors arrive
    * rather than one. A `SuppressedError`: `.suppressed` is the block's own
-   * error, which is the fault to read first, and `.error` is the cleanup
-   * failure, in a message naming the machine that is still billable. The
-   * runtime builds the identical pair for the `await using` spelling, and a
-   * cleanup failure that went unmentioned would be a cloud machine nothing
-   * anywhere names. A 404 from the cleanup is not one of these: the block
-   * deleted the machine itself, nothing is billable, and its error stands alone.
+   * error, which is the fault to read first, and `.error` is a `MandalaError`
+   * naming the machine that is still billable. Both spellings of this feature
+   * fill those two fields the same way, so `.error.message` carries the id
+   * whichever one was used — a cleanup failure that went unmentioned would be a
+   * cloud machine nothing anywhere names.
+   *
+   * Read `.error`, not `.message`. The top-level message is the one field the
+   * two spellings cannot agree on: the runtime writes its own generic text over
+   * it for `await using`, and only the callback spelling gets to say anything
+   * there.
+   *
+   * On Node 22, where `SuppressedError` is not a global, the same three fields
+   * arrive on a plain `Error` named `SuppressedError` — so `err.name` is the
+   * portable test and `instanceof` is not.
+   *
+   * A 404 from the cleanup is not one of these: the block deleted the machine
+   * itself, nothing is billable, and its error stands alone.
    */
   async ephemeral(args?: P.CreateArgs, opts?: CallOptions): Promise<EphemeralComputer>;
   async ephemeral<T>(
@@ -263,11 +274,18 @@ export class Computers {
           // `Symbol.asyncDispose` on this same pair of failures: `.error` is the
           // cleanup, `.suppressed` is the block's. Two spellings of one feature
           // must not disagree about the half that costs money.
-          throw new SuppressedError(
-            cleanupErr,
+          //
+          // Which is why `.error` is the SAME `MandalaError` the disposer
+          // builds, rather than the raw transport failure. The runtime writes
+          // its own generic text over `.message` for the `await using`
+          // spelling, so `.message` is not where the id can live; `.error` is
+          // the one field both spellings fill, and it has to name the machine
+          // in both or a caller reading it loses the id under exactly one of
+          // them.
+          throw suppressing(
+            new MandalaError(strandedText(computer.id, cleanupErr)),
             err,
-            `${computer.id} was not deleted and is still billable: ` +
-              `${cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr)}`,
+            strandedText(computer.id, cleanupErr),
           );
         }
       }
