@@ -95,22 +95,40 @@ describe('verify: the §3.2 vector', () => {
     ).toBe(true);
   });
 
-  it('accepts a buffer from another realm, and a SharedArrayBuffer', async () => {
+  it('accepts a buffer from another realm', async () => {
     // `instanceof ArrayBuffer` is realm-bound and `ArrayBuffer.isView` is false
-    // for a bare buffer, so both of these arrived at the fallthrough still
-    // being the wire bytes and were refused as a "parsed object" — told to go
-    // and read the raw body they were already holding. The brand crosses a
-    // realm where the constructor does not.
+    // for a bare buffer, so this arrived at the fallthrough still being the wire
+    // bytes and was refused as a "parsed object" — told to go and read the raw
+    // body it was already holding. The brand crosses a realm where the
+    // constructor does not.
     const bytes = new TextEncoder().encode(BODY);
     const foreign = runInNewContext('new ArrayBuffer(n)', { n: bytes.length }) as ArrayBuffer;
     expect(foreign instanceof ArrayBuffer).toBe(false);
     new Uint8Array(foreign).set(bytes);
     expect(await verify(SECRET, headers(), foreign, { now: AT })).toBe(true);
+  });
+
+  it('refuses shared memory, which can stop being what was authenticated', async () => {
+    // The bytes are HMAC'd over a snapshot and the caller then parses the
+    // ORIGINAL, so a thread holding the same buffer can rewrite it between the
+    // two reads — and a `true` would stop meaning that what was authenticated is
+    // what the handler parses, which is the only thing this function claims.
+    // Refused in both shapes it arrives in, since a view onto shared memory is
+    // the same buffer seen through a window.
+    const bytes = new TextEncoder().encode(BODY);
     const shared = new SharedArrayBuffer(bytes.length);
     new Uint8Array(shared).set(bytes);
-    expect(await verify(SECRET, headers(), shared as unknown as ArrayBuffer, { now: AT })).toBe(
-      true,
-    );
+    for (const body of [shared, new Uint8Array(shared), new DataView(shared)]) {
+      await expect(
+        verify(SECRET, headers(), body as unknown as ArrayBuffer, { now: AT }),
+      ).rejects.toThrow(ValidationError);
+      await expect(
+        verify(SECRET, headers(), body as unknown as ArrayBuffer, { now: AT }),
+      ).rejects.toThrow(/SharedArrayBuffer.*Pass a copy/s);
+    }
+    // And the copy the message asks for verifies, so the fix it names is one
+    // line and does not cost the receiver the delivery.
+    expect(await verify(SECRET, headers(), new Uint8Array(shared).slice(), { now: AT })).toBe(true);
   });
 
   it('refuses the timestamp one second later: the timestamp is signed', async () => {

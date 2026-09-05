@@ -311,6 +311,38 @@ describe('execBody', () => {
     expect(() => P.execBody({ command: 'x', env: asNumber })).toThrow(/not number/);
   });
 
+  it('refuses a key/value bag that is not a plain object, and names what it was', () => {
+    // `typeof v === 'object'` is true of a Map, a Date and a class instance
+    // alike, and `Object.keys` then answers `[]` for all three — so an env that
+    // passed only that check was dropped in silence and the command ran in the
+    // guest with none of the variables it asked for, reporting success. A Map is
+    // the ordinary mistake of the three: a key/value bag is what one is FOR.
+    const asMap = new Map([['FOO', 'bar']]) as unknown as Record<string, string>;
+    expect(() => P.execBody({ command: 'x', env: asMap })).toThrow(ValidationError);
+    expect(() => P.execBody({ command: 'x', env: asMap })).toThrow(
+      /env must be an object of NAME to value, not a Map/,
+    );
+    const asDate = new Date() as unknown as Record<string, string>;
+    expect(() => P.execBody({ command: 'x', env: asDate })).toThrow(/not a Date/);
+    class Environment {
+      FOO = 'bar';
+    }
+    const asInstance = new Environment() as unknown as Record<string, string>;
+    expect(() => P.execBody({ command: 'x', env: asInstance })).toThrow(/not an Environment/);
+  });
+
+  it('still takes the bag a caller built with no prototype at all', () => {
+    // `Object.create(null)` is a deliberate way of building exactly this — a
+    // name-to-value map with nothing inherited to collide with a variable called
+    // `constructor` — so the plain-object rule accepts a null prototype beside
+    // `Object.prototype` rather than refusing the most careful caller.
+    const bare = Object.assign(Object.create(null) as Record<string, string>, { FOO: 'bar' });
+    expect(P.execBody({ command: 'x', env: bare })).toEqual({
+      command: 'x',
+      env: { FOO: 'bar' },
+    });
+  });
+
   it('measures an entry in bytes, as the platform does', () => {
     // A limit counted in characters passes a value the platform then refuses:
     // these are two bytes each, so 2048 of them are 4096 bytes and the entry is

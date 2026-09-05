@@ -510,29 +510,41 @@ export class TimeoutError extends MandalaError {
  * reach that; a caller-supplied `fetch` is what makes it worth ruling out,
  * since this file already accepts that it must survive anything at all out of
  * one, and a hand-rolled Response with a string status is the whole hazard.
+ *
+ * The cast and the `satisfies` are what keep that from being bought at the
+ * price of the thing it protects. `Object.create(null)` is typed `any`, so
+ * `Object.assign` answers `any` and the annotation on the left checks nothing
+ * at all — a table with `402: 'not a class'` in it compiles clean, and the
+ * `new Cls(...)` below is then the same TypeError from inside the error path,
+ * arrived at through the other door. The cast gives `Object.assign` a target
+ * to check the literal against, and `satisfies` checks the literal where it is
+ * written so a wrong entry is named at the entry rather than at the call.
  */
-const BY_STATUS: Record<number, typeof APIError> = Object.assign(Object.create(null), {
-  401: AuthenticationError,
-  402: PlanLimitError,
-  403: PermissionDeniedError,
-  404: NotFoundError,
-  409: ConflictError,
-  413: TooLargeError,
-  416: RangeNotSatisfiableError,
-  503: UnavailableError,
-  504: GatewayTimeoutError,
-  // NOT OriginUnreachableError, which is the trap in this range: 520 means the
-  // platform WAS reached and answered unreadably. See OriginResponseError.
-  520: OriginResponseError,
-  521: OriginUnreachableError,
-  522: OriginUnreachableError,
-  523: OriginUnreachableError,
-  524: GatewayTimeoutError,
-  // Their own class, not more entries on the one above: an unreachable origin is
-  // a passing outage and these are a deployment somebody has to fix.
-  525: OriginTLSError,
-  526: OriginTLSError,
-});
+const BY_STATUS: Record<number, typeof APIError> = Object.assign(
+  Object.create(null) as Record<number, typeof APIError>,
+  {
+    401: AuthenticationError,
+    402: PlanLimitError,
+    403: PermissionDeniedError,
+    404: NotFoundError,
+    409: ConflictError,
+    413: TooLargeError,
+    416: RangeNotSatisfiableError,
+    503: UnavailableError,
+    504: GatewayTimeoutError,
+    // NOT OriginUnreachableError, which is the trap in this range: 520 means the
+    // platform WAS reached and answered unreadably. See OriginResponseError.
+    520: OriginResponseError,
+    521: OriginUnreachableError,
+    522: OriginUnreachableError,
+    523: OriginUnreachableError,
+    524: GatewayTimeoutError,
+    // Their own class, not more entries on the one above: an unreachable origin is
+    // a passing outage and these are a deployment somebody has to fix.
+    525: OriginTLSError,
+    526: OriginTLSError,
+  } satisfies Record<number, typeof APIError>,
+);
 
 /**
  * What a caller is told when a proxy abandoned the request and named nothing.

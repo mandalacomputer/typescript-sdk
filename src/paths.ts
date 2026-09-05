@@ -625,6 +625,26 @@ export const MAX_ENV_ENTRY_BYTES = 4096;
 const utf8Length = (s: string): number => new TextEncoder().encode(s).length;
 
 /**
+ * What arrived instead of an env, for the message that refuses it.
+ *
+ * `typeof` on its own answers `'object'` for a Map, a Date and a class instance
+ * alike, and "must be an object, not object" is a refusal that reads as a bug
+ * in the SDK rather than as an answer. The constructor's name is the word the
+ * caller will recognise as the thing they passed.
+ *
+ * No branch for `null`: {@link execBody} reads `null` and `undefined` alike as
+ * "no env" and never calls {@link envObject} with either, so a case for it here
+ * would be this code claiming to handle something that cannot reach it.
+ */
+function envShape(env: unknown): string {
+  if (Array.isArray(env)) return 'an array';
+  if (typeof env !== 'object') return typeof env;
+  const name = (env as { constructor?: { name?: string } }).constructor?.name;
+  if (!name) return 'an object with an unrecognised prototype';
+  return `${/^[AEIOU]/.test(name) ? 'an' : 'a'} ${name}`;
+}
+
+/**
  * Check an exec environment, and hand back a copy.
  *
  * The two character refusals are the ones that would otherwise not fail. The
@@ -645,10 +665,23 @@ function envObject(env: Readonly<Record<string, string>>): Json {
   // name check cannot see it — so `env: 'FOO=bar'` reaches the guest as seven
   // variables named after array indices, which is the one failure this
   // function's whole purpose is to make impossible.
-  if (!isRecord(env)) {
-    throw new ValidationError(
-      `env must be an object of NAME to value, not ${env === null ? 'null' : Array.isArray(env) ? 'an array' : typeof env}`,
-    );
+  //
+  // A PLAIN object, not merely something `typeof` calls one. `Object.keys`
+  // answers `[]` for a Map, a Date and a class instance alike, and a check that
+  // only asked for an object would let all three past into an empty `{ ...env }`
+  // — so `env: new Map([['FOO', 'bar']])`, which is an ordinary mistake to make
+  // about a key/value bag, would run the command in the guest with none of the
+  // variables it asked for and report success. That is the same silent drop as
+  // the string above, arrived at from the other side.
+  //
+  // A null prototype is accepted beside `Object.prototype` because
+  // `Object.create(null)` is a deliberate way of building exactly this bag. A
+  // literal from another realm is refused with the rest: that is this rule's
+  // one cost, and holding an env built inside a `vm` context is a far stranger
+  // thing to be doing than holding a Map.
+  const proto: unknown = isRecord(env) ? Object.getPrototypeOf(env) : undefined;
+  if (!isRecord(env) || (proto !== null && proto !== Object.prototype)) {
+    throw new ValidationError(`env must be an object of NAME to value, not ${envShape(env)}`);
   }
   const names = Object.keys(env);
   if (names.length > MAX_ENV_ENTRIES) {

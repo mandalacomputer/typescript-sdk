@@ -301,6 +301,25 @@ describe('status mapping', () => {
     }
   });
 
+  it('builds an error for every status it maps, so no entry can be a non-constructor', () => {
+    // The runtime half of what the table's type says. The null prototype above
+    // is built with `Object.create(null)`, which is typed `any` — so unless the
+    // assign is given a target to check the literal against, the annotation
+    // checks nothing at all and an entry may be a string or a number. That is a
+    // `TypeError: Cls is not a constructor` thrown from inside this function,
+    // which destroys the failure it was called to describe: the same end as the
+    // inherited key above, reached from the other side.
+    const mapped = [401, 402, 403, 404, 409, 413, 416, 503, 504, 520, 521, 522, 523, 524, 525, 526];
+    for (const status of [...mapped, 418, 500]) {
+      const err = errorForStatus(status, 'the platform said so');
+      expect(err, String(status)).toBeInstanceOf(APIError);
+      expect(err.status, String(status)).toBe(status);
+      // The message is not asserted: the 5xx wordings above are substituted on
+      // purpose, and what is being pinned here is that each entry CONSTRUCTS.
+      expect(err.message.length, String(status)).toBeGreaterThan(0);
+    }
+  });
+
   it('falls back to the status line when there was no message', async () => {
     const rec = recorder(() => new Response('', { status: 500 }));
     const err = await client(rec)

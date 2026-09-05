@@ -89,6 +89,16 @@ const SIGNATURE_VERSION = 'v1';
  * in front of the MAC is authenticated. A rotation puts two entries on a
  * delivery and never more; eight leaves room for a scheme this SDK has not
  * seen yet and still bounds the work a stranger can ask for.
+ *
+ * The bound cuts the other way too, and that is the accepted trade rather than
+ * an oversight: anything able to APPEND to this header — a proxy, a
+ * misconfigured edge — can spend the budget on well-formed junk and make an
+ * authentic delivery answer false, which is the one failure that reads to an
+ * operator as the platform signing wrong. Something able to rewrite a request's
+ * headers is already a compromise of a different order, while the work the cap
+ * refuses is a multiple of the body's cost that any stranger can ask for
+ * unauthenticated. Raise the number if a scheme ever needs more; do not remove
+ * it and reopen the side that needs no access at all.
  */
 const SIGNATURE_CANDIDATES_MAX = 8;
 
@@ -213,6 +223,26 @@ function secretBytes(secret: string): Uint8Array {
 
 function bodyBytes(rawBody: WebhookBody): Uint8Array {
   if (typeof rawBody === 'string') return encodeText(rawBody);
+  // Shared memory is refused before anything reads it, and in both shapes it
+  // arrives in — the buffer itself, or a view onto one. What this function
+  // returns is HMAC'd over a SNAPSHOT (`concat` copies), while the caller goes
+  // on to parse the original; a thread holding the same buffer can rewrite it
+  // between those two reads. A `true` would then stop meaning that what was
+  // authenticated is what the handler parses, which is the only claim this file
+  // makes. Refused rather than copied here, because a copy taken silently would
+  // authenticate one set of bytes and hand the handler another — the receiver
+  // has to take the copy, so that it is the copy it goes on to read.
+  //
+  // By brand, for the reason the ArrayBuffer below is read by brand: a worker's
+  // buffer can come from another realm, where `instanceof` does not follow.
+  const memory: unknown = ArrayBuffer.isView(rawBody) ? rawBody.buffer : rawBody;
+  if (Object.prototype.toString.call(memory) === '[object SharedArrayBuffer]') {
+    throw new ValidationError(
+      'rawBody is backed by a SharedArrayBuffer: another thread can rewrite those bytes ' +
+        'after they are authenticated and before the handler parses them. Pass a copy — ' +
+        'new Uint8Array(shared).slice() — and parse that same copy',
+    );
+  }
   if (rawBody instanceof Uint8Array) return rawBody;
   if (rawBody instanceof ArrayBuffer) return new Uint8Array(rawBody);
   // Any other view — a DataView, a Buffer from a runtime whose Buffer is not a
@@ -222,13 +252,12 @@ function bodyBytes(rawBody: WebhookBody): Uint8Array {
     return new Uint8Array(rawBody.buffer, rawBody.byteOffset, rawBody.byteLength);
   }
   // `instanceof` above is realm-bound, and `ArrayBuffer.isView` is false for a
-  // bare buffer — so a buffer from another realm, and every SharedArrayBuffer,
-  // arrives here still being the wire bytes. The brand crosses realms where the
-  // constructor does not, and reading it before the fallthrough is what keeps
-  // those from being called a parsed object and told to go read the raw body
-  // they are already holding.
-  const brand = Object.prototype.toString.call(rawBody);
-  if (brand === '[object ArrayBuffer]' || brand === '[object SharedArrayBuffer]') {
+  // bare buffer — so a buffer from another realm arrives here still being the
+  // wire bytes. The brand crosses realms where the constructor does not, and
+  // reading it before the fallthrough is what keeps such a body from being
+  // called a parsed object and told to go read the raw body it is already
+  // holding.
+  if (Object.prototype.toString.call(rawBody) === '[object ArrayBuffer]') {
     return new Uint8Array(rawBody as ArrayBufferLike);
   }
   // The parsed object is the mistake this whole file is about, and the one a

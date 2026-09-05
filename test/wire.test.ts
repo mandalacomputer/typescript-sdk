@@ -5,6 +5,7 @@ import { Client } from '../src/index.js';
 import {
   anyRoute,
   BASE,
+  BUILD_PROGRESS,
   COMPUTER,
   EXEC_STARTED,
   json,
@@ -12,6 +13,7 @@ import {
   type Responder,
   recorder,
   SNAPSHOT,
+  TEMPLATE_BUILD,
   USAGE,
   WEBHOOK,
   WEBHOOK_DELIVERY,
@@ -746,6 +748,81 @@ describe('the HTTP status a webhook endpoint never answered', () => {
     expect(unreadable && 'lastStatus' in unreadable).toBe(false);
     expect(refused?.lastStatus).toBe(503);
     expect(stringified?.lastStatus).toBe(404);
+  });
+});
+
+describe('a finish time the platform never wrote', () => {
+  it('reads a finished_at that DECODES to nothing as absent, however it was spelled', async () => {
+    // The guard is on the string `str` produced, not on the raw field, and the
+    // difference is the whole of it: `str` answers `''` for an omitted key, for
+    // a null, for the `""` a Go `string` field with no `omitempty` writes for an
+    // unset time — and for a `[]`, which is not a spelling anybody enumerated.
+    // Every one of them sorts at `Date.parse('')`, which is NaN, which
+    // `moveStamp` floors to -Infinity: the newest move went to the bottom and
+    // `latestFinishedMove` handed back the day-old row as this computer's
+    // outcome.
+    const yesterday = {
+      ...MOVE_DONE,
+      computer_id: 'vm-1',
+      started_at: '2026-08-22T01:00:00.000Z',
+      finished_at: '2026-08-22T02:00:00.000Z',
+    };
+    for (const spelling of ['', [], [''], [[]]]) {
+      const today = {
+        ...MOVE_DONE,
+        computer_id: 'vm-1',
+        state: 'moved',
+        live: false,
+        started_at: '2026-08-23T01:00:00.000Z',
+        finished_at: spelling,
+      };
+      const { client: c } = client((call) =>
+        call.path === '/moves' ? json({ moves: [yesterday, today] }) : anyRoute(call),
+      );
+      const computer = await c.computers.get('vm-1');
+      const move = await computer.waitForMove({ pollMs: 1 });
+      // `moved`, not `done`: the newer row wins on the startedAt that WAS
+      // readable, and the two states are different outcomes — one changed the
+      // hardware and one did not.
+      const seen = `${JSON.stringify(spelling)}: ${move.state} ${'finishedAt' in move}`;
+      expect(seen).toBe(`${JSON.stringify(spelling)}: moved false`);
+      // And the raw response still carries what the platform actually sent.
+      expect(move.raw.finished_at).toEqual(spelling);
+    }
+  });
+
+  it('reads a build and its steps by the same rule, on the field they share', async () => {
+    // One idea, applied to all three decoders that carry it. A build in flight
+    // and a step that has not run are exactly the records whose finish time the
+    // platform has not written yet, so this is the ordinary answer here rather
+    // than a strange one — and a caller reading `finishedAt` to decide whether
+    // the work is over was told it finished at a time that will not parse.
+    const { client: c } = client((call) =>
+      call.path === '/builds/bld-1'
+        ? json({ ...TEMPLATE_BUILD, finished_at: '' })
+        : call.path.endsWith('/progress')
+          ? json({
+              ...BUILD_PROGRESS,
+              steps: [
+                { n: 1, kind: 'apt', label: 'ripgrep', status: 'done', finished_at: '' },
+                {
+                  n: 2,
+                  kind: 'run',
+                  label: 'build',
+                  status: 'done',
+                  finished_at: '2026-08-26T12:05:00.000Z',
+                },
+              ],
+            })
+          : anyRoute(call),
+    );
+    const build = await c.builds.get('bld-1');
+    expect('finishedAt' in build).toBe(false);
+    const steps = (await c.builds.progress('bld-1')).steps;
+    expect(steps[0] && 'finishedAt' in steps[0]).toBe(false);
+    // And a step that DID finish still reports when: the rule drops what cannot
+    // be read, not the field.
+    expect(steps[1]?.finishedAt).toBe('2026-08-26T12:05:00.000Z');
   });
 });
 
