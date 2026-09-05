@@ -376,6 +376,31 @@ describe('what the decoder refuses to invent', () => {
       toComputerEvent(event({ type: 'computer.idle', data: { idle_seconds: 1800 } }))?.idleSeconds,
     ).toBe(1800);
   });
+
+  it('reads a number only in the notation this wire writes one in', () => {
+    // `Number()` is lenient about HOW a number is spelled as well as about what
+    // one is: `'0b101'` is 5 to it and `'0x10'` is 16, and neither is a sequence
+    // any hop here writes. The Python client reading the same frame RAISES on
+    // `int('0x10')`, so the two would disagree about the position of the stream
+    // rather than both refusing it — and a `seq` invented out of `'0b101'` is
+    // one this client would then resume from.
+    for (const seq of ['0x10', '0b101', '0o17', '1_000', 'Infinity']) {
+      expect(toComputerEvent(event({ seq }))?.seq, seq).toBeUndefined();
+    }
+    expect(toComputerEvent(event({ type: 'process.exited', data: { pid: '0x10' } }))?.pid).toBe(
+      undefined,
+    );
+    // And the decimal spellings a host that stringifies its numbers really
+    // sends are still read, which is the other half of the rule.
+    for (const [seq, expected] of [
+      ['41', 41],
+      ['+41', 41],
+      [' 41 ', 41],
+      ['4.1e1', 41],
+    ] as const) {
+      expect(toComputerEvent(event({ seq }))?.seq, seq).toBe(expected);
+    }
+  });
 });
 
 describe('the opening frame', () => {

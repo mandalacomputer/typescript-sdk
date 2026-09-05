@@ -750,7 +750,14 @@ export class Computer {
     }
   }
 
-  async #power(action: string, opts: CallOptions = {}, query?: Query): Promise<this> {
+  // The one action helper in this class whose argument is a variable rather
+  // than a literal written at the call site, so it is the one place the route
+  // builder's union has to be restated. Four values, all four of them power.
+  async #power(
+    action: 'start' | 'stop' | 'suspend' | 'restart',
+    opts: CallOptions = {},
+    query?: Query,
+  ): Promise<this> {
     // The platform answers a power action with the computer, so this is one
     // round trip where the Python SDK spends two. Guarded anyway: a platform
     // that answered 204 would otherwise leave a handle reporting the state the

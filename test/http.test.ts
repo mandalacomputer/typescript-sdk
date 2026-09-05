@@ -3,7 +3,13 @@
 import { createServer } from 'node:http';
 import { type AddressInfo, createServer as createSocketServer, type Socket } from 'node:net';
 import { describe, expect, it, vi } from 'vitest';
-import { errorForStatus, MoveRequiredError, TimeoutError, ValidationError } from '../src/errors.js';
+import {
+  errorForStatus,
+  MAPPED_STATUSES,
+  MoveRequiredError,
+  TimeoutError,
+  ValidationError,
+} from '../src/errors.js';
 import {
   APIError,
   AuthenticationError,
@@ -285,6 +291,45 @@ describe('status mapping', () => {
       expect(err.status).toBe(status);
     });
   }
+
+  it('does not resolve a status through Object.prototype', () => {
+    // The status table is a lookup keyed by a value that came off a response,
+    // and a plain object literal inherits `constructor`, `toString` and the
+    // rest. `BY_STATUS[status] ?? APIError` cannot fall back for an inherited
+    // key, so `new Cls(...)` was `new Object.prototype.toString()` — a
+    // TypeError thrown from inside the error path, destroying the failure it
+    // was called to describe. `fetch` is caller-injectable and this file
+    // already accepts that it must survive anything at all out of one.
+    for (const status of ['constructor', 'toString', 'hasOwnProperty', '__proto__']) {
+      const err = errorForStatus(status as unknown as number, 'the platform said so');
+      expect(err, status).toBeInstanceOf(APIError);
+      expect(err.message, status).toBe('the platform said so');
+    }
+  });
+
+  it('builds an error for every status it maps, so no entry can be a non-constructor', () => {
+    // The runtime half of what the table's type says. The null prototype above
+    // is built with `Object.create(null)`, which is typed `any` — so unless the
+    // assign is given a target to check the literal against, the annotation
+    // checks nothing at all and an entry may be a string or a number. That is a
+    // `TypeError: Cls is not a constructor` thrown from inside this function,
+    // which destroys the failure it was called to describe: the same end as the
+    // inherited key above, reached from the other side.
+    //
+    // Read out of the table rather than copied from it. A list written here by
+    // hand covers the entries that existed the day it was written, so a status
+    // added to the table later goes untested by the one test whose whole job is
+    // to notice — the drift, not the mapping, is what this asserts against.
+    // 418 and 500 are the unmapped pair that must still build an `APIError`.
+    for (const status of [...MAPPED_STATUSES, 418, 500]) {
+      const err = errorForStatus(status, 'the platform said so');
+      expect(err, String(status)).toBeInstanceOf(APIError);
+      expect(err.status, String(status)).toBe(status);
+      // The message is not asserted: the 5xx wordings above are substituted on
+      // purpose, and what is being pinned here is that each entry CONSTRUCTS.
+      expect(err.message.length, String(status)).toBeGreaterThan(0);
+    }
+  });
 
   it('falls back to the status line when there was no message', async () => {
     const rec = recorder(() => new Response('', { status: 500 }));

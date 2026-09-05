@@ -19,7 +19,7 @@
  */
 
 import { ConnectionError, MandalaError, ValidationError } from './errors.js';
-import { type GuestWindow, said, toGuestWindow } from './models.js';
+import { decimal, type GuestWindow, said, toGuestWindow } from './models.js';
 import { isRecord } from './paths.js';
 import { MAX_TIMER_MS } from './transport.js';
 
@@ -484,9 +484,12 @@ export type Hello = {
 
 /** A number, or `undefined` for anything that is not one. */
 const int = (v: unknown): number | undefined => {
-  if (typeof v !== 'number' && typeof v !== 'string') return undefined;
-  if (typeof v === 'string' && v.trim() === '') return undefined;
-  const n = Number(v);
+  // The string branch goes through {@link decimal} rather than `Number()`, so
+  // this file reads a stringified sequence the way models.ts reads a
+  // stringified pid — one rule for what the text of a number is, in the one
+  // notation this wire uses.
+  const n = typeof v === 'number' ? v : typeof v === 'string' ? decimal(v) : undefined;
+  if (n === undefined) return undefined;
   // An INTEGER, not merely a finite number, because every field this reads is
   // one: a sequence, a pid, a second count. `toBackgroundExec` already refuses
   // a non-integer pid, and a `91.5` reaching `ev.pid` would fail the

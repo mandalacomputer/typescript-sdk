@@ -13,6 +13,8 @@ import {
   recorder,
   SNAPSHOT,
   USAGE,
+  WEBHOOK,
+  WEBHOOK_DELIVERY,
   WINDOW,
 } from './harness.js';
 
@@ -659,6 +661,91 @@ describe('a coerced value is not the value', () => {
     );
     const computer = await c.computers.get('vm-1');
     expect((await computer.waitForMove({ pollMs: 1 })).state).toBe('done');
+  });
+
+  it('does not read a number written in a notation this wire never uses', async () => {
+    // `Number()` is lenient about HOW a number is written as well as about what
+    // one is: `'0x10'` is 16 to it, `'0b101'` is 5, `'0o17'` is 15. Nothing here
+    // sends those — and the Python client at the other end of the same payload
+    // RAISES on `int('0x10')`, so a field the two read as different numbers is
+    // worse than one neither can read.
+    for (const code of ['0x10', '0b101', '0o17', 'Infinity', '1_000', '1,000', '12px']) {
+      const { client: c } = client((call) =>
+        call.path.endsWith('/exec')
+          ? json({ exit_code: code, stdout: '', stderr: '', timed_out: false })
+          : anyRoute(call),
+      );
+      const computer = await c.computers.get('vm-1');
+      const result = await computer.exec('x');
+      expect(`${code}: ${result.exitCode}/${result.ok}`).toBe(`${code}: -1/false`);
+    }
+  });
+
+  it('still reads every decimal spelling a host that stringifies its numbers sends', async () => {
+    // The other half of the rule, and the one that would break real traffic if
+    // the shape check were drawn too tight: a sign, a fraction, an exponent and
+    // surrounding space are all ordinary ways of writing a number, and a guard
+    // that refused them would tell such a host every field it sends is junk.
+    for (const [pid, expected] of [
+      ['4242', 4242],
+      ['+4242', 4242],
+      [' 4242 ', 4242],
+      ['4.2e3', 4200],
+      ['0042', 42],
+    ] as const) {
+      const { client: c } = client((call) =>
+        call.path.endsWith('/windows') ? json({ windows: [{ ...WINDOW, pid }] }) : anyRoute(call),
+      );
+      const [w] = await (await c.computers.get('vm-1')).windows();
+      expect(`${pid}: ${w?.pid}`).toBe(`${pid}: ${expected}`);
+    }
+    // And a negative and a fraction still decode, and are still refused one
+    // layer up by the rule that a pid is a non-negative integer.
+    const { client: c } = client((call) =>
+      call.path.endsWith('/windows')
+        ? json({ windows: [{ ...WINDOW, x: '-1920', y: '-12.5' }] })
+        : anyRoute(call),
+    );
+    const [w] = await (await c.computers.get('vm-1')).windows();
+    expect([w?.x, w?.y]).toEqual([-1920, -12.5]);
+  });
+});
+
+describe('the HTTP status a webhook endpoint never answered', () => {
+  it('does not report an unreadable last_status as a status of zero', async () => {
+    // `num`'s fallback is 0, and 0 is not an HTTP status — but it reads as one,
+    // so a caller branching on `lastStatus >= 500` is told the endpoint answered
+    // when it never did. The field's own documentation says absence means "the
+    // newest got no answer", which is exactly what `count` exists to express.
+    for (const value of [[], {}, ' ', 'gateway timeout', true, [503]]) {
+      const { client: c } = client((call) =>
+        call.path === '/webhooks' ? json([{ ...WEBHOOK, last_status: value }]) : anyRoute(call),
+      );
+      const [hook] = await c.webhooks.list();
+      expect(`${JSON.stringify(value)}: ${JSON.stringify(hook?.lastStatus)}`).toBe(
+        `${JSON.stringify(value)}: undefined`,
+      );
+      // Absent, not present-and-undefined: a key the platform never answered
+      // must not show up in `Object.keys`, the way every optional field here is
+      // omitted rather than nulled.
+      expect(hook && 'lastStatus' in hook).toBe(false);
+    }
+  });
+
+  it('reads a delivery the same way, and still reports the status one did get', async () => {
+    const { client: c } = client((call) =>
+      call.path.endsWith('/deliveries')
+        ? json([
+            { ...WEBHOOK_DELIVERY, id: 'whd-unreadable', last_status: {} },
+            { ...WEBHOOK_DELIVERY, id: 'whd-refused', last_status: 503 },
+            { ...WEBHOOK_DELIVERY, id: 'whd-stringified', last_status: '404' },
+          ])
+        : anyRoute(call),
+    );
+    const [unreadable, refused, stringified] = await c.webhooks.deliveries('whk-1');
+    expect(unreadable && 'lastStatus' in unreadable).toBe(false);
+    expect(refused?.lastStatus).toBe(503);
+    expect(stringified?.lastStatus).toBe(404);
   });
 });
 

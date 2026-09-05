@@ -46,10 +46,30 @@ export const str = (v: unknown, fallback = ''): string => {
  * this client invented rather than read, and the fallback is what it is for.
  */
 export const num = (v: unknown, fallback = 0): number => {
-  if (typeof v !== 'number' && typeof v !== 'string') return fallback;
-  if (typeof v === 'string' && v.trim() === '') return fallback;
-  const n = Number(v);
-  return Number.isFinite(n) ? n : fallback;
+  if (typeof v === 'number') return Number.isFinite(v) ? v : fallback;
+  if (typeof v !== 'string') return fallback;
+  return decimal(v) ?? fallback;
+};
+/**
+ * The number a STRING spells, in the one notation a payload can mean by it.
+ *
+ * `Number()` is where the last of the coercion hides. It is not only lenient
+ * about what is a number, it is lenient about how one is written: `'0x10'` is
+ * 16 to it, `'0b101'` is 5, `'0o17'` is 15. Nothing on this wire is written
+ * that way — and the client at the other end of the same payload disagrees,
+ * because Python's `int('0x10')` raises rather than answering sixteen. A field
+ * two clients read as different numbers is worse than one neither can read, so
+ * a shape is required before the coercion is allowed to run, and anything else
+ * is the non-answer the callers already know how to report.
+ *
+ * Surrounding space is still tolerated, because a host that stringifies its
+ * numbers may pad them and the digits it sent are not in doubt.
+ */
+export const decimal = (v: string): number | undefined => {
+  const s = v.trim();
+  if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(s)) return undefined;
+  const n = Number(s);
+  return Number.isFinite(n) ? n : undefined;
 };
 /**
  * What a boolean field on the wire actually WAS, before anything decides what it
@@ -172,11 +192,9 @@ export const caveat = (v: unknown): boolean => {
  * review, third pass, OPL-3850).
  */
 export const count = (v: unknown): number | undefined => {
-  if (v == null) return undefined;
-  if (typeof v !== 'number' && typeof v !== 'string') return undefined;
-  if (typeof v === 'string' && v.trim() === '') return undefined;
-  const n = Number(v);
-  return Number.isFinite(n) ? n : undefined;
+  if (typeof v === 'number') return Number.isFinite(v) ? v : undefined;
+  if (typeof v !== 'string') return undefined;
+  return decimal(v);
 };
 
 /**
@@ -1407,18 +1425,6 @@ export function toSnapshot(d: Record<string, unknown>): Snapshot {
 }
 
 /**
- * What a computer would leave behind, from `GET computers/:id/snapshots`.
- *
- * NOT a listing of the snapshots themselves — that is `client.snapshots.list()`,
- * and the two answer different shapes.
- *
- * `fingerprint` is why this route exists rather than being a total a caller
- * could compute: it names that exact set, and it is the interlock on an
- * irreversible operation. Pass it to `computer.delete({ deleteSnapshots: true,
- * expect })` and a capture that finished after you looked cannot be swept up in
- * a decision that was never about it.
- */
-/**
  * A move in flight, or the outcome of one that has finished.
  *
  * A resize past what a computer's host can run is refused with an offer (see
@@ -1517,6 +1523,18 @@ export function toMove(d: Record<string, unknown>): Move {
   };
 }
 
+/**
+ * What a computer would leave behind, from `GET computers/:id/snapshots`.
+ *
+ * NOT a listing of the snapshots themselves — that is `client.snapshots.list()`,
+ * and the two answer different shapes.
+ *
+ * `fingerprint` is why this route exists rather than being a total a caller
+ * could compute: it names that exact set, and it is the interlock on an
+ * irreversible operation. Pass it to `computer.delete({ deleteSnapshots: true,
+ * expect })` and a capture that finished after you looked cannot be swept up in
+ * a decision that was never about it.
+ */
 export type Holdings = {
   count: number;
   sizeBytes: number;
@@ -2187,6 +2205,13 @@ const strings = (v: unknown): string[] =>
   Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
 
 export function toWebhook(d: Record<string, unknown>): Webhook {
+  // `count`, not `num`, and the key omitted rather than set: the field's whole
+  // job is to be able to say the newest attempt got no answer, and `num`'s
+  // fallback is 0 — which is not an HTTP status but reads as one, so a caller
+  // branching on `lastStatus >= 500` is told the endpoint answered when it
+  // never did. This is the same rule `windowPid` and the geometry read by, for
+  // the same reason: absent is a real answer here and 0 cannot stand in for it.
+  const lastStatus = count(d.last_status);
   return {
     id: str(d.id),
     url: str(d.url),
@@ -2200,7 +2225,7 @@ export function toWebhook(d: Record<string, unknown>): Webhook {
     ...(d.disabled_at == null ? {} : { disabledAt: str(d.disabled_at) }),
     ...(d.last_success_at == null ? {} : { lastSuccessAt: str(d.last_success_at) }),
     ...(d.last_failure_at == null ? {} : { lastFailureAt: str(d.last_failure_at) }),
-    ...(d.last_status == null ? {} : { lastStatus: num(d.last_status) }),
+    ...(lastStatus === undefined ? {} : { lastStatus }),
     ...(d.workspace_id == null ? {} : { workspaceId: str(d.workspace_id) }),
     createdAt: str(d.created_at),
     updatedAt: str(d.updated_at),
@@ -2275,6 +2300,10 @@ export type WebhookDelivery = {
 };
 
 export function toWebhookDelivery(d: Record<string, unknown>): WebhookDelivery {
+  // As on {@link toWebhook}, and it matters more here: this is the row a
+  // caller reads to decide whether the endpoint refused the delivery or never
+  // saw it, and `num`'s 0 answers that question wrongly in the one direction.
+  const lastStatus = count(d.last_status);
   return {
     id: str(d.id),
     eventType: str(d.event_type),
@@ -2284,7 +2313,7 @@ export function toWebhookDelivery(d: Record<string, unknown>): WebhookDelivery {
     attempts: num(d.attempts),
     ...(d.next_at == null ? {} : { nextAt: str(d.next_at) }),
     ...(d.attempted_at == null ? {} : { attemptedAt: str(d.attempted_at) }),
-    ...(d.last_status == null ? {} : { lastStatus: num(d.last_status) }),
+    ...(lastStatus === undefined ? {} : { lastStatus }),
     ...(d.last_error == null ? {} : { lastError: str(d.last_error) }),
     ...(d.delivered_at == null ? {} : { deliveredAt: str(d.delivered_at) }),
     createdAt: str(d.created_at),
