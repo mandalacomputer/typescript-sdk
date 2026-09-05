@@ -92,6 +92,15 @@ function pathId(id: string, what: string): string {
   if (id === '.' || id === '..') {
     throw new ValidationError(`${what} must not be ${JSON.stringify(id)}`);
   }
+  // A lone surrogate is not UTF-8 and has no percent-encoding, so
+  // `encodeURIComponent` throws a bare URIError reading `URI malformed` —
+  // which names neither the argument nor the call it came from, and is not the
+  // error type every other refusal on this surface is caught as. Named here so
+  // it arrives as the same ValidationError a `..` does. A well-formed pair is
+  // a single code point under the `u` flag and does not match.
+  if (/\p{Surrogate}/u.test(id)) {
+    throw new ValidationError(`${what} must be valid UTF-8 (got ${JSON.stringify(id)})`);
+  }
   return encodeURIComponent(id);
 }
 
@@ -135,10 +144,34 @@ function positiveIntIf(v: number | undefined, what: string): void {
 export const computer = (id: string): string => `computers/${pathId(id, 'computer id')}`;
 
 /**
- * start | stop | suspend | restart | clone | screenshot | input | exec |
- * windows | files | snapshots | schedule | agent
+ * The sub-routes one computer answers on.
+ *
+ * A union rather than a `string`, and the same for the three action helpers
+ * below. An id is interpolated through {@link pathId}; an action is
+ * interpolated raw, because the set is closed and every one of them is a
+ * literal written in this package. Naming that set is what makes it so — the
+ * enumeration used to live in this comment, where nothing checked it, and it
+ * had already fallen two behind the call sites.
  */
-export const computerAction = (id: string, action: string): string => `${computer(id)}/${action}`;
+type ComputerAction =
+  | 'start'
+  | 'stop'
+  | 'suspend'
+  | 'restart'
+  | 'clone'
+  | 'move'
+  | 'screenshot'
+  | 'input'
+  | 'clipboard'
+  | 'exec'
+  | 'windows'
+  | 'files'
+  | 'snapshots'
+  | 'schedule'
+  | 'agent';
+
+export const computerAction = (id: string, action: ComputerAction): string =>
+  `${computer(id)}/${action}`;
 
 /**
  * A background command's guest pid (OPL-3584).
@@ -226,6 +259,22 @@ export function templateDocument(document: string): string {
 }
 
 /**
+ * A real `string`, refused rather than coerced.
+ *
+ * The companion to {@link flag}, for the same class of reason. Every builder
+ * below reads a string and then trims, concatenates or encodes it: a non-string
+ * reaching one of those is a `TypeError` thrown from inside this SDK that names
+ * neither the argument nor the call, or — worse — a `String()` coercion that
+ * sends `"[object Object]"` to the platform as if somebody had typed it.
+ */
+function requireString(v: unknown, what: string): string {
+  if (typeof v !== 'string') {
+    throw new ValidationError(`${what} must be a string, not ${v === null ? 'null' : typeof v}`);
+  }
+  return v;
+}
+
+/**
  * One optional boolean option, refused when it is not a boolean.
  *
  * Truthiness is the wrong test for every flag on this surface, and the reason
@@ -242,22 +291,6 @@ export function templateDocument(document: string): string {
  * "omitted" is a third state that the parameters below map to their own
  * defaults (adversarial review and the sweep it prompted, OPL-3835).
  */
-/**
- * A real `string`, refused rather than coerced.
- *
- * The companion to {@link flag}, for the same class of reason. Every builder
- * below reads a string and then trims, concatenates or encodes it: a non-string
- * reaching one of those is a `TypeError` thrown from inside this SDK that names
- * neither the argument nor the call, or — worse — a `String()` coercion that
- * sends `"[object Object]"` to the platform as if somebody had typed it.
- */
-function requireString(v: unknown, what: string): string {
-  if (typeof v !== 'string') {
-    throw new ValidationError(`${what} must be a string, not ${v === null ? 'null' : typeof v}`);
-  }
-  return v;
-}
-
 export function flag(v: boolean | undefined, what: string): boolean | undefined {
   if (v === undefined) return undefined;
   // A PRIMITIVE boolean. `typeof new Boolean(false)` is `'object'`.
@@ -288,15 +321,16 @@ export function noReuse(v: boolean | undefined): Query {
 
 export const build = (id: string): string => `${BUILDS}/${pathId(id, 'build id')}`;
 export const webhook = (id: string): string => `${WEBHOOKS}/${pathId(id, 'webhook id')}`;
-export const webhookAction = (id: string, action: string): string => `${webhook(id)}/${action}`;
+export const webhookAction = (id: string, action: 'rotate' | 'test' | 'deliveries'): string =>
+  `${webhook(id)}/${action}`;
 
-/** progress | events */
-export const buildAction = (id: string, action: string): string => `${build(id)}/${action}`;
+export const buildAction = (id: string, action: 'progress' | 'events'): string =>
+  `${build(id)}/${action}`;
 
 export const snapshot = (id: string): string => `snapshots/${pathId(id, 'snapshot id')}`;
 
-/** restore | clone */
-export const snapshotAction = (id: string, action: string): string => `${snapshot(id)}/${action}`;
+export const snapshotAction = (id: string, action: 'restore' | 'clone'): string =>
+  `${snapshot(id)}/${action}`;
 
 export const CHAT_COMPLETIONS = 'chat/completions';
 
@@ -440,19 +474,6 @@ export type UpdateArgs = {
 };
 
 /**
- * Build a PATCH payload.
- *
- * The platform refuses a rename combined with a resize on purpose — a resize
- * needs the computer stopped and a rename does not, so one request cannot
- * honour both without applying half of it. That refusal is left to the server:
- * unlike the create/size clash it depends on the computer's current state,
- * which this function does not have.
- *
- * An empty patch is refused here. It can only mean a caller built the arguments
- * from something that turned out to be empty, and the platform's answer to it
- * is a 400 that reads as though the request was malformed.
- */
-/**
  * What a move is asked for: the same sizing group a resize takes, minus the two
  * fields a move cannot deliver.
  *
@@ -493,6 +514,19 @@ export function moveBody(args: MoveArgs): Json {
   return omitUndefined({ cpu: args.cpu, ram_mb: args.ramMb, disk_gb: args.diskGb });
 }
 
+/**
+ * Build a PATCH payload.
+ *
+ * The platform refuses a rename combined with a resize on purpose — a resize
+ * needs the computer stopped and a rename does not, so one request cannot
+ * honour both without applying half of it. That refusal is left to the server:
+ * unlike the create/size clash it depends on the computer's current state,
+ * which this function does not have.
+ *
+ * An empty patch is refused here. It can only mean a caller built the arguments
+ * from something that turned out to be empty, and the platform's answer to it
+ * is a 400 that reads as though the request was malformed.
+ */
 export function updateBody(args: UpdateArgs): Json {
   positiveIntIf(args.cpu, 'cpu');
   positiveIntIf(args.ramMb, 'ramMb');
@@ -605,6 +639,17 @@ const utf8Length = (s: string): number => new TextEncoder().encode(s).length;
  * checks below have already passed over it.
  */
 function envObject(env: Readonly<Record<string, string>>): Json {
+  // The shape is checked before the entries because a string passes every
+  // entry check that follows: `Object.keys('FOO=bar')` is `'0'..'6'`, each
+  // value is a one-character string, and the `=` lands in a value where the
+  // name check cannot see it — so `env: 'FOO=bar'` reaches the guest as seven
+  // variables named after array indices, which is the one failure this
+  // function's whole purpose is to make impossible.
+  if (!isRecord(env)) {
+    throw new ValidationError(
+      `env must be an object of NAME to value, not ${env === null ? 'null' : Array.isArray(env) ? 'an array' : typeof env}`,
+    );
+  }
   const names = Object.keys(env);
   if (names.length > MAX_ENV_ENTRIES) {
     throw new ValidationError(
@@ -675,8 +720,14 @@ export function execBody(args: ExecArgs): Json {
   if (args.cwd !== undefined) body.cwd = absoluteGuestPath(args.cwd, 'cwd');
   // An empty object is omitted rather than sent: the platform reads no `env`
   // and an empty one the same way, and sending it puts a key on the wire that
-  // says a caller asked for something they did not.
-  if (args.env && Object.keys(args.env).length) body.env = envObject(args.env);
+  // says a caller asked for something they did not. Emptiness is judged AFTER
+  // envObject rather than by a key count here, because `Object.keys` answers
+  // an empty list for a number as readily as for `{}` — so a gate written this
+  // way round drops `env: 5` on the floor instead of naming it.
+  if (args.env !== undefined && args.env !== null) {
+    const env = envObject(args.env);
+    if (Object.keys(env).length) body.env = env;
+  }
   return body;
 }
 
@@ -1171,11 +1222,11 @@ export function screenshotQuery(width?: number, fresh?: boolean): Query | undefi
  * `TRUE` — is a graceful stop that reports success while the guest is still
  * being asked politely, which is the failure a caller reaching for `force`
  * already tried once.
- */
-/**
- * `force` pulls the power rather than asking the guest to come down, so a
- * `"false"` read as true is an ungraceful stop of a machine whose caller
- * explicitly asked for the graceful one. Validated, like every flag here.
+ *
+ * And validated rather than read for truthiness, like every flag here, for the
+ * other half of the same reason: `force` pulls the power rather than asking the
+ * guest to come down, so a `"false"` taken as true is an ungraceful stop of a
+ * machine whose caller explicitly asked for the graceful one.
  */
 export const stopQuery = (force?: boolean): Query =>
   flag(force, 'force') ? { force: 'true' } : {};
@@ -1282,10 +1333,15 @@ export function windowBody(args: {
       );
     }
   }
+  // x and y stay on finiteIf because a negative one is ordinary: a second
+  // monitor left of the primary puts its windows at a negative origin, and
+  // refusing that would refuse a correct move. A size cannot be negative, or
+  // zero, or a fraction — a window 0 pixels wide is not a window — so those
+  // two take the same check every other shape field on this surface takes.
   finiteIf(args.x, 'x');
   finiteIf(args.y, 'y');
-  finiteIf(args.width, 'width');
-  finiteIf(args.height, 'height');
+  positiveIntIf(args.width, 'width');
+  positiveIntIf(args.height, 'height');
   return omitUndefined({ ...args });
 }
 
@@ -1302,8 +1358,7 @@ export function windowBody(args: {
  * An all-whitespace name is refused for the reason {@link updateBody} refuses
  * one: it can only come from a caller building the name out of something that
  * turned out to be empty, and a snapshot called `"  "` is not what they meant.
- */
-/**
+ *
  * `memory` captures live RAM as well as disk, which is a slower snapshot and a
  * much larger one. Taken raw and validated here rather than `Boolean(...)`d at
  * the call site: that coercion was the flag's whole check, and it read

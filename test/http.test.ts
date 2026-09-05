@@ -286,6 +286,21 @@ describe('status mapping', () => {
     });
   }
 
+  it('does not resolve a status through Object.prototype', () => {
+    // The status table is a lookup keyed by a value that came off a response,
+    // and a plain object literal inherits `constructor`, `toString` and the
+    // rest. `BY_STATUS[status] ?? APIError` cannot fall back for an inherited
+    // key, so `new Cls(...)` was `new Object.prototype.toString()` — a
+    // TypeError thrown from inside the error path, destroying the failure it
+    // was called to describe. `fetch` is caller-injectable and this file
+    // already accepts that it must survive anything at all out of one.
+    for (const status of ['constructor', 'toString', 'hasOwnProperty', '__proto__']) {
+      const err = errorForStatus(status as unknown as number, 'the platform said so');
+      expect(err, status).toBeInstanceOf(APIError);
+      expect(err.message, status).toBe('the platform said so');
+    }
+  });
+
   it('falls back to the status line when there was no message', async () => {
     const rec = recorder(() => new Response('', { status: 500 }));
     const err = await client(rec)

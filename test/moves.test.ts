@@ -235,6 +235,41 @@ describe('waitForMove', () => {
     expect(move.finishedAt).toBe('2026-08-23T02:00:00.000Z');
   });
 
+  it('reads an empty finished_at as absent, not as a stamp that will not parse', async () => {
+    // A Go struct with a plain `string` field and no `omitempty` serialises an
+    // unset finish time as exactly `""` — the third spelling of absence, beside
+    // an omitted key and a null. `??` does not fall back for it, so the row
+    // sorted at `Date.parse('')` — NaN, therefore -Infinity — and the listing's
+    // day-old row was handed back as the newest. The declared type says
+    // finishedAt is absent while a move is live, and `''` is not a time.
+    const yesterday = {
+      ...MOVE_DONE,
+      computer_id: 'vm-1',
+      started_at: '2026-08-22T01:00:00.000Z',
+      finished_at: '2026-08-22T02:00:00.000Z',
+    };
+    const today = {
+      ...MOVE_DONE,
+      computer_id: 'vm-1',
+      state: 'moved',
+      live: false,
+      started_at: '2026-08-23T01:00:00.000Z',
+      finished_at: '',
+    };
+    const { client: c } = client((call) =>
+      call.path === '/moves' ? json({ moves: [yesterday, today] }) : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    const move = await computer.waitForMove({ pollMs: 1 });
+    // `moved` and not `done`: the newer row wins on its readable startedAt, and
+    // the two states are different outcomes — one changed hardware, one did not.
+    expect(move.state).toBe('moved');
+    expect(move.startedAt).toBe('2026-08-23T01:00:00.000Z');
+    expect('finishedAt' in move).toBe(false);
+    // And the raw response still carries what the platform actually sent.
+    expect(move.raw.finished_at).toBe('');
+  });
+
   it('refuses a body with no moves array rather than calling the computer deleted', async () => {
     // Read as `[]`, a malformed 200 reached the reaped-row branch — and that
     // branch says the platform reaps a move when its computer is DELETED.

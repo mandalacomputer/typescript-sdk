@@ -81,6 +81,18 @@ export type WebhookBody = string | ArrayBuffer | ArrayBufferView;
 const SIGNATURE_VERSION = 'v1';
 
 /**
+ * How many `v1` entries in one `webhook-signature` are worth checking.
+ *
+ * Each entry costs an HMAC over the WHOLE body, so a header packed with
+ * well-formed base64 buys an unauthenticated caller a multiple of that work —
+ * a few hundred of them fit inside an ordinary header size limit, and nothing
+ * in front of the MAC is authenticated. A rotation puts two entries on a
+ * delivery and never more; eight leaves room for a scheme this SDK has not
+ * seen yet and still bounds the work a stranger can ask for.
+ */
+const SIGNATURE_CANDIDATES_MAX = 8;
+
+/**
  * Whether a delivery is authentic: signed by `secret`, and recent.
  *
  * ```ts
@@ -122,8 +134,20 @@ export async function verify(
   rawBody: WebhookBody,
   opts: VerifyOptions = {},
 ): Promise<boolean> {
+  // Everything the RECEIVER supplied is judged first, and all of it, before a
+  // single field of the delivery is read. A window of NaN is the same class of
+  // mistake as a secret without its prefix, and it has to say so on every call:
+  // judged after the headers, it would throw for a good delivery and answer
+  // false for a bad one, so a receiver whose clock argument was wrong would
+  // learn it only once real traffic arrived — and never from its own tests,
+  // which are the ones that send an empty header bag.
   const key = secretBytes(secret);
   const body = bodyBytes(rawBody);
+  const now = opts.now ?? Date.now() / 1000;
+  const tolerance = opts.toleranceS ?? WEBHOOK_TOLERANCE_S;
+  if (!Number.isFinite(now) || !Number.isFinite(tolerance) || tolerance < 0) {
+    throw new ValidationError('now and toleranceS must be finite numbers, in seconds');
+  }
 
   const id = header(headers, 'webhook-id');
   const timestamp = header(headers, 'webhook-timestamp');
@@ -136,11 +160,6 @@ export async function verify(
   // would otherwise read as January 1970 and fail the window by accident
   // rather than by rule.
   if (!/^\d{1,16}$/.test(timestamp)) return false;
-  const now = opts.now ?? Date.now() / 1000;
-  const tolerance = opts.toleranceS ?? WEBHOOK_TOLERANCE_S;
-  if (!Number.isFinite(now) || !Number.isFinite(tolerance) || tolerance < 0) {
-    throw new ValidationError('now and toleranceS must be finite numbers, in seconds');
-  }
   if (Math.abs(now - Number(timestamp)) > tolerance) return false;
 
   const signed = concat(encodeText(`${id}.${timestamp}.`), body);
@@ -152,13 +171,17 @@ export async function verify(
   // version this receiver does not know are ignored rather than refused, which
   // is what lets the platform add a second scheme beside this one without a
   // release of this SDK — the format has the slot for it.
+  let checked = 0;
   for (const entry of signature.split(' ')) {
     const comma = entry.indexOf(',');
     if (comma === -1 || entry.slice(0, comma) !== SIGNATURE_VERSION) continue;
     const mac = base64(entry.slice(comma + 1));
     // A MAC of the wrong length cannot verify; `subtle.verify` would say so
     // itself, but a 32-byte check is not a comparison and cannot leak anything.
+    // It is also what keeps the count below counting only the entries that
+    // would cost an HMAC — junk is skipped for nothing.
     if (mac?.length !== 32) continue;
+    if (++checked > SIGNATURE_CANDIDATES_MAX) break;
     if (await subtle().verify('HMAC', cryptoKey, mac, signed)) return true;
   }
   return false;
@@ -198,6 +221,16 @@ function bodyBytes(rawBody: WebhookBody): Uint8Array {
   if (ArrayBuffer.isView(rawBody)) {
     return new Uint8Array(rawBody.buffer, rawBody.byteOffset, rawBody.byteLength);
   }
+  // `instanceof` above is realm-bound, and `ArrayBuffer.isView` is false for a
+  // bare buffer — so a buffer from another realm, and every SharedArrayBuffer,
+  // arrives here still being the wire bytes. The brand crosses realms where the
+  // constructor does not, and reading it before the fallthrough is what keeps
+  // those from being called a parsed object and told to go read the raw body
+  // they are already holding.
+  const brand = Object.prototype.toString.call(rawBody);
+  if (brand === '[object ArrayBuffer]' || brand === '[object SharedArrayBuffer]') {
+    return new Uint8Array(rawBody as ArrayBufferLike);
+  }
   // The parsed object is the mistake this whole file is about, and the one a
   // framework makes on the caller's behalf. Refusing it names the fix; letting
   // `String(rawBody)` produce `[object Object]` would fail every delivery with
@@ -229,6 +262,20 @@ function header(headers: WebhookHeaders, name: string): string | undefined {
     return headers.get(name) ?? undefined;
   }
   if (typeof headers !== 'object' || headers === null) return undefined;
+  // `instanceof` is realm-bound and names one implementation, and a receiver
+  // holds whichever its framework built: node-fetch's, Hono's, an undici a
+  // bundler pinned a copy of, or the global one from another realm. All of
+  // them keep their entries behind a private map, so `Object.entries` below
+  // sees nothing and every lookup answers undefined — which is not "no such
+  // header" but a false from verify() on an AUTHENTIC delivery, the one
+  // failure in this file that reads to an operator as the platform signing
+  // wrong. A `get` method is what the shape promises; taking it is the whole
+  // contract, and a plain header bag has no such key to be mistaken for one.
+  const get: unknown = (headers as { get?: unknown }).get;
+  if (typeof get === 'function') {
+    const v: unknown = (get as (n: string) => unknown).call(headers, name);
+    return typeof v === 'string' ? v : undefined;
+  }
   for (const [k, v] of Object.entries(headers)) {
     if (k.toLowerCase() !== name) continue;
     const first = Array.isArray(v) ? v[0] : v;

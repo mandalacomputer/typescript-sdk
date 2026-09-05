@@ -499,7 +499,19 @@ export class TimeoutError extends MandalaError {
   override name = 'TimeoutError';
 }
 
-const BY_STATUS: Record<number, typeof APIError> = {
+/**
+ * Null-prototype, because this is a lookup by a value that came off a response.
+ *
+ * A plain object literal inherits `constructor`, `toString` and the rest, and
+ * both readers below take `BY_STATUS[status] ?? APIError` — a `??` that cannot
+ * fire for an inherited key, so `new Cls(...)` would be `new Object.toString()`
+ * and throw a TypeError from inside the error path, destroying the failure it
+ * was called to describe. The supported statuses are all numbers and never
+ * reach that; a caller-supplied `fetch` is what makes it worth ruling out,
+ * since this file already accepts that it must survive anything at all out of
+ * one, and a hand-rolled Response with a string status is the whole hazard.
+ */
+const BY_STATUS: Record<number, typeof APIError> = Object.assign(Object.create(null), {
   401: AuthenticationError,
   402: PlanLimitError,
   403: PermissionDeniedError,
@@ -520,7 +532,7 @@ const BY_STATUS: Record<number, typeof APIError> = {
   // a passing outage and these are a deployment somebody has to fix.
   525: OriginTLSError,
   526: OriginTLSError,
-};
+});
 
 /**
  * What a caller is told when a proxy abandoned the request and named nothing.
@@ -549,30 +561,6 @@ const GATEWAY_TIMEOUT_MESSAGE =
   'After one of those, the next call on that computer may report the guest agent as ' +
   'busy with the command that outlived the request';
 
-/**
- * Whether the response named this failure in the shape this surface uses.
- *
- * Only a JSON body with a non-empty `error` string counts. An HTML page and an
- * empty body are an intermediary's, and both are worth discarding for the
- * wording above; a structured message is not. "upstream unavailable before
- * dispatch" is a more specific true thing than anything written here, and
- * replacing it would be this client overwriting a hop that knew more than it
- * does with a guess.
- *
- * `error` and not RFC 9457's `detail`, though Cloudflare answers these statuses
- * with one and `messageFromBody` in transport.ts reads it. Deliberate, and the
- * distinction is what each hop can know. Cloudflare's `detail` describes the
- * edge accurately and stops there, because a proxy cannot know that the request
- * under it was a foreground exec with a two-minute ceiling over it and an
- * execBackground alternative. Counting it here would hand that sentence the
- * substitution and lose the only part a caller can act on — on 504 and 524,
- * which is to say on almost every real one of these.
- *
- * Which hop wrote it is not knowable from here and does not need to be. The test
- * is whether SOMETHING said something specific — a 504 can be raised by any
- * proxy in the chain, including one in front of a `baseUrl` this client has
- * never seen.
- */
 /** What a caller is told when the platform's own answer arrived unreadable. */
 const ORIGIN_RESPONSE_MESSAGE =
   'the platform received the request and the exchange then broke on the way back — an ' +
@@ -600,13 +588,36 @@ const ORIGIN_TLS_MESSAGE =
   'outage — an expired or mismatched certificate fails the same way on every retry, so ' +
   'report it rather than waiting it out';
 
+/**
+ * Whether the response named this failure in the shape this surface uses.
+ *
+ * Only a JSON body with a non-empty `error` string counts. An HTML page and an
+ * empty body are an intermediary's, and both are worth discarding for the
+ * wording above; a structured message is not. "upstream unavailable before
+ * dispatch" is a more specific true thing than anything written here, and
+ * replacing it would be this client overwriting a hop that knew more than it
+ * does with a guess.
+ *
+ * `error` and not RFC 9457's `detail`, though Cloudflare answers these statuses
+ * with one and `messageFromBody` in transport.ts reads it. Deliberate, and the
+ * distinction is what each hop can know. Cloudflare's `detail` describes the
+ * edge accurately and stops there, because a proxy cannot know that the request
+ * under it was a foreground exec with a two-minute ceiling over it and an
+ * execBackground alternative. Counting it here would hand that sentence the
+ * substitution and lose the only part a caller can act on — on 504 and 524,
+ * which is to say on almost every real one of these.
+ *
+ * Which hop wrote it is not knowable from here and does not need to be. The test
+ * is whether SOMETHING said something specific — a 504 can be raised by any
+ * proxy in the chain, including one in front of a `baseUrl` this client has
+ * never seen.
+ */
 function namedTheFailure(body: unknown): boolean {
   if (!body || typeof body !== 'object') return false;
   const err = (body as { error?: unknown }).error;
   return typeof err === 'string' && err.length > 0;
 }
 
-/** Build the error for a status, with the platform's own message when it sent one. */
 /**
  * Our wording for a failure, carrying the status it stands in for.
  *
@@ -635,6 +646,7 @@ export type ErrorHeaders = {
   rangeTotal?: number;
 };
 
+/** Build the error for a status, with the platform's own message when it sent one. */
 export function errorForStatus(
   status: number,
   message: string,

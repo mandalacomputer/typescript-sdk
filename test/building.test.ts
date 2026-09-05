@@ -7,6 +7,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import { ValidationError } from '../src/errors.js';
 import * as P from '../src/paths.js';
 
 describe('clipboardBody', () => {
@@ -292,6 +293,24 @@ describe('execBody', () => {
     expect(() => P.execBody({ command: 'x', env: long })).toThrow(/4096/);
   });
 
+  it('refuses an env that is not an object, rather than spreading a string', () => {
+    // The one bad env that passed every check below it: `Object.keys('FOO=bar')`
+    // is '0'..'6', each value is a one-character STRING so the type check
+    // passes, and the '=' lands in a VALUE where the name check cannot see it.
+    // Seven variables named after array indices reached the guest, successfully.
+    const asString = 'FOO=bar' as unknown as Record<string, string>;
+    expect(() => P.execBody({ command: 'x', env: asString })).toThrow(ValidationError);
+    expect(() => P.execBody({ command: 'x', env: asString })).toThrow(
+      /env must be an object of NAME to value, not string/,
+    );
+    const asArray = [['FOO', 'bar']] as unknown as Record<string, string>;
+    expect(() => P.execBody({ command: 'x', env: asArray })).toThrow(/not an array/);
+    // A number has no keys at all, so a gate written on the key count dropped
+    // it silently instead of naming it.
+    const asNumber = 5 as unknown as Record<string, string>;
+    expect(() => P.execBody({ command: 'x', env: asNumber })).toThrow(/not number/);
+  });
+
   it('measures an entry in bytes, as the platform does', () => {
     // A limit counted in characters passes a value the platform then refuses:
     // these are two bytes each, so 2048 of them are 4096 bytes and the entry is
@@ -457,6 +476,36 @@ describe('windowBody', () => {
   it('rejects an action the platform has no verb for', () => {
     expect(() => P.windowBody({ action: 'wiggle' as never })).toThrow(/one of/);
   });
+
+  it('refuses a size that is not a positive integer, the way every other shape field is', () => {
+    // finiteIf only stops a NaN becoming JSON null. A window -5.5 pixels wide is
+    // as knowable a mistake as `cpu: -1`, and createBody, moveBody and
+    // updateBody all draw the line here — this builder was the outlier, and
+    // `{ action: 'resize', width: -5.5, height: 0 }` went on the wire.
+    for (const width of [-5.5, 0, -1, 320.5]) {
+      expect(() => P.windowBody({ action: 'resize', width }), String(width)).toThrow(
+        /width must be a positive integer/,
+      );
+    }
+    expect(() => P.windowBody({ action: 'resize', height: 0 })).toThrow(
+      /height must be a positive integer/,
+    );
+    expect(P.windowBody({ action: 'resize', width: 1280, height: 720 })).toEqual({
+      action: 'resize',
+      width: 1280,
+      height: 720,
+    });
+  });
+
+  it('still takes a negative origin, which a second monitor really has', () => {
+    // x and y are NOT sizes. A display left of the primary puts its windows at a
+    // negative origin, so the positive-integer rule would refuse a correct move.
+    expect(P.windowBody({ action: 'move', x: -1920, y: -12 })).toEqual({
+      action: 'move',
+      x: -1920,
+      y: -12,
+    });
+  });
 });
 
 describe('agentBody', () => {
@@ -513,6 +562,22 @@ describe('path encoding', () => {
     expect(() => P.computer('..')).toThrow(/computer id/);
     expect(() => P.snapshot('..')).toThrow(/snapshot id/);
     expect(() => P.windowPath('vm-1', '.')).toThrow(/window id/);
+  });
+
+  it('refuses a lone surrogate as a ValidationError, not a bare URIError', () => {
+    // `encodeURIComponent('\ud800')` throws `URIError: URI malformed`, which
+    // names neither the argument nor the call, and is not the class every other
+    // refusal on this surface is caught as — a CLI that prints a ValidationError
+    // as a sentence would print this one as a stack trace. `clipboardBody` and
+    // the watch paths in events.ts already draw this line.
+    for (const id of ['\ud800', 'vm-\udfff', 'a\ud800b']) {
+      expect(() => P.computer(id), JSON.stringify(id)).toThrow(ValidationError);
+      expect(() => P.computer(id), JSON.stringify(id)).toThrow(/computer id must be valid UTF-8/);
+    }
+    expect(() => P.snapshot('\ud800')).toThrow(/snapshot id must be valid UTF-8/);
+    expect(() => P.windowPath('vm-1', '\ud800')).toThrow(/window id must be valid UTF-8/);
+    // A well-formed pair is one Unicode scalar value and still encodes.
+    expect(P.computer('vm-😀')).toBe('computers/vm-%F0%9F%98%80');
   });
 });
 

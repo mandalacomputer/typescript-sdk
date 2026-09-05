@@ -1,5 +1,6 @@
 /** Account webhooks: verifying a delivery, and the subscriptions it comes from. */
 
+import { runInNewContext } from 'node:vm';
 import { describe, expect, it } from 'vitest';
 import {
   Client,
@@ -11,6 +12,7 @@ import {
   WEBHOOK_COMPUTERS_MAX,
   WEBHOOK_DESCRIPTION_MAX,
   WEBHOOK_TOLERANCE_S,
+  type WebhookHeaders,
 } from '../src/index.js';
 import {
   anyRoute,
@@ -93,6 +95,24 @@ describe('verify: the §3.2 vector', () => {
     ).toBe(true);
   });
 
+  it('accepts a buffer from another realm, and a SharedArrayBuffer', async () => {
+    // `instanceof ArrayBuffer` is realm-bound and `ArrayBuffer.isView` is false
+    // for a bare buffer, so both of these arrived at the fallthrough still
+    // being the wire bytes and were refused as a "parsed object" — told to go
+    // and read the raw body they were already holding. The brand crosses a
+    // realm where the constructor does not.
+    const bytes = new TextEncoder().encode(BODY);
+    const foreign = runInNewContext('new ArrayBuffer(n)', { n: bytes.length }) as ArrayBuffer;
+    expect(foreign instanceof ArrayBuffer).toBe(false);
+    new Uint8Array(foreign).set(bytes);
+    expect(await verify(SECRET, headers(), foreign, { now: AT })).toBe(true);
+    const shared = new SharedArrayBuffer(bytes.length);
+    new Uint8Array(shared).set(bytes);
+    expect(await verify(SECRET, headers(), shared as unknown as ArrayBuffer, { now: AT })).toBe(
+      true,
+    );
+  });
+
   it('refuses the timestamp one second later: the timestamp is signed', async () => {
     // The platform's own negative: the same id and body at 1788264001 signs to
     // a different MAC. Presenting the ORIGINAL signature with the moved
@@ -170,6 +190,29 @@ describe('verify: the rotation vector', () => {
     expect(await verify(SECRET, previous, BODY, { now: AT })).toBe(false);
   });
 
+  it('checks a bounded number of v1 entries, and no more', async () => {
+    // Each entry costs an HMAC over the WHOLE body, and nothing in front of the
+    // MAC is authenticated — so a header packed with well-formed base64 buys an
+    // unauthenticated caller a multiple of that work, and a few hundred fit
+    // inside an ordinary header size limit. A rotation puts two on a delivery;
+    // the cap is eight, which is where this pins it.
+    //
+    // Well-formed, 32-byte and wrong: junk that decoded to the wrong LENGTH
+    // would be skipped before it cost anything, and would prove nothing.
+    const filler = `v1,${'A'.repeat(43)}=`;
+    const behind = (n: number) =>
+      headers({ 'webhook-signature': [...Array<string>(n).fill(filler), SIGNATURE].join(' ') });
+    expect(await verify(SECRET, behind(7), BODY, { now: AT })).toBe(true);
+    expect(await verify(SECRET, behind(8), BODY, { now: AT })).toBe(false);
+    // Entries too short to be a MAC are not candidates and do not fill the
+    // budget: skipping them is free, so counting them would refuse a genuine
+    // delivery behind a header a proxy had padded with junk.
+    const padded = headers({
+      'webhook-signature': [...Array<string>(50).fill('v1,AAAA'), SIGNATURE].join(' '),
+    });
+    expect(await verify(SECRET, padded, BODY, { now: AT })).toBe(true);
+  });
+
   it('ignores an entry whose version it does not know', async () => {
     // The format has a slot for a second scheme, and a receiver that refused a
     // header for carrying one would break the day the platform added it.
@@ -183,6 +226,39 @@ describe('verify: the rotation vector', () => {
 describe('verify: the headers, however a framework holds them', () => {
   it('reads a Headers instance', async () => {
     expect(await verify(SECRET, new Headers(headers()), BODY, { now: AT })).toBe(true);
+  });
+
+  it('reads a Headers that is not the global one', async () => {
+    // `instanceof Headers` names ONE implementation, and a receiver holds
+    // whichever its framework built: node-fetch's, Hono's, an undici a bundler
+    // pinned its own copy of, or the global one from another realm. All of them
+    // keep their entries behind a private map, so the plain-object walk sees no
+    // keys at all — and the answer was false on an AUTHENTIC delivery, which
+    // reads to an operator as the platform signing wrong. A `get` method is the
+    // shape's whole contract, so it is what gets taken.
+    const bag = new Map(Object.entries(headers()));
+    class ForeignHeaders {
+      get(name: string): string | null {
+        return bag.get(name.toLowerCase()) ?? null;
+      }
+    }
+    const foreign = new ForeignHeaders() as unknown as WebhookHeaders;
+    expect(foreign instanceof Headers).toBe(false);
+    expect(Object.entries(foreign)).toEqual([]);
+    expect(await verify(SECRET, foreign, BODY, { now: AT })).toBe(true);
+    // And it is still the source of truth for a delivery that should fail: the
+    // fallback reads it, it does not merely stop returning undefined.
+    bag.set('webhook-signature', PREVIOUS_SIGNATURE);
+    expect(await verify(SECRET, foreign, BODY, { now: AT })).toBe(false);
+  });
+
+  it('answers false, not a throw, when a Headers-like get returns something odd', async () => {
+    // The duck-type takes any `get`, so what it hands back is checked rather
+    // than trusted: a `null` for a missing header is the Fetch spelling, and an
+    // implementation answering an array or an object must not reach the regex
+    // and the base64 decoder as if it were a header value.
+    const odd = { get: (name: string) => (name === 'webhook-id' ? [ID] : null) };
+    expect(await verify(SECRET, odd as unknown as WebhookHeaders, BODY, { now: AT })).toBe(false);
   });
 
   it('matches header names case-insensitively', async () => {
@@ -270,6 +346,20 @@ describe('verify: the configuration errors that are not deliveries', () => {
     await expect(verify(SECRET, headers(), BODY, { now: AT, toleranceS: -1 })).rejects.toThrow(
       ValidationError,
     );
+  });
+
+  it('refuses the window before it reads the delivery, so a test sees it too', async () => {
+    // The receiver's own arguments are judged first, and all of them, before a
+    // field of the delivery is read. Judged after the headers, a NaN window
+    // threw for a good delivery and answered false for a bad one — so a
+    // receiver whose clock argument was wrong would learn it only once real
+    // traffic arrived, and never from its own tests, which are the ones that
+    // send an empty header bag.
+    for (const opts of [{ now: Number.NaN }, { toleranceS: Number.NaN }, { toleranceS: -1 }]) {
+      await expect(verify(SECRET, {}, BODY, opts), JSON.stringify(opts)).rejects.toThrow(
+        ValidationError,
+      );
+    }
   });
 });
 
