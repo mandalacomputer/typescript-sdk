@@ -1267,231 +1267,66 @@ export function expectMoves(
 }
 
 /**
- * When a move BEGAN, which is the only stamp a floor can be read against.
- *
- * `startedAt` and never `finishedAt`: the floor is one move's start, so a row
- * judged by when it ENDED would be judged against a different question — and
- * the two answers differ by however long a multi-gigabyte copy takes. An
- * unreadable stamp is `-Infinity` rather than a throw, as the listing is the
- * platform's and one unparseable row should not end a wait; below every floor
- * is where that puts it, because a row nobody can place in time is not evidence
- * about a move that started at a known instant.
- *
- * Not evidence, but not nothing either: such a row might BE the move, so
- * {@link moveAtOrAfter} counts the ones it drops this way rather than letting
- * them leave without a trace. One of them on a listing is why that listing
- * cannot be read as saying the move's row has left it.
- */
-const startStamp = (m: Move): number => {
-  const t = Date.parse(m.startedAt);
-  return Number.isNaN(t) ? -Infinity : t;
-};
-
-/**
- * Whether a row is OVER as of a floor, where its finish can be read at all.
- *
- * The one thing {@link moveAtOrAfter} can say about a below-floor row without
- * guessing: a move the listing dates as having finished before this one was
- * accepted is not this one. Distance to the floor cannot say that — see
- * {@link FLOOR_SLACK_MS}, whose whole point is that the two components render
- * the same clock differently — and it is the below-floor rows that are
- * expensive to get wrong, since they are terminal and end a wait on the first
- * poll.
- *
- * ABSENT OR UNREADABLE IS NOT EVIDENCE, and so is not grounds to drop a row: a
- * live move has no finish time yet, and `lost` is a terminal state the platform
- * reaches by having stopped watching, which a row can carry with no finish time
- * at all. `?? ''` rather than a check for the field, because `Date.parse('')`
- * is already NaN and both ways of having no stamp mean the same here.
- */
-const finishedBeforeFloor = (m: Move, floor: number): boolean => {
-  const t = Date.parse(m.finishedAt ?? '');
-  return !Number.isNaN(t) && t < floor;
-};
-
-/**
  * An RFC3339 instant, zone and all.
  *
  * The zone is the point. `Date.parse('2026-08-23 01:00:00')` answers a number —
  * for that wall clock in the LOCAL zone — so a hand-written stamp with no `Z`
- * silently becomes a floor hours away from the one it names.
+ * silently names an instant hours from the one it reads as.
  */
 const RFC3339 = /^\d{4}-\d{2}-\d{2}[Tt ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[Zz]|[+-]\d{2}:\d{2})$/;
 
 /**
- * The instant a wait's move began: its floor.
+ * The `startedAt` a wait is anchored to: the exact string to match rows against.
  *
- * BOTH SIDES OF THE COMPARISON ARE THE PLATFORM'S CLOCK. The floor is the
- * `started_at` the platform put on the move it accepted, and every row it is
- * compared with carries a `started_at` from that same clock — no local clock
- * enters it. One that did would matter: a client running a minute fast, given
- * `Date.now()` as its floor, ignores its own move's row until the deadline; one
- * running slow admits yesterday's, which is the failure the floor exists for.
+ * WHAT THE PLATFORM GUARANTEES, since everything here follows from it.
+ * `computer_moves` is keyed by `computer_id` — one row per computer, ever — and
+ * a move is written with `INSERT OR REPLACE` inside the transaction that
+ * precedes the 202. So a listing filtered to one computer has at most ONE row,
+ * and there is nothing to select between: no nearest, no tolerance, no window.
+ * The `started_at` on that row is the same stored string the 202 handed back,
+ * out of one database and written once, so the two are compared by EQUALITY and
+ * not by distance. There is no second rendering to be off by a fraction of a
+ * second, and no clock skew, because there is no second clock.
+ *
+ * The anchor still earns its place, for the other half of `INSERT OR REPLACE`:
+ * a second relocate on the same computer REPLACES this move's row mid-wait.
+ * Without the anchor the wait would read the new move's `state` and `detail` as
+ * the outcome of the one it was started for. Equality is what notices.
  *
  * A string is held to RFC3339-with-a-zone rather than to whatever `Date.parse`
- * will take, for the reason above it. A {@link Move}'s own `startedAt` is read
- * with `Date.parse` and no shape test, because that is the function the ROWS
- * are read with: holding the anchor to a stricter rule than the rows it is
- * compared against would refuse a platform spelling this wait can otherwise
- * answer perfectly well.
+ * will take, because that catches a typo before any request is made. It is only
+ * a SHAPE test: the match is exact string equality, so a persisted anchor must
+ * be the value the platform stored, verbatim — `2026-08-23T02:00:12.699Z` and
+ * not the same instant re-formatted by a date library, which is a different
+ * string and matches nothing.
+ *
+ * A {@link Move}'s own `startedAt` is checked with `Date.parse` and no shape
+ * test, because it came off the platform in the platform's own spelling and
+ * holding it to a stricter rule than the rows it will be compared against would
+ * refuse a wait that can otherwise be answered perfectly well. What is refused
+ * is a move with no readable start at all, which is a move nothing can be
+ * anchored to — `str()` renders an absent `started_at` as `''`, and an anchor of
+ * `''` would match a row whose start the platform never sent.
  */
-export const moveFloor = (move: Move | string): number => {
+export const moveAnchor = (move: Move | string): string => {
   if (typeof move === 'string') {
-    const t = RFC3339.test(move) ? Date.parse(move) : Number.NaN;
-    if (Number.isNaN(t)) {
+    if (!RFC3339.test(move)) {
       throw new ValidationError(
         `move must be the Move that relocate() returned, or an RFC3339 timestamp with a zone ` +
           `like 2026-08-23T01:00:00Z — got ${JSON.stringify(move).slice(0, 120)}`,
       );
     }
-    return t;
+    return move;
   }
-  const t = Date.parse(isRecord(move) ? str(move.startedAt) : '');
-  if (Number.isNaN(t)) {
+  const startedAt = isRecord(move) ? str(move.startedAt) : '';
+  if (Number.isNaN(Date.parse(startedAt))) {
     throw new ValidationError(
       `move must be the Move that relocate() returned, and this one has no readable startedAt ` +
         `to wait from: ${`${JSON.stringify(move)}`.slice(0, 120)}`,
     );
   }
-  return t;
+  return startedAt;
 };
-
-/**
- * How far below its floor a row may have started and still be this wait's move.
- *
- * Both sides of the comparison are the platform's clock, but not the platform's
- * same rendering of it: the floor is the `started_at` on a `POST …/move` 202 and
- * the rows come out of a listing. A listing that prints seconds where the 202
- * printed milliseconds — `…T02:00:12Z` against `…T02:00:12.699Z` — puts every
- * row for this move a fraction of a second BELOW its own floor, whereupon
- * nothing ever matches, and a wait that would have answered in seconds instead
- * burns the whole fifteen-minute deadline while the move runs perfectly well.
- * Any clock difference between the component that accepts a move and the one
- * that lists it lands in the same place.
- *
- * A minute covers both and costs little: it is 1440x smaller than the DAY of
- * finished rows this listing keeps, which is the window that makes a stale row
- * possible at all. It costs little only because it is a TOLERANCE ON THE MATCH
- * and not a wider net — {@link moveAtOrAfter} takes the row NEAREST the floor,
- * so the minute lets this move's own row through when the listing rounded it
- * down, while a move that genuinely began within it is ordinarily further from
- * the floor and loses. Admitting the minute and then taking the EARLIEST row
- * would instead hand every wait to whichever move on this computer started
- * first, which is the bug the floor exists to close, reopened at 1/1440 of its
- * old size and with a finished row — one that answers `!live` at once — as the
- * thing that wins.
- *
- * ORDINARILY, because the paragraph above says the two renderings can differ in
- * either direction, and a skew that way puts a prior row nearer the floor than
- * this move's own. Nearness is therefore a preference and not the guarantee;
- * what bounds the minute is the FINISHED check in {@link moveAtOrAfter}, which
- * is about time rather than about which row looks likeliest.
- */
-const FLOOR_SLACK_MS = 60_000;
-
-/**
- * The move a wait is watching, among rows already known to be one computer's,
- * and how many rows had to be dropped to find it.
- *
- * `GET /moves` carries the moves that FINISHED IN THE LAST DAY beside the one
- * running now, so neither the first row for this computer nor the newest is the
- * move a given wait was started for: a copy that finished yesterday satisfied
- * `!live` on the first poll and handed back a computer whose disk was still
- * crossing between hosts. The floor — the accepted move's own start — is what
- * tells them apart.
- *
- * The row NEAREST the floor is the one, among those no more than
- * {@link FLOOR_SLACK_MS} below it, and none of them is preferred for being
- * live: a live row is the newer one by definition, so preferring it can only
- * swap this move for one another process started between two polls, whose
- * `state` and `detail` would be reported as the outcome of a relocate the
- * caller never asked about.
- *
- * NEAREST IS A PREFERENCE AND NOT THE GUARANTEE, and the difference is worth
- * being exact about. It would be a guarantee if this move's row could only ever
- * render AT its floor or below it — the listing printing whole seconds where
- * the 202 printed milliseconds — because then nothing could sit closer. But
- * {@link FLOOR_SLACK_MS} is a minute rather than a second precisely because the
- * two renderings can differ in EITHER direction, and under a skew the other way
- * this move's own row lands above the floor by more than a prior row lands
- * below it. Nearest is right in the ordinary case and would quietly be wrong in
- * that one.
- *
- * So the guarantee is carried by a second rule, which is a statement about time
- * rather than about which row looks likeliest: A ROW THAT HAD FINISHED BEFORE
- * THE FLOOR IS NOT A MOVE THAT STARTED AT IT. Such a row is dropped outright,
- * however near it lands and whatever the slack would otherwise admit, and that
- * is the half worth guarding — an earlier move taken for this one is already
- * terminal, so it answers `!live` on the first poll and ends the wait while the
- * disk is still crossing between hosts, which is the failure the floor exists
- * to prevent. Being wrong the other way costs a wrong `state` and `detail`, and
- * distance is enough for it: a later move is another operation minutes away,
- * not a fraction of a second.
- *
- * That check reads a listing stamp against the 202's, so it is no more immune
- * to skew than anything else here; what it is not is a guess. It leaves exactly
- * one hole, and a narrow one — a prior move whose whole run is shorter than the
- * skew between the two components, so that the listing dates its finish after
- * an instant it really preceded.
- *
- * Two rows equally near the floor are settled without falling back to the order
- * the platform happened to send them in, because that order is not evidence
- * about anything. Not the same instant, the row AT OR AFTER the floor wins: one
- * below it may belong to an earlier operation, one at or after it cannot have
- * begun before the move being waited on did. The SAME instant — which is what a
- * listing truncating to whole seconds produces, and the case the slack exists
- * for — goes to the LIVE row. Preferring live is only ever dangerous for a row
- * that started later, and a row carrying this one's own stamp did not; it is
- * also the only reading that covers a terminal row with no finish time to
- * place, which `lost` is, being the state the platform reaches by having
- * stopped watching.
- *
- * Rows whose `started_at` cannot be placed in time are counted as `undated`
- * rather than merely dropped: any one of them might be this move, so they are
- * the difference between a listing that does not carry it and a listing nobody
- * could read well enough to say.
- *
- * `undefined` is NOT an outcome. It says this listing does not show the move
- * YET — see {@link Computer.waitForMove}, where telling that apart from a row
- * the platform dropped is the whole of the hard part.
- */
-export const moveAtOrAfter = (
-  moves: Move[],
-  floor: number,
-): { move: Move | undefined; undated: number } => ({
-  move: moves
-    .filter((m) => {
-      const start = startStamp(m);
-      if (start < floor - FLOOR_SLACK_MS) return false;
-      // The slack's own guard, and the reason it can be a minute wide: a row
-      // below the floor that the listing dates as already OVER is a move that
-      // ended before this one was accepted, and no rendering difference makes
-      // it this one. Without it the nearest-row rule is decided by whichever
-      // row the clocks happen to place closer, and on a poll before this move's
-      // own row propagates — which is the premise of the whole wait — a prior
-      // move that ran inside the slack is the only candidate there is, so it
-      // wins by default and answers `!live` at once.
-      return !(start < floor && finishedBeforeFloor(m, floor));
-    })
-    .reduce<Move | undefined>((best, m) => {
-      if (best === undefined) return m;
-      const gap = Math.abs(startStamp(m) - floor);
-      const bestGap = Math.abs(startStamp(best) - floor);
-      if (gap !== bestGap) return gap < bestGap ? m : best;
-      const start = startStamp(m);
-      const bestStart = startStamp(best);
-      // Equally near and a different instant: the later row wins, because a row
-      // at or after the floor cannot be an operation that began before this one.
-      if (start !== bestStart) return start > bestStart ? m : best;
-      // Equally near and the SAME instant, which a listing printing whole
-      // seconds hands over routinely and no stamp comparison can separate.
-      // Deciding it by `data.moves` order is deciding it by nothing; the live
-      // row is the answer, and safely, since a row sharing this one's stamp is
-      // not one that started after it.
-      return m.live && !best.live ? m : best;
-    }, undefined),
-  undated: moves.filter((m) => startStamp(m) === -Infinity).length,
-});
 
 /**
  * Whether a ROW off the wire belongs to the computer named.

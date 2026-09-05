@@ -1073,21 +1073,25 @@ resize, which accepts it. A saved desktop only loads on the host that wrote it,
 so it cannot travel: resume and stop the computer, or discard the session, first.
 
 **`waitForMove()` takes the move `relocate()` returned**, and that argument is
-required. A `Move` carries no id and `GET /moves` keeps every move that finished
-in the last day beside the one running now, so the record from the 202 — or an
-RFC3339 `startedAt` a restarted process persisted — is the only thing that says
-which move a wait is watching. A listing with no row at or after that instant is
-one that has not caught up yet, so the wait goes on polling and its deadline,
-rather than yesterday's row, is what ends it. The row NEAREST that instant is
-the move; a minute of slack sits under it, because the 202 and the listing are
-two renderings of the same platform clock and one of them printing whole seconds
-must not put a move's own row below its own floor. What that minute may not do
-is hand the wait to a move that really did start within it — one that finished
-seconds earlier would answer straight away, on a disk still crossing between
-hosts — so a row below the floor that the listing dates as having FINISHED
-before it is never the answer, however near the floor it lands. Two rows the
-same distance from the floor go to the one at or after it, and two carrying the
-same instant go to the one still running.
+required. A `Move` carries no id, so its `startedAt` — or an RFC3339 `startedAt`
+a restarted process persisted — is what says which move a wait is watching, and
+a row of this computer's is that move exactly when its `startedAt` is the same
+string. Equality and not a window: the platform keys its moves table by computer
+id and writes a move with `INSERT OR REPLACE`, so at most one row is ever this
+computer's, and the stamp on it is the same stored string the 202 handed back.
+There is nothing to choose between and no second clock to be off by. A persisted
+anchor must therefore be that value verbatim, not the same instant re-formatted.
+
+The day of finished moves the listing keeps is real, but it is a fact about the
+ACCOUNT and not about one computer, so it is not what the anchor guards against.
+What it guards against is the other half of `INSERT OR REPLACE`: a second
+relocate on this same computer overwrites this move's row while the wait is
+running, and without an anchor the wait would report the new move's outcome as
+this one's. When that happens the wait fails at once with a `MandalaError`
+naming both stamps — the replacement does not un-happen, so there is nothing to
+wait out. A listing with no row for this computer at all is different: that is
+one which has not caught up yet, so the wait goes on polling and its deadline is
+what ends it.
 
 A row that was listed and then is not, on two consecutive polls of a listing
 this client could read whole, ends the wait with a `MandalaError`: a move's row

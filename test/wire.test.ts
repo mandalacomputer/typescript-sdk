@@ -653,7 +653,7 @@ describe('a coerced value is not the value', () => {
       .waitForMove(MOVE_STARTED.started_at, { pollMs: 1, timeoutMs: 60 })
       .catch((e) => e);
     expect(err).toBeInstanceOf(TimeoutError);
-    expect(String(err)).toContain('no move for vm-1 started at or after');
+    expect(String(err)).toContain('no move for vm-1 that started at');
   });
 
   it('still picks the move the platform did attribute to this computer', async () => {
