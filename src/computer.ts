@@ -360,8 +360,9 @@ function pointPastTheCeiling(err: unknown): unknown {
  *
  * "THE LAST LISTING READ", said in the sentence rather than left to be assumed.
  * These two counts are the most recent successful poll's, and the wait clears
- * them when a later poll fails, so the span they describe is never longer than
- * one listing and the reader is told which one.
+ * them on any later poll that read no listing — one that failed and one its own
+ * deadline cut short — so the span they describe is never longer than one
+ * listing and the reader is told which one.
  */
 const blindness = (w: { unreadable: number; undated: number }): string =>
   [
@@ -388,7 +389,10 @@ const blindness = (w: { unreadable: number; undated: number }): string =>
  * `unreadable`, `undated` — is the MOST RECENT poll's and no earlier one's, for
  * the reason `observed` exists: those describe a listing in the present tense,
  * and a wait whose later polls all failed must not quote its first one to do it.
- * Which is why the loop clears the blindness counts wherever it clears `absent`.
+ * Which is why the loop clears the blindness counts on EVERY poll that read no
+ * listing — one that failed and one its own deadline cut short alike, since
+ * what makes those counts stale is having read nothing since, and neither of
+ * the two read anything.
  */
 const moveTimeoutText = (w: {
   id: string;
@@ -1039,9 +1043,10 @@ export class Computer {
    * floor is this move. A minute of slack sits under the floor, because the 202
    * and the listing are two renderings of the platform's clock and a listing
    * that prints whole seconds would otherwise put this move's own row below its
-   * own floor forever — and nearest rather than earliest is what keeps that
-   * minute from readmitting the very rows the floor was added to exclude. See
-   * {@link moveAtOrAfter}.
+   * own floor forever — and what keeps that minute from readmitting the very
+   * rows the floor was added to exclude is that a row below the floor which the
+   * listing dates as already FINISHED is not a candidate at all, whatever the
+   * distances say. See {@link moveAtOrAfter}.
    *
    * An RFC3339 timestamp with a zone is accepted in its place, so a process that
    * restarted can still wait on a `startedAt` it persisted. Anything else — a
@@ -1098,11 +1103,14 @@ export class Computer {
     // spell: `observed` false covers a listing nobody could fetch as well, and
     // those two end a wait with entirely different sentences.
     let absent = false;
-    // THE LAST SUCCESSFUL POLL'S, and cleared wherever `absent` is, which is
-    // what makes that true. Left standing across a failed poll they would let a
-    // timeout describe the listing as it was a quarter of an hour ago — two
-    // undecodable rows read once, then fifteen minutes of failures — in a
-    // sentence written in the present tense about what can be made out now.
+    // THE LAST SUCCESSFUL POLL'S, and cleared by every poll that read no
+    // listing, which is what makes that true. Left standing across one they
+    // would let a timeout describe the listing as it was a quarter of an hour
+    // ago — two undecodable rows read once, then fifteen minutes of silence —
+    // in a sentence written in the present tense about what can be made out
+    // now. A poll the deadline cut short read no listing either, which is the
+    // half of that this loop went on getting wrong after it stopped getting the
+    // other half wrong.
     let unreadableLast = 0;
     let undatedLast = 0;
     // CONSECUTIVE, not cumulative. The listing is eventually consistent — that
@@ -1222,6 +1230,15 @@ export class Computer {
         // inside a poll is not the platform failing to answer.
         if (isDeadlineAbort(err)) {
           aborts += 1;
+          // The blindness counts go, exactly as on the failure path below and
+          // for the identical reason: they are what the last listing READ could
+          // not make out, and a poll cut short never read one. Left standing,
+          // one poll that saw two undecodable rows and a quarter of an hour of
+          // aborts after it end in a timeout describing that first listing in
+          // the present tense — the sentence this wait was changed to stop
+          // writing, reached by the one path that had not been closed.
+          unreadableLast = 0;
+          undatedLast = 0;
           continue;
         }
         if (!isTransientForPoll(err)) throw err;

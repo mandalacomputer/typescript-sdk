@@ -1288,6 +1288,28 @@ const startStamp = (m: Move): number => {
 };
 
 /**
+ * Whether a row is OVER as of a floor, where its finish can be read at all.
+ *
+ * The one thing {@link moveAtOrAfter} can say about a below-floor row without
+ * guessing: a move the listing dates as having finished before this one was
+ * accepted is not this one. Distance to the floor cannot say that — see
+ * {@link FLOOR_SLACK_MS}, whose whole point is that the two components render
+ * the same clock differently — and it is the below-floor rows that are
+ * expensive to get wrong, since they are terminal and end a wait on the first
+ * poll.
+ *
+ * ABSENT OR UNREADABLE IS NOT EVIDENCE, and so is not grounds to drop a row: a
+ * live move has no finish time yet, and `lost` is a terminal state the platform
+ * reaches by having stopped watching, which a row can carry with no finish time
+ * at all. `?? ''` rather than a check for the field, because `Date.parse('')`
+ * is already NaN and both ways of having no stamp mean the same here.
+ */
+const finishedBeforeFloor = (m: Move, floor: number): boolean => {
+  const t = Date.parse(m.finishedAt ?? '');
+  return !Number.isNaN(t) && t < floor;
+};
+
+/**
  * An RFC3339 instant, zone and all.
  *
  * The zone is the point. `Date.parse('2026-08-23 01:00:00')` answers a number —
@@ -1352,12 +1374,18 @@ export const moveFloor = (move: Move | string): number => {
  * possible at all. It costs little only because it is a TOLERANCE ON THE MATCH
  * and not a wider net — {@link moveAtOrAfter} takes the row NEAREST the floor,
  * so the minute lets this move's own row through when the listing rounded it
- * down, while a move that genuinely began within that minute sits further from
+ * down, while a move that genuinely began within it is ordinarily further from
  * the floor and loses. Admitting the minute and then taking the EARLIEST row
  * would instead hand every wait to whichever move on this computer started
  * first, which is the bug the floor exists to close, reopened at 1/1440 of its
  * old size and with a finished row — one that answers `!live` at once — as the
  * thing that wins.
+ *
+ * ORDINARILY, because the paragraph above says the two renderings can differ in
+ * either direction, and a skew that way puts a prior row nearer the floor than
+ * this move's own. Nearness is therefore a preference and not the guarantee;
+ * what bounds the minute is the FINISHED check in {@link moveAtOrAfter}, which
+ * is about time rather than about which row looks likeliest.
  */
 const FLOOR_SLACK_MS = 60_000;
 
@@ -1373,25 +1401,50 @@ const FLOOR_SLACK_MS = 60_000;
  * tells them apart.
  *
  * The row NEAREST the floor is the one, among those no more than
- * {@link FLOOR_SLACK_MS} below it. Nearest rather than earliest, and the whole
- * guarantee turns on that: this move's row sits AT its floor, or a fraction
- * below where the listing renders coarser than the 202 did, so no row can be
- * closer to the floor than it is. Every other row is a different operation
- * minutes or hours away in one direction or the other, and distance is what
- * puts each of them behind — an earlier one taken for this move answers `!live`
- * on the first poll while the disk is still crossing between hosts, which is
- * the failure the floor exists to prevent, and a later one — another process
- * starting a move on this computer between two polls — reports the `state` and
- * `detail` of a relocate the caller never asked about. A live row is not
- * preferred ahead of the nearest either, for the second of those reasons: it is
- * by definition the newer row, so preferring it can only swap this move for one
- * that began after the wait did.
+ * {@link FLOOR_SLACK_MS} below it, and none of them is preferred for being
+ * live: a live row is the newer one by definition, so preferring it can only
+ * swap this move for one another process started between two polls, whose
+ * `state` and `detail` would be reported as the outcome of a relocate the
+ * caller never asked about.
  *
- * An exact tie goes to the row AT OR AFTER the floor. A row below the floor may
- * belong to an earlier operation; one at or after it cannot have begun before
- * the move being waited on did, so it is the safer of two equally near rows —
- * and of the two ways to be wrong, only the earlier row ends the wait early on
- * a computer that is still moving.
+ * NEAREST IS A PREFERENCE AND NOT THE GUARANTEE, and the difference is worth
+ * being exact about. It would be a guarantee if this move's row could only ever
+ * render AT its floor or below it — the listing printing whole seconds where
+ * the 202 printed milliseconds — because then nothing could sit closer. But
+ * {@link FLOOR_SLACK_MS} is a minute rather than a second precisely because the
+ * two renderings can differ in EITHER direction, and under a skew the other way
+ * this move's own row lands above the floor by more than a prior row lands
+ * below it. Nearest is right in the ordinary case and would quietly be wrong in
+ * that one.
+ *
+ * So the guarantee is carried by a second rule, which is a statement about time
+ * rather than about which row looks likeliest: A ROW THAT HAD FINISHED BEFORE
+ * THE FLOOR IS NOT A MOVE THAT STARTED AT IT. Such a row is dropped outright,
+ * however near it lands and whatever the slack would otherwise admit, and that
+ * is the half worth guarding — an earlier move taken for this one is already
+ * terminal, so it answers `!live` on the first poll and ends the wait while the
+ * disk is still crossing between hosts, which is the failure the floor exists
+ * to prevent. Being wrong the other way costs a wrong `state` and `detail`, and
+ * distance is enough for it: a later move is another operation minutes away,
+ * not a fraction of a second.
+ *
+ * That check reads a listing stamp against the 202's, so it is no more immune
+ * to skew than anything else here; what it is not is a guess. It leaves exactly
+ * one hole, and a narrow one — a prior move whose whole run is shorter than the
+ * skew between the two components, so that the listing dates its finish after
+ * an instant it really preceded.
+ *
+ * Two rows equally near the floor are settled without falling back to the order
+ * the platform happened to send them in, because that order is not evidence
+ * about anything. Not the same instant, the row AT OR AFTER the floor wins: one
+ * below it may belong to an earlier operation, one at or after it cannot have
+ * begun before the move being waited on did. The SAME instant — which is what a
+ * listing truncating to whole seconds produces, and the case the slack exists
+ * for — goes to the LIVE row. Preferring live is only ever dangerous for a row
+ * that started later, and a row carrying this one's own stamp did not; it is
+ * also the only reading that covers a terminal row with no finish time to
+ * place, which `lost` is, being the state the platform reaches by having
+ * stopped watching.
  *
  * Rows whose `started_at` cannot be placed in time are counted as `undated`
  * rather than merely dropped: any one of them might be this move, so they are
@@ -1407,15 +1460,35 @@ export const moveAtOrAfter = (
   floor: number,
 ): { move: Move | undefined; undated: number } => ({
   move: moves
-    .filter((m) => startStamp(m) >= floor - FLOOR_SLACK_MS)
+    .filter((m) => {
+      const start = startStamp(m);
+      if (start < floor - FLOOR_SLACK_MS) return false;
+      // The slack's own guard, and the reason it can be a minute wide: a row
+      // below the floor that the listing dates as already OVER is a move that
+      // ended before this one was accepted, and no rendering difference makes
+      // it this one. Without it the nearest-row rule is decided by whichever
+      // row the clocks happen to place closer, and on a poll before this move's
+      // own row propagates — which is the premise of the whole wait — a prior
+      // move that ran inside the slack is the only candidate there is, so it
+      // wins by default and answers `!live` at once.
+      return !(start < floor && finishedBeforeFloor(m, floor));
+    })
     .reduce<Move | undefined>((best, m) => {
       if (best === undefined) return m;
       const gap = Math.abs(startStamp(m) - floor);
       const bestGap = Math.abs(startStamp(best) - floor);
-      // The `>` is the tie-break the doc block names: equally near, the later
-      // row wins, because a row at or after the floor cannot be an operation
-      // that began before this one.
-      return gap < bestGap || (gap === bestGap && startStamp(m) > startStamp(best)) ? m : best;
+      if (gap !== bestGap) return gap < bestGap ? m : best;
+      const start = startStamp(m);
+      const bestStart = startStamp(best);
+      // Equally near and a different instant: the later row wins, because a row
+      // at or after the floor cannot be an operation that began before this one.
+      if (start !== bestStart) return start > bestStart ? m : best;
+      // Equally near and the SAME instant, which a listing printing whole
+      // seconds hands over routinely and no stamp comparison can separate.
+      // Deciding it by `data.moves` order is deciding it by nothing; the live
+      // row is the answer, and safely, since a row sharing this one's stamp is
+      // not one that started after it.
+      return m.live && !best.live ? m : best;
     }, undefined),
   undated: moves.filter((m) => startStamp(m) === -Infinity).length,
 });

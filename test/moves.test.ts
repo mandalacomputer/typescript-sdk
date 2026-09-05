@@ -409,18 +409,105 @@ describe('waitForMove', () => {
     expect(polls).toBe(2);
   });
 
+  it('does not answer from a below-floor row while its own has yet to propagate', async () => {
+    // WHAT NEARNESS CANNOT DECIDE, because there is nothing to be near. The
+    // whole premise of this wait is that `GET /moves` lags the 202 that started
+    // it, so on any poll before this move's own row propagates the only
+    // qualifying row is whatever else the slack admits — and `MOVE_DONE` is
+    // exactly that: a small overlay that began 17s below the floor and was over
+    // 13s below it. Nearest-to-the-floor picks it because it is the only
+    // candidate there is, and it satisfies `!live` at once, so the wait reports
+    // `done` on poll 1 while the disk it was asked about is still crossing
+    // between hosts. Distance cannot rule it out; the clock can — a row that had
+    // FINISHED before the floor is not a move that started at it.
+    const floor = '2026-08-23T02:00:30.000Z';
+    const mine = { ...MOVE_DONE, started_at: floor, finished_at: '2026-08-23T02:00:44.000Z' };
+    let polls = 0;
+    const { client: c } = client((call) => {
+      if (call.path !== '/moves') return anyRoute(call);
+      polls += 1;
+      // Poll 1 is the lagging replica: this computer's only row on it is the
+      // older one. Poll 2 is the listing having caught up.
+      return json({ moves: polls === 1 ? [MOVE_DONE] : [MOVE_DONE, mine] });
+    });
+    const computer = await c.computers.get('vm-1');
+    const move = await computer.waitForMove(floor, { pollMs: 1, timeoutMs: 5_000 });
+
+    expect(move.startedAt).toBe(floor);
+    expect(move.finishedAt).toBe('2026-08-23T02:00:44.000Z');
+    // The count is the assertion that matters: answering on poll 1 is answering
+    // about a move that had already ended before this one was accepted.
+    expect(polls).toBe(2);
+  });
+
+  it('settles two rows carrying the same instant on live rather than on row order', async () => {
+    // THE CASE THE SLACK EXISTS FOR IS ALSO THE ONE A STAMP COMPARISON CANNOT
+    // DECIDE. A listing printing whole seconds renders this move's own
+    // `02:00:12.699Z` and a prior move's `02:00:12.1Z` as the same `02:00:12Z`:
+    // equal distance from the floor and equal stamps, so "the later row wins"
+    // has nothing to compare and the answer falls out of the order the platform
+    // happened to send `data.moves` in. In one of the two orders that is the
+    // prior row, terminal, and the wait ends on the first poll. Live is what
+    // separates them, and safely — a row sharing this move's stamp is not one
+    // that started after it.
+    const floor = MOVE_STARTED.started_at;
+    const coarse = '2026-08-23T02:00:12Z';
+    // `lost` with no finish stamp: the prior row the FINISHED check cannot
+    // place, which is why this tie has to be broken and not merely filtered.
+    const prior = {
+      ...MOVE_STARTED,
+      state: 'lost',
+      live: false,
+      detail: 'the move before this one',
+      started_at: coarse,
+    };
+    const running = { ...MOVE_STARTED, detail: 'the move being waited on', started_at: coarse };
+    // Poll 2 comes off a replica rendering milliseconds — the same difference
+    // between two renderings that the minute of slack is there to absorb — so
+    // there is no tie left on it and distance alone answers.
+    const fine = [
+      { ...prior, started_at: '2026-08-23T02:00:12.100Z' },
+      {
+        ...MOVE_DONE,
+        detail: 'the move being waited on',
+        finished_at: '2026-08-23T02:00:20.000Z',
+      },
+    ];
+    for (const first of [prior, running]) {
+      let polls = 0;
+      const { client: c } = client((call) => {
+        if (call.path !== '/moves') return anyRoute(call);
+        polls += 1;
+        return json({ moves: polls === 1 ? [first, first === prior ? running : prior] : fine });
+      });
+      const computer = await c.computers.get('vm-1');
+      const move = await computer.waitForMove(floor, { pollMs: 1, timeoutMs: 5_000 });
+
+      expect(move.detail).toBe('the move being waited on');
+      expect(move.state).toBe('done');
+      expect(polls).toBe(2);
+    }
+  });
+
   it('breaks an exact tie in favour of the row at or after the floor', async () => {
     // Two rows the same distance from the floor is a coin toss that has to land
     // the same way every time, and it lands ABOVE: a row below the floor can
     // belong to an earlier operation, while one at or after it cannot have begun
     // before the move being waited on did. Of the two ways to be wrong, only the
     // row below ends a wait early on a computer whose disk is still moving.
+    //
+    // `lost` and no finish stamp, so that it is the DISTANCE rule being pinned
+    // here: a below-floor row the listing dates as finished is refused outright
+    // and would pass this test without the tie-break existing at all. `lost` is
+    // the state the platform reaches by having stopped watching, and a row can
+    // carry it with nothing to say when it ended.
     const floor = '2026-08-23T02:00:30.000Z';
     const below = {
-      ...MOVE_DONE,
+      ...MOVE_STARTED,
+      state: 'lost',
+      live: false,
       detail: 'the move before this one',
       started_at: '2026-08-23T02:00:10.000Z',
-      finished_at: '2026-08-23T02:00:20.000Z',
     };
     const above = {
       ...MOVE_DONE,
@@ -526,6 +613,32 @@ describe('waitForMove', () => {
     expect(polls).toBeGreaterThan(1);
     expect((err as Error).message).not.toContain('could not be read at all');
     expect((err as Error).message).toContain('poll(s) failed outright');
+  });
+
+  it('does not quote a stale listing when the polls after it were cut short instead', async () => {
+    // The same sentence and the other way of never reading a listing again. A
+    // poll this wait's own deadline cuts short read nothing at all, so it leaves
+    // the counts of what could not be made out exactly as stale as a 503 does —
+    // and clearing them on one path and not the other is a timeout that
+    // describes a quarter-hour-old listing in the present tense whenever the
+    // silence was the clock's rather than the platform's. Nothing here failed,
+    // which is the point: there is no `failed outright` clause to carry the
+    // reader past it.
+    let polls = 0;
+    const { client: c } = client((call) => {
+      if (call.path !== '/moves') return anyRoute(call);
+      polls += 1;
+      return polls === 1 ? json({ moves: [42, 'not a row'] }) : new Promise<Response>(() => {});
+    });
+    const computer = await c.computers.get('vm-1');
+    const err = await computer.waitForMove(SINCE, { pollMs: 1, timeoutMs: 60 }).catch((e) => e);
+
+    expect(err).toBeInstanceOf(TimeoutError);
+    expect(polls).toBeGreaterThan(1);
+    expect((err as Error).message).not.toContain('could not be read at all');
+    // Still the branch about a move never seen on a listing that WAS read, so
+    // the fix is the counts going and not the sentence changing.
+    expect((err as Error).message).toContain('appeared on GET moves');
   });
 
   it('picks this computer’s move out of the account’s', async () => {

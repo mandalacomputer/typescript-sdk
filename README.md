@@ -1081,11 +1081,13 @@ one that has not caught up yet, so the wait goes on polling and its deadline,
 rather than yesterday's row, is what ends it. The row NEAREST that instant is
 the move; a minute of slack sits under it, because the 202 and the listing are
 two renderings of the same platform clock and one of them printing whole seconds
-must not put a move's own row below its own floor. Nearest and not earliest, so
-that the minute admits this move's own rounded-down row without also handing the
-wait to a move that really did start within it — one that finished seconds
-earlier would otherwise answer straight away, on a disk still crossing between
-hosts.
+must not put a move's own row below its own floor. What that minute may not do
+is hand the wait to a move that really did start within it — one that finished
+seconds earlier would answer straight away, on a disk still crossing between
+hosts — so a row below the floor that the listing dates as having FINISHED
+before it is never the answer, however near the floor it lands. Two rows the
+same distance from the floor go to the one at or after it, and two carrying the
+same instant go to the one still running.
 
 A row that was listed and then is not, on two consecutive polls of a listing
 this client could read whole, ends the wait with a `MandalaError`: a move's row
