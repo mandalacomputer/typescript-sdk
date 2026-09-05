@@ -833,10 +833,20 @@ const MAX_GUEST_PATH_BYTES = 4096;
  * linter refuses for the sound reason that a control character written into a
  * regex is usually a typo. This is the case it is not.
  *
- * A lone surrogate is not UTF-8, and it is the one bad path that would NOT be
- * refused by the platform: `encodeURIComponent` turns it into `%EF%BF%BD`, so
- * the host is handed a VALID path that is not the one the caller named — a
- * different file read, written or watched, with nothing anywhere saying so.
+ * A lone surrogate is not UTF-8, and it is the one bad path the two routes
+ * carrying it fail on DIFFERENTLY — which is the argument for one guard in
+ * front of both rather than a rule per route. A path bound for `files` or an
+ * exec `cwd` goes on the query through `URLSearchParams` (`transport.ts`
+ * `#url`), which substitutes it: `?path=/home/user/\ud800.txt` is sent as
+ * `%2Fhome%2Fuser%2F%EF%BF%BD.txt`, so the platform is handed a VALID path that
+ * is not the one the caller named and reads or writes whatever is at it, with
+ * nothing anywhere saying so. A watch nomination goes on the URL through
+ * `encodeURIComponent` (`events.ts` `withWatches`), which throws `URIError: URI
+ * malformed` — a real refusal, but a bare one naming neither the argument nor
+ * the call, out of a class nothing on this surface catches. Neither route is
+ * left to its own answer, so neither can be dropped on the reasoning that the
+ * encoder already handles it: on one it silently retargets, and on the other it
+ * is the wrong error.
  */
 export function checkPathText(path: string, what: string, maxBytes: number): void {
   if (utf8Length(path) > maxBytes) {

@@ -699,12 +699,16 @@ const stream = c.events({
 });                                // [{ path: '/home/user/project', armed: false }]
 ```
 
-`hello.incomplete` is the opening frame's own version of a listing's short
-answer: `null` when every `windows` and `watching` entry decoded, and a count of
-the entries that did not. An entry this client cannot read is dropped rather
-than allowed to end the connection — a stream is worth more than one malformed
-row — so the count is the only trace it was there, and it is what to check
-before reading `hello.watching.length` as what the host accepted.
+`hello.watchingIncomplete` and `hello.windowsIncomplete` are the opening frame's
+version of a listing's short answer, one per collection: `null` when every entry
+of that collection was usable, and a count of the entries that were not. An
+entry this client cannot use — a row that is not an object, or one that names no
+window and no tree — is dropped rather than allowed to end the connection (a
+stream is worth more than one malformed row), so the count is the only trace it
+was there. `hello.watchingIncomplete` is what to check before reading
+`hello.watching.length` as what the host accepted; a window the host could not
+describe moves the other one and says nothing about your nominations, which is
+why there are two counts and not one.
 
 **And `armed` is the half that is easy to get wrong.** A tree is *not* being
 watched the moment the opening frame accepts it: the guest has to be asked, and

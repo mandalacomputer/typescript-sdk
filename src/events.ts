@@ -462,6 +462,24 @@ export type Hello = {
    */
   windows?: GuestWindow[];
   /**
+   * How many {@link windows} entries this client could not use, or `null` when
+   * it used them all.
+   *
+   * `Listing.incomplete`'s spelling and its promise: presence says the array
+   * above is shorter than what the host answered with, and the number is
+   * detail, so `null` has to mean that collection was whole. Its own field
+   * rather than one shared with {@link watchingIncomplete}, because a listing's
+   * count can be a single number only by describing a single collection — one
+   * shared between two of them tells a caller checking `watching` that its
+   * nominations were dropped when the bad row was a window, which is the one
+   * conclusion this frame is read to reach.
+   *
+   * `0` is the one count that is not a count: it means the host sent a
+   * `windows` that is not an array at all, so the shortfall is real and
+   * unsizeable — see {@link toHello}.
+   */
+  windowsIncomplete: number | null;
+  /**
    * The trees this stream will report file changes under, or `undefined`.
    *
    * ABSENT when nothing was nominated, which is the platform saying no
@@ -480,19 +498,15 @@ export type Hello = {
    */
   watching?: WatchedTree[];
   /**
-   * How many entries of {@link windows} and {@link watching} this client could
-   * not read, or `null` when it read them all.
+   * How many {@link watching} entries this client could not use, or `null` when
+   * it used them all.
    *
-   * `Listing.incomplete`'s spelling, because it is the same statement:
-   * presence says the collections above are shorter than what the host
-   * answered with, and the number is detail. An entry that is not an object is
-   * dropped rather than allowed to end the connection — a stream cannot be
-   * worth less than every event still to come on it, which is what refusing
-   * the opening frame over one bad entry would cost — but dropped silently it
-   * makes `watching.length` disagree with what was nominated, and that count
-   * is the one thing a caller reads this frame to check.
+   * {@link windowsIncomplete}'s rule, over the collection a caller compares
+   * against what it nominated: this is the count to check before reading
+   * `watching.length` as what the host accepted, and a window it could not read
+   * does not move it.
    */
-  incomplete: number | null;
+  watchingIncomplete: number | null;
   raw: Record<string, unknown>;
 };
 
@@ -637,16 +651,47 @@ export function toComputerEvent(frame: unknown): ComputerEvent | undefined {
   return ev;
 }
 
+/**
+ * One opening-frame collection, and how short reading it left it.
+ *
+ * An entry is DROPPED and counted, never kept as a placeholder. A row that is
+ * not an object has nothing to decode; a row that decodes to no identity — a
+ * window with no `id`, a tree with no `path` — is worse, because it survives as
+ * something a caller can hold and never match: a nomination of
+ * `/home/user/project` compared against `''` finds nothing, and the frame that
+ * handed it over said it was whole. Whatever its shape was on the wire, an
+ * entry that names nothing is an entry short, so it is counted as one — the
+ * asymmetry with {@link toWindowListing}, which refuses a listing outright over
+ * exactly that row, is narrowed to what a stream can afford rather than left
+ * open.
+ *
+ * Not an array at all is a shortfall this client cannot SIZE, so it reports the
+ * `0` a listing reports for a response with no body: the collection stays
+ * `undefined` — it says nothing, which is honest, where `[]` would be this
+ * decoder claiming the desktop is empty — and the count is what separates that
+ * silence from the host's own. The platform does not produce this shape:
+ * `eventsocket.go` sends `[]` for an empty set and the watch frames only run
+ * under a non-empty one, so this is a guard rather than a live hazard, and it
+ * is here because a frame arriving through a proxy is not a frame this daemon
+ * wrote. `null` counts as absent for the same reason — it is JSON's own way of
+ * saying nothing, not a collection gone missing.
+ */
+function helloRows<T>(
+  rows: unknown,
+  decode: (row: Record<string, unknown>) => T,
+  names: (decoded: T) => boolean,
+): { items: T[] | undefined; incomplete: number | null } {
+  if (rows == null) return { items: undefined, incomplete: null };
+  if (!Array.isArray(rows)) return { items: undefined, incomplete: 0 };
+  const items = rows.filter(isRecord).map(decode).filter(names);
+  return { items, incomplete: shortfall(rows.length - items.length) };
+}
+
 /** The opening frame, or `undefined` for anything that is not one. */
 export function toHello(frame: unknown): Hello | undefined {
   if (!isRecord(frame) || frame.type !== 'hello') return undefined;
-  const windowRows = Array.isArray(frame.windows) ? frame.windows : undefined;
-  const windows = windowRows?.filter(isRecord).map(toGuestWindow);
-  const watchRows = Array.isArray(frame.watching) ? frame.watching : undefined;
-  const watching = watchRows?.filter(isRecord).map(toWatchedTree);
-  const dropped =
-    (windowRows ? windowRows.length - (windows?.length ?? 0) : 0) +
-    (watchRows ? watchRows.length - (watching?.length ?? 0) : 0);
+  const windows = helloRows(frame.windows, toGuestWindow, (w) => w.id !== '');
+  const watching = helloRows(frame.watching, toWatchedTree, (t) => t.path !== '');
   return {
     computer: typeof frame.computer === 'string' ? frame.computer : '',
     cursor: typeof frame.cursor === 'string' ? frame.cursor : '',
@@ -656,9 +701,8 @@ export function toHello(frame: unknown): Hello | undefined {
     // field was malformed hands an agent a screen that is still booting.
     ready: frame.ready === true,
     events: stringList(frame.events) ?? [],
-    windows,
-    watching,
-    // An entry that is not an object is dropped rather than refused, and the
+    windows: windows.items,
+    // An entry this client cannot use is dropped rather than refused, and the
     // shortfall is SAID rather than left in the arithmetic. Refusing the frame
     // — which is what `toWindowListing` does with the same class of garbage —
     // ends a connection over one unreadable entry in an opening frame, and
@@ -666,10 +710,15 @@ export function toHello(frame: unknown): Hello | undefined {
     // reading is the right one here, because a caller who is told the picture
     // is short can re-read `computers/:id/windows` and carry on.
     //
-    // Through the same `shortfall` a listing's short answer goes through, and
-    // for the same reason it refuses to report a zero: presence is the signal,
-    // so `null` has to mean the frame was whole.
-    incomplete: shortfall(dropped),
+    // PER COLLECTION, which is the half a single count could not do. These are
+    // two independent answers — a window the host could not describe says
+    // nothing about the trees a caller nominated — so one number over both had
+    // a caller following the documented rule ("check this before reading
+    // `watching.length`") concluding its nominations were dropped over a bad
+    // window row.
+    windowsIncomplete: windows.incomplete,
+    watching: watching.items,
+    watchingIncomplete: watching.incomplete,
     raw: { ...frame },
   };
 }
@@ -683,6 +732,10 @@ export function toHello(frame: unknown): Hello | undefined {
  * changed" over a tree nothing is watching yet, and never finds out. Wrong in
  * the other, it waits for an `armed` event — which ends at a caller's timeout,
  * and which the platform may well be about to send anyway.
+ *
+ * The empty `path` this answers for a row that named none is a value {@link
+ * toHello} drops and counts rather than hands on: a tree nobody can name is a
+ * tree nobody can match an event against.
  */
 function toWatchedTree(entry: Record<string, unknown>): WatchedTree {
   return { path: text(entry.path) ?? '', armed: entry.armed === true };

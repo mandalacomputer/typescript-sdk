@@ -432,12 +432,16 @@ describe('filesQuery', () => {
   });
 
   it('refuses a lone surrogate, which reaches the guest as a different file', () => {
-    // `encodeURIComponent('\ud800')` is `%EF%BF%BD`: the platform is handed a
-    // VALID path that is not the one the caller named, reads or writes
-    // whatever is at it, and answers as though nothing were wrong. The one
-    // shape of bad path the platform cannot refuse for us — the stream's watch
-    // nominations have refused it since they were written, and a path is a
-    // path whichever route it goes to.
+    // This path rides the query, and `URLSearchParams` — which is what builds
+    // it, in transport's `#url` — substitutes a lone surrogate rather than
+    // refusing it: `path=/home/user/\ud800.txt` goes out as
+    // `%2Fhome%2Fuser%2F%EF%BF%BD.txt`, so the platform is handed a VALID path
+    // that is not the one the caller named, reads or writes whatever is at it,
+    // and answers as though nothing were wrong. The one shape of bad path the
+    // platform cannot refuse for us. The watch route encodes with
+    // `encodeURIComponent`, which throws a bare `URIError` on the same input
+    // instead — two failures, neither of them the refusal a caller can catch,
+    // which is why one guard sits in front of both.
     expect(() => P.filesQuery('/home/user/\ud800.txt')).toThrow(ValidationError);
     expect(() => P.filesQuery('/home/user/\ud800.txt')).toThrow(/must be valid UTF-8/);
     expect(() => P.execBody({ command: 'make', cwd: '/srv/\udfff' })).toThrow(
