@@ -264,17 +264,24 @@ function main() {
         ['query', 'query'],
         ['headers', 'header'],
       ]) {
-        // Matched rather than spelled, for the reason the body below is: the one
-        // space after the colon is a spelling, not a shape. A list the formatter
-        // wrapped — `query:\n  [{ name: 'limit' }]` — is the same list, but an
-        // `indexOf` for today's spelling skips the route's query and header
-        // parameters entirely and says nothing. With a full table the guard for
-        // a scan that counted nothing does not fire either, because the other
-        // routes counted: the route's real parameters surface as ones the mirror
-        // invented, which sends the operator to the wrong file.
-        const at = new RegExp(`\\b${key}:\\s*\\[`).exec(body);
-        if (!at) continue;
-        const list = balanced(body, at.index + at[0].length - 1, '[', ']');
+        // At the entry's own depth, for the reason the body below is: a regex
+        // over the whole entry answers with the first `query: [` at any depth,
+        // so a description or a response example nesting one of its own supplies
+        // the parameters and the route's real list — further down, at the
+        // entry's own depth — is never read at all. A parameter set read out of
+        // prose is then compared against the mirror as if the platform had
+        // documented it, and the route's genuine parameters surface as ones the
+        // mirror invented, which sends whoever reads the report to the wrong
+        // file to delete entries that are correct. The guard for a scan that
+        // counted nothing does not fire, because the other routes counted.
+        //
+        // It keeps what the regex was there for: the one space after the colon
+        // is a spelling, not a shape, and a list the formatter wrapped —
+        // `query:\n  [{ name: 'limit' }]` — is still found, because the key
+        // pattern spans the whitespace either way.
+        const at = topLevelValueAt(body, key);
+        if (at === -1 || body[at] !== '[') continue;
+        const list = balanced(body, at, '[', ']');
         for (const n of list.matchAll(/name:\s*'([^']+)'/g)) params.add(`${kind}:${n[1]}`);
         // `$` as well as a separator, and it is not decoration: `query:
         // [ALLOW_PARTIAL]` on one line is the whole list with nothing after the
