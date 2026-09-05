@@ -207,6 +207,16 @@ const incompleteCount = (header: string): number => {
 };
 
 /**
+ * How short an answer is, in {@link Listing.incomplete}'s spelling: `null` for
+ * not short at all, and the count otherwise.
+ *
+ * Zero is the one number this cannot report, and deliberately — the platform
+ * sends `0` for a shortfall it cannot size, so a `0` derived from counting
+ * would claim a fan-out failure that never happened.
+ */
+const shortfall = (missing: number): number | null => (missing > 0 ? missing : null);
+
+/**
  * A `Content-Range` on a response that carried bytes: `bytes 0-1048575/2147483648`.
  *
  * Refused rather than half-read when the positions do not describe a window —
@@ -626,19 +636,33 @@ export class Transport {
     const sent = await this.#fetchRaw('GET', path, opts);
     const short = sent.resp.headers.get(INCOMPLETE_HEADER);
     const data = await this.#decode<unknown>(sent, 'GET', path, opts.signal);
+    // The same check and the same element filter {@link jsonArray}'s callers
+    // get, because these are the list routes a user actually calls. Cast to
+    // `T[]`, an object answer reached `items.map` as an anonymous TypeError,
+    // and a single null element reached toSnapshot as `d.id` of null — both of
+    // them naming neither the request nor the platform.
+    const rows = expectArray(data, 'GET', path);
+    const items = rows.filter(isRecord);
     return {
-      // The same check and the same element filter {@link jsonArray}'s callers
-      // get, because these are the list routes a user actually calls. Cast to
-      // `T[]`, an object answer reached `items.map` as an anonymous TypeError,
-      // and a single null element reached toSnapshot as `d.id` of null — both
-      // of them naming neither the request nor the platform.
-      items: expectArray(data, 'GET', path).filter(isRecord),
+      items,
       // A header that is not a number came from something other than the
       // platform, and Number() turns it into a NaN that poisons the first sum a
       // caller does with it. Presence is the signal — see {@link Listing} — so
       // the warning survives as a count of 0 rather than as arithmetic nobody
       // can trace back to a header.
-      incomplete: short === null ? null : incompleteCount(short),
+      //
+      // And a row the filter above threw away leaves the answer exactly as
+      // short as a row the platform could not fan out to, in the one shape the
+      // caller acts on: an array diffed against their own idea of the estate,
+      // with a delete on the difference. `X-GC-Incomplete` is a "this list is
+      // short" channel rather than a "a host was unreachable" one — it replaced
+      // a header that named hosts precisely so the count could stand for the
+      // shortfall by itself — so a client-side drop belongs in it rather than
+      // in a second signal nobody would read. Only when the platform has not
+      // already flagged the answer: presence is what a caller tests, and adding
+      // to a count the platform documents as best effort would make it no
+      // truer.
+      incomplete: short !== null ? incompleteCount(short) : shortfall(rows.length - items.length),
     };
   }
 

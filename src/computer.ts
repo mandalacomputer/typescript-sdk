@@ -2902,7 +2902,21 @@ export class Computer {
       remaining = total - offset;
     }
 
-    for (let first = true; ; first = false) {
+    // `first` is "nothing is known about this file yet", not "this is request
+    // number one" — and after a tail probe something is. The probe only falls
+    // through to here having been served a 206 with a total, so ranges are
+    // proven to work on this path and the loop opens at an offset derived from
+    // that total. Entering with `first` set anyway hands both of the escapes
+    // below to a file that has forfeited them: a whole-file answer is taken as
+    // the honest unmeasurable-file case and yielded, which for a tail read is
+    // the file's FIRST bytes returned as its last, and a 416 with a total of
+    // zero ends the read as an empty file rather than as one truncated out from
+    // under it. The platform can serve either — a guest file re-created between
+    // two requests is measurable for one and not the next (openGuestRead in
+    // server/guestfile.go ignores a Range on a file whose length the seek
+    // cannot give and answers 200) — so this is not a shape only a broken
+    // origin can produce.
+    for (let first = total === undefined; ; first = false) {
       const length =
         remaining === undefined
           ? chunkBytes
@@ -2983,7 +2997,9 @@ export class Computer {
    *
    * A string is written as UTF-8. A `ReadableStream` is sent as the request
    * body so a large local file does not have to live as one Buffer first;
-   * pass `contentLength` when you know it so the platform sees the size.
+   * pass `contentLength` when you know it so the platform sees the size. It is
+   * a stream's option: against a `Uint8Array` or a string the length is already
+   * known here, and one that disagrees with it is refused rather than sent.
    * The path rules are {@link readFile}'s. The bytes land exactly as given —
    * this is how a credential reaches a guest `.env` without echoing it through
    * a shell command line.
@@ -3011,6 +3027,30 @@ export class Computer {
       if (!Number.isSafeInteger(opts.contentLength) || opts.contentLength < 0) {
         throw new ValidationError(
           `contentLength must be a non-negative whole number of bytes no larger than ${Number.MAX_SAFE_INTEGER} (got ${opts.contentLength})`,
+        );
+      }
+      // A body already in hand has a length, and it is not a second opinion —
+      // it is the number. Sending a different one is not a header disagreeing
+      // with a header: undici frames the request with the CALLER's value, so
+      // under-declaring hands the platform a prefix of the body and leaves the
+      // rest of it desynchronising the connection (measured: the origin reads 5
+      // of 20 bytes and the request ends in a 408), while over-declaring is
+      // refused locally as a bare `TypeError: fetch failed`. Neither reaches the
+      // caller as the mistake they made. The under-declared half is the one
+      // that costs data rather than clarity: the control plane streams this
+      // route and forwards the declared length as `X-GC-Expect-Bytes`, so
+      // gorillad writes exactly that many bytes into the guest and answers 200
+      // with a matching count (writeGuestFile in server/guestfile.go checks the
+      // body against the declaration, and a body cut to the declaration
+      // agrees) — a truncated guest file reported as a complete write.
+      //
+      // A stream is the only body whose length this cannot know, which is what
+      // the option is for, and it keeps the header unchecked.
+      if (!(bytes instanceof ReadableStream) && opts.contentLength !== bytes.length) {
+        throw new ValidationError(
+          `contentLength is ${opts.contentLength} but the data is ${bytes.length} bytes: ` +
+            'the length is only worth passing for a ReadableStream, whose size cannot be read ' +
+            'off the body',
         );
       }
       headers = { 'Content-Length': String(opts.contentLength) };

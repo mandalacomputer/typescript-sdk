@@ -1854,6 +1854,32 @@ describe('files', () => {
     ).rejects.toThrow(/contentLength/);
     expect(rec.calls.filter((call) => call.method === 'PUT')).toEqual([]);
   });
+
+  it('refuses a contentLength that contradicts a body it can measure', async () => {
+    // undici frames the request with the CALLER's number, so an under-declared
+    // length is not a header nobody believes — it is a shorter request. The
+    // control plane streams this route and passes the declaration on, so the
+    // guest gets a prefix of the file and the write answers 200 with a matching
+    // count: truncation reported as success. Free to catch, since the body is
+    // already in hand and the only body whose length is not is a stream.
+    const { rec, client: c } = client(anyRoute);
+    const computer = await c.computers.get('vm-1');
+    await expect(computer.writeFile('/tmp/a.txt', 'hello', { contentLength: 3 })).rejects.toThrow(
+      /contentLength is 3 but the data is 5 bytes/,
+    );
+    await expect(
+      computer.writeFile('/tmp/a.bin', new Uint8Array(20), { contentLength: 40 }),
+    ).rejects.toThrow(/contentLength is 40 but the data is 20 bytes/);
+    // A string is measured as its UTF-8 bytes, which is how it goes on the
+    // wire — counting characters would refuse every correct non-ASCII write.
+    await expect(computer.writeFile('/tmp/a.txt', 'é', { contentLength: 1 })).rejects.toThrow(
+      /contentLength is 1 but the data is 2 bytes/,
+    );
+    expect(rec.calls.filter((call) => call.method === 'PUT')).toEqual([]);
+    // Agreeing is still accepted, so nothing that was correct has to change.
+    expect(await computer.writeFile('/tmp/a.txt', 'hello', { contentLength: 5 })).toBe(5);
+    expect(rec.last().headers['Content-Length']).toBe('5');
+  });
 });
 
 /** `n` bytes whose value at every position says which position it is. */
@@ -2193,6 +2219,54 @@ describe('paging a file bigger than one request', () => {
     await expect(computer.readFileChunks('/tmp/big.bin', { offset: -250 }).next()).rejects.toThrow(
       /without a total/,
     );
+  });
+
+  it('gives a proven-rangeable file none of the first-request escapes', async () => {
+    // The tail probe reaches the forward loop only having been served a 206
+    // with a total, so this path can be windowed and the loop opens at an
+    // offset derived from that total. Both escapes the loop keeps for its very
+    // first request are then wrong here. A whole-file answer is the file's
+    // FIRST bytes arriving as its last — a `mandala scp` writing the head of a
+    // log into a tail and exiting 0 — rather than the unmeasurable file the
+    // escape exists for; and a 416 with a total of zero is the file truncated
+    // out from under the read rather than one that was always empty.
+    const probed =
+      (answer: () => Response): Responder =>
+      (call) => {
+        if (!(call.path.endsWith('/files') && call.method === 'GET')) return anyRoute(call);
+        if (call.headers.Range !== 'bytes=-1') return answer();
+        return new Response(filled(1000).slice(999), {
+          status: 206,
+          headers: {
+            'content-type': 'application/octet-stream',
+            'accept-ranges': 'bytes',
+            'content-range': 'bytes 999-999/1000',
+          },
+        });
+      };
+    const unmeasured = await computerOn(
+      probed(
+        () =>
+          new Response(filled(1000), {
+            status: 200,
+            headers: { 'content-type': 'application/octet-stream', 'accept-ranges': 'none' },
+          }),
+      ),
+    );
+    await expect(
+      unmeasured.computer.readFileChunks('/tmp/big.bin', { offset: -250 }).next(),
+    ).rejects.toThrow(/for bytes from 750 and was answered with the whole file/);
+    const emptied = await computerOn(
+      probed(() =>
+        errorJson(416, 'that range is outside the file, which is 0 bytes', {
+          'accept-ranges': 'bytes',
+          'content-range': 'bytes */0',
+        }),
+      ),
+    );
+    await expect(
+      emptied.computer.readFileChunks('/tmp/big.bin', { offset: -250 }).next(),
+    ).rejects.toBeInstanceOf(RangeNotSatisfiableError);
   });
 
   it('refuses a window wider than the one it asked for', async () => {
