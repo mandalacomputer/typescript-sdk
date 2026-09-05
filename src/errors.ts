@@ -499,28 +499,66 @@ export class TimeoutError extends MandalaError {
   override name = 'TimeoutError';
 }
 
-const BY_STATUS: Record<number, typeof APIError> = {
-  401: AuthenticationError,
-  402: PlanLimitError,
-  403: PermissionDeniedError,
-  404: NotFoundError,
-  409: ConflictError,
-  413: TooLargeError,
-  416: RangeNotSatisfiableError,
-  503: UnavailableError,
-  504: GatewayTimeoutError,
-  // NOT OriginUnreachableError, which is the trap in this range: 520 means the
-  // platform WAS reached and answered unreadably. See OriginResponseError.
-  520: OriginResponseError,
-  521: OriginUnreachableError,
-  522: OriginUnreachableError,
-  523: OriginUnreachableError,
-  524: GatewayTimeoutError,
-  // Their own class, not more entries on the one above: an unreachable origin is
-  // a passing outage and these are a deployment somebody has to fix.
-  525: OriginTLSError,
-  526: OriginTLSError,
-};
+/**
+ * Null-prototype, because this is a lookup by a value that came off a response.
+ *
+ * A plain object literal inherits `constructor`, `toString` and the rest, and
+ * both readers below take `BY_STATUS[status] ?? APIError` — a `??` that cannot
+ * fire for an inherited key, so `new Cls(...)` would be `new Object.toString()`
+ * and throw a TypeError from inside the error path, destroying the failure it
+ * was called to describe. The supported statuses are all numbers and never
+ * reach that; a caller-supplied `fetch` is what makes it worth ruling out,
+ * since this file already accepts that it must survive anything at all out of
+ * one, and a hand-rolled Response with a string status is the whole hazard.
+ *
+ * The cast and the `satisfies` are what keep that from being bought at the
+ * price of the thing it protects. `Object.create(null)` is typed `any`, so
+ * `Object.assign` answers `any` and the annotation on the left checks nothing
+ * at all — a table with `402: 'not a class'` in it compiles clean, and the
+ * `new Cls(...)` below is then the same TypeError from inside the error path,
+ * arrived at through the other door. The cast gives `Object.assign` a target
+ * to check the literal against, and `satisfies` checks the literal where it is
+ * written so a wrong entry is named at the entry rather than at the call.
+ */
+const BY_STATUS: Record<number, typeof APIError> = Object.assign(
+  Object.create(null) as Record<number, typeof APIError>,
+  {
+    401: AuthenticationError,
+    402: PlanLimitError,
+    403: PermissionDeniedError,
+    404: NotFoundError,
+    409: ConflictError,
+    413: TooLargeError,
+    416: RangeNotSatisfiableError,
+    503: UnavailableError,
+    504: GatewayTimeoutError,
+    // NOT OriginUnreachableError, which is the trap in this range: 520 means the
+    // platform WAS reached and answered unreadably. See OriginResponseError.
+    520: OriginResponseError,
+    521: OriginUnreachableError,
+    522: OriginUnreachableError,
+    523: OriginUnreachableError,
+    524: GatewayTimeoutError,
+    // Their own class, not more entries on the one above: an unreachable origin is
+    // a passing outage and these are a deployment somebody has to fix.
+    525: OriginTLSError,
+    526: OriginTLSError,
+  } satisfies Record<number, typeof APIError>,
+);
+
+/**
+ * The statuses the table above maps, for the test that proves each one builds.
+ *
+ * The table stays private — a caller has `instanceof` and `err.status` and
+ * needs no list of what this file knows — but a test that enumerates the
+ * entries by hand covers only the ones that existed when it was written, and a
+ * status added above and not added there is precisely the entry nobody proved
+ * constructs. Derived, so the two cannot drift.
+ *
+ * Not re-exported from `index.ts`, whose explicit export list is the published
+ * surface, so nothing a consumer can reach widens by this being here.
+ */
+export const MAPPED_STATUSES: readonly number[] = Object.freeze(Object.keys(BY_STATUS).map(Number));
 
 /**
  * What a caller is told when a proxy abandoned the request and named nothing.
@@ -549,30 +587,6 @@ const GATEWAY_TIMEOUT_MESSAGE =
   'After one of those, the next call on that computer may report the guest agent as ' +
   'busy with the command that outlived the request';
 
-/**
- * Whether the response named this failure in the shape this surface uses.
- *
- * Only a JSON body with a non-empty `error` string counts. An HTML page and an
- * empty body are an intermediary's, and both are worth discarding for the
- * wording above; a structured message is not. "upstream unavailable before
- * dispatch" is a more specific true thing than anything written here, and
- * replacing it would be this client overwriting a hop that knew more than it
- * does with a guess.
- *
- * `error` and not RFC 9457's `detail`, though Cloudflare answers these statuses
- * with one and `messageFromBody` in transport.ts reads it. Deliberate, and the
- * distinction is what each hop can know. Cloudflare's `detail` describes the
- * edge accurately and stops there, because a proxy cannot know that the request
- * under it was a foreground exec with a two-minute ceiling over it and an
- * execBackground alternative. Counting it here would hand that sentence the
- * substitution and lose the only part a caller can act on — on 504 and 524,
- * which is to say on almost every real one of these.
- *
- * Which hop wrote it is not knowable from here and does not need to be. The test
- * is whether SOMETHING said something specific — a 504 can be raised by any
- * proxy in the chain, including one in front of a `baseUrl` this client has
- * never seen.
- */
 /** What a caller is told when the platform's own answer arrived unreadable. */
 const ORIGIN_RESPONSE_MESSAGE =
   'the platform received the request and the exchange then broke on the way back — an ' +
@@ -600,13 +614,36 @@ const ORIGIN_TLS_MESSAGE =
   'outage — an expired or mismatched certificate fails the same way on every retry, so ' +
   'report it rather than waiting it out';
 
+/**
+ * Whether the response named this failure in the shape this surface uses.
+ *
+ * Only a JSON body with a non-empty `error` string counts. An HTML page and an
+ * empty body are an intermediary's, and both are worth discarding for the
+ * wording above; a structured message is not. "upstream unavailable before
+ * dispatch" is a more specific true thing than anything written here, and
+ * replacing it would be this client overwriting a hop that knew more than it
+ * does with a guess.
+ *
+ * `error` and not RFC 9457's `detail`, though Cloudflare answers these statuses
+ * with one and `messageFromBody` in transport.ts reads it. Deliberate, and the
+ * distinction is what each hop can know. Cloudflare's `detail` describes the
+ * edge accurately and stops there, because a proxy cannot know that the request
+ * under it was a foreground exec with a two-minute ceiling over it and an
+ * execBackground alternative. Counting it here would hand that sentence the
+ * substitution and lose the only part a caller can act on — on 504 and 524,
+ * which is to say on almost every real one of these.
+ *
+ * Which hop wrote it is not knowable from here and does not need to be. The test
+ * is whether SOMETHING said something specific — a 504 can be raised by any
+ * proxy in the chain, including one in front of a `baseUrl` this client has
+ * never seen.
+ */
 function namedTheFailure(body: unknown): boolean {
   if (!body || typeof body !== 'object') return false;
   const err = (body as { error?: unknown }).error;
   return typeof err === 'string' && err.length > 0;
 }
 
-/** Build the error for a status, with the platform's own message when it sent one. */
 /**
  * Our wording for a failure, carrying the status it stands in for.
  *
@@ -635,6 +672,7 @@ export type ErrorHeaders = {
   rangeTotal?: number;
 };
 
+/** Build the error for a status, with the platform's own message when it sent one. */
 export function errorForStatus(
   status: number,
   message: string,
