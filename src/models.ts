@@ -9,8 +9,8 @@
  * place that has nothing to do with the response that was wrong.
  */
 
-import { MandalaError } from './errors.js';
-import { isRecord } from './paths.js';
+import { MandalaError, ValidationError } from './errors.js';
+import { isRecord, MOVES } from './paths.js';
 
 /**
  * A string from a payload, with a fallback for an absent one.
@@ -1212,10 +1212,11 @@ export type Snapshot = {
  * `{ moves: [...] }` is the shape. Anything else is the platform failing to
  * answer, and reading it as `[]` turned one malformed 200 into two different
  * false statements: a quiet account from {@link Moves.list}, and — in
- * `Computer.waitForMove`, which reaches its reaped-row branch only once a move
- * has been accepted — the claim that the computer had been DELETED. An empty
- * array still means what it always did, which is the reaped row that branch is
- * for.
+ * `Computer.waitForMove` — the claim that the computer had been DELETED, which
+ * that wait now makes on the FIRST poll of a listing it could read whole. All
+ * the more reason the envelope has to be held to its shape here: an empty array
+ * is a listing that does not carry the move, and a listing nobody can parse is
+ * not one of those.
  */
 export function moveRows(
   data: unknown,
@@ -1244,8 +1245,9 @@ export function moveRows(
  * read is most likely another computer's, and refusing on it would abort a
  * wait over a move that is present, readable and running. It reads
  * {@link moveRows} instead and spends `unreadable` only where the count
- * changes the answer: whether an empty result means the move was reaped, or
- * means nobody could tell.
+ * changes the answer: a listing that has stopped carrying this move may be
+ * called a dropped row only if every row of it was decodable, because a row
+ * this client could not read might be that very move.
  */
 export function expectMoves(
   data: unknown,
@@ -1265,31 +1267,90 @@ export function expectMoves(
 }
 
 /**
- * When a move was last heard of, for ordering an account-wide listing.
+ * An RFC3339 instant, zone and all.
  *
- * `finishedAt` where there is one, `startedAt` otherwise. An unreadable stamp
- * sorts below every readable one rather than throwing: the listing is the
- * platform's, and one unparseable row should not decide which move a wait
- * returns.
+ * The zone is the point. `Date.parse('2026-08-23 01:00:00')` answers a number —
+ * for that wall clock in the LOCAL zone — so a hand-written stamp with no `Z`
+ * silently names an instant hours from the one it reads as.
  */
-const moveStamp = (m: Move): number => {
-  const t = Date.parse(m.finishedAt ?? m.startedAt ?? '');
-  return Number.isNaN(t) ? -Infinity : t;
-};
+const RFC3339 = /^\d{4}-\d{2}-\d{2}[Tt ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[Zz]|[+-]\d{2}:\d{2})$/;
 
 /**
- * The most recently finished move among rows already known to be one computer's.
+ * The `startedAt` a wait is anchored to: the exact string to match rows against.
  *
- * `GET /moves` carries the moves that finished in the last DAY beside the one
- * running now, so "the first row for this computer" is not "the move this wait
- * is watching" — see {@link Computer.waitForMove}, which is where taking the
- * first one ended a wait on a copy that finished yesterday.
+ * WHAT THE PLATFORM GUARANTEES, since everything here follows from it.
+ * `computer_moves` is keyed by `computer_id` — one row per computer, ever — and
+ * a move is written with `INSERT OR REPLACE` inside the transaction that
+ * precedes the 202. So a listing filtered to one computer has at most ONE row,
+ * and there is nothing to select between: no nearest, no tolerance, no window.
+ * The `started_at` on that row is the same stored string the 202 handed back,
+ * out of one database and written once, so the two are compared by EQUALITY and
+ * not by distance. There is no second rendering to be off by a fraction of a
+ * second, and no clock skew, because there is no second clock.
+ *
+ * The anchor still earns its place, for the other half of `INSERT OR REPLACE`:
+ * a second relocate on the same computer REPLACES this move's row mid-wait.
+ * Without the anchor the wait would read the new move's `state` and `detail` as
+ * the outcome of the one it was started for. Equality is what notices.
+ *
+ * A string is held to RFC3339-with-a-zone rather than to whatever `Date.parse`
+ * will take, because that catches a typo before any request is made. It is only
+ * a SHAPE test: the match is exact string equality, so a persisted anchor must
+ * be the value the platform stored, verbatim — `2026-08-23T02:00:12.699Z` and
+ * not the same instant re-formatted by a date library, which is a different
+ * string and matches nothing.
+ *
+ * A {@link Move}'s own `startedAt` is checked with `Date.parse` and no shape
+ * test, because it came off the platform in the platform's own spelling and
+ * holding it to a stricter rule than the rows it will be compared against would
+ * refuse a wait that can otherwise be answered perfectly well. What is refused
+ * is a move with no readable start at all, which is a move nothing can be
+ * anchored to — `str()` renders an absent `started_at` as `''`, and an anchor of
+ * `''` would match a row whose start the platform never sent.
+ *
+ * WHOSE MISTAKE IT WAS decides the class, and `raw` is what tells them apart.
+ * Every `Move` comes out of `toMove`, which always sets `raw`, so a value
+ * carrying one came off the wire: `Computer.relocate` guards its own 202, which
+ * leaves `client.moves.list()` as the route that can hand back a row the
+ * platform sent with no readable `started_at` — a platform omission, so a
+ * {@link MandalaError} naming that route, for the reason `relocate`'s guard
+ * exists. Anything else with no `raw` is a value the caller assembled or a
+ * misplaced options object, and stays a {@link ValidationError} — which now says
+ * what changed, because the old two-argument-optional signature let
+ * `waitForMove({ pollMs: 1 })` compile, and a message that only reports an
+ * unreadable `startedAt` never tells that caller where their options went.
  */
-export const latestFinishedMove = (moves: Move[]): Move | undefined =>
-  moves.reduce<Move | undefined>(
-    (best, m) => (best === undefined || moveStamp(m) > moveStamp(best) ? m : best),
-    undefined,
-  );
+const SIGNATURE =
+  `waitForMove's first argument is the move to wait for and is required; options are the ` +
+  `SECOND argument — waitForMove(move, { pollMs })`;
+
+export const moveAnchor = (move: Move | string): string => {
+  if (typeof move === 'string') {
+    if (!RFC3339.test(move)) {
+      throw new ValidationError(
+        `move must be the Move that relocate() returned, or an RFC3339 timestamp with a zone ` +
+          `like 2026-08-23T01:00:00Z — got ${JSON.stringify(move).slice(0, 120)}. ${SIGNATURE}`,
+      );
+    }
+    return move;
+  }
+  const startedAt = isRecord(move) ? str(move.startedAt) : '';
+  if (Number.isNaN(Date.parse(startedAt))) {
+    const shown = `${JSON.stringify(move)}`.slice(0, 120);
+    if (isRecord(move) && isRecord(move.raw)) {
+      throw new MandalaError(
+        `this Move has no readable startedAt to wait from, which is what waitForMove anchors ` +
+          `to; a Move off GET ${MOVES} with no readable started_at is the platform having ` +
+          `omitted it, not a value you chose — got: ${shown}`,
+      );
+    }
+    throw new ValidationError(
+      `move must be the Move that relocate() returned, and this one has no readable startedAt ` +
+        `to wait from: ${shown}. ${SIGNATURE}`,
+    );
+  }
+  return startedAt;
+};
 
 /**
  * Whether a ROW off the wire belongs to the computer named.

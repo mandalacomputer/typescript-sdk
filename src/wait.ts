@@ -72,7 +72,7 @@ export type WaitOptions = {
  *
  *   A bare {@link MandalaError} is caught by the same floor, and that is the
  *   half worth spelling out, because every poll loop here raises them: "this
- *   move is no longer listed", "this build says done beside a running status".
+ *   move is not listed", "this build says done beside a running status".
  *   Those are VERDICTS this SDK reached about a poll that succeeded, thrown
  *   from inside the same try that wraps the request. Polling through one is an
  *   infinite loop with a deadline on it, which is what the test suite said the

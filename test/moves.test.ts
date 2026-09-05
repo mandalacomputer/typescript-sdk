@@ -6,11 +6,22 @@ import {
   ConflictError,
   isTransient,
   MandalaError,
+  type Move,
   type MoveArgs,
   MoveRequiredError,
   TimeoutError,
+  ValidationError,
 } from '../src/index.js';
-import { anyRoute, BASE, errorJson, json, MOVE_DONE, type Responder, recorder } from './harness.js';
+import {
+  anyRoute,
+  BASE,
+  errorJson,
+  json,
+  MOVE_DONE,
+  MOVE_STARTED,
+  type Responder,
+  recorder,
+} from './harness.js';
 
 // OPL-3773. A resize past what a computer's host can run is refused with an
 // OFFER — `move: {required, possible}` on the body — and this SDK bound neither
@@ -160,17 +171,432 @@ describe('relocate', () => {
     const post = rec.calls.find((call) => call.method === 'POST');
     expect(post?.body).toEqual({ ram_mb: 26000 });
   });
+
+  it('refuses a 202 with no readable started_at, naming the route', async () => {
+    // `toMove` coerces an absent `started_at` to `''`, so a 202 that omitted or
+    // renamed it returned from here looking perfectly well-formed — and then the
+    // very next documented line, `await c.waitForMove(move)`, threw a
+    // ValidationError about the value this method had just handed back, in the
+    // class reserved for caller mistakes. The platform's omission is the
+    // platform's, and a move with no start is a move nothing can be anchored to.
+    const { client: c } = client((call) =>
+      call.path.endsWith('/move') && call.method === 'POST'
+        ? json({ ...MOVE_STARTED, started_at: undefined }, { status: 202 })
+        : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    const err = await computer.relocate({ ramMb: 26000 }).catch((e) => e);
+
+    expect(err).toBeInstanceOf(MandalaError);
+    expect(err).not.toBeInstanceOf(ValidationError);
+    expect((err as Error).message).toContain('POST computers/vm-1/move');
+    expect((err as Error).message).toContain('started_at');
+  });
 });
+
+// The anchor every wait below is started from, and the one the harness's own
+// rows carry. The platform keys `computer_moves` by computer id and writes with
+// `INSERT OR REPLACE`, so a row of this computer's is this move exactly when its
+// `started_at` equals the anchor — and a row carrying a different one is this
+// move's row having been replaced by a later relocate.
+const SINCE = MOVE_STARTED.started_at;
 
 describe('waitForMove', () => {
   it('answers the move once it has stopped running', async () => {
     const { client: c } = client(anyRoute);
     const computer = await c.computers.get('vm-1');
-    await computer.relocate({ ramMb: 26000 });
-    const move = await computer.waitForMove({ pollMs: 1 });
+    const accepted = await computer.relocate({ ramMb: 26000 });
+    const move = await computer.waitForMove(accepted, { pollMs: 1 });
     expect(move.live).toBe(false);
     expect(move.state).toBe('done');
     expect(move.finishedAt).toBeTruthy();
+  });
+
+  it('keeps polling past a listing whose other rows are another computer’s', async () => {
+    // The ordinary life of a move: live, then finished, on an ACCOUNT-WIDE
+    // listing that carries other computers' rows the whole time — here another
+    // computer's day-old finished one, which is not an answer about this
+    // computer at either poll and must not be read as one.
+    const elsewhere = {
+      ...MOVE_DONE,
+      computer_id: 'vm-other',
+      started_at: '2026-08-22T01:00:00.000Z',
+      finished_at: '2026-08-22T02:00:00.000Z',
+    };
+    let polls = 0;
+    const { client: c } = client((call) => {
+      if (call.path !== '/moves') return anyRoute(call);
+      polls += 1;
+      if (polls < 3) return json({ moves: [elsewhere, MOVE_STARTED] });
+      return json({ moves: [elsewhere, MOVE_DONE] });
+    });
+    const computer = await c.computers.get('vm-1');
+    const accepted = await computer.relocate({ ramMb: 26000 });
+    const move = await computer.waitForMove(accepted, { pollMs: 1, timeoutMs: 2_000 });
+
+    // The identity of the row first: `state: 'done'` is true of the other
+    // computer's row as well, so the stamp is what tells the two apart.
+    expect(move.startedAt).toBe(MOVE_STARTED.started_at);
+    expect(polls).toBe(3);
+    expect(move.state).toBe('done');
+    expect(move.live).toBe(false);
+  });
+
+  it('takes an RFC3339 timestamp in place of the move', async () => {
+    // For the process that restarted: the `startedAt` it persisted is the same
+    // string the Move carries, which is the whole of what the match needs.
+    const { client: c } = client(anyRoute);
+    const computer = await c.computers.get('vm-1');
+    expect((await computer.waitForMove(SINCE, { pollMs: 1 })).state).toBe('done');
+  });
+
+  it('refuses a timestamp it cannot place, before any request', async () => {
+    // The shape test earns its place by catching a typo before any request is
+    // made. A stamp with no zone is the one worth naming: it reads as a valid
+    // instant to `Date.parse` and as an instant hours from the one it spells,
+    // which is a sign the caller re-formatted a stamp rather than persisting the
+    // platform's own — and a re-formatted stamp matches no row at all.
+    const { rec, client: c } = client(anyRoute);
+    const computer = await c.computers.get('vm-1');
+    const before = rec.calls.length;
+    for (const bad of ['yesterday', '2026-08-23 01:00:00', '2026-08-23T01:00:00', '', 'Z']) {
+      const err = await computer.waitForMove(bad, { pollMs: 1, timeoutMs: 50 }).catch((e) => e);
+      expect(`${bad}: ${err instanceof ValidationError}`).toBe(`${bad}: true`);
+      expect((err as Error).message).toContain('move must be');
+    }
+    expect(rec.calls.length).toBe(before);
+  });
+
+  it('refuses a move whose startedAt the platform never sent', async () => {
+    // `str(undefined)` is `''`, so an omitted `started_at` reaches this as an
+    // empty string. A wait anchored to nothing would be the wait this argument
+    // was added to replace.
+    const { client: c } = client(anyRoute);
+    const computer = await c.computers.get('vm-1');
+    const err = await computer
+      .waitForMove({ ...MOVE_DONE, startedAt: '' } as unknown as Move)
+      .catch((e) => e);
+    expect(err).toBeInstanceOf(ValidationError);
+    expect((err as Error).message).toContain('no readable startedAt');
+  });
+
+  it('does not blame the caller for a Move off the LISTING with no startedAt', async () => {
+    // The same defect `relocate`'s guard was added to fix, one route over.
+    // `const [m] = await client.moves.list(); await c.waitForMove(m)` is a
+    // documented shape, and a row the platform sent with no readable
+    // `started_at` made that line throw a ValidationError — the class reserved
+    // for caller mistakes — about a value the caller never chose. A Move carries
+    // `raw`, which is what says it came off the wire rather than out of a
+    // caller's object literal, and the route that could hand back such a Move is
+    // named so the reader knows where to look.
+    const { client: c } = client((call) =>
+      call.path === '/moves'
+        ? json({ moves: [{ ...MOVE_DONE, started_at: undefined }] })
+        : anyRoute(call),
+    );
+    const [listed] = await c.moves.list();
+    const computer = await c.computers.get('vm-1');
+    const err = await computer.waitForMove(listed as Move, { pollMs: 1 }).catch((e) => e);
+
+    expect(err).toBeInstanceOf(MandalaError);
+    expect(err).not.toBeInstanceOf(ValidationError);
+    expect((err as Error).message).toContain('GET moves');
+    expect((err as Error).message).toContain('not a value you chose');
+  });
+
+  it('tells a caller who passed the options object first that the signature moved', async () => {
+    // Both breaking halves of this release meet here. `waitForMove()` used to
+    // take no required argument, so `c.waitForMove({ pollMs: 1 })` is code that
+    // COMPILED and ran, and from JavaScript it still runs — into a message that
+    // reported an unreadable `startedAt` and never said the signature changed or
+    // where the options had gone. A caller cannot act on the first sentence and
+    // can act on the second.
+    const { rec, client: c } = client(anyRoute);
+    const computer = await c.computers.get('vm-1');
+    const before = rec.calls.length;
+    for (const bad of [{ pollMs: 1 } as unknown as Move, 'not a stamp']) {
+      const err = await computer.waitForMove(bad).catch((e) => e);
+      expect(err).toBeInstanceOf(ValidationError);
+      expect((err as Error).message).toContain('required');
+      expect((err as Error).message).toContain('SECOND argument');
+    }
+    // And before any request, which is what makes it a caller's mistake.
+    expect(rec.calls.length).toBe(before);
+  });
+
+  it('says the row is gone on the FIRST poll that reads a listing without it', async () => {
+    // The whole of finding 1, and the cost of getting it wrong is in the numbers
+    // here: a computer deleted mid-move leaves a clean listing with no row for
+    // it on every poll, and a rule that waited for the row to have been SEEN
+    // first — twice, consecutively — never fired at all. That wait ran the
+    // default 900_000ms out and answered with a TimeoutError. The row is written
+    // inside the transaction that precedes the 202 and the 202 is a read-back of
+    // it, so a caller holding a move holds proof the row existed; absence on a
+    // listing read whole is a row that has LEFT, and it is conclusive at once.
+    let polls = 0;
+    const { client: c } = client((call) => {
+      if (call.path !== '/moves') return anyRoute(call);
+      polls += 1;
+      return json({ moves: [] });
+    });
+    const computer = await c.computers.get('vm-1');
+    // No `timeoutMs`: the DEFAULT is what this is about. A wait that has to be
+    // given a short deadline to fail promptly has not been fixed.
+    const started = Date.now();
+    const err = await computer.waitForMove(SINCE, { pollMs: 1 }).catch((e) => e);
+
+    expect(err).toBeInstanceOf(MandalaError);
+    expect(err).not.toBeInstanceOf(TimeoutError);
+    expect((err as Error).message).toContain('not listed');
+    // The wording has to leave room for the second way a row leaves: `Moves.list`
+    // says this listing holds the finished moves that have not been DISMISSED,
+    // so "the computer was deleted" is one cause asserted off an observation
+    // that has two.
+    expect((err as Error).message).toContain('deleted');
+    expect((err as Error).message).toContain('dismissed');
+    expect(polls).toBe(1);
+    expect(Date.now() - started).toBeLessThan(5_000);
+  });
+
+  it('does not fail fast on a listing it could not read whole', async () => {
+    // The exception, and it is the only one left: a row this client could not
+    // decode might be this very move, so an empty result after dropping some is
+    // "nobody could tell" and must not borrow the certainty of the sentence
+    // above. The wait goes on, and a row that turns up is still answered.
+    let polls = 0;
+    const { client: c } = client((call) => {
+      if (call.path !== '/moves') return anyRoute(call);
+      polls += 1;
+      return json({ moves: polls < 3 ? [42] : [MOVE_DONE] });
+    });
+    const computer = await c.computers.get('vm-1');
+    const move = await computer.waitForMove(SINCE, { pollMs: 1, timeoutMs: 5_000 });
+
+    expect(move.state).toBe('done');
+    expect(polls).toBe(3);
+  });
+
+  it('fails at once when this computer’s row carries a different startedAt', async () => {
+    // THE ONE THING THE ANCHOR IS FOR. `computer_moves` is keyed by computer id
+    // and written with `INSERT OR REPLACE`, so a second relocate on this
+    // computer does not add a row — it OVERWRITES this move's. Without the
+    // anchor the wait reads the newer move's `state` and `detail` and reports
+    // them as the outcome of the relocate the caller asked about; here the row
+    // says `failed` where the anchored move was mid-copy, which is somebody
+    // being told a move did not happen while their disk crosses between hosts.
+    //
+    // And it fails on the FIRST poll rather than polling on: the replacement
+    // cannot un-happen, and this move's outcome is no longer recorded anywhere,
+    // so spending fifteen minutes to say the same thing is its own defect.
+    const replaced = {
+      ...MOVE_DONE,
+      state: 'failed',
+      detail: 'somebody else’s relocate',
+      started_at: '2026-08-23T02:40:00.000Z',
+      finished_at: '2026-08-23T02:41:00.000Z',
+    };
+    let polls = 0;
+    const { client: c } = client((call) => {
+      if (call.path !== '/moves') return anyRoute(call);
+      polls += 1;
+      return json({ moves: [replaced] });
+    });
+    const computer = await c.computers.get('vm-1');
+    const err = await computer.waitForMove(SINCE, { pollMs: 1, timeoutMs: 5_000 }).catch((e) => e);
+
+    expect(err).toBeInstanceOf(MandalaError);
+    expect(err).not.toBeInstanceOf(TimeoutError);
+    // Both stamps, because "a newer move replaced it" is a claim the reader has
+    // to be able to check — and the one they persisted is half of it.
+    expect((err as Error).message).toContain(SINCE);
+    expect((err as Error).message).toContain('2026-08-23T02:40:00.000Z');
+    expect((err as Error).message).toContain('replaced');
+    // Fast, not a timeout dressed up as an error.
+    expect(polls).toBe(1);
+  });
+
+  it('does not read a replaced row as the move having vanished', async () => {
+    // The two ways this computer's row can stop being this move's row, told
+    // apart. A row that is GONE is the computer deleted or the move dismissed —
+    // a sentence about a listing. A row that is present and carries somebody
+    // else's stamp is a relocate that took the computer over, which is a
+    // sentence about a move, and it must not be reported as the first.
+    const { client: c } = client((call) =>
+      call.path === '/moves'
+        ? json({ moves: [{ ...MOVE_DONE, started_at: '2026-08-23T02:40:00.000Z' }] })
+        : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    const err = await computer.waitForMove(SINCE, { pollMs: 1, timeoutMs: 5_000 }).catch((e) => e);
+
+    expect(err).toBeInstanceOf(MandalaError);
+    expect((err as Error).message).not.toContain('no longer listed');
+    expect((err as Error).message).not.toContain('deleted');
+  });
+
+  it('answers from the anchored row when it goes from live to terminal', async () => {
+    // Outcome A, both halves. The same row throughout — one row per computer is
+    // what the platform stores — so what changes between polls is the row's
+    // state and not which row is being read. Live keeps the wait going; the
+    // first terminal reading of it is the answer.
+    let polls = 0;
+    const { client: c } = client((call) => {
+      if (call.path !== '/moves') return anyRoute(call);
+      polls += 1;
+      return json({ moves: [polls < 3 ? MOVE_STARTED : MOVE_DONE] });
+    });
+    const computer = await c.computers.get('vm-1');
+    const move = await computer.waitForMove(SINCE, { pollMs: 1, timeoutMs: 5_000 });
+
+    expect(polls).toBe(3);
+    expect(move.startedAt).toBe(SINCE);
+    expect(move.state).toBe('done');
+    expect(move.live).toBe(false);
+    // `finished_at: null` on the live rows is the wire saying absent; the
+    // terminal one carries the real stamp.
+    expect(move.finishedAt).toBe(MOVE_DONE.finished_at);
+  });
+
+  it('matches a row the platform rendered to whole seconds', async () => {
+    // The regression an earlier round of this method introduced, pinned so it
+    // cannot come back. Nothing says the platform prints milliseconds: it
+    // stores one string and hands the same one to the 202 and to the listing,
+    // and a whole-second spelling is as valid as any other. A rule that read
+    // those stamps as NUMBERS and vetoed a row dated as finished "before" the
+    // anchor threw away the only row this move will ever have — after which the
+    // wait went on to report the computer as deleted. Equality on the string
+    // has no arithmetic in it and so has nowhere to go wrong.
+    const second = '2026-08-23T02:00:12Z';
+    const row = { ...MOVE_DONE, started_at: second, finished_at: second };
+    const { client: c } = client((call) =>
+      call.path === '/moves' ? json({ moves: [row] }) : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    const move = await computer.waitForMove(second, { pollMs: 1, timeoutMs: 300 });
+
+    expect(move.startedAt).toBe(second);
+    expect(move.state).toBe('done');
+  });
+
+  it('does not say every poll failed when no poll failed', async () => {
+    // A poll cut short by this wait's OWN deadline is a `continue` that
+    // increments nothing — not the reads, not the failures — so a wait whose
+    // only poll ended that way arrived at the last branch with both at zero and
+    // announced that every poll had failed. Nothing had failed; the wait had
+    // simply not been given long enough to finish one.
+    const { client: c } = client((call) =>
+      call.path === '/moves' ? new Promise<Response>(() => {}) : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    const err = await computer.waitForMove(SINCE, { pollMs: 1, timeoutMs: 40 }).catch((e) => e);
+
+    expect(err).toBeInstanceOf(TimeoutError);
+    expect((err as Error).message).not.toContain('every poll failed');
+    expect((err as Error).message).toContain('no poll finished before the deadline');
+  });
+
+  it('does not say every poll failed when only the first of several did', async () => {
+    // `failures` counts transient failures and NOTHING else — a poll cut short
+    // by this wait's own deadline is a `continue` that increments no counter —
+    // so "every poll failed" was reached by a wait in which one poll got a 503
+    // and every other one simply ran out of clock. Three silences billed to the
+    // platform that were this deadline's own. The count that was observed is the
+    // most the sentence may claim.
+    let polls = 0;
+    const { client: c } = client((call) => {
+      if (call.path !== '/moves') return anyRoute(call);
+      polls += 1;
+      return polls === 1
+        ? errorJson(503, 'the moves listing is briefly unavailable')
+        : new Promise<Response>(() => {});
+    });
+    const computer = await c.computers.get('vm-1');
+    const err = await computer.waitForMove(SINCE, { pollMs: 1, timeoutMs: 60 }).catch((e) => e);
+
+    expect(err).toBeInstanceOf(TimeoutError);
+    expect(polls).toBeGreaterThan(1);
+    expect((err as Error).message).not.toContain('every poll failed');
+    expect((err as Error).message).toContain('1 failed outright');
+    expect((err as Error).message).toContain("cut short by this wait's own deadline");
+  });
+
+  it('does not describe a listing read a quarter of an hour ago as what it can see now', async () => {
+    // `unreadable` is written on a poll that READ the listing and is not
+    // evidence about any other one, so a wait that decoded two bad rows
+    // once and then failed for the rest of its deadline must not end by
+    // describing that first listing in the present tense. It is the same mistake
+    // `observed` exists to prevent, made with a different value: the timeout
+    // here has one thing to report, which is that the polls stopped answering.
+    let polls = 0;
+    const { client: c } = client((call) => {
+      if (call.path !== '/moves') return anyRoute(call);
+      polls += 1;
+      return polls === 1
+        ? json({ moves: [42, 'not a row'] })
+        : errorJson(503, 'the moves listing is briefly unavailable');
+    });
+    const computer = await c.computers.get('vm-1');
+    const err = await computer.waitForMove(SINCE, { pollMs: 1, timeoutMs: 60 }).catch((e) => e);
+
+    expect(err).toBeInstanceOf(TimeoutError);
+    expect(polls).toBeGreaterThan(1);
+    expect((err as Error).message).not.toContain('could not be read at all');
+    expect((err as Error).message).toContain('poll(s) failed outright');
+  });
+
+  it('does not quote a stale listing when the polls after it were cut short instead', async () => {
+    // The same sentence and the other way of never reading a listing again. A
+    // poll this wait's own deadline cuts short read nothing at all, so it leaves
+    // the counts of what could not be made out exactly as stale as a 503 does —
+    // and clearing them on one path and not the other is a timeout that
+    // describes a quarter-hour-old listing in the present tense whenever the
+    // silence was the clock's rather than the platform's. Nothing here failed,
+    // which is the point: there is no `failed outright` clause to carry the
+    // reader past it.
+    let polls = 0;
+    const { client: c } = client((call) => {
+      if (call.path !== '/moves') return anyRoute(call);
+      polls += 1;
+      return polls === 1 ? json({ moves: [42, 'not a row'] }) : new Promise<Response>(() => {});
+    });
+    const computer = await c.computers.get('vm-1');
+    const err = await computer.waitForMove(SINCE, { pollMs: 1, timeoutMs: 60 }).catch((e) => e);
+
+    expect(err).toBeInstanceOf(TimeoutError);
+    expect(polls).toBeGreaterThan(1);
+    expect((err as Error).message).not.toContain('could not be read at all');
+    // Still the branch about a move never seen on a listing that WAS read, so
+    // the fix is the counts going and not the sentence changing.
+    expect((err as Error).message).toContain('appeared on GET moves');
+  });
+
+  it('does not claim the row stopped being listed once it has thrown away why', async () => {
+    // The abort path cleared the blindness count and kept `absent`, which are
+    // the two halves of one reading: "the listing answered, partly, and this
+    // move was not in the part I could read". Splitting them left a timeout
+    // asserting the first half of a sentence whose second half — the reason it
+    // is not decidable — had been deleted, so it read "stopped being listed
+    // within 60ms, and  — so whether it is gone cannot be told". A poll this
+    // wait's own deadline cut short read no listing at all, so it invalidates
+    // both, and what is left to say is that the polls stopped answering.
+    let polls = 0;
+    const { client: c } = client((call) => {
+      if (call.path !== '/moves') return anyRoute(call);
+      polls += 1;
+      if (polls === 1) return json({ moves: [MOVE_STARTED] });
+      if (polls === 2) return json({ moves: [42] });
+      return new Promise<Response>(() => {});
+    });
+    const computer = await c.computers.get('vm-1');
+    const err = await computer.waitForMove(SINCE, { pollMs: 1, timeoutMs: 80 }).catch((e) => e);
+
+    expect(err).toBeInstanceOf(TimeoutError);
+    expect(polls).toBeGreaterThan(2);
+    expect((err as Error).message).not.toContain('stopped being listed');
+    expect((err as Error).message).not.toContain('cannot be told');
+    // The state it was last in survives, because that reading really was made.
+    expect((err as Error).message).toContain('could not be reached for the last part');
+    expect((err as Error).message).toContain('state moving');
   });
 
   it('picks this computer’s move out of the account’s', async () => {
@@ -188,51 +614,9 @@ describe('waitForMove', () => {
         : anyRoute(call),
     );
     const computer = await c.computers.get('vm-1');
-    const move = await computer.waitForMove({ pollMs: 1 });
+    const move = await computer.waitForMove(SINCE, { pollMs: 1 });
     expect(move.computerId).toBe('vm-1');
     expect(move.state).toBe('done');
-  });
-
-  it('waits for the LIVE row rather than a move that finished yesterday', async () => {
-    // The listing keeps a finished move for a DAY beside the one running now,
-    // so a computer moved yesterday and moving again today has two rows. Taking
-    // the first ended the wait on the first poll and handed back a computer
-    // whose disk was still crossing between hosts.
-    const yesterday = {
-      ...MOVE_DONE,
-      computer_id: 'vm-1',
-      started_at: '2026-08-22T01:00:00.000Z',
-      finished_at: '2026-08-22T02:00:00.000Z',
-    };
-    const running = {
-      ...MOVE_DONE,
-      computer_id: 'vm-1',
-      state: 'moving',
-      live: true,
-      started_at: '2026-08-23T01:00:00.000Z',
-      finished_at: null,
-    };
-    let polls = 0;
-    const { client: c } = client((call) => {
-      if (call.path !== '/moves') return anyRoute(call);
-      polls += 1;
-      return json({
-        moves: [
-          yesterday,
-          polls === 1
-            ? running
-            : { ...running, state: 'done', live: false, finished_at: '2026-08-23T02:00:00.000Z' },
-        ],
-      });
-    });
-    const computer = await c.computers.get('vm-1');
-    const move = await computer.waitForMove({ pollMs: 1 });
-
-    expect(polls).toBeGreaterThan(1);
-    expect(move.state).toBe('done');
-    expect(move.startedAt).toBe('2026-08-23T01:00:00.000Z');
-    // `finished_at: null` is the wire saying absent, not the empty string.
-    expect(move.finishedAt).toBe('2026-08-23T02:00:00.000Z');
   });
 
   it('refuses a body with no moves array rather than calling the computer deleted', async () => {
@@ -242,7 +626,7 @@ describe('waitForMove', () => {
       call.path === '/moves' ? json({ ok: true }) : anyRoute(call),
     );
     const computer = await c.computers.get('vm-1');
-    const err = await computer.waitForMove({ pollMs: 1, timeoutMs: 200 }).catch((e) => e);
+    const err = await computer.waitForMove(SINCE, { pollMs: 1, timeoutMs: 200 }).catch((e) => e);
 
     expect(err).toBeInstanceOf(MandalaError);
     expect((err as Error).message).toContain('moves array');
@@ -257,7 +641,7 @@ describe('waitForMove', () => {
       call.path === '/moves' ? new Response('', { status: 200 }) : anyRoute(call),
     );
     const computer = await c.computers.get('vm-1');
-    const err = await computer.waitForMove({ pollMs: 1, timeoutMs: 200 }).catch((e) => e);
+    const err = await computer.waitForMove(SINCE, { pollMs: 1, timeoutMs: 200 }).catch((e) => e);
 
     expect(err).toBeInstanceOf(MandalaError);
     expect((err as Error).message).toContain('moves array');
@@ -277,7 +661,7 @@ describe('waitForMove', () => {
           : anyRoute(call),
       );
       const computer = await c.computers.get('vm-1');
-      const move = await computer.waitForMove({ pollMs: 1 });
+      const move = await computer.waitForMove(SINCE, { pollMs: 1 });
       expect(`${state}: ${move.state} / ${move.detail}`).toBe(`${state}: ${state} / a reason`);
     }
   });
@@ -289,25 +673,28 @@ describe('waitForMove', () => {
         : anyRoute(call),
     );
     const computer = await c.computers.get('vm-1');
-    const err = await computer.waitForMove({ timeoutMs: 30, pollMs: 5 }).catch((e) => e);
+    const err = await computer.waitForMove(SINCE, { timeoutMs: 30, pollMs: 5 }).catch((e) => e);
     expect(err).toBeInstanceOf(TimeoutError);
     // The sentence has to say the move survives the wait, because it does: there
     // is no calling back a disk crossing between two hosts.
     expect((err as Error).message).toContain('has not stopped');
   });
 
-  it('stops when the move stops being listed, which means the computer is gone', async () => {
+  it('names the anchor, not a cause, when no poll ever read a listing whole', async () => {
+    // The timeout branch for a move never seen is now reachable only where every
+    // readable poll was PARTIAL, so it has nothing decidable to report and must
+    // claim nothing: not that the row was reaped, not that the move was never
+    // accepted. What it owes the reader is which row was being looked for.
     const { client: c } = client((call) =>
-      call.path === '/moves' ? json({ moves: [] }) : anyRoute(call),
+      call.path === '/moves' ? json({ moves: [null] }) : anyRoute(call),
     );
     const computer = await c.computers.get('vm-1');
-    const err = await computer.waitForMove({ timeoutMs: 500, pollMs: 1 }).catch((e) => e);
-    // MandalaError and not a timeout: waiting longer cannot bring back a row the
-    // platform reaped, and spending the whole deadline to say so is the failure
-    // this branch exists to avoid.
-    expect(err).toBeInstanceOf(MandalaError);
-    expect(err).not.toBeInstanceOf(TimeoutError);
-    expect((err as Error).message).toContain('deleted');
+    const err = await computer.waitForMove(SINCE, { timeoutMs: 60, pollMs: 1 }).catch((e) => e);
+
+    expect(err).toBeInstanceOf(TimeoutError);
+    expect((err as Error).message).toContain('that started at 2026-08-23T02:00:12.699Z');
+    expect((err as Error).message).toContain('readable in full');
+    expect((err as Error).message).not.toContain('deleted');
   });
 });
 

@@ -76,6 +76,21 @@ await using c = await client.computers.ephemeral({ template: 'base' });
 await c.waitForGuest();
 ```
 
+**If the block throws and the cleanup delete fails too, both errors arrive** —
+a `SuppressedError` whose `.suppressed` is the block's own error, the fault to
+read first, and whose `.error` is a `MandalaError` naming the machine that is
+still billable. Both spellings fill those two fields the same way, so a cleanup
+failure is never the thing that goes unmentioned.
+
+Read `.error`, not `.message`: the top-level message is the one field the two
+spellings cannot agree on, because the runtime writes its own generic text over
+it for `await using`. And on Node 22, where `SuppressedError` is not a global,
+the same three fields arrive on a plain `Error` named `SuppressedError` — so
+`err.name === 'SuppressedError'` is the portable test and `instanceof` is not.
+
+A 404 from the cleanup is not one of these: the block deleted the machine
+itself, and its own error stands alone.
+
 Every computer is a Linux desktop today. Windows guests are not offered on any
 plan; where this README mentions Windows it is describing behaviour the client
 already supports for when they are.
@@ -1041,9 +1056,9 @@ try {
   await c.update({ ramMb: 32768 });
 } catch (err) {
   if (err instanceof MoveRequiredError && err.movePossible) {
-    await c.relocate({ ramMb: 32768 });       // 202 — the copy runs behind it
-    const move = await c.waitForMove();
-    if (move.state !== 'done') console.log(move.state, move.detail);
+    const move = await c.relocate({ ramMb: 32768 });  // 202 — the copy runs behind it
+    const outcome = await c.waitForMove(move);        // anchored to THAT move
+    if (outcome.state !== 'done') console.log(outcome.state, outcome.detail);
   } else throw err;
 }
 ```
@@ -1056,6 +1071,34 @@ that quietly relocates a machine.
 **The computer must be stopped**, and suspended is not stopped here — unlike a
 resize, which accepts it. A saved desktop only loads on the host that wrote it,
 so it cannot travel: resume and stop the computer, or discard the session, first.
+
+**`waitForMove()` takes the move `relocate()` returned**, and that argument is
+required. A `Move` carries no id, so its `startedAt` — or an RFC3339 `startedAt`
+a restarted process persisted — is what says which move a wait is watching, and
+a row of this computer's is that move exactly when its `startedAt` is the same
+string. Equality and not a window: the platform keys its moves table by computer
+id and writes a move with `INSERT OR REPLACE`, so at most one row is ever this
+computer's, and the stamp on it is the same stored string the 202 handed back.
+There is nothing to choose between and no second clock to be off by. A persisted
+anchor must therefore be that value verbatim, not the same instant re-formatted.
+
+The day of finished moves the listing keeps is real, but it is a fact about the
+ACCOUNT and not about one computer, so it is not what the anchor guards against.
+What it guards against is the other half of `INSERT OR REPLACE`: a second
+relocate on this same computer overwrites this move's row while the wait is
+running, and without an anchor the wait would report the new move's outcome as
+this one's. When that happens the wait fails at once with a `MandalaError`
+naming both stamps — the replacement does not un-happen, so there is nothing to
+wait out.
+
+A listing with **no** row for this computer ends the wait the same way, on the
+first poll. The row is written inside the transaction that precedes the 202 and
+the 202 is a read-back of it, so by the time you hold a move to wait on the row
+exists: absence is not a listing catching up, it is a row that has left, which
+happens when the computer is deleted and when a finished move is dismissed. The
+one exception is a listing this client could not read whole — a row it could not
+decode might be this very move, so nothing is claimed and the deadline is what
+ends the wait.
 
 **`waitForMove()` does not throw for a move that ended badly**, because the ways
 it can end are not one thing:
