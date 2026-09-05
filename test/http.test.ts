@@ -1146,6 +1146,32 @@ describe('answers that are not what the route promised', () => {
     expect(await client(rec).computers.list()).toHaveLength(0);
   });
 
+  it('marks a listing short by the rows it dropped, and leaves a flagged one alone', async () => {
+    // A dropped row and a row the fan-out never reached leave the same answer:
+    // an array one shorter than the estate, handed to a caller who diffs it
+    // against their own idea of that estate. `incomplete: null` on it is the
+    // one sentence that makes the drop unrecoverable — the count is the only
+    // trace the row was ever there.
+    const dropped = recorder(() => json([null, SNAPSHOT, null]));
+    const listed = await client(dropped).snapshots.listWithStatus();
+    expect(listed.items).toHaveLength(1);
+    expect(listed.incomplete).toBe(2);
+    // Whole answers keep saying so: the count is a shortfall, not a row count.
+    const whole = recorder(() => json([SNAPSHOT]));
+    expect((await client(whole).snapshots.listWithStatus()).incomplete).toBeNull();
+    // And the platform's own number survives a drop rather than being added to.
+    // Presence is what a caller tests, and `X-GC-Incomplete: 0` means "short by
+    // an amount that cannot be stated" — arithmetic on it would state one.
+    const both = recorder(
+      () =>
+        new Response(JSON.stringify([null, SNAPSHOT]), {
+          status: 200,
+          headers: { 'content-type': 'application/json', 'X-GC-Incomplete': '0' },
+        }),
+    );
+    expect((await client(both).snapshots.listWithStatus()).incomplete).toBe(0);
+  });
+
   it('names the computers route when a listed record has no id', async () => {
     const rec = recorder(() => json([{ name: 'missing its id' }]));
     await expect(client(rec).computers.listWithStatus()).rejects.toThrow(
