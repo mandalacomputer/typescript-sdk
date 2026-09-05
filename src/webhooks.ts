@@ -124,10 +124,22 @@ const SIGNATURE_CANDIDATES_MAX = 8;
  *
  * Answers `false` for a delivery that is not authentic — a missing or
  * malformed header, a timestamp outside the window, a signature under another
- * secret. Throws only for a `secret` this receiver could never verify anything
- * with, because that is a configuration error and not a bad delivery: a
- * verifier that answered `false` forever because the secret was pasted without
- * its prefix is a webhook that silently never works.
+ * secret. It throws instead for the three mistakes that are the RECEIVER's
+ * rather than the delivery's: a `secret` this receiver could never verify
+ * anything with (missing its prefix, or not base64 after it), a `now` or
+ * `toleranceS` that is not a finite number of seconds, and a `rawBody` that is
+ * not the wire bytes — a parsed object, a value of some other type, or bytes
+ * backed by a `SharedArrayBuffer`, which another thread can rewrite between the
+ * MAC and the handler's own parse. None of those is a property of the request,
+ * so each is wrong on every call or on none: answering `false` would turn a
+ * verifier that never works into 401s nobody can explain.
+ *
+ * That is why the handler above has no `catch`. Once the secret, the clock and
+ * the body-reading middleware are right, the throws are unreachable — but they
+ * are unreachable by configuration, not by construction, and inside an async
+ * route a throw is an unhandled rejection rather than a 401. A receiver that
+ * takes any of the three from somewhere it does not control should wrap the
+ * call and fail closed.
  *
  * `secret` is the value `POST /webhooks` or `POST /webhooks/{id}/rotate`
  * answered once. Inside the 24 hours after a rotation either secret verifies

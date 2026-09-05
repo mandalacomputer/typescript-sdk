@@ -343,6 +343,19 @@ describe('execBody', () => {
     });
   });
 
+  it('names a null env rather than dereferencing it', () => {
+    // `Array.isArray(null)` is false and `typeof null` is `'object'`, so a null
+    // reaches the constructor lookup and throws a TypeError from inside the
+    // refusal — a crash out of the SDK where every other wrong shape gets a
+    // ValidationError naming what was passed. `execBody` reads `null` as "no
+    // env" and never gets here, which is exactly the problem: this function's
+    // safety was a property of its one caller, and the caller can change.
+    expect(P.envShape(null)).toBe('null');
+    // And the caller's own reading of null is unchanged: absent, not refused.
+    const none = null as unknown as Record<string, string>;
+    expect(P.execBody({ command: 'x', env: none })).not.toHaveProperty('env');
+  });
+
   it('measures an entry in bytes, as the platform does', () => {
     // A limit counted in characters passes a value the platform then refuses:
     // these are two bytes each, so 2048 of them are 4096 bytes and the entry is

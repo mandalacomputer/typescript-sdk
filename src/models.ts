@@ -33,25 +33,6 @@ export const str = (v: unknown, fallback = ''): string => {
   }
 };
 /**
- * A time field kept only when the platform sent one that is readable as a time.
- *
- * The PRODUCED string decides, not the raw field, and that is the whole point.
- * A record that has not finished says so in more spellings than a reader can
- * enumerate — the key omitted, an explicit `null`, and the `""` a Go struct
- * with a plain `string` field and no `omitempty` writes for an unset time — and
- * `str` collapses those, plus `[]`, plus everything `String` refuses outright,
- * to the same `''`. A guard on the raw field catches the spellings somebody
- * thought of; a guard on what came out catches the ones nobody did.
- *
- * It has to be caught here rather than left to the reader, because `??` does not
- * fall back for `''` — {@link moveStamp} would take `Date.parse('')`, get NaN,
- * sort that row at -Infinity, and hand {@link latestFinishedMove} an OLDER move
- * back as the newest, ignoring the startedAt that was readable all along. Every
- * declared type below says this field is ABSENT while the work is still live,
- * and `''` is not a time.
- */
-const stamp = (v: unknown): string | undefined => str(v) || undefined;
-/**
  * A number from a payload, with a fallback for anything that is not one.
  *
  * Exported for {@link Computer}'s own getters, which read the same platform
@@ -756,19 +737,13 @@ const buildId = (d: Record<string, unknown>, what: string): string => {
 };
 
 export function toTemplateBuild(d: Record<string, unknown>): TemplateBuild {
-  // {@link stamp}, and for the reason it names rather than by analogy: a build
-  // in flight is exactly the record whose finish time the platform has not
-  // written yet, so `""` is what this field carries for minutes at a time —
-  // and a caller reading `finishedAt` to decide whether the build is over is
-  // told it finished at a time that will not parse.
-  const finishedAt = stamp(d.finished_at);
   return {
     id: buildId(d, 'a build'),
     ref: str(d.ref),
     status: str(d.status),
     error: str(d.error),
     startedAt: str(d.started_at),
-    ...(finishedAt === undefined ? {} : { finishedAt }),
+    ...(d.finished_at == null ? {} : { finishedAt: str(d.finished_at) }),
     raw: { ...d },
   };
 }
@@ -789,17 +764,13 @@ export type BuildStep = {
 };
 
 export function toBuildStep(d: Record<string, unknown>): BuildStep {
-  // The same rule as the build that owns the step, on the same field: most of
-  // the steps in a progress poll are pending or running, so an unset finish
-  // time is the ordinary answer here rather than the odd one.
-  const finishedAt = stamp(d.finished_at);
   return {
     n: num(d.n),
     kind: str(d.kind),
     label: str(d.label),
     status: str(d.status),
     ...(d.started_at == null ? {} : { startedAt: str(d.started_at) }),
-    ...(finishedAt === undefined ? {} : { finishedAt }),
+    ...(d.finished_at == null ? {} : { finishedAt: str(d.finished_at) }),
     raw: { ...d },
   };
 }
@@ -1519,7 +1490,6 @@ const liveMove = (v: unknown, state: unknown): boolean => {
 
 export function toMove(d: Record<string, unknown>): Move {
   const state = str(d.state);
-  const finishedAt = stamp(d.finished_at);
   return {
     computerId: str(d.computer_id),
     state,
@@ -1546,10 +1516,9 @@ export function toMove(d: Record<string, unknown>): Move {
     ...(d.ram_mb == null ? {} : { ramMb: num(d.ram_mb) }),
     ...(d.disk_gb == null ? {} : { diskGb: num(d.disk_gb) }),
     startedAt: str(d.started_at),
-    // Same reason, and the same fix, through {@link stamp}: a move still
-    // running reported a finish time of the empty string rather than none, and
-    // {@link moveStamp} sorted it below every row that had one.
-    ...(finishedAt === undefined ? {} : { finishedAt }),
+    // Same reason, and the same fix: `str(null)` is `''`, so a move still
+    // running reported a finish time of the empty string rather than none.
+    ...(d.finished_at == null ? {} : { finishedAt: str(d.finished_at) }),
     raw: { ...d },
   };
 }

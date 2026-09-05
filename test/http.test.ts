@@ -3,7 +3,13 @@
 import { createServer } from 'node:http';
 import { type AddressInfo, createServer as createSocketServer, type Socket } from 'node:net';
 import { describe, expect, it, vi } from 'vitest';
-import { errorForStatus, MoveRequiredError, TimeoutError, ValidationError } from '../src/errors.js';
+import {
+  errorForStatus,
+  MAPPED_STATUSES,
+  MoveRequiredError,
+  TimeoutError,
+  ValidationError,
+} from '../src/errors.js';
 import {
   APIError,
   AuthenticationError,
@@ -309,8 +315,13 @@ describe('status mapping', () => {
     // `TypeError: Cls is not a constructor` thrown from inside this function,
     // which destroys the failure it was called to describe: the same end as the
     // inherited key above, reached from the other side.
-    const mapped = [401, 402, 403, 404, 409, 413, 416, 503, 504, 520, 521, 522, 523, 524, 525, 526];
-    for (const status of [...mapped, 418, 500]) {
+    //
+    // Read out of the table rather than copied from it. A list written here by
+    // hand covers the entries that existed the day it was written, so a status
+    // added to the table later goes untested by the one test whose whole job is
+    // to notice — the drift, not the mapping, is what this asserts against.
+    // 418 and 500 are the unmapped pair that must still build an `APIError`.
+    for (const status of [...MAPPED_STATUSES, 418, 500]) {
       const err = errorForStatus(status, 'the platform said so');
       expect(err, String(status)).toBeInstanceOf(APIError);
       expect(err.status, String(status)).toBe(status);

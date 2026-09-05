@@ -632,11 +632,21 @@ const utf8Length = (s: string): number => new TextEncoder().encode(s).length;
  * in the SDK rather than as an answer. The constructor's name is the word the
  * caller will recognise as the thing they passed.
  *
- * No branch for `null`: {@link execBody} reads `null` and `undefined` alike as
- * "no env" and never calls {@link envObject} with either, so a case for it here
- * would be this code claiming to handle something that cannot reach it.
+ * `null` is named before the `typeof` line rather than left to it, because it
+ * is the one value that would reach the constructor lookup and dereference
+ * nothing: `Array.isArray(null)` is false and `typeof null` is `'object'`, so
+ * the refusal would leave as a TypeError from inside the SDK instead of as the
+ * ValidationError every other shape gets. {@link execBody} does read `null` and
+ * `undefined` alike as "no env" and never calls {@link envObject} with either —
+ * but that makes this function's safety a property of a different function, and
+ * a helper that only holds because of where it happens to be called from is one
+ * caller away from not holding. Exported for the same reason: that branch is
+ * unreachable through {@link execBody}, so the only test that can hold this
+ * function to its own contract is one that calls it. Module-internal — nothing
+ * here is re-exported from `index.ts`, which is the published surface.
  */
-function envShape(env: unknown): string {
+export function envShape(env: unknown): string {
+  if (env === null) return 'null';
   if (Array.isArray(env)) return 'an array';
   if (typeof env !== 'object') return typeof env;
   const name = (env as { constructor?: { name?: string } }).constructor?.name;

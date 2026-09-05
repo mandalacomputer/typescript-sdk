@@ -547,6 +547,20 @@ const BY_STATUS: Record<number, typeof APIError> = Object.assign(
 );
 
 /**
+ * The statuses the table above maps, for the test that proves each one builds.
+ *
+ * The table stays private — a caller has `instanceof` and `err.status` and
+ * needs no list of what this file knows — but a test that enumerates the
+ * entries by hand covers only the ones that existed when it was written, and a
+ * status added above and not added there is precisely the entry nobody proved
+ * constructs. Derived, so the two cannot drift.
+ *
+ * Not re-exported from `index.ts`, whose explicit export list is the published
+ * surface, so nothing a consumer can reach widens by this being here.
+ */
+export const MAPPED_STATUSES: readonly number[] = Object.freeze(Object.keys(BY_STATUS).map(Number));
+
+/**
  * What a caller is told when a proxy abandoned the request and named nothing.
  *
  * Used only where the response carried no structured message of its own — see
