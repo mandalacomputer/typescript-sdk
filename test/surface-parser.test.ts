@@ -464,6 +464,28 @@ describe('the route table reader', () => {
     ).toEqual(['query:limit']);
   });
 
+  it('reads the entry’s own query list, not one nested in its prose', async () => {
+    // The list was found by a regex over the whole entry, which answers with the
+    // first `query: [` at any depth: a response example nesting one of its own
+    // supplies the parameters, and the route's real list — further down, at the
+    // entry's own depth — is never read. The set read out of the prose is then
+    // compared against the mirror as if the platform had documented it, so the
+    // route's genuine parameters surface as ones the mirror invented and the
+    // operator is sent to delete allowlist entries that are correct. The guard
+    // for a scan that counted nothing stays quiet, because the other routes
+    // counted.
+    expect(
+      await scanParams(`
+        export const DOCS: Record<string, Doc> = {
+          'GET sizes': {
+            responses: { 200: { example: { query: [{ name: 'ghost' }] } } },
+            query: [{ name: 'real', description: 'x' }],
+          },
+        };
+      `),
+    ).toEqual(['query:real']);
+  });
+
   it('does not resolve a shared constant to a copy of it quoted in a comment', async () => {
     // Allowing an indent is what put the scan inside block comments, where a
     // superseded declaration is indented under its `*`. The quoted copy comes
