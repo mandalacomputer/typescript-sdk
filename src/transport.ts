@@ -119,15 +119,23 @@ export type Bytes = {
 /**
  * A collection read the platform may have had to answer short.
  *
- * `incomplete` is the count of what the placement cache could account for, and
- * it is legitimately `0`: a computer created during an outage was never cached
- * against the host now holding it. So presence is the signal and the number is
- * detail — hence `null` versus a number, rather than a count that means nothing
- * at zero.
+ * `incomplete` present means the list is short. The number is one of two
+ * quantities and does not say which: the platform's own shortfall, counted out
+ * of what the placement cache could account for and legitimately `0` because a
+ * computer created during an outage was never cached against the host now
+ * holding it; or, when the platform called the answer whole, how many rows this
+ * client could not decode and dropped. Both leave the same array — one shorter
+ * than the estate — which is what a caller acts on, so they share the channel.
+ * Presence is the signal and the number is detail — hence `null` versus a
+ * number, rather than a count that means nothing at zero.
  */
 export type Listing<T> = {
   items: T[];
-  /** `null` when the answer was complete. A number — possibly 0 — when it was not. */
+  /**
+   * `null` when the answer was complete. A number — possibly 0 — when it was
+   * not, being either the platform's shortfall or this client's dropped rows,
+   * with no way to tell the two apart. Branch on presence, not on the number.
+   */
   incomplete: number | null;
 };
 

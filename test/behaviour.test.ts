@@ -1880,6 +1880,26 @@ describe('files', () => {
     expect(await computer.writeFile('/tmp/a.txt', 'hello', { contentLength: 5 })).toBe(5);
     expect(rec.last().headers['Content-Length']).toBe('5');
   });
+
+  it('leaves the length alone for a stream this realm does not recognise', async () => {
+    // A body is measurable or it is not, and only the measurable shapes can be
+    // enumerated: asking instead whether it is a `ReadableStream` of THIS realm
+    // calls a polyfilled one, a cross-realm one, and the Node `Readable` undici
+    // accepts from an untyped caller measurable, reads `undefined` off each,
+    // and refuses the write while advising that the length is only worth
+    // passing for a stream — which this is.
+    const { rec, client: c } = client(anyRoute);
+    const computer = await c.computers.get('vm-1');
+    const foreign = {
+      pipe: () => {},
+      on: () => {},
+      read: () => null,
+    } as unknown as ReadableStream<Uint8Array>;
+    await expect(
+      computer.writeFile('/tmp/a.bin', foreign, { contentLength: 20 }),
+    ).resolves.toBeDefined();
+    expect(rec.last().headers['Content-Length']).toBe('20');
+  });
 });
 
 /** `n` bytes whose value at every position says which position it is. */
@@ -2267,6 +2287,35 @@ describe('paging a file bigger than one request', () => {
     await expect(
       emptied.computer.readFileChunks('/tmp/big.bin', { offset: -250 }).next(),
     ).rejects.toBeInstanceOf(RangeNotSatisfiableError);
+  });
+
+  it('takes the whole file as the answer to a tail wider than the file', async () => {
+    // The forfeit above is a position, not a request number, because a tail
+    // longer than the file resolves to a window starting at byte zero — and a
+    // whole-file answer to THAT is the window, arriving under a 200 the way RFC
+    // 9110 lets an origin or an intermediary answer a range it covers entirely.
+    // Refusing it would reject a correct answer to `mandala scp` reading the
+    // last 5kB of a 1kB log.
+    const { computer } = await computerOn((call) => {
+      if (!(call.path.endsWith('/files') && call.method === 'GET')) return anyRoute(call);
+      if (call.headers.Range !== 'bytes=-1') {
+        return new Response(filled(1000), {
+          status: 200,
+          headers: { 'content-type': 'application/octet-stream', 'accept-ranges': 'bytes' },
+        });
+      }
+      return new Response(filled(1000).slice(999), {
+        status: 206,
+        headers: {
+          'content-type': 'application/octet-stream',
+          'accept-ranges': 'bytes',
+          'content-range': 'bytes 999-999/1000',
+        },
+      });
+    });
+    expect(await rebuilt(computer.readFileChunks('/tmp/big.bin', { offset: -5000 }))).toEqual(
+      filled(1000),
+    );
   });
 
   it('refuses a window wider than the one it asked for', async () => {

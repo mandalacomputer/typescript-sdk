@@ -1402,10 +1402,15 @@ if (incomplete !== null) {
 }
 ```
 
-`incomplete` is `null` exactly when the answer was whole. When it is not, it is
-how many rows the placement cache could account for — legitimately `0`, because a
-computer created during the outage was never cached against the host now holding
-it. So branch on `incomplete !== null`, never on the number.
+`incomplete` is `null` exactly when the answer was whole. When it is not, the
+number is one of two things and does not distinguish them: how many rows the
+placement cache could account for — legitimately `0`, because a computer created
+during the outage was never cached against the host now holding it — or, when
+the platform called the answer whole, how many rows this client received and
+could not decode, which it drops rather than hands back as junk. Either way the
+array is short by rows that still exist, which is the part a caller has to act
+on. So branch on `incomplete !== null`, never on the number, and do not log it
+as a count of anything in particular.
 
 Builds are the third of these and the one where the status is always all you
 get. The platform keeps no record of which hypervisor ran which build, so a

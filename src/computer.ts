@@ -2940,7 +2940,15 @@ export class Computer {
         // first answer — an unmeasurable file — and a contradiction as any
         // later one, where these would be the file's first bytes handed back in
         // the middle of a read that is already past them.
-        if (!first) {
+        //
+        // Offset zero is neither, and it is why the forfeit is spelled as a
+        // position rather than as `!first`: a tail wider than the file resolves
+        // to a window that starts at byte zero and runs to the end, so the
+        // whole file IS the answer that was asked for and yielding it hands
+        // back nothing the caller did not want. Only once the loop has moved
+        // past byte zero does a whole-file answer put the file's first bytes
+        // somewhere they cannot belong.
+        if (!first && offset > 0) {
           throw new MandalaError(
             `asked ${path} for bytes from ${offset} and was answered with the whole file; ` +
               'a paging read cannot go on from that',
@@ -3045,8 +3053,17 @@ export class Computer {
       // agrees) — a truncated guest file reported as a complete write.
       //
       // A stream is the only body whose length this cannot know, which is what
-      // the option is for, and it keeps the header unchecked.
-      if (!(bytes instanceof ReadableStream) && opts.contentLength !== bytes.length) {
+      // the option is for, and it keeps the header unchecked. Which bodies
+      // those are is asked positively — a view over an ArrayBuffer is the one
+      // shape with a length, the string having become one above — because the
+      // negative form (anything that is not a realm-native `ReadableStream`)
+      // calls every stream this realm does not recognise measurable: a
+      // polyfilled or cross-realm stream, or the Node `Readable` an untyped
+      // caller can pass because undici accepts one. Each has no `.length`, so
+      // the check would fire on a body that IS a stream and tell its caller to
+      // pass the length only for a stream. An unrecognised stream keeping the
+      // header unchecked is the same trust a recognised one already gets.
+      if (ArrayBuffer.isView(bytes) && opts.contentLength !== bytes.length) {
         throw new ValidationError(
           `contentLength is ${opts.contentLength} but the data is ${bytes.length} bytes: ` +
             'the length is only worth passing for a ReadableStream, whose size cannot be read ' +
