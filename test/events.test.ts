@@ -457,7 +457,7 @@ describe('the opening frame', () => {
     expect(toHello(hello({ watching: [] }))?.watching).toEqual([]);
   });
 
-  it('reads `armed` as true only, and keeps an entry it cannot read', () => {
+  it('reads `armed` as true only, and drops an entry it cannot read', () => {
     // TRUE only, for the reason `ready` is: a tree read as live when it is not
     // has a client taking silence for "nothing has changed" and never finding
     // out. Read as not-live when it is, the client waits — and a wait ends at
@@ -465,13 +465,78 @@ describe('the opening frame', () => {
     const h = toHello(
       hello({ watching: [{ path: '/w', armed: 'true' }, { armed: true }, 'not a tree'] }),
     );
-    // The unreadable entry is still an entry the host answered with: dropping
-    // it would make the length disagree with what was nominated, which is the
-    // one thing this is read to check.
-    expect(h?.watching).toEqual([
-      { path: '/w', armed: false },
-      { path: '', armed: true },
-    ]);
+    // An entry that is not an object at all is dropped — there is nothing to
+    // decode — and so is one that decoded to no path, because a tree nobody
+    // can name is a tree no event can be matched against. Both are counted,
+    // because the length is the one thing this is read to check and a short
+    // list that does not admit it is the frame lying about what was nominated.
+    expect(h?.watching).toEqual([{ path: '/w', armed: false }]);
+    expect(h?.watchingIncomplete).toBe(2);
+  });
+
+  it('says how many entries it could not use, once per collection', () => {
+    // The listing's own spelling: presence is the signal, the number is
+    // detail, and `null` has to mean that collection was whole. Refusing the
+    // frame instead — `toWindowListing`'s answer to the same garbage — would
+    // end a connection over one bad entry in an opening frame and take every
+    // event after it along too.
+    const whole = toHello(hello({ windows: [WINDOW] }));
+    expect(whole?.windowsIncomplete).toBeNull();
+    expect(whole?.watchingIncomplete).toBeNull();
+    expect(toHello(hello())?.windowsIncomplete).toBeNull();
+    expect(toHello(hello({ windows: [], watching: [] }))?.watchingIncomplete).toBeNull();
+    const short = toHello(
+      hello({ windows: [WINDOW, 'not a window', 7], watching: [{ path: '/w' }, null] }),
+    );
+    expect(short?.windows).toHaveLength(1);
+    expect(short?.watching).toHaveLength(1);
+    expect(short?.windowsIncomplete).toBe(2);
+    expect(short?.watchingIncomplete).toBe(1);
+  });
+
+  it('does not let a bad window row report the nominations as short', () => {
+    // The two collections are independent answers, and a caller told to check
+    // this before reading `watching.length` must not learn anything from the
+    // desktop half: one shared count had a client concluding the host dropped
+    // its nominations because a window row was junk.
+    const h = toHello(hello({ windows: ['junk'], watching: [{ path: '/w', armed: true }] }));
+    expect(h?.watching).toEqual([{ path: '/w', armed: true }]);
+    expect(h?.watchingIncomplete).toBeNull();
+    expect(h?.windowsIncomplete).toBe(1);
+    // And the other way round: a tree that named nothing says nothing about
+    // the desktop.
+    const other = toHello(hello({ windows: [WINDOW], watching: [{ armed: true }] }));
+    expect(other?.windowsIncomplete).toBeNull();
+    expect(other?.watchingIncomplete).toBe(1);
+  });
+
+  it('drops a window that named no window, rather than handing back an empty id', () => {
+    // `toGuestWindow` answers `''` for a row with no `id`, and an id is the
+    // whole of what a window entry is for — every action names one. Kept, it
+    // is a window a caller can hold and never match, in a frame that claimed
+    // to be whole.
+    const h = toHello(hello({ windows: [WINDOW, { title: 'Terminal' }] }));
+    expect(h?.windows).toHaveLength(1);
+    expect(h?.windows?.[0]?.id).toBe('0x3000003');
+    expect(h?.windowsIncomplete).toBe(1);
+  });
+
+  it('reports a collection that is not an array as short by an unknown amount', () => {
+    // A guard rather than a live hazard — `eventsocket.go` sends `[]` for an
+    // empty set, and the watch frames only run under a non-empty one — but a
+    // frame reaching this decoder through a proxy is not a frame that daemon
+    // wrote. Discarded silently, a non-array leaves `undefined`, which is what
+    // a resumed connection says, and a caller reads "you already hold this
+    // picture" off a collection that was never read. `0` is the listing's own
+    // answer for a shortfall it cannot size.
+    const h = toHello(hello({ windows: 'nope', watching: { path: '/w' } }));
+    expect(h?.windows).toBeUndefined();
+    expect(h?.watching).toBeUndefined();
+    expect(h?.windowsIncomplete).toBe(0);
+    expect(h?.watchingIncomplete).toBe(0);
+    // A JSON `null` is how a wire says nothing at all, and is read as the
+    // absence it is rather than as a collection gone missing.
+    expect(toHello(hello({ windows: null }))?.windowsIncomplete).toBeNull();
   });
 });
 
@@ -2212,6 +2277,21 @@ describe('the numbers a stream is given', () => {
     expect(() => c.events({ maxRetries: -1 })).toThrow(ValidationError);
     // Zero retries is "never give up", not a refusal.
     expect(() => c.events({ maxRetries: 0 })).not.toThrow();
+  });
+
+  it('refuses a fraction where the number counts frames or attempts', async () => {
+    // `maxQueued: 0.5` is a queue that overflows on the FIRST frame, and
+    // overflow closes the socket — so it reads as a stream that reconnects
+    // forever and delivers nothing, with the fraction nowhere in the symptom.
+    // `maxRetries: 0.5` is the same shape one step over: the count passes 0.5
+    // before it is ever 1, so the first failure is final on a stream that was
+    // told to retry.
+    const { computer: c } = await computer();
+    for (const opts of [{ maxQueued: 0.5 }, { maxQueued: 2.5 }, { maxRetries: 0.5 }]) {
+      expect(() => c.events(opts), JSON.stringify(opts)).toThrow(ValidationError);
+      expect(() => c.events(opts), JSON.stringify(opts)).toThrow(/whole number/);
+    }
+    expect(() => c.events({ maxQueued: 1, maxRetries: 3 })).not.toThrow();
   });
 });
 

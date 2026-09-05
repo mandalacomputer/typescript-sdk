@@ -20,8 +20,8 @@
 
 import { ConnectionError, MandalaError, ValidationError } from './errors.js';
 import { decimal, type GuestWindow, said, toGuestWindow } from './models.js';
-import { isRecord } from './paths.js';
-import { MAX_TIMER_MS } from './transport.js';
+import { checkPathText, isRecord } from './paths.js';
+import { MAX_TIMER_MS, shortfall } from './transport.js';
 
 /**
  * Who is describing this event.
@@ -462,6 +462,24 @@ export type Hello = {
    */
   windows?: GuestWindow[];
   /**
+   * How many {@link windows} entries this client could not use, or `null` when
+   * it used them all.
+   *
+   * `Listing.incomplete`'s spelling and its promise: presence says the array
+   * above is shorter than what the host answered with, and the number is
+   * detail, so `null` has to mean that collection was whole. Its own field
+   * rather than one shared with {@link watchingIncomplete}, because a listing's
+   * count can be a single number only by describing a single collection — one
+   * shared between two of them tells a caller checking `watching` that its
+   * nominations were dropped when the bad row was a window, which is the one
+   * conclusion this frame is read to reach.
+   *
+   * `0` is the one count that is not a count: it means the host sent a
+   * `windows` that is not an array at all, so the shortfall is real and
+   * unsizeable — see {@link toHello}.
+   */
+  windowsIncomplete: number | null;
+  /**
    * The trees this stream will report file changes under, or `undefined`.
    *
    * ABSENT when nothing was nominated, which is the platform saying no
@@ -479,6 +497,16 @@ export type Hello = {
    * for what is true now.
    */
   watching?: WatchedTree[];
+  /**
+   * How many {@link watching} entries this client could not use, or `null` when
+   * it used them all.
+   *
+   * {@link windowsIncomplete}'s rule, over the collection a caller compares
+   * against what it nominated: this is the count to check before reading
+   * `watching.length` as what the host accepted, and a window it could not read
+   * does not move it.
+   */
+  watchingIncomplete: number | null;
   raw: Record<string, unknown>;
 };
 
@@ -623,19 +651,47 @@ export function toComputerEvent(frame: unknown): ComputerEvent | undefined {
   return ev;
 }
 
+/**
+ * One opening-frame collection, and how short reading it left it.
+ *
+ * An entry is DROPPED and counted, never kept as a placeholder. A row that is
+ * not an object has nothing to decode; a row that decodes to no identity — a
+ * window with no `id`, a tree with no `path` — is worse, because it survives as
+ * something a caller can hold and never match: a nomination of
+ * `/home/user/project` compared against `''` finds nothing, and the frame that
+ * handed it over said it was whole. Whatever its shape was on the wire, an
+ * entry that names nothing is an entry short, so it is counted as one — the
+ * asymmetry with {@link toWindowListing}, which refuses a listing outright over
+ * exactly that row, is narrowed to what a stream can afford rather than left
+ * open.
+ *
+ * Not an array at all is a shortfall this client cannot SIZE, so it reports the
+ * `0` a listing reports for a response with no body: the collection stays
+ * `undefined` — it says nothing, which is honest, where `[]` would be this
+ * decoder claiming the desktop is empty — and the count is what separates that
+ * silence from the host's own. The platform does not produce this shape:
+ * `eventsocket.go` sends `[]` for an empty set and the watch frames only run
+ * under a non-empty one, so this is a guard rather than a live hazard, and it
+ * is here because a frame arriving through a proxy is not a frame this daemon
+ * wrote. `null` counts as absent for the same reason — it is JSON's own way of
+ * saying nothing, not a collection gone missing.
+ */
+function helloRows<T>(
+  rows: unknown,
+  decode: (row: Record<string, unknown>) => T,
+  names: (decoded: T) => boolean,
+): { items: T[] | undefined; incomplete: number | null } {
+  if (rows == null) return { items: undefined, incomplete: null };
+  if (!Array.isArray(rows)) return { items: undefined, incomplete: 0 };
+  const items = rows.filter(isRecord).map(decode).filter(names);
+  return { items, incomplete: shortfall(rows.length - items.length) };
+}
+
 /** The opening frame, or `undefined` for anything that is not one. */
 export function toHello(frame: unknown): Hello | undefined {
   if (!isRecord(frame) || frame.type !== 'hello') return undefined;
-  const windows = Array.isArray(frame.windows)
-    ? frame.windows.filter(isRecord).map(toGuestWindow)
-    : undefined;
-  // Every record kept, exactly as `windows` keeps every record: an entry this
-  // client cannot read is still an entry the host answered with, and dropping
-  // it would make `watching.length` disagree with what was nominated — which
-  // is the one thing a caller reads this to check.
-  const watching = Array.isArray(frame.watching)
-    ? frame.watching.filter(isRecord).map(toWatchedTree)
-    : undefined;
+  const windows = helloRows(frame.windows, toGuestWindow, (w) => w.id !== '');
+  const watching = helloRows(frame.watching, toWatchedTree, (t) => t.path !== '');
   return {
     computer: typeof frame.computer === 'string' ? frame.computer : '',
     cursor: typeof frame.cursor === 'string' ? frame.cursor : '',
@@ -645,8 +701,24 @@ export function toHello(frame: unknown): Hello | undefined {
     // field was malformed hands an agent a screen that is still booting.
     ready: frame.ready === true,
     events: stringList(frame.events) ?? [],
-    windows,
-    watching,
+    windows: windows.items,
+    // An entry this client cannot use is dropped rather than refused, and the
+    // shortfall is SAID rather than left in the arithmetic. Refusing the frame
+    // — which is what `toWindowListing` does with the same class of garbage —
+    // ends a connection over one unreadable entry in an opening frame, and
+    // takes every event that would have come after it with it; the listing's
+    // reading is the right one here, because a caller who is told the picture
+    // is short can re-read `computers/:id/windows` and carry on.
+    //
+    // PER COLLECTION, which is the half a single count could not do. These are
+    // two independent answers — a window the host could not describe says
+    // nothing about the trees a caller nominated — so one number over both had
+    // a caller following the documented rule ("check this before reading
+    // `watching.length`") concluding its nominations were dropped over a bad
+    // window row.
+    windowsIncomplete: windows.incomplete,
+    watching: watching.items,
+    watchingIncomplete: watching.incomplete,
     raw: { ...frame },
   };
 }
@@ -660,6 +732,10 @@ export function toHello(frame: unknown): Hello | undefined {
  * changed" over a tree nothing is watching yet, and never finds out. Wrong in
  * the other, it waits for an `armed` event — which ends at a caller's timeout,
  * and which the platform may well be about to send anyway.
+ *
+ * The empty `path` this answers for a row that named none is a value {@link
+ * toHello} drops and counts rather than hands on: a tree nobody can name is a
+ * tree nobody can match an event against.
  */
 function toWatchedTree(entry: Record<string, unknown>): WatchedTree {
   return { path: text(entry.path) ?? '', armed: entry.armed === true };
@@ -1790,32 +1866,13 @@ function checkWatches(watch: readonly string[]): string[] {
         `a watched directory must be an absolute guest path: ${JSON.stringify(path)}`,
       );
     }
-    if (new TextEncoder().encode(path).length > MAX_WATCH_PATH_BYTES) {
-      throw new ValidationError(
-        `a watched directory may be at most ${MAX_WATCH_PATH_BYTES} bytes: ` +
-          `${JSON.stringify(path)}`,
-      );
-    }
-    // Refused rather than escaped, which is the platform's own reading: a path
-    // may hold these on Linux, and this one is echoed back in an opening frame
-    // and written to somebody's log, so a newline in it is a caller choosing
-    // what another terminal renders. Nobody nominates one by accident.
-    //
-    // By code point rather than by a character class, which the linter refuses
-    // for the sound reason that a control character written into a regex is
-    // usually a typo. This one is the case it is not.
-    if ([...path].some((ch) => ch < ' ' || ch === '\u007f')) {
-      throw new ValidationError(
-        `a watched directory cannot contain control characters: ${JSON.stringify(path)}`,
-      );
-    }
-    // A lone surrogate is not UTF-8, and it is the one bad path that would NOT
-    // be refused on the upgrade: `encodeURIComponent` turns it into a
-    // replacement character, so the host is handed a valid path that is not the
-    // one that was asked for, and watches the wrong tree quietly.
-    if (/\p{Surrogate}/u.test(path)) {
-      throw new ValidationError(`a watched directory must be valid UTF-8: ${JSON.stringify(path)}`);
-    }
+    // The length, the control characters and the lone surrogate, in the one
+    // place those three rules live: they are the same rules the file and exec
+    // routes apply to a path bound for the same guest, and a second copy here
+    // is a second thing to keep in step. The CAP is this route's own — the
+    // platform bounds a nomination far below what a file path may be — so it is
+    // passed in.
+    checkPathText(path, 'a watched directory', MAX_WATCH_PATH_BYTES);
     if (cleanWatchPath(path) === '/') {
       throw new ValidationError(
         `watching / is not a nomination; name the directory you are waiting on ` +
@@ -1916,6 +1973,11 @@ function checkStreamNumbers(o: {
       throw new ValidationError(`${name} must be a positive finite number (got ${v})`);
     }
   };
+  const whole = (name: string, v: number) => {
+    if (!Number.isInteger(v)) {
+      throw new ValidationError(`${name} must be a whole number (got ${v})`);
+    }
+  };
   // The ceiling matters for the same reason the floor does, and it was the half
   // this refusal was missing. `setTimeout` stores its delay in a 32-bit signed
   // int, so anything past MAX_TIMER_MS wraps to 1ms and fires AT ONCE — a
@@ -1933,12 +1995,22 @@ function checkStreamNumbers(o: {
   timer('backoffMs', o.backoffMs);
   timer('maxBackoffMs', o.maxBackoffMs);
   timer('connectTimeoutMs', o.connectTimeoutMs);
+  // A COUNT, where the three above are durations: a queue holds whole frames
+  // and a retry either happens or does not, so a fraction is a number with no
+  // reading. Left unchecked it was not treated as one either — `maxQueued: 0.5`
+  // is a queue that overflows on the FIRST frame, and overflow here closes the
+  // socket, so a stream that reconnects forever and delivers nothing was a
+  // typo's whole diagnosis. `maxRetries: 0.5` is the same shape one step over:
+  // the attempt count passes 0.5 before it is ever 1, so the first failure is
+  // final on a stream told to retry.
   positive('maxQueued', o.maxQueued);
+  whole('maxQueued', o.maxQueued);
   if (!Number.isFinite(o.maxRetries) || o.maxRetries < 0) {
     throw new ValidationError(
       `maxRetries must be a non-negative finite number (got ${o.maxRetries})`,
     );
   }
+  whole('maxRetries', o.maxRetries);
 }
 
 /** A promise with a deadline on it, for a socket that opened and then said nothing. */

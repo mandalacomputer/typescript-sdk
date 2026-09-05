@@ -1172,6 +1172,30 @@ describe('answers that are not what the route promised', () => {
     expect((await client(both).snapshots.listWithStatus()).incomplete).toBe(0);
   });
 
+  it('marks a listing with no body at all short, rather than empty', async () => {
+    // A 204, or a 200 with nothing in it, from a route that has no empty
+    // answer — no producer of one exists on any list path, so it is a broken
+    // responder or a proxy answering for one. Still an empty array, because a
+    // route that legitimately answers 204 must not be refused and the
+    // documented contract is a list; but not an empty ESTATE, which is what
+    // `incomplete: null` beside it would have said. The hazard is the one
+    // `web/lib/surface.ts` names — a caller diffs the array against its own
+    // idea of the world and tidies up the computers that "disappeared" — and
+    // it does not care which hop lost the rows.
+    const nothing = recorder(() => new Response(null, { status: 204 }));
+    const listed = await client(nothing).computers.listWithStatus();
+    expect(listed.items).toEqual([]);
+    expect(listed.incomplete).toBe(0);
+    const empty = recorder(
+      () => new Response('', { status: 200, headers: { 'content-type': 'application/json' } }),
+    );
+    expect((await client(empty).snapshots.listWithStatus()).incomplete).toBe(0);
+    // An account with nothing in it says so, and keeps saying so: `[]` is the
+    // platform's own statement and is not this.
+    const none = recorder(() => json([]));
+    expect((await client(none).snapshots.listWithStatus()).incomplete).toBeNull();
+  });
+
   it('names the computers route when a listed record has no id', async () => {
     const rec = recorder(() => json([{ name: 'missing its id' }]));
     await expect(client(rec).computers.listWithStatus()).rejects.toThrow(

@@ -149,22 +149,24 @@ export type Bytes = {
 /**
  * A collection read the platform may have had to answer short.
  *
- * `incomplete` present means the list is short. The number is one of two
+ * `incomplete` present means the list is short. The number is one of three
  * quantities and does not say which: the platform's own shortfall, counted out
  * of what the placement cache could account for and legitimately `0` because a
  * computer created during an outage was never cached against the host now
  * holding it; or, when the platform called the answer whole, how many rows this
- * client could not decode and dropped. Both leave the same array — one shorter
- * than the estate — which is what a caller acts on, so they share the channel.
- * Presence is the signal and the number is detail — hence `null` versus a
- * number, rather than a count that means nothing at zero.
+ * client could not decode and dropped; or `0` for a response that carried no
+ * body at all, which is a list this client cannot size. All three leave the
+ * same array — one shorter than the estate — which is what a caller acts on, so
+ * they share the channel. Presence is the signal and the number is detail —
+ * hence `null` versus a number, rather than a count that means nothing at zero.
  */
 export type Listing<T> = {
   items: T[];
   /**
    * `null` when the answer was complete. A number — possibly 0 — when it was
-   * not, being either the platform's shortfall or this client's dropped rows,
-   * with no way to tell the two apart. Branch on presence, not on the number.
+   * not, being the platform's shortfall, this client's dropped rows, or a body
+   * that never arrived, with no way to tell them apart. Branch on presence, not
+   * on the number.
    */
   incomplete: number | null;
 };
@@ -176,8 +178,10 @@ export type Listing<T> = {
  * calls `.map` on an object gets `data.map is not a function` — an anonymous
  * TypeError naming neither the request nor the platform, which is the failure
  * #decode exists to prevent one layer up. A missing body is an empty list,
- * since a list route with nothing to say and a list route that said nothing are
- * the same answer.
+ * because there is nothing else it could be handed back as and a caller of
+ * {@link jsonArray} has nowhere to put a caveat — {@link Transport.listing},
+ * which does, marks that same answer incomplete rather than reading it as an
+ * account with nothing in it.
  */
 function expectArray(data: unknown, method: string, path: string): unknown[] {
   if (data == null) return [];
@@ -251,8 +255,13 @@ const incompleteCount = (header: string): number => {
  * Zero is the one number this cannot report, and deliberately — the platform
  * sends `0` for a shortfall it cannot size, so a `0` derived from counting
  * would claim a fan-out failure that never happened.
+ *
+ * Shared with the event stream's opening frame, which drops undecodable
+ * entries out of its own two collections and has the same thing to say about
+ * it. One rule for what "short" means, so a caller who has learned to read it
+ * on a listing reads it there too.
  */
-const shortfall = (missing: number): number | null => (missing > 0 ? missing : null);
+export const shortfall = (missing: number): number | null => (missing > 0 ? missing : null);
 
 /**
  * A `Content-Range` on a response that carried bytes: `bytes 0-1048575/2147483648`.
@@ -711,7 +720,26 @@ export class Transport {
       // already flagged the answer: presence is what a caller tests, and adding
       // to a count the platform documents as best effort would make it no
       // truer.
-      incomplete: short !== null ? incompleteCount(short) : shortfall(rows.length - items.length),
+      //
+      // A body that never arrived counts too. `expectArray` answers an absent
+      // one with `[]` and that stays the answer — a route legitimately saying
+      // "nothing" with a 204 exists on this platform, and refusing the response
+      // would break it — but an empty ARRAY and an empty RESPONSE are not the
+      // same claim, and only the first is the platform stating the account is
+      // empty. `web/lib/surface.ts` says what a caller does with the second
+      // read as the first: it "will diff the array it was given against its own
+      // idea of the world, and the obvious next thing it does with a computer
+      // that has 'disappeared' is tidy it up". That hazard does not care
+      // whether the rows went missing in a fan-out, in this decoder, or in a
+      // proxy that answered 204 for a route that has no empty answer — no list
+      // route here produces one — so it is reported through the one channel
+      // that already carries it.
+      incomplete:
+        short !== null
+          ? incompleteCount(short)
+          : data == null
+            ? 0
+            : shortfall(rows.length - items.length),
     };
   }
 

@@ -3094,14 +3094,36 @@ describe('answers that would leave a handle worse off', () => {
   it('does not read a background command with no exit code as having succeeded', async () => {
     // Number('') is 0, and a command still running reported as having exited
     // successfully is the one wrong answer here that reads as fine. The same
-    // guard toExecResult carries on the same field.
+    // guard toExecResult carries on the same field: a blank arrived, it is not
+    // an exit code, and -1 is what this decoder says about a value it cannot
+    // read. What it must never be is 0.
     const { client: c } = client((call) =>
       /\/exec$/.test(call.path) ? json({ pid: 42, running: true, exit_code: '' }) : anyRoute(call),
     );
     const computer = await c.computers.get('vm-1');
     const started = await computer.execBackground('sleep 60');
-    expect(started.exitCode).toBeUndefined();
+    expect(started.exitCode).toBe(-1);
     expect(started.running).toBe(true);
+  });
+
+  it('reads an empty exit code and a blank one alike', async () => {
+    // `count`'s own rule — a string of nothing but space is the same non-answer
+    // as the empty one — and the two shapes reaching this field through it
+    // rather than through a hand-written test for one of them. Neither is a
+    // payload this platform sends (`exit_code` is a pointer with `omitempty`,
+    // so "has not exited" is absent), which is exactly why the difference must
+    // not be readable as an outcome: no wire behind it, no two answers.
+    const codes: unknown[] = ['', ' ', '  \t'];
+    for (const code of codes) {
+      const { client: c } = client((call) =>
+        /\/exec$/.test(call.path)
+          ? json({ pid: 42, running: true, exit_code: code })
+          : anyRoute(call),
+      );
+      const computer = await c.computers.get('vm-1');
+      const started = await computer.execBackground('sleep 60');
+      expect(started.exitCode, JSON.stringify(code)).toBe(-1);
+    }
   });
 
   it('does not read a background exit code it cannot parse as success', async () => {
