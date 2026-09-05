@@ -9,7 +9,7 @@
  * place that has nothing to do with the response that was wrong.
  */
 
-import { MandalaError } from './errors.js';
+import { MandalaError, ValidationError } from './errors.js';
 import { isRecord } from './paths.js';
 
 /**
@@ -1265,31 +1265,97 @@ export function expectMoves(
 }
 
 /**
- * When a move was last heard of, for ordering an account-wide listing.
+ * When a move BEGAN, which is the only stamp a floor can be read against.
  *
- * `finishedAt` where there is one, `startedAt` otherwise. An unreadable stamp
- * sorts below every readable one rather than throwing: the listing is the
- * platform's, and one unparseable row should not decide which move a wait
- * returns.
+ * `startedAt` and never `finishedAt`: the floor is one move's start, so a row
+ * judged by when it ENDED would be judged against a different question — and
+ * the two answers differ by however long a multi-gigabyte copy takes. An
+ * unreadable stamp is `-Infinity` rather than a throw, as the listing is the
+ * platform's and one unparseable row should not end a wait; below every floor
+ * is where that puts it, because a row nobody can place in time is not evidence
+ * about a move that started at a known instant.
  */
-const moveStamp = (m: Move): number => {
-  const t = Date.parse(m.finishedAt ?? m.startedAt ?? '');
+const startStamp = (m: Move): number => {
+  const t = Date.parse(m.startedAt);
   return Number.isNaN(t) ? -Infinity : t;
 };
 
 /**
- * The most recently finished move among rows already known to be one computer's.
+ * An RFC3339 instant, zone and all.
  *
- * `GET /moves` carries the moves that finished in the last DAY beside the one
- * running now, so "the first row for this computer" is not "the move this wait
- * is watching" — see {@link Computer.waitForMove}, which is where taking the
- * first one ended a wait on a copy that finished yesterday.
+ * The zone is the point. `Date.parse('2026-08-23 01:00:00')` answers a number —
+ * for that wall clock in the LOCAL zone — so a hand-written stamp with no `Z`
+ * silently becomes a floor hours away from the one it names.
  */
-export const latestFinishedMove = (moves: Move[]): Move | undefined =>
-  moves.reduce<Move | undefined>(
-    (best, m) => (best === undefined || moveStamp(m) > moveStamp(best) ? m : best),
-    undefined,
+const RFC3339 = /^\d{4}-\d{2}-\d{2}[Tt ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[Zz]|[+-]\d{2}:\d{2})$/;
+
+/**
+ * The instant a wait's move began: its floor.
+ *
+ * BOTH SIDES OF THE COMPARISON ARE THE PLATFORM'S CLOCK. The floor is the
+ * `started_at` the platform put on the move it accepted, and every row it is
+ * compared with carries a `started_at` from that same clock — no local clock
+ * enters it. One that did would matter: a client running a minute fast, given
+ * `Date.now()` as its floor, ignores its own move's row until the deadline; one
+ * running slow admits yesterday's, which is the failure the floor exists for.
+ *
+ * A string is held to RFC3339-with-a-zone rather than to whatever `Date.parse`
+ * will take, for the reason above it. A {@link Move}'s own `startedAt` is read
+ * with `Date.parse` and no shape test, because that is the function the ROWS
+ * are read with: holding the anchor to a stricter rule than the rows it is
+ * compared against would refuse a platform spelling this wait can otherwise
+ * answer perfectly well.
+ */
+export const moveFloor = (move: Move | string): number => {
+  if (typeof move === 'string') {
+    const t = RFC3339.test(move) ? Date.parse(move) : Number.NaN;
+    if (Number.isNaN(t)) {
+      throw new ValidationError(
+        `move must be the Move that relocate() returned, or an RFC3339 timestamp with a zone ` +
+          `like 2026-08-23T01:00:00Z — got ${JSON.stringify(move).slice(0, 120)}`,
+      );
+    }
+    return t;
+  }
+  const t = Date.parse(isRecord(move) ? str(move.startedAt) : '');
+  if (Number.isNaN(t)) {
+    throw new ValidationError(
+      `move must be the Move that relocate() returned, and this one has no readable startedAt ` +
+        `to wait from: ${`${JSON.stringify(move)}`.slice(0, 120)}`,
+    );
+  }
+  return t;
+};
+
+/**
+ * The move a wait is watching, among rows already known to be one computer's.
+ *
+ * `GET /moves` carries the moves that FINISHED IN THE LAST DAY beside the one
+ * running now, so neither the first row for this computer nor the newest is the
+ * move a given wait was started for: a copy that finished yesterday satisfied
+ * `!live` on the first poll and handed back a computer whose disk was still
+ * crossing between hosts. The floor — the accepted move's own start — is what
+ * tells them apart.
+ *
+ * A live row at or after it is the copy running now; one move runs per account
+ * at a time, so there is only one it can be. Otherwise the EARLIEST row at or
+ * after the floor is the one, because anything later began after this wait did
+ * and answering with it would report an operation nobody asked about.
+ *
+ * `undefined` is NOT an outcome. It says this listing does not show the move
+ * YET — see {@link Computer.waitForMove}, where telling that apart from a row
+ * the platform reaped is the whole of the hard part.
+ */
+export const moveAtOrAfter = (moves: Move[], floor: number): Move | undefined => {
+  const since = moves.filter((m) => startStamp(m) >= floor);
+  return (
+    since.find((m) => m.live) ??
+    since.reduce<Move | undefined>(
+      (best, m) => (best === undefined || startStamp(m) < startStamp(best) ? m : best),
+      undefined,
+    )
   );
+};
 
 /**
  * Whether a ROW off the wire belongs to the computer named.

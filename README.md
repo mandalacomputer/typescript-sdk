@@ -76,6 +76,13 @@ await using c = await client.computers.ephemeral({ template: 'base' });
 await c.waitForGuest();
 ```
 
+**If the block throws and the cleanup delete fails too, both errors arrive** —
+a `SuppressedError` whose `.suppressed` is the block's own error, the fault to
+read first, and whose `.error` names the machine that is still billable. Either
+spelling produces the same pair, so a cleanup failure is never the thing that
+goes unmentioned. A 404 from the cleanup is not one: the block deleted the
+machine itself, and its own error stands alone.
+
 Every computer is a Linux desktop today. Windows guests are not offered on any
 plan; where this README mentions Windows it is describing behaviour the client
 already supports for when they are.
@@ -1041,9 +1048,9 @@ try {
   await c.update({ ramMb: 32768 });
 } catch (err) {
   if (err instanceof MoveRequiredError && err.movePossible) {
-    await c.relocate({ ramMb: 32768 });       // 202 — the copy runs behind it
-    const move = await c.waitForMove();
-    if (move.state !== 'done') console.log(move.state, move.detail);
+    const move = await c.relocate({ ramMb: 32768 });  // 202 — the copy runs behind it
+    const outcome = await c.waitForMove(move);        // anchored to THAT move
+    if (outcome.state !== 'done') console.log(outcome.state, outcome.detail);
   } else throw err;
 }
 ```
@@ -1056,6 +1063,14 @@ that quietly relocates a machine.
 **The computer must be stopped**, and suspended is not stopped here — unlike a
 resize, which accepts it. A saved desktop only loads on the host that wrote it,
 so it cannot travel: resume and stop the computer, or discard the session, first.
+
+**`waitForMove()` takes the move `relocate()` returned**, and that argument is
+required. A `Move` carries no id and `GET /moves` keeps every move that finished
+in the last day beside the one running now, so the record from the 202 — or an
+RFC3339 `startedAt` a restarted process persisted — is the only thing that says
+which move a wait is watching. A listing with no row at or after that instant is
+one that has not caught up yet, so the wait goes on polling and its deadline,
+rather than yesterday's row, is what ends it.
 
 **`waitForMove()` does not throw for a move that ended badly**, because the ways
 it can end are not one thing:

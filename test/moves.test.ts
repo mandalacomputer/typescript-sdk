@@ -6,11 +6,22 @@ import {
   ConflictError,
   isTransient,
   MandalaError,
+  type Move,
   type MoveArgs,
   MoveRequiredError,
   TimeoutError,
+  ValidationError,
 } from '../src/index.js';
-import { anyRoute, BASE, errorJson, json, MOVE_DONE, type Responder, recorder } from './harness.js';
+import {
+  anyRoute,
+  BASE,
+  errorJson,
+  json,
+  MOVE_DONE,
+  MOVE_STARTED,
+  type Responder,
+  recorder,
+} from './harness.js';
 
 // OPL-3773. A resize past what a computer's host can run is refused with an
 // OFFER — `move: {required, possible}` on the body — and this SDK bound neither
@@ -162,15 +173,112 @@ describe('relocate', () => {
   });
 });
 
+// The anchor every wait below is started from. `GET /moves` is account-wide and
+// keeps a day of finished rows, so a wait with nothing tying it to one operation
+// cannot tell this move's outcome from the last one's — which is why the
+// argument is required, and why a test that omits it is a test of nothing.
+const SINCE = MOVE_STARTED.started_at;
+
 describe('waitForMove', () => {
   it('answers the move once it has stopped running', async () => {
     const { client: c } = client(anyRoute);
     const computer = await c.computers.get('vm-1');
-    await computer.relocate({ ramMb: 26000 });
-    const move = await computer.waitForMove({ pollMs: 1 });
+    const accepted = await computer.relocate({ ramMb: 26000 });
+    const move = await computer.waitForMove(accepted, { pollMs: 1 });
     expect(move.live).toBe(false);
     expect(move.state).toBe('done');
     expect(move.finishedAt).toBeTruthy();
+  });
+
+  it('keeps polling while the only row for this computer finished yesterday', async () => {
+    // THE BUG THE ANCHOR EXISTS FOR. The listing keeps a move that finished in
+    // the last DAY beside the one running now, and a row the platform accepted
+    // seconds ago need not be in an account-wide listing on the first poll. With
+    // nothing to compare against, yesterday's row satisfied `!live` immediately
+    // and was handed back as this operation's outcome — so the caller started
+    // using a computer whose disk was still crossing between hosts.
+    const yesterday = {
+      ...MOVE_DONE,
+      started_at: '2026-08-22T01:00:00.000Z',
+      finished_at: '2026-08-22T02:00:00.000Z',
+    };
+    let polls = 0;
+    const { client: c } = client((call) => {
+      if (call.path !== '/moves') return anyRoute(call);
+      polls += 1;
+      // Not visible yet, then live, then finished — the ordinary life of a move
+      // that was accepted a moment ago.
+      if (polls === 1) return json({ moves: [yesterday] });
+      if (polls === 2) return json({ moves: [yesterday, MOVE_STARTED] });
+      return json({ moves: [yesterday, MOVE_DONE] });
+    });
+    const computer = await c.computers.get('vm-1');
+    const accepted = await computer.relocate({ ramMb: 26000 });
+    const move = await computer.waitForMove(accepted, { pollMs: 1, timeoutMs: 2_000 });
+
+    // The identity of the row first: `state: 'done'` is true of yesterday's row
+    // as well, so the stamp is the assertion that can tell the two apart.
+    expect(move.startedAt).toBe(MOVE_STARTED.started_at);
+    expect(polls).toBe(3);
+    expect(move.state).toBe('done');
+    expect(move.live).toBe(false);
+  });
+
+  it('takes an RFC3339 timestamp in place of the move', async () => {
+    // For the process that restarted: the `startedAt` it persisted is the same
+    // floor the Move carries, and the platform's clock is on both sides of the
+    // comparison either way.
+    const { client: c } = client(anyRoute);
+    const computer = await c.computers.get('vm-1');
+    expect((await computer.waitForMove(SINCE, { pollMs: 1 })).state).toBe('done');
+  });
+
+  it('refuses a timestamp it cannot place, before any request', async () => {
+    // A stamp with no zone is the dangerous one: `Date.parse` reads it in the
+    // LOCAL zone and answers a number, so it would become a floor hours away
+    // from the instant it names — against rows stamped by the platform's clock.
+    const { rec, client: c } = client(anyRoute);
+    const computer = await c.computers.get('vm-1');
+    const before = rec.calls.length;
+    for (const bad of ['yesterday', '2026-08-23 01:00:00', '2026-08-23T01:00:00', '', 'Z']) {
+      const err = await computer.waitForMove(bad, { pollMs: 1, timeoutMs: 50 }).catch((e) => e);
+      expect(`${bad}: ${err instanceof ValidationError}`).toBe(`${bad}: true`);
+      expect((err as Error).message).toContain('move must be');
+    }
+    expect(rec.calls.length).toBe(before);
+  });
+
+  it('refuses a move whose startedAt the platform never sent', async () => {
+    // `str(undefined)` is `''`, so an omitted `started_at` reaches this as an
+    // empty string. A wait anchored to nothing would be the wait this argument
+    // was added to replace.
+    const { client: c } = client(anyRoute);
+    const computer = await c.computers.get('vm-1');
+    const err = await computer
+      .waitForMove({ ...MOVE_DONE, startedAt: '' } as unknown as Move)
+      .catch((e) => e);
+    expect(err).toBeInstanceOf(ValidationError);
+    expect((err as Error).message).toContain('no readable startedAt');
+  });
+
+  it('says the move was reaped once its row has been seen and then is not', async () => {
+    // The one disappearance that is a fact rather than an inference: the row was
+    // there, so it existed, and the platform reaps one for a single reason.
+    // Waiting out the rest of a fifteen-minute deadline to say so is what this
+    // branch exists to avoid.
+    let polls = 0;
+    const { client: c } = client((call) => {
+      if (call.path !== '/moves') return anyRoute(call);
+      polls += 1;
+      return json({ moves: polls === 1 ? [MOVE_STARTED] : [] });
+    });
+    const computer = await c.computers.get('vm-1');
+    const err = await computer.waitForMove(SINCE, { pollMs: 1, timeoutMs: 5_000 }).catch((e) => e);
+
+    expect(err).toBeInstanceOf(MandalaError);
+    expect(err).not.toBeInstanceOf(TimeoutError);
+    expect((err as Error).message).toContain('no longer listed');
+    expect(polls).toBe(2);
   });
 
   it('picks this computer’s move out of the account’s', async () => {
@@ -188,7 +296,7 @@ describe('waitForMove', () => {
         : anyRoute(call),
     );
     const computer = await c.computers.get('vm-1');
-    const move = await computer.waitForMove({ pollMs: 1 });
+    const move = await computer.waitForMove(SINCE, { pollMs: 1 });
     expect(move.computerId).toBe('vm-1');
     expect(move.state).toBe('done');
   });
@@ -226,7 +334,7 @@ describe('waitForMove', () => {
       });
     });
     const computer = await c.computers.get('vm-1');
-    const move = await computer.waitForMove({ pollMs: 1 });
+    const move = await computer.waitForMove('2026-08-23T01:00:00.000Z', { pollMs: 1 });
 
     expect(polls).toBeGreaterThan(1);
     expect(move.state).toBe('done');
@@ -242,7 +350,7 @@ describe('waitForMove', () => {
       call.path === '/moves' ? json({ ok: true }) : anyRoute(call),
     );
     const computer = await c.computers.get('vm-1');
-    const err = await computer.waitForMove({ pollMs: 1, timeoutMs: 200 }).catch((e) => e);
+    const err = await computer.waitForMove(SINCE, { pollMs: 1, timeoutMs: 200 }).catch((e) => e);
 
     expect(err).toBeInstanceOf(MandalaError);
     expect((err as Error).message).toContain('moves array');
@@ -257,7 +365,7 @@ describe('waitForMove', () => {
       call.path === '/moves' ? new Response('', { status: 200 }) : anyRoute(call),
     );
     const computer = await c.computers.get('vm-1');
-    const err = await computer.waitForMove({ pollMs: 1, timeoutMs: 200 }).catch((e) => e);
+    const err = await computer.waitForMove(SINCE, { pollMs: 1, timeoutMs: 200 }).catch((e) => e);
 
     expect(err).toBeInstanceOf(MandalaError);
     expect((err as Error).message).toContain('moves array');
@@ -277,7 +385,7 @@ describe('waitForMove', () => {
           : anyRoute(call),
       );
       const computer = await c.computers.get('vm-1');
-      const move = await computer.waitForMove({ pollMs: 1 });
+      const move = await computer.waitForMove(SINCE, { pollMs: 1 });
       expect(`${state}: ${move.state} / ${move.detail}`).toBe(`${state}: ${state} / a reason`);
     }
   });
@@ -289,25 +397,30 @@ describe('waitForMove', () => {
         : anyRoute(call),
     );
     const computer = await c.computers.get('vm-1');
-    const err = await computer.waitForMove({ timeoutMs: 30, pollMs: 5 }).catch((e) => e);
+    const err = await computer.waitForMove(SINCE, { timeoutMs: 30, pollMs: 5 }).catch((e) => e);
     expect(err).toBeInstanceOf(TimeoutError);
     // The sentence has to say the move survives the wait, because it does: there
     // is no calling back a disk crossing between two hosts.
     expect((err as Error).message).toContain('has not stopped');
   });
 
-  it('stops when the move stops being listed, which means the computer is gone', async () => {
+  it('does not call a computer deleted over a row that was never there', async () => {
+    // This handle never relocated, so an empty listing is exactly what it should
+    // have — and the sentence that ended this wait said the platform reaps a
+    // move "when its computer is deleted", about a computer that is running. An
+    // empty listing is a row not yet visible and a row reaped wearing one face,
+    // and only the deadline can end a wait that cannot tell them apart.
     const { client: c } = client((call) =>
       call.path === '/moves' ? json({ moves: [] }) : anyRoute(call),
     );
     const computer = await c.computers.get('vm-1');
-    const err = await computer.waitForMove({ timeoutMs: 500, pollMs: 1 }).catch((e) => e);
-    // MandalaError and not a timeout: waiting longer cannot bring back a row the
-    // platform reaped, and spending the whole deadline to say so is the failure
-    // this branch exists to avoid.
-    expect(err).toBeInstanceOf(MandalaError);
-    expect(err).not.toBeInstanceOf(TimeoutError);
-    expect((err as Error).message).toContain('deleted');
+    const err = await computer.waitForMove(SINCE, { timeoutMs: 60, pollMs: 1 }).catch((e) => e);
+
+    expect(err).toBeInstanceOf(TimeoutError);
+    // Both possibilities, neither asserted — and the floor, so somebody reading
+    // the message can see which rows were being looked for.
+    expect((err as Error).message).toContain('started at or after 2026-08-23T02:00:12.699Z');
+    expect((err as Error).message).toContain('never accepted never appears at all');
   });
 });
 

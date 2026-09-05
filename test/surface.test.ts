@@ -126,10 +126,12 @@ async function exerciseEverything(client: Client): Promise<void> {
   // All three sizing fields in one call: the platform reads exactly these three
   // off a move body, and the parameter sweep is what proves the SDK sends them.
   // `move` on the class is the mouse pointer — see Computer.relocate.
-  await c.relocate({ ramMb: 26000, cpu: 2, diskGb: 40 });
+  const accepted = await c.relocate({ ramMb: 26000, cpu: 2, diskGb: 40 });
   // The wait on the move, which reads the same account-wide listing as
-  // `moves.list()` below and is a different method for doing it.
-  await c.waitForMove();
+  // `moves.list()` below and is a different method for doing it. It is anchored
+  // to the record the relocate answered with, which is the only thing that says
+  // WHICH move it is waiting for.
+  await c.waitForMove(accepted);
   await client.moves.list();
 
   await c.screenshot();

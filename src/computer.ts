@@ -54,7 +54,8 @@ import {
   belongsToComputer,
   count,
   isWindowResult,
-  latestFinishedMove,
+  moveAtOrAfter,
+  moveFloor,
   moveRows,
   num,
   said,
@@ -346,6 +347,73 @@ function pointPastTheCeiling(err: unknown): unknown {
     err.body,
   );
 }
+
+/**
+ * What a move wait ran out of time doing, in the sentence that is true of it.
+ *
+ * Five different silences, and the wrong one sends somebody to the wrong place:
+ * a copy still running is not a platform that stopped answering, and neither is
+ * a listing that answered every time and never carried this move. The ones about
+ * a move known to exist are read off the MOST RECENT poll rather than off any
+ * poll ever, for the reason `observed` exists — a wait whose later polls all
+ * failed must not quote the first one and describe the present tense with it.
+ */
+const moveTimeoutText = (w: {
+  id: string;
+  timeoutMs: number;
+  floor: number;
+  last: Move | undefined;
+  observed: boolean;
+  absent: boolean;
+  unreadable: number;
+  reads: number;
+  failures: number;
+}): string => {
+  if (w.last && w.observed) {
+    return (
+      `${w.id} was still moving after ${w.timeoutMs}ms (state ${w.last.state}; ` +
+      `the move has not stopped, only this wait has)`
+    );
+  }
+  // Its row was there and then was not, while rows this client could not decode
+  // were there too — so any one of THOSE might be it. A clean disappearance is
+  // answered long before this, by the reaped refusal in the loop.
+  if (w.last && w.absent) {
+    return (
+      `${w.id}'s move stopped being listed by GET ${P.MOVES} within ${w.timeoutMs}ms, and ` +
+      `${w.unreadable} row(s) of that listing could not be read at all — so whether it is gone ` +
+      `cannot be told from it. When it last answered it was in state ${w.last.state}.`
+    );
+  }
+  if (w.last) {
+    return (
+      `${w.id}'s move could not be reached for the last part of ${w.timeoutMs}ms; when it ` +
+      `last answered it was in state ${w.last.state}. The move has not stopped, only this wait ` +
+      `has — read moves.list for where it got to.`
+    );
+  }
+  // Never seen at all, on listings that were READ — which is two situations
+  // wearing one face: a row this account-wide listing has not caught up to, and
+  // one the platform reaped, which it does when the computer is deleted. Saying
+  // only the second is how a wait on a computer that had never moved at all
+  // reported it as deleted. Neither is decidable from here, so both are said and
+  // neither is asserted.
+  //
+  // Counted rather than read off the last poll alone, unlike the branches above:
+  // those describe a move known to exist and so must speak in the present tense,
+  // while this one is about whether anything was ever there to see.
+  if (w.reads > 0) {
+    return (
+      `no move for ${w.id} started at or after ${new Date(w.floor).toISOString()} appeared on ` +
+      `GET ${P.MOVES} within ${w.timeoutMs}ms` +
+      (w.unreadable > 0 ? `, and ${w.unreadable} row(s) of it could not be read at all` : '') +
+      (w.failures > 0 ? `, and ${w.failures} poll(s) failed outright` : '') +
+      `. A move that was accepted and never appears here is one the platform reaped, which it ` +
+      `does when the computer is deleted; a move that was never accepted never appears at all.`
+    );
+  }
+  return `${w.id}'s move could not be observed within ${w.timeoutMs}ms: every poll failed`;
+};
 
 export class Computer {
   #t: Transport;
@@ -848,8 +916,10 @@ export class Computer {
    *
    * ANSWERS BEFORE IT FINISHES. The returned {@link Move} is the operation as it
    * stood the moment it was accepted, with `live` true and the disk copy running
-   * behind it; {@link waitForMove} is the other half. One move runs per account
-   * at a time.
+   * behind it; {@link waitForMove} is the other half, and it takes this value —
+   * a `Move` carries no id, so the record returned here is what ties a wait to
+   * this move rather than to one that finished earlier today. One move runs per
+   * account at a time.
    *
    * Everything is decided again at the moment this runs — the plan, the state of
    * the computer, and which host it goes to — so it can still refuse even though
@@ -873,7 +943,28 @@ export class Computer {
   }
 
   /**
-   * Wait for this computer's move to stop running, and answer what happened.
+   * Wait for the move {@link relocate} accepted to stop running, and answer
+   * what happened.
+   *
+   * ```ts
+   * const move = await c.relocate({ ramMb: 32768 });
+   * const outcome = await c.waitForMove(move);
+   * ```
+   *
+   * THE MOVE IS REQUIRED, and it is the argument this method is about. A
+   * {@link Move} carries no id, and `GET /moves` keeps every move that finished
+   * in the last DAY beside the one running now — so with nothing tying the wait
+   * to the operation it was started for, a copy that finished YESTERDAY was
+   * indistinguishable from this one: it satisfied `!live` on a first poll where
+   * the new row was not yet in the account-wide listing, and the caller went on
+   * to use a computer whose disk was still crossing between hosts. The move's
+   * own `startedAt` is the floor; rows that began before it belong to some
+   * earlier operation and are not an answer to this one.
+   *
+   * An RFC3339 timestamp with a zone is accepted in its place, so a process that
+   * restarted can still wait on a `startedAt` it persisted. Anything else — a
+   * stamp with no zone, a `Move` with no readable start — is a
+   * {@link ValidationError} before any request is made.
    *
    * Polls the account's moves and picks out this computer's. It does NOT throw
    * for a move that ended badly, and that is the decision worth knowing: the
@@ -882,18 +973,29 @@ export class Computer {
    * exactly how `moved`, where the computer HAS changed hardware, gets read as
    * "nothing happened". Read `state`.
    *
-   * Throws {@link TimeoutError} if the move is still going when the timeout runs
-   * out. The move is not stopped by that; only the waiting is, and there is no
-   * cancelling a disk crossing between two hosts in any case.
+   * A LISTING WITH NO ROW AT OR AFTER THE FLOOR IS NOT AN OUTCOME. It is the
+   * listing not showing the move yet, which an account-wide one need not do on
+   * the first poll after a 202, so this keeps polling and lets the deadline be
+   * the answer.
    *
-   * Throws {@link MandalaError} if the move stops being listed, which happens
-   * when the computer is deleted — the platform reaps the row with it.
+   * Throws {@link TimeoutError} if the move is still going, or still not
+   * listed, when the timeout runs out. The move is not stopped by that; only
+   * the waiting is, and there is no cancelling a disk crossing between two hosts
+   * in any case.
+   *
+   * Throws {@link MandalaError} if the move's row was on the listing and then
+   * was not, which the platform does for one reason: the computer is deleted and
+   * it reaps the row with it. Waiting longer cannot bring back a reaped row, so
+   * spending the rest of the deadline to say so would be its own defect.
    *
    * The default timeout is generous because the work is: a small overlay crosses
    * in seconds and a full Windows disk takes minutes, plus minutes more when the
    * target has to be sent the image this computer was built from first.
    */
-  async waitForMove(opts: WaitOptions = {}): Promise<Move> {
+  async waitForMove(move: Move | string, opts: WaitOptions = {}): Promise<Move> {
+    // Before the deadline is set, because a bad anchor is the caller's mistake
+    // and nothing has been sent yet.
+    const floor = moveFloor(move);
     const { timeoutMs = 900_000, pollMs = 3_000, signal } = opts;
     checkWait(timeoutMs, pollMs);
     const deadline = Date.now() + timeoutMs;
@@ -906,17 +1008,31 @@ export class Computer {
     // still moving": a claim about the present tense made from an observation
     // that may be the whole timeout old.
     let observed = false;
+    // Whether the most recent poll READ the listing and this move was not on
+    // it — the third thing a poll can say, and one the other two flags cannot
+    // spell: `observed` false covers a listing nobody could fetch as well, and
+    // those two end a wait with entirely different sentences.
+    let absent = false;
+    let unreadableLast = 0;
+    // Cumulative, and only for the sentence a timeout that never saw the move
+    // ends with: "every poll failed" is a different statement from "they
+    // answered and it was not there", and one wait can do both.
+    let reads = 0;
+    let failures = 0;
     for (;;) {
       if (Date.now() >= deadline) {
         throw new TimeoutError(
-          last && observed
-            ? `${this.id} was still moving after ${timeoutMs}ms (state ${last.state}; ` +
-                'the move has not stopped, only this wait has)'
-            : last
-              ? `${this.id}'s move could not be reached for the last part of ${timeoutMs}ms; when it ` +
-                `last answered it was in state ${last.state}. The move has not stopped, only this ` +
-                `wait has — read moves.list for where it got to.`
-              : `${this.id}'s move could not be observed within ${timeoutMs}ms: every poll failed`,
+          moveTimeoutText({
+            id: this.id,
+            timeoutMs,
+            floor,
+            last,
+            observed,
+            absent,
+            unreadable: unreadableLast,
+            reads,
+            failures,
+          }),
         );
       }
       // The sleep comes before every poll but the first, as waitUntilBuilt's
@@ -935,6 +1051,7 @@ export class Computer {
         // rows are other computers'. Refusing the whole listing over one of
         // those would abort a wait whose own move is present and readable.
         const { rows, unreadable } = moveRows(moves, 'GET', P.MOVES);
+        reads += 1;
         const ours = rows
           .map(toMove)
           // THE RAW row, for the reason the snapshot filter gives: `str()` is a
@@ -942,38 +1059,40 @@ export class Computer {
           // picked out of this account-wide listing and returned as this
           // computer's move (Codex review, third pass, OPL-3850).
           .filter((m) => belongsToComputer(m.raw, this.id));
-        // The listing keeps a finished move for a DAY beside the one running
-        // now, so the first row for this computer is not necessarily the move
-        // being waited on: a copy that finished yesterday satisfied `!mine.live`
-        // on the first poll and handed the caller a computer whose disk was
-        // still crossing between hosts. A live row IS the move in progress;
-        // where there is none, the newest finished row is the one this wait was
-        // started for.
-        const mine = ours.find((m) => m.live) ?? latestFinishedMove(ours);
-        // A move that is no longer listed is one the platform reaped, and it
-        // reaps for one reason: the computer is gone. Not a state to keep
-        // polling for — and distinguishable from "not started yet" because this
-        // is only reached after a move was accepted.
-        //
-        // Only when the listing was READ, though. Rows this client could not
-        // decode are rows it cannot attribute, so any one of them might be the
-        // move being waited on: an empty result after dropping some is "nobody
-        // could tell", which is a different sentence from "the platform reaped
-        // it" and must not borrow that one's certainty.
+        // The floor does the rest of the filtering: see `moveAtOrAfter`, which
+        // is where the day of finished rows this listing keeps stops being able
+        // to answer for the move that was just accepted.
+        const mine = moveAtOrAfter(ours, floor);
         if (!mine) {
-          if (unreadable > 0) {
+          // Absent, which is TWO situations wearing one face while this wait has
+          // never seen the row: one the account-wide listing has not caught up
+          // to, and one the platform reaped — which it does when the computer is
+          // deleted. Reading the second off the first is how a wait that had
+          // merely polled a second too early reported a live computer as gone,
+          // so neither is claimed here and the deadline is left to be the
+          // answer.
+          //
+          // Once the row HAS been seen, though, its disappearance is a fact
+          // rather than an inference, and waiting the rest of a fifteen-minute
+          // deadline to report it would be its own defect. Only where the
+          // listing was fully READ: rows this client could not decode are rows
+          // it cannot attribute, so any one of them might be this move, and an
+          // empty result after dropping some is "nobody could tell" — a
+          // different sentence, which must not borrow this one's certainty.
+          if (last && unreadable === 0) {
             throw new MandalaError(
-              `${this.id} has no move among the rows of GET ${P.MOVES} this client could read, ` +
-                `and ${unreadable} of ${rows.length + unreadable} could not be read at all — so ` +
-                `whether its move is gone cannot be told from this listing`,
+              `${this.id}'s move is no longer listed by GET ${P.MOVES}; the platform reaps a ` +
+                `move's row when its computer is deleted`,
             );
           }
-          throw new MandalaError(
-            `${this.id} has no move any more; the platform reaps one when its computer is deleted`,
-          );
+          absent = true;
+          observed = false;
+          unreadableLast = unreadable;
+          continue;
         }
         last = mine;
         observed = true;
+        absent = false;
         if (!mine.live) return mine;
       } catch (err) {
         if (signal?.aborted) throw err;
@@ -986,6 +1105,11 @@ export class Computer {
         if (isDeadlineAbort(err)) continue;
         if (!isTransientForPoll(err)) throw err;
         observed = false;
+        // A poll that never got an answer says nothing about whether the move is
+        // on the listing, so the flag that means "it answered and it was not
+        // there" has to go with it.
+        absent = false;
+        failures += 1;
         delayMs = retryDelay(pollMs, err);
       }
     }

@@ -206,6 +206,15 @@ export class Computers {
    * Cleanup runs even if the block throws. It does not run if the process is
    * killed — nothing in a language can promise that — so a long-lived fleet
    * wants the platform's idle suspend as the real backstop, not this.
+   *
+   * WHEN THE BLOCK THROWS AND THE CLEANUP DELETE FAILS TOO, both errors arrive
+   * rather than one. A `SuppressedError`: `.suppressed` is the block's own
+   * error, which is the fault to read first, and `.error` is the cleanup
+   * failure, in a message naming the machine that is still billable. The
+   * runtime builds the identical pair for the `await using` spelling, and a
+   * cleanup failure that went unmentioned would be a cloud machine nothing
+   * anywhere names. A 404 from the cleanup is not one of these: the block
+   * deleted the machine itself, nothing is billable, and its error stands alone.
    */
   async ephemeral(args?: P.CreateArgs, opts?: CallOptions): Promise<EphemeralComputer>;
   async ephemeral<T>(
@@ -235,10 +244,33 @@ export class Computers {
     try {
       result = await fn(computer);
     } catch (err) {
-      // Swallowed, and only on this path. A cleanup failure must not replace
-      // the error the block was already throwing — that hides the actual
-      // fault behind a secondary one.
-      await computer.delete().catch(() => {});
+      try {
+        await computer.delete();
+      } catch (cleanupErr) {
+        // A 404 is the goal state already reached: the block deleted the
+        // machine itself — delete({ deleteSnapshots: true }) inside the block is
+        // the documented way to purge snapshots — so nothing is billable and the
+        // block's error travels alone, exactly as it does when the cleanup
+        // succeeds.
+        if (!(cleanupErr instanceof NotFoundError)) {
+          // BOTH, and the block's stays primary. Replacing it hides the actual
+          // fault behind a secondary one; a `.catch(() => {})` in its place
+          // swallows this one and strands a billable machine with nothing
+          // anywhere naming it — the outcome the success path below calls
+          // unacceptable, in as many words. `SuppressedError` is how the
+          // language already says both, and it is what the runtime hands the
+          // `await using` spelling out of `EphemeralComputer`'s
+          // `Symbol.asyncDispose` on this same pair of failures: `.error` is the
+          // cleanup, `.suppressed` is the block's. Two spellings of one feature
+          // must not disagree about the half that costs money.
+          throw new SuppressedError(
+            cleanupErr,
+            err,
+            `${computer.id} was not deleted and is still billable: ` +
+              `${cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr)}`,
+          );
+        }
+      }
       throw err;
     }
     // On the success path there is no error to protect, and a swallowed

@@ -2322,16 +2322,52 @@ describe('ephemeral', () => {
     expect(rec.routes()).toContainEqual(['DELETE', 'computers/vm-1']);
   });
 
-  it('does not let a cleanup failure replace the error the block was throwing', async () => {
-    // Hiding the actual fault behind a secondary one is the worst outcome here.
+  it('keeps BOTH errors when the block threw and the cleanup delete failed too', async () => {
+    // Two failures, and each one is unaffordable to lose. Replacing the block's
+    // error hides the actual fault behind a secondary one; dropping the cleanup
+    // failure — which is what a `.catch(() => {})` here did — strands a billable
+    // cloud machine with nothing anywhere naming it, so nobody can go and find
+    // it. `SuppressedError` is how the language already says both, and it is
+    // what the `await using` spelling of this same feature gets from the
+    // runtime: the two must not disagree about the one that costs money.
     const { client: c } = client((call) =>
       call.method === 'DELETE' ? errorJson(409, 'a snapshot is in flight') : anyRoute(call),
     );
-    await expect(
-      c.computers.ephemeral({ template: 'base' }, async () => {
-        throw new Error('the work failed');
-      }),
-    ).rejects.toThrow('the work failed');
+    const block = new Error('the work failed');
+    const err = await c.computers
+      .ephemeral({ template: 'base' }, async () => {
+        throw block;
+      })
+      .catch((e) => e);
+
+    expect(err).toBeInstanceOf(SuppressedError);
+    // The block's own error, by identity: it is the fault to read first and it
+    // arrives unwrapped.
+    expect((err as SuppressedError).suppressed).toBe(block);
+    // The cleanup failure, with the platform's reason and — the point of the
+    // whole branch — the id of the machine still being billed for.
+    expect((err as SuppressedError).error).toBeInstanceOf(ConflictError);
+    expect((err as Error).message).toMatch(/vm-1.*still billable/);
+    expect((err as Error).message).toContain('a snapshot is in flight');
+  });
+
+  it('does not wrap the block’s error when the cleanup delete 404s', async () => {
+    // A 404 is the goal state already reached — the block deleted the machine
+    // itself — so nothing is billable and there is no second failure to report.
+    // Wrapping here would announce a leak that does not exist and bury the only
+    // error that matters inside a `SuppressedError` nobody needed.
+    const { client: c } = client((call) =>
+      call.method === 'DELETE' ? errorJson(404, 'no such computer') : anyRoute(call),
+    );
+    const block = new Error('the work failed');
+    const err = await c.computers
+      .ephemeral({ template: 'base' }, async () => {
+        throw block;
+      })
+      .catch((e) => e);
+
+    expect(err).toBe(block);
+    expect(err).not.toBeInstanceOf(SuppressedError);
   });
 
   it('reports a delete that failed after the block succeeded, naming the machine', async () => {
