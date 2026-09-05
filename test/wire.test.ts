@@ -5,14 +5,17 @@ import { Client, MandalaError, TimeoutError } from '../src/index.js';
 import {
   anyRoute,
   BASE,
+  BUILD_PROGRESS,
   COMPUTER,
   EXEC_STARTED,
   json,
   MOVE_DONE,
   MOVE_STARTED,
+  PUBLISHED_TEMPLATE,
   type Responder,
   recorder,
   SNAPSHOT,
+  TEMPLATE_BUILD,
   USAGE,
   WEBHOOK,
   WEBHOOK_DELIVERY,
@@ -1107,5 +1110,203 @@ describe('a row this client cannot read is not a row it may drop', () => {
       .catch((e) => e);
     expect(err).toBeInstanceOf(TimeoutError);
     expect(String(err)).toContain('could not be read at all');
+  });
+});
+
+/**
+ * Every spelling of "there is no time here" the two halves of the platform can
+ * send.
+ *
+ * `null` is the control plane's: its stores hold these as nullable TEXT and its
+ * views hand the column straight out, so an unfinished move arrives as a `null`
+ * or as no key at all. `''` and `[]` are the same non-answer arriving as a
+ * string — `str([])` is `''`, which is the reading a guard on the RAW field
+ * never saw, because it tested one value and the decoder stored another.
+ *
+ * The last three are one value in three spellings: Go's zero `time.Time`, which
+ * reaches a daemon-served record because `omitempty` does not elide a struct.
+ * Marshalled in UTC it is the first; carried in a zone east of UTC the clock
+ * moves and the date holds; west of it the date rolls back a day, which is why
+ * this is compared as an instant and not as text.
+ */
+const NO_TIME = [
+  null,
+  '',
+  [],
+  '0001-01-01T00:00:00Z',
+  '0001-01-01T01:00:00+01:00',
+  '0000-12-31T23:00:00-01:00',
+];
+
+/** The same fields, carrying a time. Nothing here may drop one of these. */
+const A_TIME = '2026-08-26T12:15:00.000Z';
+
+describe('an optional timestamp is absent unless there is a time in it', () => {
+  /**
+   * The reading with teeth. `TemplateBuild.finishedAt` is documented "absent
+   * while it is still running", and the zero time is the worst of the values
+   * that break that: it is truthy, RFC3339-shaped and parses, so `if
+   * (build.finishedAt)` reports a running build as finished and an ordering on
+   * it files that build ahead of every real one — where `''` at least fails
+   * both tests by accident.
+   */
+  it('does not report a running build as finished', async () => {
+    for (const value of NO_TIME) {
+      const { client: c } = client((call) =>
+        /^\/builds\/[^/]+$/.test(call.path)
+          ? json({ ...TEMPLATE_BUILD, status: 'running', finished_at: value })
+          : anyRoute(call),
+      );
+      const build = await c.builds.get('bld-1');
+      expect(`${JSON.stringify(value)}: ${JSON.stringify(build.finishedAt)}`).toBe(
+        `${JSON.stringify(value)}: undefined`,
+      );
+      // Absent, not present-and-undefined: `'finishedAt' in build` is what a
+      // caller writes to ask whether the platform answered at all.
+      expect('finishedAt' in build).toBe(false);
+    }
+  });
+
+  it('still reports the time a finished build did answer', async () => {
+    const { client: c } = client((call) =>
+      /^\/builds\/[^/]+$/.test(call.path)
+        ? json({ ...TEMPLATE_BUILD, status: 'succeeded', finished_at: A_TIME })
+        : anyRoute(call),
+    );
+    expect((await c.builds.get('bld-1')).finishedAt).toBe(A_TIME);
+  });
+
+  /**
+   * A `pending` step is the case the two optional fields on a step exist for:
+   * it has not started and has not finished, and the daemon's struct still
+   * carries two zero times for it.
+   */
+  it('leaves both stamps off a step that has not run', async () => {
+    for (const value of NO_TIME) {
+      const { client: c } = client((call) =>
+        call.path.endsWith('/progress')
+          ? json({
+              ...BUILD_PROGRESS,
+              status: 'running',
+              done: false,
+              steps: [
+                {
+                  n: 1,
+                  kind: 'apt',
+                  label: 'ripgrep',
+                  status: 'done',
+                  started_at: A_TIME,
+                  finished_at: A_TIME,
+                },
+                {
+                  n: 2,
+                  kind: 'run',
+                  label: 'make',
+                  status: 'pending',
+                  started_at: value,
+                  finished_at: value,
+                },
+              ],
+            })
+          : anyRoute(call),
+      );
+      const [done, pending] = (await c.builds.progress('bld-1')).steps;
+      expect(`${JSON.stringify(value)}: ${done?.startedAt}/${done?.finishedAt}`).toBe(
+        `${JSON.stringify(value)}: ${A_TIME}/${A_TIME}`,
+      );
+      expect(`${JSON.stringify(value)}: ${pending && 'startedAt' in pending}`).toBe(
+        `${JSON.stringify(value)}: false`,
+      );
+      expect(pending && 'finishedAt' in pending).toBe(false);
+    }
+  });
+
+  /**
+   * `moveStamp` orders the moves listing by this field, and a value it cannot
+   * parse floors the row to `-Infinity` — so a move sorted below every other
+   * one is how a wrong timestamp here becomes the wrong OUTCOME handed back.
+   */
+  it('leaves a running move without a finish time', async () => {
+    for (const value of NO_TIME) {
+      const { client: c } = client((call) =>
+        call.path === '/moves'
+          ? json({ moves: [{ ...MOVE_STARTED, finished_at: value }] })
+          : anyRoute(call),
+      );
+      const [move] = await c.moves.list();
+      expect(`${JSON.stringify(value)}: ${move && 'finishedAt' in move}`).toBe(
+        `${JSON.stringify(value)}: false`,
+      );
+    }
+  });
+
+  it('reads a template nobody published as one nobody published', async () => {
+    for (const value of NO_TIME) {
+      const { client: c } = client((call) =>
+        call.path.startsWith('/templates/')
+          ? json({ ...PUBLISHED_TEMPLATE, published_at: value })
+          : anyRoute(call),
+      );
+      const t = await c.templates.get('system', 'base');
+      expect(`${JSON.stringify(value)}: ${'publishedAt' in t}`).toBe(
+        `${JSON.stringify(value)}: false`,
+      );
+    }
+  });
+
+  it('does not date a subscription that has never been disabled or delivered to', async () => {
+    for (const value of NO_TIME) {
+      const { client: c } = client((call) =>
+        call.path === '/webhooks'
+          ? json([
+              {
+                ...WEBHOOK,
+                disabled_at: value,
+                last_success_at: value,
+                last_failure_at: value,
+              },
+            ])
+          : anyRoute(call),
+      );
+      const [hook] = await c.webhooks.list();
+      const present = ['disabledAt', 'lastSuccessAt', 'lastFailureAt'].filter(
+        (k) => hook && k in hook,
+      );
+      expect(`${JSON.stringify(value)}: ${present.join(',')}`).toBe(`${JSON.stringify(value)}: `);
+    }
+  });
+
+  it('does not date a delivery that has not been attempted or delivered', async () => {
+    for (const value of NO_TIME) {
+      const { client: c } = client((call) =>
+        call.path.endsWith('/deliveries')
+          ? json([
+              { ...WEBHOOK_DELIVERY, next_at: value, attempted_at: value, delivered_at: value },
+            ])
+          : anyRoute(call),
+      );
+      const [d] = await c.webhooks.deliveries('whk-1');
+      const present = ['nextAt', 'attemptedAt', 'deliveredAt'].filter((k) => d && k in d);
+      expect(`${JSON.stringify(value)}: ${present.join(',')}`).toBe(`${JSON.stringify(value)}: `);
+    }
+  });
+
+  /**
+   * The line this draws, stated rather than left to be discovered. `str({})` is
+   * `'[object Object]'`, which is not a time and is kept — this file's standing
+   * rule is that a payload nobody can read is preserved rather than invented
+   * over, and `raw` still carries what arrived. What is dropped is the two
+   * values the platform actually MEANS as "no time": the empty one, and the
+   * zero instant. Widening that to "anything unreadable" is a different
+   * decision from this one and would be made here.
+   */
+  it('keeps a value it cannot read rather than inventing an absence', async () => {
+    const { client: c } = client((call) =>
+      /^\/builds\/[^/]+$/.test(call.path)
+        ? json({ ...TEMPLATE_BUILD, finished_at: { Time: '0001-01-01T00:00:00Z', Valid: false } })
+        : anyRoute(call),
+    );
+    const build = await c.builds.get('bld-1');
+    expect(build.finishedAt).toBe('[object Object]');
   });
 });
