@@ -112,6 +112,22 @@ export type WaitOptions = {
  * moment the status they are watching settles. mandala-computer-python's
  * `_is_transient_for_poll` and the MCP server's draw the line in the same place.
  *
+ * 501 is inside the band deliberately, and it is the one that keeps being
+ * queried, because "not implemented" reads like a permanent verdict on the
+ * request. On this platform it is not that: `server/buildjob.go` answers 501
+ * when no hypervisor in the fleet has libguestfs, kept apart from the 409 the
+ * busy hosts answer "so that a fleet where every host answers 501 tells the
+ * caller something true rather than 'everything is busy'" — and `web/lib/apidoc`
+ * documents it as a status that "is neither a caller error nor a state of the
+ * thing they named". A fleet gains a host with libguestfs the same way it gains
+ * capacity, so it is no more permanent than the 409.
+ *
+ * It stays in the band for a plainer reason as well: it is emitted on
+ * `POST /builds`, and no wait polls that route — the waits replay GET progress
+ * reads, which never answer it. Carving it out would change no wait's behaviour
+ * and would put this predicate out of step with the two implementations named
+ * above, both of which draw the band whole.
+ *
  * Everything at 5xx polls through, which is the behaviour change: 502 and 520-523
  * mean the outcome is unknown, and a read whose outcome is unknown can simply
  * be read again. {@link Computer.waitForGuest} already knew this about 502 and

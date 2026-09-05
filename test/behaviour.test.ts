@@ -190,6 +190,51 @@ describe('waiting', () => {
     expect(err.message).not.toMatch(/every refresh failed/);
   });
 
+  it('does not say every refresh failed when no refresh failed', async () => {
+    // A refresh cut short by this wait's own deadline is not a refresh the
+    // platform failed, and both left `observed` false while incrementing
+    // nothing. So a wait whose every attempt expired mid-request billed the
+    // platform for silences the deadline had caused, and sent the reader
+    // looking for a fleet outage that never happened.
+    let gets = 0;
+    const { client: c } = client((call) => {
+      if (call.method !== 'GET' || call.path !== '/computers/vm-1') return anyRoute(call);
+      gets += 1;
+      return gets === 1
+        ? json({ ...COMPUTER, status: 'building' })
+        : new Promise<Response>(() => {});
+    });
+    const computer = await c.computers.get('vm-1');
+    const err = await computer.waitUntilBuilt({ timeoutMs: 40, pollMs: 1 }).catch((e) => e);
+
+    expect(err).toBeInstanceOf(TimeoutError);
+    expect(err.message).not.toMatch(/every refresh failed/);
+    expect(err.message).toContain('no refresh finished before the deadline');
+    expect(err.message).toContain('nothing about the disk copy was ever read');
+  });
+
+  it('counts the failed refreshes apart from the ones its deadline cut short', async () => {
+    // The count that was observed is the most the sentence may claim: one 503
+    // and a run of expired polls is not every refresh failing.
+    let gets = 0;
+    const { client: c } = client((call) => {
+      if (call.method !== 'GET' || call.path !== '/computers/vm-1') return anyRoute(call);
+      gets += 1;
+      if (gets === 1) return json({ ...COMPUTER, status: 'building' });
+      return gets === 2
+        ? errorJson(503, 'host could not be reached')
+        : new Promise<Response>(() => {});
+    });
+    const computer = await c.computers.get('vm-1');
+    const err = await computer.waitUntilBuilt({ timeoutMs: 60, pollMs: 1 }).catch((e) => e);
+
+    expect(err).toBeInstanceOf(TimeoutError);
+    expect(gets).toBeGreaterThan(2);
+    expect(err.message).not.toMatch(/every refresh failed/);
+    expect(err.message).toContain('1 failed outright');
+    expect(err.message).toContain("cut short by this wait's own deadline");
+  });
+
   it('rides out a transient error from the host busy doing the copy being waited on', async () => {
     // A 503 during a minutes-long disk copy is the ordinary weather of a
     // build; one of them must not abort the whole wait.
@@ -227,6 +272,48 @@ describe('waiting', () => {
     // unobserved claim, one line lower.
     expect(err.message).toMatch(/could not be observed/);
     expect(err.message).not.toMatch(/was still/);
+  });
+
+  it('does not say every refresh failed when the deadline cut every one short', async () => {
+    // waitUntilBuilt's bug on the wait beside it: this loop's deadline-abort
+    // branch holds `fresh` and touches nothing else, so a wait in which the
+    // host refused nothing — every request simply outlived what was left of the
+    // budget — announced that every refresh had failed.
+    let gets = 0;
+    const { client: c } = client((call) => {
+      if (call.method !== 'GET' || call.path !== '/computers/vm-1') return anyRoute(call);
+      gets += 1;
+      return gets === 1
+        ? json({ ...COMPUTER, status: 'starting' })
+        : new Promise<Response>(() => {});
+    });
+    const computer = await c.computers.get('vm-1');
+    const err = await computer.waitUntilRunning({ timeoutMs: 40, pollMs: 1 }).catch((e) => e);
+
+    expect(err).toBeInstanceOf(TimeoutError);
+    expect(err.message).not.toMatch(/every refresh failed/);
+    expect(err.message).toContain('no refresh finished before the deadline');
+    expect(err.message).toContain('nothing about the computer was ever read');
+  });
+
+  it('counts a machine wait: failures apart from its own expired polls', async () => {
+    let gets = 0;
+    const { client: c } = client((call) => {
+      if (call.method !== 'GET' || call.path !== '/computers/vm-1') return anyRoute(call);
+      gets += 1;
+      if (gets === 1) return json({ ...COMPUTER, status: 'starting' });
+      return gets === 2
+        ? errorJson(503, 'host could not be reached')
+        : new Promise<Response>(() => {});
+    });
+    const computer = await c.computers.get('vm-1');
+    const err = await computer.waitUntilRunning({ timeoutMs: 60, pollMs: 1 }).catch((e) => e);
+
+    expect(err).toBeInstanceOf(TimeoutError);
+    expect(gets).toBeGreaterThan(2);
+    expect(err.message).not.toMatch(/every refresh failed/);
+    expect(err.message).toContain('1 failed outright');
+    expect(err.message).toContain("cut short by this wait's own deadline");
   });
 
   it('does not quote a status in the present tense after the polls stopped answering', async () => {
