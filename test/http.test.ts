@@ -762,6 +762,35 @@ describe('a failure body from something that is not the platform', () => {
     expect((err as APIError).body).toHaveLength(1 << 20);
   });
 
+  it('stops at the same ceiling when the page arrived on a stream route', async () => {
+    // The most exposed of the buffered reads: a stream request passes
+    // `noTimeout`, so no deadline bounds this body, and only 200 characters of
+    // it are ever quoted. A proxy answering the agent route with a large HTML
+    // page had all of it read to produce that one sentence.
+    const chunk = new TextEncoder().encode('x'.repeat(1 << 16));
+    const offered = 1 << 24;
+    let pulled = 0;
+    const page = () =>
+      new ReadableStream<Uint8Array>({
+        pull(ctrl) {
+          if (pulled >= offered) return void ctrl.close();
+          pulled += chunk.length;
+          ctrl.enqueue(chunk);
+        },
+      });
+    const rec = recorder((call) =>
+      call.path.endsWith('/agent')
+        ? new Response(page(), { status: 200, headers: { 'content-type': 'text/html' } })
+        : anyRoute(call),
+    );
+    const c = await client(rec).computers.get('vm-1');
+    await expect(c.agent({ prompt: 'go', modelKey: 'sk' })).rejects.toThrow(
+      /expected an event stream from POST computers\/vm-1\/agent.*text\/html/s,
+    );
+    // Room for the chunk that crosses it; nowhere near what was on offer.
+    expect(pulled).toBeLessThanOrEqual((1 << 20) + chunk.length);
+  });
+
   it('still keeps a page whole when it fits, so the Ray ID survives', async () => {
     const page = `<html><body>error</body><!-- Ray ID: 8f0c${'.'.repeat(20_000)} --></html>`;
     const rec = recorder(

@@ -1477,12 +1477,14 @@ describe('what a payload cannot be allowed to mean', () => {
     expect(await computer.clearSchedule()).toMatchObject({ enabled: false });
   });
 
-  it('refuses a cleared-schedule body that is not an object at all', async () => {
+  it('reads a cleared-schedule body that is not an object as the cleared schedule', async () => {
     // `{}` is a real answer on this route and only on this one. An array or a
     // scalar is not: it reached toSchedule, which read enabled/hour/minute/tz
     // off it, got undefined for every one, and fabricated "disabled, midnight
-    // UTC" with the garbage spread into `raw`. Both sibling methods already
-    // refuse the shape.
+    // UTC" with the garbage spread into `raw`. It is dropped rather than
+    // refused — the DELETE already answered 2xx, so the schedule is gone
+    // whatever the acknowledgement said, and a platform that says `"cleared"`
+    // is not a reason to fail the call.
     for (const body of [[1, 2, 3], 'cleared', 7]) {
       const { client: c } = client((call) =>
         call.method === 'DELETE' && call.path.endsWith('/schedule') ? json(body) : anyRoute(call),

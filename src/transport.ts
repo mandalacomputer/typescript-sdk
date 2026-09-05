@@ -51,6 +51,14 @@ const MAX_SSE_EVENT_CHARS = 1 << 20;
  * footer a few kilobytes in. So the ceiling only has to clear an HTML error
  * page, and the same 1 MiB the event stream already refuses to exceed does.
  *
+ * Applied to both bodies read only to be reported: a failing response's, and
+ * the one {@link Transport.sse} reads when a route answered with something
+ * that is not an event stream. That second one is the more exposed of the two
+ * — a stream request passes `noTimeout`, so nothing but the caller's own
+ * signal bounds it — and only its first 200 characters ever reach the message,
+ * so a multi-megabyte error page was being buffered whole to quote a sentence
+ * of it.
+ *
  * Deliberately not applied to {@link Transport.bytes} or the JSON decode:
  * both have legitimate bodies whose size is the platform's to choose, and a
  * ceiling below one of those would refuse a download the API is willing to
@@ -871,7 +879,7 @@ export class Transport {
     // it.
     const contentType = resp.headers.get('content-type') ?? '';
     if (!contentType.toLowerCase().includes('text/event-stream')) {
-      const text = await resp.text().catch(() => '');
+      const text = await textUpTo(resp, MAX_ERROR_BODY_BYTES).catch(() => '');
       throw new MandalaError(
         `expected an event stream from ${method} ${path}, got ` +
           `${contentType || 'no content type'}: ${text.slice(0, 200)}`,

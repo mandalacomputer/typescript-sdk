@@ -829,8 +829,12 @@ async function cmdScp(srcArg: string, dstArg: string): Promise<number> {
     // landed.
     size = uploadSize(info.size, written);
   } finally {
-    // The handle, not the stream: closing a ReadStream built from a FileHandle
-    // leaves the descriptor open, and this is the only thing holding it.
+    // For the paths where the stream is never consumed. A ReadStream built from
+    // a FileHandle closes that handle when it ends or is destroyed, so on the
+    // success path this is a second close and resolves as a no-op — but a
+    // writeFile that throws before reading a byte (an unresolvable path, a
+    // refused length, a request that never leaves) destroys nothing, and the
+    // descriptor would be left to the garbage collector.
     await fh.close().catch(() => {});
   }
   process.stderr.write(`${srcArg} -> ${remote.target}:${path} (${size})\n`);

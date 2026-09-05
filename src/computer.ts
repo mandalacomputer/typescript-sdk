@@ -3230,8 +3230,13 @@ export class Computer {
     // BODY and nothing else — an array or a scalar reached toSchedule, which
     // read enabled/hour/minute/tz off it, got undefined for every one and
     // fabricated the same "disabled, midnight UTC" with the garbage spread into
-    // `raw`. Its two siblings above both refuse that shape; this is the same
-    // refusal, keeping the one answer this route alone accepts.
+    // `raw`. So a non-object is dropped for `{}` — the empty body's meaning,
+    // not the body's. Its two siblings refuse a shape they cannot read, and are
+    // right to: they READ a state, so a body they cannot parse means they do
+    // not know it. This one CONFIRMS an operation the DELETE already answered
+    // 2xx to, and "there is no schedule now" is true whatever the body said —
+    // refusing would fail a working call against a platform that acknowledges
+    // with `"cleared"` or `[]`, and learn nothing by it.
     return toSchedule(P.isRecord(data) ? data : {});
   }
 
