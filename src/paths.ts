@@ -802,12 +802,76 @@ export function shellQuote(s: string): string {
   return `'${s.replaceAll("'", `'\\''`)}'`;
 }
 
+/**
+ * The most a guest path may be, in BYTES of UTF-8 rather than characters.
+ *
+ * The platform's own bound: `server/guestfile.go` refuses a path longer than
+ * `guestPathMax` before it ever reaches the guest agent, and Go counts the
+ * bytes of the string rather than its runes. Mirrored here for the reason every
+ * other cap in this file is — it is a refusal knowable without a round trip —
+ * and deliberately NOT the tighter 256 the event stream applies to a watch,
+ * which is that route's own limit and would turn away paths the file routes
+ * accept.
+ */
+const MAX_GUEST_PATH_BYTES = 4096;
+
+/**
+ * The three things a path must not be, whatever it is a path FOR.
+ *
+ * Shared by the file and exec routes here and by the event stream's watch
+ * nominations, which is the same class of value going to the same guest through
+ * two doors — one implementation, so the two doors cannot drift. The caps
+ * differ and are the caller's to pass; the rules do not.
+ *
+ * A length in BYTES, because that is what the platform counts.
+ *
+ * Control characters are refused rather than escaped, which is the platform's
+ * own reading: a path may hold them on Linux, but such a path is echoed into an
+ * opening frame, an audit log, and whatever a person is shown, so a newline in
+ * one is a caller choosing what somebody else's terminal renders. Nobody types
+ * one by accident. By code point rather than by a character class, which the
+ * linter refuses for the sound reason that a control character written into a
+ * regex is usually a typo. This is the case it is not.
+ *
+ * A lone surrogate is not UTF-8, and it is the one bad path the two routes
+ * carrying it fail on DIFFERENTLY — which is the argument for one guard in
+ * front of both rather than a rule per route. A path bound for `files` or an
+ * exec `cwd` goes on the query through `URLSearchParams` (`transport.ts`
+ * `#url`), which substitutes it: `?path=/home/user/\ud800.txt` is sent as
+ * `%2Fhome%2Fuser%2F%EF%BF%BD.txt`, so the platform is handed a VALID path that
+ * is not the one the caller named and reads or writes whatever is at it, with
+ * nothing anywhere saying so. A watch nomination goes on the URL through
+ * `encodeURIComponent` (`events.ts` `withWatches`), which throws `URIError: URI
+ * malformed` — a real refusal, but a bare one naming neither the argument nor
+ * the call, out of a class nothing on this surface catches. Neither route is
+ * left to its own answer, so neither can be dropped on the reasoning that the
+ * encoder already handles it: on one it silently retargets, and on the other it
+ * is the wrong error.
+ */
+export function checkPathText(path: string, what: string, maxBytes: number): void {
+  if (utf8Length(path) > maxBytes) {
+    throw new ValidationError(`${what} may be at most ${maxBytes} bytes: ${JSON.stringify(path)}`);
+  }
+  if ([...path].some((ch) => ch < ' ' || ch === '\u007f')) {
+    throw new ValidationError(`${what} cannot contain control characters: ${JSON.stringify(path)}`);
+  }
+  if (/\p{Surrogate}/u.test(path)) {
+    throw new ValidationError(`${what} must be valid UTF-8: ${JSON.stringify(path)}`);
+  }
+}
+
 /** Validate any path that the platform interprets inside a Linux or Windows guest. */
 function absoluteGuestPath(path: string, what: string): string {
   requireString(path, what);
   if (!path.startsWith('/') && !path.startsWith('\\\\') && !/^[A-Za-z]:[\\/]/.test(path)) {
     throw new ValidationError(`${what} must be absolute: ${JSON.stringify(path)}`);
   }
+  // The same three refusals a watch nomination gets, because a path this SDK
+  // sends to `files` or as an exec `cwd` is the same value going to the same
+  // guest. The stream refused them and these routes did not, which made the
+  // safest thing a caller could do with a path depend on which call they had
+  // reached for.
+  checkPathText(path, what, MAX_GUEST_PATH_BYTES);
   return path;
 }
 
