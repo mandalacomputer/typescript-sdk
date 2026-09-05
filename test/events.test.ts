@@ -465,13 +465,32 @@ describe('the opening frame', () => {
     const h = toHello(
       hello({ watching: [{ path: '/w', armed: 'true' }, { armed: true }, 'not a tree'] }),
     );
-    // The unreadable entry is still an entry the host answered with: dropping
-    // it would make the length disagree with what was nominated, which is the
-    // one thing this is read to check.
+    // An entry that is not an object at all is dropped — there is nothing to
+    // decode — and the frame SAYS so, because the length is the one thing this
+    // is read to check and a short list that does not admit it is the frame
+    // lying about what was nominated.
     expect(h?.watching).toEqual([
       { path: '/w', armed: false },
       { path: '', armed: true },
     ]);
+    expect(h?.incomplete).toBe(1);
+  });
+
+  it('says how many entries it could not read, across both collections', () => {
+    // The listing's own spelling: presence is the signal, the number is
+    // detail, and `null` has to mean the frame was whole. Refusing the frame
+    // instead — `toWindowListing`'s answer to the same garbage — would end a
+    // connection over one bad entry in an opening frame and take every event
+    // after it along too.
+    expect(toHello(hello({ windows: [WINDOW] }))?.incomplete).toBeNull();
+    expect(toHello(hello())?.incomplete).toBeNull();
+    expect(toHello(hello({ windows: [], watching: [] }))?.incomplete).toBeNull();
+    const short = toHello(
+      hello({ windows: [WINDOW, 'not a window', 7], watching: [{ path: '/w' }, null] }),
+    );
+    expect(short?.windows).toHaveLength(1);
+    expect(short?.watching).toHaveLength(1);
+    expect(short?.incomplete).toBe(3);
   });
 });
 
@@ -2212,6 +2231,21 @@ describe('the numbers a stream is given', () => {
     expect(() => c.events({ maxRetries: -1 })).toThrow(ValidationError);
     // Zero retries is "never give up", not a refusal.
     expect(() => c.events({ maxRetries: 0 })).not.toThrow();
+  });
+
+  it('refuses a fraction where the number counts frames or attempts', async () => {
+    // `maxQueued: 0.5` is a queue that overflows on the FIRST frame, and
+    // overflow closes the socket — so it reads as a stream that reconnects
+    // forever and delivers nothing, with the fraction nowhere in the symptom.
+    // `maxRetries: 0.5` is the same shape one step over: the count passes 0.5
+    // before it is ever 1, so the first failure is final on a stream that was
+    // told to retry.
+    const { computer: c } = await computer();
+    for (const opts of [{ maxQueued: 0.5 }, { maxQueued: 2.5 }, { maxRetries: 0.5 }]) {
+      expect(() => c.events(opts), JSON.stringify(opts)).toThrow(ValidationError);
+      expect(() => c.events(opts), JSON.stringify(opts)).toThrow(/whole number/);
+    }
+    expect(() => c.events({ maxQueued: 1, maxRetries: 3 })).not.toThrow();
   });
 });
 

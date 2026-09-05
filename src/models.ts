@@ -831,7 +831,11 @@ export type BuildProgress = {
   raw: Record<string, unknown>;
 };
 
-/** The statuses a build stops on. `server/buildjob.go` declares exactly three. */
+/**
+ * The statuses a build STOPS on — two of the three `server/buildjob.go`
+ * declares, the third being `running`. There is no cancelled state on this
+ * wire, so a build that is not running is one of these.
+ */
 const BUILD_TERMINAL = ['succeeded', 'failed'];
 
 /**
@@ -1744,12 +1748,21 @@ export function toBackgroundExec(d: Record<string, unknown>): BackgroundExec {
   return {
     pid,
     running: stillRunning(d),
-    // Absent, null and the empty string are "did not send one" and read
-    // `undefined`; a value present and unreadable — `"killed"`, `"signal:9"`, an
-    // object, an array — gets toExecResult's -1, because something arrived and
-    // it was not an exit code. Both through `count`, which is what tells the two
-    // apart: `Number('')` and `Number([])` are both the 0 this must not invent.
-    exitCode: d.exit_code == null || d.exit_code === '' ? undefined : (count(d.exit_code) ?? -1),
+    // Absent and null are "did not send one" and read `undefined`; anything
+    // else that `count` cannot read as a number — `"killed"`, `"signal:9"`, an
+    // object, an array, and a string of nothing but space — gets toExecResult's
+    // -1, because something arrived and it was not an exit code. Through
+    // `count` rather than `Number`, which is what keeps a 0 out of both:
+    // `Number('')` and `Number([])` are the exit code this must not invent.
+    //
+    // ONE rule for a blank string, where there used to be two: an `=== ''` test
+    // here read the empty string as absent while `'  '` — which `count`'s own
+    // doc calls the same non-answer — fell through to -1. Neither shape can
+    // arrive, `server/execbg.go` declaring `ExitCode *int` with `omitempty` so
+    // that "has not exited" is absent rather than 0, so the two readings never
+    // disagreed about a real payload; they disagreed about what this file
+    // believes, which is worth more than the branch that carried it.
+    exitCode: d.exit_code == null ? undefined : (count(d.exit_code) ?? -1),
     stdout: str(d.stdout),
     stderr: str(d.stderr),
     // FALSE on anything unreadable, and this is the counter-example worth

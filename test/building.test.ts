@@ -430,6 +430,40 @@ describe('filesQuery', () => {
     // A single backslash is still Windows drive-relative, not absolute.
     expect(() => P.filesQuery('\\notes.txt')).toThrow(/must be absolute/);
   });
+
+  it('refuses a lone surrogate, which reaches the guest as a different file', () => {
+    // `encodeURIComponent('\ud800')` is `%EF%BF%BD`: the platform is handed a
+    // VALID path that is not the one the caller named, reads or writes
+    // whatever is at it, and answers as though nothing were wrong. The one
+    // shape of bad path the platform cannot refuse for us — the stream's watch
+    // nominations have refused it since they were written, and a path is a
+    // path whichever route it goes to.
+    expect(() => P.filesQuery('/home/user/\ud800.txt')).toThrow(ValidationError);
+    expect(() => P.filesQuery('/home/user/\ud800.txt')).toThrow(/must be valid UTF-8/);
+    expect(() => P.execBody({ command: 'make', cwd: '/srv/\udfff' })).toThrow(
+      /cwd must be valid UTF-8/,
+    );
+    // A well-formed pair is one code point and is a filename somebody has.
+    expect(P.filesQuery('/home/user/😀.txt')).toEqual({ path: '/home/user/😀.txt' });
+  });
+
+  it('refuses a control character, and a path past what the guest accepts', () => {
+    // `server/guestfile.go` refuses both before the path reaches the guest
+    // agent — the control characters because a path holding one is not the
+    // path it prints as in an audit log or on somebody's screen, and the
+    // length in BYTES, which is what Go counts. Both are knowable here, and a
+    // refusal here is a stack trace at the call site rather than a 400.
+    expect(() => P.filesQuery('/tmp/a\nb')).toThrow(/cannot contain control characters/);
+    expect(() => P.filesQuery('/tmp/a\u007f')).toThrow(/cannot contain control characters/);
+    expect(() => P.execBody({ command: 'make', cwd: '/srv/\u0000' })).toThrow(
+      /cwd cannot contain control characters/,
+    );
+    const long = `/${'a'.repeat(4096)}`;
+    expect(() => P.filesQuery(long)).toThrow(/at most 4096 bytes/);
+    // Counted in bytes, not characters: 2048 two-byte characters is over it.
+    expect(() => P.filesQuery(`/${'é'.repeat(2048)}`)).toThrow(/at most 4096 bytes/);
+    expect(() => P.filesQuery(`/${'a'.repeat(4095)}`)).not.toThrow();
+  });
 });
 
 describe('screenshotQuery', () => {

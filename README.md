@@ -699,6 +699,13 @@ const stream = c.events({
 });                                // [{ path: '/home/user/project', armed: false }]
 ```
 
+`hello.incomplete` is the opening frame's own version of a listing's short
+answer: `null` when every `windows` and `watching` entry decoded, and a count of
+the entries that did not. An entry this client cannot read is dropped rather
+than allowed to end the connection — a stream is worth more than one malformed
+row — so the count is the only trace it was there, and it is what to check
+before reading `hello.watching.length` as what the host accepted.
+
 **And `armed` is the half that is easy to get wrong.** A tree is *not* being
 watched the moment the opening frame accepts it: the guest has to be asked, and
 on a computer nobody has opened a terminal on the host installs the watcher
@@ -1403,13 +1410,14 @@ if (incomplete !== null) {
 ```
 
 `incomplete` is `null` exactly when the answer was whole. When it is not, the
-number is one of two things and does not distinguish them: how many rows the
+number is one of three things and does not distinguish them: how many rows the
 placement cache could account for — legitimately `0`, because a computer created
 during the outage was never cached against the host now holding it — or, when
 the platform called the answer whole, how many rows this client received and
-could not decode, which it drops rather than hands back as junk. Either way the
-array is short by rows that still exist, which is the part a caller has to act
-on. So branch on `incomplete !== null`, never on the number, and do not log it
+could not decode, which it drops rather than hands back as junk — or `0` for a
+response that carried no body at all, which is a list nothing can size and which
+no list route on this platform produces. Any of the three leaves the array short
+by rows that still exist, which is the part a caller has to act on. So branch on `incomplete !== null`, never on the number, and do not log it
 as a count of anything in particular.
 
 Builds are the third of these and the one where the status is always all you
