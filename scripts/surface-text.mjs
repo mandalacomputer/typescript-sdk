@@ -3,7 +3,33 @@ function quotedClose(text, from) {
   const quote = text[from];
   for (let i = from + 1; i < text.length; i++) {
     if (text[i] === '\\') i++;
-    else if (text[i] === quote) return i + 1;
+    else if (quote === '`' && text[i] === '$' && text[i + 1] === '{') {
+      // What is inside `${...}` is code, not text: a nested template's backtick
+      // and a string argument's quote close nothing at this level, and reading
+      // one as if it did ends the literal early. Everything after that point is
+      // then scanned in the wrong mode — a `//` becomes a comment inside what
+      // was a string, a quote opens a literal that is not there — and the damage
+      // runs on to the next accidental re-pairing rather than stopping at the
+      // template.
+      const hole = holeEnd(text, i + 1);
+      if (hole === -1) return -1;
+      i = hole;
+    } else if (text[i] === quote) return i + 1;
+  }
+  return -1;
+}
+
+/** The `}` closing a `${` interpolation opened at `from`, or -1 if unclosed. */
+function holeEnd(text, from) {
+  let depth = 0;
+  for (let i = from; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === "'" || ch === '"' || ch === '`') {
+      const end = quotedClose(text, i);
+      if (end === -1) return -1;
+      i = end - 1;
+    } else if (ch === '{') depth++;
+    else if (ch === '}' && --depth === 0) return i;
   }
   return -1;
 }
@@ -14,14 +40,81 @@ function quotedEnd(text, from) {
   return end === -1 ? text.length : end;
 }
 
+/** The identifier ending just before `end`, or '' where no identifier does. */
+function identifierBefore(text, end) {
+  // Bounded rather than `text.slice(0, end).match(/…$/)`, which copies the whole
+  // prefix and scans it again for every slash inspected — quadratic in the file,
+  // for an answer that never involves a character further back than the start of
+  // one word.
+  let i = end;
+  while (i > 0 && /[\w$]/.test(text[i - 1])) i--;
+  const word = text.slice(i, end);
+  return /^[A-Za-z_$][\w$]*$/.test(word) ? word : '';
+}
+
+/** The `(` matching the `)` at `at`, or -1 when the walk runs off the front. */
+function openerOf(text, at) {
+  let depth = 0;
+  for (let i = at; i >= 0; i--) {
+    if (text[i] === ')') depth++;
+    else if (text[i] === '(' && --depth === 0) return i;
+  }
+  return -1;
+}
+
+// A slash after one of these words begins a regex, because each of them is
+// followed by an expression rather than by a value to divide. The four this
+// began with covered `return /re/` and nothing else, so `typeof /re/.source`,
+// `x in /re/`, `else /re/.test(s)` and the rest were read as division — and the
+// first quote inside such a regex then opened a literal that swallowed whatever
+// followed, comments included.
+const REGEX_KEYWORDS = new Set([
+  'return',
+  'case',
+  'throw',
+  'yield',
+  'typeof',
+  'in',
+  'of',
+  'instanceof',
+  'new',
+  'void',
+  'delete',
+  'do',
+  'else',
+]);
+
+// The heads whose closing `)` is followed by a statement rather than by a value.
+const STATEMENT_HEADS = new Set(['if', 'while', 'for']);
+
 /** Whether a slash here can begin a regex literal rather than divide values. */
 function regexCanStart(text, from) {
   let i = from - 1;
   while (i >= 0 && /\s/.test(text[i])) i--;
   if (i < 0) return true;
-  if ('([{=,:;!?&|~+*%^<>'.includes(text[i])) return true;
-  const word = text.slice(0, i + 1).match(/([A-Za-z_$][\w$]*)$/)?.[1];
-  return word === 'return' || word === 'case' || word === 'throw' || word === 'yield';
+  const ch = text[i];
+  if ('([{=,:;!?&|~+*%^<>'.includes(ch)) return true;
+  if (ch === ')') {
+    // A `)` alone decides nothing: `(a + b) / c` divides, `if (ok) /re/.test(s)`
+    // does not. What separates them is the word in front of the matching `(`, so
+    // the paren is walked back to. The walk counts parens without regard for the
+    // ones inside literals, so a `f(')')` on the way back finds the wrong opener
+    // and the answer falls back to division — which is the safe direction of the
+    // two: a regex read as division mis-scans to the end of the line, where a
+    // division read as a regex can carry a phantom literal over code.
+    const open = openerOf(text, i);
+    if (open === -1) return false;
+    let word = open - 1;
+    while (word >= 0 && /\s/.test(text[word])) word--;
+    return STATEMENT_HEADS.has(identifierBefore(text, word + 1));
+  }
+  // `]` closes an index or an array literal, both of them values, and no
+  // statement head ends in one — so a slash after it divides. The residual case
+  // is a regex written directly against a subscript (`parts[0] /re/.test(s)`),
+  // which is read as division here; neither file this scans is written that way,
+  // and there is no local evidence that would tell the two apart.
+  if (ch === ']') return false;
+  return REGEX_KEYWORDS.has(identifierBefore(text, i + 1));
 }
 
 /** Advance past a regex literal, including escaped delimiters and flags. */
@@ -45,6 +138,28 @@ function regexEnd(text, from) {
 const SHORT_ESCAPES = { n: '\n', t: '\t', r: '\r', b: '\b', f: '\f', v: '\v', 0: '\0' };
 
 /**
+ * The number one `\x`/`\u` escape spells.
+ *
+ * `Number.parseInt` answers NaN for digits that are not hex, and the two things
+ * that consume it disagree about NaN in the worst two ways available:
+ * `String.fromCharCode` returns NUL, so the bad escape becomes an invisible
+ * character in the middle of a route pattern that then matches nothing, and
+ * `String.fromCodePoint` throws a RangeError naming neither the file nor the
+ * literal. What this reads is compiled TypeScript, so an escape that is not
+ * well formed means the scanner was wrong about where the literal began or
+ * ended — the same conclusion the unterminated `\u{` case draws, and worth
+ * saying in the same words.
+ */
+function hexValue(digits, text) {
+  if (!/^[0-9a-fA-F]+$/.test(digits)) {
+    throw new Error(
+      `malformed escape \\${digits} in ${JSON.stringify(text.slice(0, 60))} — the literal was read wrong`,
+    );
+  }
+  return Number.parseInt(digits, 16);
+}
+
+/**
  * The text a quoted literal spells, with its escape sequences resolved.
  *
  * The walk that finds the literal is escape-aware and the read of it has to
@@ -63,7 +178,7 @@ function unescaped(text) {
     const next = text[++i];
     if (next === undefined) break;
     if (next === 'x') {
-      out += String.fromCharCode(Number.parseInt(text.slice(i + 1, i + 3), 16));
+      out += String.fromCharCode(hexValue(text.slice(i + 1, i + 3), text));
       i += 2;
     } else if (next === 'u' && text[i + 1] === '{') {
       const end = text.indexOf('}', i + 2);
@@ -77,10 +192,19 @@ function unescaped(text) {
           `unterminated \\u{ escape in ${JSON.stringify(text.slice(0, 60))} — the literal was read wrong`,
         );
       }
-      out += String.fromCodePoint(Number.parseInt(text.slice(i + 2, end), 16));
+      const code = hexValue(text.slice(i + 2, end), text);
+      // Above the last code point there is no character to build, and the raw
+      // RangeError says only that — not which literal, which is the half worth
+      // knowing.
+      if (code > 0x10ffff) {
+        throw new Error(
+          `code point \\u{${text.slice(i + 2, end)}} is out of range in ${JSON.stringify(text.slice(0, 60))}`,
+        );
+      }
+      out += String.fromCodePoint(code);
       i = end;
     } else if (next === 'u') {
-      out += String.fromCharCode(Number.parseInt(text.slice(i + 1, i + 5), 16));
+      out += String.fromCharCode(hexValue(text.slice(i + 1, i + 5), text));
       i += 4;
     } else {
       // Anything else stands for itself: `\'`, `\"`, `` \` ``, `\\`, `\$`.
@@ -136,6 +260,14 @@ export function stripComments(text) {
 
 /** The text inside a balanced pair, ignoring delimiters in literals and comments. */
 export function balanced(text, from, open, close) {
+  // The caller's `indexOf` answers -1 for a delimiter that is not there, and -1
+  // is a legal loop start: what came back was the text from offset 0 to whatever
+  // closer turned up first, a slice that looks like an answer and is not one.
+  // Every caller here computes `from` from a search, so the one thing worth
+  // asserting is that the search found what it was looking for.
+  if (text[from] !== open) {
+    throw new Error(`balanced() started at offset ${from}, which is not a ${open}`);
+  }
   let depth = 0;
   for (let i = from; i < text.length; i++) {
     const ch = text[i];
@@ -163,9 +295,32 @@ export function topLevelKeys(body) {
   while (i < body.length) {
     const ch = body[i];
     if (ch === '{' || ch === '[' || ch === '(') depth++;
-    else if (ch === '}' || ch === ']' || ch === ')') depth--;
-    else if (ch === "'" || ch === '"' || ch === '`') {
-      i = quotedEnd(body, i);
+    else if (ch === '}' || ch === ']' || ch === ')') {
+      // Valid source cannot close what it never opened, and the depth never
+      // climbs back: every key after the stray closer is dropped, and what the
+      // caller reads is an object with no fields rather than one it could not
+      // parse. `entries` throws on the same condition for the same reason.
+      if (--depth < 0) throw new Error(`unbalanced ${ch} at offset ${i}`);
+    } else if (ch === "'" || ch === '"' || ch === '`') {
+      const end = quotedEnd(body, i);
+      // A quoted key is a key: `'name': str(…)` names the field `name` exactly
+      // as `name:` does. Stepping over the literal without looking for the colon
+      // reads the object as having no field there at all — and an object read as
+      // having no fields is a route documenting no body, which matches a mirror
+      // that lists none. That match is the vacuous all-clear this whole gate is
+      // built to refuse.
+      if (depth === 0) {
+        const colon = body.slice(end).match(/^\s*:/);
+        if (colon) {
+          const inner = body.slice(i + 1, end - 1);
+          // A computed key spelled with a hole in it names nothing this can
+          // resolve; guessing at one would be worse than the key going unnamed.
+          if (!(ch === '`' && hasHole(inner))) keys.push(unescaped(inner));
+          i = end + colon[0].length;
+          continue;
+        }
+      }
+      i = end;
       continue;
     } else if (ch === '/' && regexCanStart(body, i)) {
       i = regexEnd(body, i);
@@ -211,8 +366,12 @@ export function topLevelField(body, name) {
   while (i < body.length) {
     const ch = body[i];
     if (ch === '{' || ch === '[' || ch === '(') depth++;
-    else if (ch === '}' || ch === ']' || ch === ')') depth--;
-    else if (ch === "'" || ch === '"' || ch === '`') {
+    else if (ch === '}' || ch === ']' || ch === ')') {
+      // As in `topLevelKeys`: a depth that goes negative never comes back, so
+      // the rest of the entry is searched at a depth that says "nested" and the
+      // field is reported missing rather than unreadable.
+      if (--depth < 0) throw new Error(`unbalanced ${ch} at offset ${i}`);
+    } else if (ch === "'" || ch === '"' || ch === '`') {
       i = quotedEnd(body, i);
       continue;
     } else if (ch === '/' && regexCanStart(body, i)) {
@@ -260,15 +419,26 @@ export function topLevelField(body, name) {
  * and the routes that went missing are reported as routes the platform dropped.
  * That is the false all-clear the entry split exists to prevent, arriving by
  * way of the split itself.
+ *
+ * Anything between the entries other than whitespace and commas is refused for
+ * the same reason. A `...SHARED` spread, or a list built by concatenation, holds
+ * routes this walk cannot see; emitting the entries around it hands back a table
+ * that is short by however many the spread carried, and those surface as routes
+ * the mirror invented rather than as a list nobody read whole.
  */
 export function entries(body) {
   const out = [];
   let depth = 0;
   let from = 0;
   let i = 0;
+  const stray = (at) =>
+    new Error(
+      `unexpected ${JSON.stringify(body.slice(at, at + 40))} at offset ${at}: a list element that is not an object literal`,
+    );
   while (i < body.length) {
     const ch = body[i];
     if (ch === "'" || ch === '"' || ch === '`') {
+      if (depth === 0) throw stray(i);
       i = quotedEnd(body, i);
       continue;
     }
@@ -283,6 +453,7 @@ export function entries(body) {
       continue;
     }
     if (ch === '/' && regexCanStart(body, i)) {
+      if (depth === 0) throw stray(i);
       i = regexEnd(body, i);
       continue;
     }
@@ -294,7 +465,7 @@ export function entries(body) {
       // that reads like a table which lost some routes.
       if (depth === 0) throw new Error(`unbalanced } at offset ${i}`);
       if (--depth === 0) out.push(body.slice(from + 1, i));
-    }
+    } else if (depth === 0 && !/[\s,]/.test(ch)) throw stray(i);
     i++;
   }
   if (depth !== 0) throw new Error('unbalanced { in list body');
