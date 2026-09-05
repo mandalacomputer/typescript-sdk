@@ -710,13 +710,20 @@ export class Computer {
     // `display_width_px` and `display_height_px` in a tool definition, and a
     // negative there is a model computing coordinates against a screen that
     // cannot exist.
+    // Integrality subsumes the finiteness tests that used to stand here, and
+    // closes the case they were extended for once rather than again: a pixel
+    // count is a whole number, and `"1280.5x800.2"` otherwise came back as a
+    // display_width_px of 1280.5, which is a screen no screenshot can be.
+    // The platform will not send one — parseDisplay refuses anything Atoi
+    // rejects, and refuses odd numbers on top of that — so this is the guard
+    // holding the line the API already holds, not a live hazard.
     if (
       w === undefined ||
       h === undefined ||
       !(w > 0) ||
       !(h > 0) ||
-      !Number.isFinite(w) ||
-      !Number.isFinite(h)
+      !Number.isInteger(w) ||
+      !Number.isInteger(h)
     ) {
       return { width: SCREEN_WIDTH, height: SCREEN_HEIGHT };
     }
@@ -3219,8 +3226,18 @@ export class Computer {
     );
     // `{}` is a real answer here, and the only route where it is: a cleared
     // schedule has no window, and "disabled" with an hour nobody chose is the
-    // closest this type can come to saying so.
-    return toSchedule(data ?? { enabled: false });
+    // closest this type can come to saying so. That licence is for an EMPTY
+    // BODY and nothing else — an array or a scalar reached toSchedule, which
+    // read enabled/hour/minute/tz off it, got undefined for every one and
+    // fabricated the same "disabled, midnight UTC" with the garbage spread into
+    // `raw`. So a non-object is dropped for `{}` — the empty body's meaning,
+    // not the body's. Its two siblings refuse a shape they cannot read, and are
+    // right to: they READ a state, so a body they cannot parse means they do
+    // not know it. This one CONFIRMS an operation the DELETE already answered
+    // 2xx to, and "there is no schedule now" is true whatever the body said —
+    // refusing would fail a working call against a platform that acknowledges
+    // with `"cleared"` or `[]`, and learn nothing by it.
+    return toSchedule(P.isRecord(data) ? data : {});
   }
 
   // --- the agent loop -------------------------------------------------
@@ -3249,6 +3266,10 @@ export class Computer {
    * {@link AgentResult.finished}.
    */
   async agent(args: AgentArgs): Promise<AgentResult> {
+    // Named here as well, though agentStream checks the same argument a line
+    // later: it would name ITSELF, and this is the method the caller called.
+    // agentOnce below does the same thing for the same reason.
+    requireModelKey(args.modelKey, 'agent()');
     for await (const ev of this.agentStream(args)) {
       if (ev.type === 'done') {
         // A done event is terminal even if a proxy or server leaves the SSE
@@ -3285,8 +3306,20 @@ export class Computer {
    * platform is free to add types, and falling over on the first unrecognised
    * one would turn a forward-compatible addition into an outage.
    */
-  async *agentStream(args: AgentArgs): AsyncGenerator<AgentEvent> {
-    const modelKey = requireModelKey(args.modelKey, 'agent()');
+  agentStream(args: AgentArgs): AsyncGenerator<AgentEvent> {
+    // A plain method wrapping an inner generator, rather than `async *` with
+    // the check in its body. A generator's body does not run until the first
+    // next(), so `const s = c.agentStream({ prompt })` with no key SUCCEEDED
+    // and the refusal surfaced wherever the stream was eventually consumed —
+    // possibly in another function, possibly never. Every other local refusal
+    // in this SDK happens where the mistake was made, and this is what it costs
+    // to keep that true here. The name is passed too: it read `agent()`, about
+    // a method the caller had not called.
+    const modelKey = requireModelKey(args.modelKey, 'agentStream()');
+    return this.#agentStream(args, modelKey);
+  }
+
+  async *#agentStream(args: AgentArgs, modelKey: string): AsyncGenerator<AgentEvent> {
     let steps = 0;
     for await (const raw of this.#t.sse('POST', P.computerAction(this.id, 'agent'), {
       body: P.agentBody({

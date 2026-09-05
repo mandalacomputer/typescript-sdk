@@ -31,6 +31,7 @@ import {
   writeFully,
 } from '../src/cli.js';
 import type { FileChunk } from '../src/index.js';
+import { BASE, COMPUTER, FakeSocket, json, recorder } from './harness.js';
 
 describe('terminal lifecycle', () => {
   it('rejects a websocket that closes before its handshake opens', async () => {
@@ -58,7 +59,7 @@ describe('terminal lifecycle', () => {
     const calls: string[] = [];
     await expect(
       finishInteraction(
-        Promise.reject(new Error('stdout failed')),
+        () => Promise.reject(new Error('stdout failed')),
         () => calls.push('cleanup'),
         () => calls.push('close'),
       ),
@@ -71,7 +72,7 @@ describe('terminal lifecycle', () => {
     try {
       const calls: string[] = [];
       const finishing = finishInteraction(
-        new Promise<void>(() => {}),
+        () => new Promise<void>(() => {}),
         () => calls.push('cleanup'),
         () => calls.push('close'),
         10,
@@ -158,6 +159,39 @@ describe('terminal lifecycle', () => {
     const err = new Error('unexpected');
     expect(unexpectedErrorText(err)).toBe(err.stack);
     expect(unexpectedErrorText('unexpected')).toBe('unexpected');
+  });
+  it('waits for a write queued after the drain began, not just the chain it was handed', async () => {
+    // The value of `queued` was snapshotted at the call, and the socket is not
+    // closed until close() runs AFTER the await — so a frame landing in between
+    // chained onto a NEW promise nobody was holding, and its bytes were written
+    // once cleanup() had already taken the terminal out of raw mode.
+    const order: string[] = [];
+    const pending: (() => void)[] = [];
+    let queued: Promise<void> = Promise.resolve();
+    const write = (label: string) => {
+      queued = queueTerminalWrite(queued, (done) => {
+        pending.push(() => {
+          order.push(label);
+          done();
+        });
+      });
+    };
+
+    write('first');
+    const finishing = finishInteraction(
+      () => queued,
+      () => order.push('cleanup'),
+      () => order.push('close'),
+      1_000,
+    );
+    await vi.waitFor(() => expect(pending).toHaveLength(1));
+    // The late frame, queued behind a write that has not drained yet.
+    write('late');
+    pending.shift()!();
+    await vi.waitFor(() => expect(pending).toHaveLength(1));
+    pending.shift()!();
+    await finishing;
+    expect(order).toEqual(['first', 'late', 'cleanup', 'close']);
   });
 });
 
@@ -429,6 +463,35 @@ describe('argument handling', () => {
     expect(out).toContain('--session needs a name');
   });
 
+  it('keeps the stack of an internal fault, which every DOMException carries a code for', async () => {
+    // The catch tested `'code' in err`, written for a Node SystemError. Every
+    // DOMException carries a NUMERIC legacy `code` on its prototype, so it took
+    // that branch too and printed as a bare one-liner under a comment saying a
+    // non-SDK fault deserves its stack. This is the concrete instance: a
+    // malformed terminal URL makes `new WebSocket(url)` throw code 12, and the
+    // user saw `mandala: hash` with nothing to locate it.
+    const computer = { ...COMPUTER, vnc: { ...COMPUTER.vnc, terminal_url: 'ws://host/t#frag' } };
+    const savedKey = process.env.MANDALA_API_KEY;
+    const savedBase = process.env.MANDALA_BASE_URL;
+    const savedFetch = globalThis.fetch;
+    process.env.MANDALA_API_KEY = 'com_test';
+    process.env.MANDALA_BASE_URL = BASE;
+    globalThis.fetch = recorder((call) =>
+      json(call.path === '/computers' ? [computer] : computer),
+    ).fetch;
+    try {
+      const thrown = await run(['ssh', 'demo']).catch((e) => e);
+      expect(thrown).toBeInstanceOf(DOMException);
+      expect(typeof (thrown as DOMException).code).toBe('number');
+    } finally {
+      globalThis.fetch = savedFetch;
+      if (savedKey === undefined) delete process.env.MANDALA_API_KEY;
+      else process.env.MANDALA_API_KEY = savedKey;
+      if (savedBase === undefined) delete process.env.MANDALA_BASE_URL;
+      else process.env.MANDALA_BASE_URL = savedBase;
+    }
+  });
+
   it('refuses an ssh carrying a command rather than silently dropping it', async () => {
     // `mandala ssh vm ls -la` is the ubiquitous ssh idiom and this command does
     // not have it. Ignoring the tail opened an interactive shell instead, which
@@ -436,6 +499,122 @@ describe('argument handling', () => {
     const { code, out } = await run(['ssh', 'demo', 'ls']);
     expect(code).toBe(1);
     expect(out).toContain('runs no command');
+  });
+});
+
+/**
+ * The ssh loop, driven end to end against a fake socket and a fake platform.
+ *
+ * Worth the setup for one thing the pure parts cannot show: what `mandala ssh`
+ * RETURNS, which is the number a shell reads as success or failure.
+ */
+describe('the exit code a session reports', () => {
+  const sshWith = async (frame: unknown): Promise<number> => {
+    const savedKey = process.env.MANDALA_API_KEY;
+    const savedBase = process.env.MANDALA_BASE_URL;
+    const savedFetch = globalThis.fetch;
+    const savedWS = globalThis.WebSocket;
+    process.env.MANDALA_API_KEY = 'com_test';
+    process.env.MANDALA_BASE_URL = BASE;
+    globalThis.fetch = recorder((call) =>
+      json(call.path === '/computers' ? [COMPUTER] : COMPUTER),
+    ).fetch;
+    globalThis.WebSocket = class extends FakeSocket {
+      binaryType = 'blob';
+      constructor(url: string) {
+        super(url);
+        // On a microtask, not in the constructor: the loop registers its
+        // listeners after `new WebSocket(...)` returns, and a socket that
+        // opened synchronously would fire into nothing.
+        queueMicrotask(() => {
+          this.emitOpen();
+          // A tick later than the open: the message listener is registered
+          // only once waitForWebSocketOpen has resolved, so a frame sent in the
+          // same turn would be delivered to nobody.
+          setTimeout(() => this.sendRaw(JSON.stringify(frame)), 0);
+        });
+      }
+    } as unknown as typeof WebSocket;
+    try {
+      const { main } = await import('../src/cli.js');
+      return await main(['ssh', 'demo']);
+    } finally {
+      globalThis.WebSocket = savedWS;
+      globalThis.fetch = savedFetch;
+      if (savedKey === undefined) delete process.env.MANDALA_API_KEY;
+      else process.env.MANDALA_API_KEY = savedKey;
+      if (savedBase === undefined) delete process.env.MANDALA_BASE_URL;
+      else process.env.MANDALA_BASE_URL = savedBase;
+    }
+  };
+
+  it('passes an ordinary code through', async () => {
+    expect(await sshWith({ type: 'exit', code: 0 })).toBe(0);
+    expect(await sshWith({ type: 'exit', code: 3 })).toBe(3);
+    expect(await sshWith({ type: 'exit', code: '7' })).toBe(7);
+  });
+
+  it('refuses a code process.exit cannot carry, rather than letting it wrap', async () => {
+    // process.exit takes the low byte, so 256 arrived at the shell as 0 — a
+    // guest failure reported as the success `mandala ssh vm cmd && next` acts
+    // on. -1 wrapping to 255 is at least still a failure; this one inverts.
+    expect(await sshWith({ type: 'exit', code: 256 })).toBe(1);
+    expect(await sshWith({ type: 'exit', code: -1 })).toBe(1);
+  });
+});
+
+describe('scp upload', () => {
+  const uploadWith = async (
+    local: string,
+    respond: Parameters<typeof recorder>[0],
+  ): Promise<ReturnType<typeof recorder>> => {
+    const rec = recorder(respond);
+    const savedKey = process.env.MANDALA_API_KEY;
+    const savedBase = process.env.MANDALA_BASE_URL;
+    const savedFetch = globalThis.fetch;
+    process.env.MANDALA_API_KEY = 'com_test';
+    process.env.MANDALA_BASE_URL = BASE;
+    globalThis.fetch = rec.fetch;
+    const realErr = process.stderr.write.bind(process.stderr);
+    process.stderr.write = (() => true) as never;
+    try {
+      const { main } = await import('../src/cli.js');
+      expect(await main(['scp', local, 'demo:/tmp/out.bin'])).toBe(0);
+      return rec;
+    } finally {
+      process.stderr.write = realErr;
+      globalThis.fetch = savedFetch;
+      if (savedKey === undefined) delete process.env.MANDALA_API_KEY;
+      else process.env.MANDALA_API_KEY = savedKey;
+      if (savedBase === undefined) delete process.env.MANDALA_BASE_URL;
+      else process.env.MANDALA_BASE_URL = savedBase;
+    }
+  };
+
+  it('declares the length of the file it opened, not one measured before the resolve', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'mandala-scp-'));
+    try {
+      const local = join(dir, 'build.log');
+      await writeFile(local, 'x'.repeat(10));
+      // The file grows while the computer is being resolved — a log still being
+      // written, a build output not finished. Measured before that round trip
+      // and streamed after it, the declared count described a file that had
+      // already moved on, and undici refuses a body that disagrees with its own
+      // Content-Length with a bare `fetch failed`. The platform is no more
+      // forgiving: it treats the declared number as a promise.
+      const rec = await uploadWith(local, async (call) => {
+        if (call.path === '/computers') {
+          await writeFile(local, 'x'.repeat(25));
+          return json([COMPUTER]);
+        }
+        return json({ bytes: 25 });
+      });
+      const put = rec.calls.find((c) => c.method === 'PUT')!;
+      expect(put.raw).toHaveLength(25);
+      expect(put.headers['Content-Length']).toBe('25');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });
 
