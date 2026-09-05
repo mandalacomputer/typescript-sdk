@@ -198,6 +198,53 @@ export const count = (v: unknown): number | undefined => {
 };
 
 /**
+ * The instant Go's zero `time.Time` names, in every spelling of it.
+ *
+ * A number and not a string, because the zero time has more than one written
+ * form and they are all the same moment: marshalled in UTC it is
+ * `0001-01-01T00:00:00Z`, carried east of it `0001-01-01T01:00:00+01:00`, and
+ * west of it the date rolls back to `0000-12-31T23:00:00-01:00`. Comparing text
+ * would catch whichever one was in front of whoever wrote the check; comparing
+ * the instant catches the class, which is what the platform can actually send.
+ */
+const GO_ZERO_TIME = Date.parse('0001-01-01T00:00:00Z');
+
+/**
+ * A timestamp the platform may simply not have, as {@link count} is for a number.
+ *
+ * Decides on the PRODUCED string rather than on the raw field, because those
+ * are two different questions and only one of them is the one being asked:
+ * `str([])` is `''`, so a wire value that is not a time at all clears a
+ * `== null` guard and settles into a field the type declares as a time. `''` is
+ * the same non-answer however it arrived, and the key is omitted rather than
+ * set to it — every field this reads for documents itself as absent when the
+ * thing did not happen, and `''` reads instead as a time that is known and
+ * blank.
+ *
+ * The zero time is dropped BY NAME, not by a floor on how old a stamp may be —
+ * a floor is a guess at a boundary nobody has defined, and this is a value with
+ * an exact identity. It arrives because Go's `omitempty` does not elide a zero
+ * `time.Time`: a struct is never empty to `encoding/json`, so a daemon's unset
+ * stamp marshals as a year-one date rather than going missing. Left in, it is
+ * the worst of the readings — truthy, RFC3339-shaped and parseable — so
+ * `if (build.finishedAt)` reports a running build as finished, and anything
+ * ordering on it files that build two millennia ahead of every real one, where
+ * an unreadable value would at least have sorted itself to one end. The control
+ * plane strips it on the way out too (`whenever`, `web/lib/projection.ts`);
+ * this is the tier whose types promise the field is optional, so it does not
+ * take that on trust.
+ *
+ * NOT a check that what survives is a time. A string that is neither empty nor
+ * the zero instant is passed through as it came, on this file's standing rule
+ * that a payload nobody can read is preserved rather than invented over.
+ */
+const stamp = (v: unknown): string | undefined => {
+  const s = str(v);
+  if (s === '') return undefined;
+  return Date.parse(s) === GO_ZERO_TIME ? undefined : s;
+};
+
+/**
  * Everything needed to put a computer's live desktop on a page.
  *
  * Two credentials rather than one, and the difference is enforced by the
@@ -516,16 +563,17 @@ export type PublishedTemplate = {
 export function toPublishedTemplate(d: Record<string, unknown>): PublishedTemplate {
   const doc = d.document;
   const tpl = d.template;
+  // Absent stays absent rather than becoming '': a shipped template was not
+  // published by anybody, and an empty timestamp reads as one that is known
+  // and blank rather than one that does not apply.
+  const publishedAt = stamp(d.published_at);
   return {
     ref: str(d.ref),
     docDigest: str(d.doc_digest),
     document: isRecord(doc) ? { ...doc } : {},
     template: toTemplate(isRecord(tpl) ? tpl : {}),
     versions: Array.isArray(d.versions) ? d.versions.map((v) => str(v)) : [],
-    // Absent stays absent rather than becoming '': a shipped template was not
-    // published by anybody, and an empty timestamp reads as one that is known
-    // and blank rather than one that does not apply.
-    ...(d.published_at == null ? {} : { publishedAt: str(d.published_at) }),
+    ...(publishedAt === undefined ? {} : { publishedAt }),
     raw: { ...d },
   };
 }
@@ -737,13 +785,14 @@ const buildId = (d: Record<string, unknown>, what: string): string => {
 };
 
 export function toTemplateBuild(d: Record<string, unknown>): TemplateBuild {
+  const finishedAt = stamp(d.finished_at);
   return {
     id: buildId(d, 'a build'),
     ref: str(d.ref),
     status: str(d.status),
     error: str(d.error),
     startedAt: str(d.started_at),
-    ...(d.finished_at == null ? {} : { finishedAt: str(d.finished_at) }),
+    ...(finishedAt === undefined ? {} : { finishedAt }),
     raw: { ...d },
   };
 }
@@ -764,13 +813,17 @@ export type BuildStep = {
 };
 
 export function toBuildStep(d: Record<string, unknown>): BuildStep {
+  // A `pending` step is the case both of these exist for: it has no start and
+  // no finish, and the daemon's struct still carries two zero times.
+  const startedAt = stamp(d.started_at);
+  const finishedAt = stamp(d.finished_at);
   return {
     n: num(d.n),
     kind: str(d.kind),
     label: str(d.label),
     status: str(d.status),
-    ...(d.started_at == null ? {} : { startedAt: str(d.started_at) }),
-    ...(d.finished_at == null ? {} : { finishedAt: str(d.finished_at) }),
+    ...(startedAt === undefined ? {} : { startedAt }),
+    ...(finishedAt === undefined ? {} : { finishedAt }),
     raw: { ...d },
   };
 }
@@ -1555,6 +1608,10 @@ const liveMove = (v: unknown, state: unknown): boolean => {
 
 export function toMove(d: Record<string, unknown>): Move {
   const state = str(d.state);
+  // Same reason, and the same shape of fix: a move still running has no finish
+  // time, and `str(null)` is `''` — a finish time of the empty string rather
+  // than none, on the field `moveStamp` orders the whole listing by.
+  const finishedAt = stamp(d.finished_at);
   return {
     computerId: str(d.computer_id),
     state,
@@ -1581,9 +1638,7 @@ export function toMove(d: Record<string, unknown>): Move {
     ...(d.ram_mb == null ? {} : { ramMb: num(d.ram_mb) }),
     ...(d.disk_gb == null ? {} : { diskGb: num(d.disk_gb) }),
     startedAt: str(d.started_at),
-    // Same reason, and the same fix: `str(null)` is `''`, so a move still
-    // running reported a finish time of the empty string rather than none.
-    ...(d.finished_at == null ? {} : { finishedAt: str(d.finished_at) }),
+    ...(finishedAt === undefined ? {} : { finishedAt }),
     raw: { ...d },
   };
 }
@@ -2286,6 +2341,9 @@ export function toWebhook(d: Record<string, unknown>): Webhook {
   // never did. This is the same rule `windowPid` and the geometry read by, for
   // the same reason: absent is a real answer here and 0 cannot stand in for it.
   const lastStatus = count(d.last_status);
+  const disabledAt = stamp(d.disabled_at);
+  const lastSuccessAt = stamp(d.last_success_at);
+  const lastFailureAt = stamp(d.last_failure_at);
   return {
     id: str(d.id),
     url: str(d.url),
@@ -2296,9 +2354,9 @@ export function toWebhook(d: Record<string, unknown>): Webhook {
     // read is not one it should report as delivering.
     enabled: said(d.enabled),
     ...(d.disabled_reason == null ? {} : { disabledReason: str(d.disabled_reason) }),
-    ...(d.disabled_at == null ? {} : { disabledAt: str(d.disabled_at) }),
-    ...(d.last_success_at == null ? {} : { lastSuccessAt: str(d.last_success_at) }),
-    ...(d.last_failure_at == null ? {} : { lastFailureAt: str(d.last_failure_at) }),
+    ...(disabledAt === undefined ? {} : { disabledAt }),
+    ...(lastSuccessAt === undefined ? {} : { lastSuccessAt }),
+    ...(lastFailureAt === undefined ? {} : { lastFailureAt }),
     ...(lastStatus === undefined ? {} : { lastStatus }),
     ...(d.workspace_id == null ? {} : { workspaceId: str(d.workspace_id) }),
     createdAt: str(d.created_at),
@@ -2378,6 +2436,9 @@ export function toWebhookDelivery(d: Record<string, unknown>): WebhookDelivery {
   // caller reads to decide whether the endpoint refused the delivery or never
   // saw it, and `num`'s 0 answers that question wrongly in the one direction.
   const lastStatus = count(d.last_status);
+  const nextAt = stamp(d.next_at);
+  const attemptedAt = stamp(d.attempted_at);
+  const deliveredAt = stamp(d.delivered_at);
   return {
     id: str(d.id),
     eventType: str(d.event_type),
@@ -2385,11 +2446,11 @@ export function toWebhookDelivery(d: Record<string, unknown>): WebhookDelivery {
     cursor: str(d.cursor),
     state: str(d.state),
     attempts: num(d.attempts),
-    ...(d.next_at == null ? {} : { nextAt: str(d.next_at) }),
-    ...(d.attempted_at == null ? {} : { attemptedAt: str(d.attempted_at) }),
+    ...(nextAt === undefined ? {} : { nextAt }),
+    ...(attemptedAt === undefined ? {} : { attemptedAt }),
     ...(lastStatus === undefined ? {} : { lastStatus }),
     ...(d.last_error == null ? {} : { lastError: str(d.last_error) }),
-    ...(d.delivered_at == null ? {} : { deliveredAt: str(d.delivered_at) }),
+    ...(deliveredAt === undefined ? {} : { deliveredAt }),
     createdAt: str(d.created_at),
     raw: { ...d },
   };
