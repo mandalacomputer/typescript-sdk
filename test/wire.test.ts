@@ -1,7 +1,7 @@
 /** What a boolean field the client cannot read is allowed to mean. */
 
 import { describe, expect, it } from 'vitest';
-import { Client, TimeoutError } from '../src/index.js';
+import { Client, MandalaError, TimeoutError } from '../src/index.js';
 import {
   anyRoute,
   BASE,
@@ -646,14 +646,17 @@ describe('a coerced value is not the value', () => {
         : anyRoute(call),
     );
     const computer = await c.computers.get('vm-1');
-    // No row belongs to this computer, so the wait goes on waiting rather than
-    // handing back a row it cannot attribute — and its deadline, not that row,
-    // is what ends it.
+    // No row belongs to this computer, and the row that only coerces to it is
+    // still a row this client READ — so the listing is whole and the answer is
+    // the one a listing without this computer's row gets. What matters is which
+    // answer it is NOT: the coerced row's own `state` handed back as this move's
+    // outcome.
     const err = await computer
       .waitForMove(MOVE_STARTED.started_at, { pollMs: 1, timeoutMs: 60 })
       .catch((e) => e);
-    expect(err).toBeInstanceOf(TimeoutError);
-    expect(String(err)).toContain('no move for vm-1 that started at');
+    expect(err).toBeInstanceOf(MandalaError);
+    expect(String(err)).toContain('not listed by GET moves');
+    expect(String(err)).not.toContain('replaced');
   });
 
   it('still picks the move the platform did attribute to this computer', async () => {
@@ -1075,17 +1078,34 @@ describe('a row this client cannot read is not a row it may drop', () => {
     await expect(c.moves.list()).rejects.toThrow(/row 0 of 1/);
   });
 
-  it('reads an empty moves listing as a row it cannot see YET, not as a verdict', async () => {
-    // An account-wide listing that has not caught up to a move accepted seconds
-    // ago looks exactly like one whose row was reaped. Only a row that HAS been
-    // seen and then is not — moves.test.ts covers that one — is evidence of the
-    // deletion the reaped sentence claims.
+  it('reads an empty moves listing it could read WHOLE as the verdict it is', async () => {
+    // The row is written inside the transaction that precedes the 202, out of
+    // one database with no replica, so there is no listing that has "not caught
+    // up" to a move a caller is holding. An empty one that this client read in
+    // full is a row that left.
     const { client: c } = client((call) =>
       call.path === '/moves' ? json({ moves: [] }) : anyRoute(call),
     );
     const computer = await c.computers.get('vm-1');
-    await expect(
-      computer.waitForMove(MOVE_STARTED.started_at, { pollMs: 1, timeoutMs: 60 }),
-    ).rejects.toThrow(TimeoutError);
+    const err = await computer
+      .waitForMove(MOVE_STARTED.started_at, { pollMs: 1, timeoutMs: 60 })
+      .catch((e) => e);
+    expect(err).toBeInstanceOf(MandalaError);
+    expect(err).not.toBeInstanceOf(TimeoutError);
+  });
+
+  it('reads an empty moves listing it could NOT read whole as no verdict at all', async () => {
+    // And the exception that keeps that honest: a row this client could not
+    // decode might be this very move, so a listing left empty by dropping one is
+    // "nobody could tell" rather than "it is gone". The deadline ends this wait.
+    const { client: c } = client((call) =>
+      call.path === '/moves' ? json({ moves: [null] }) : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    const err = await computer
+      .waitForMove(MOVE_STARTED.started_at, { pollMs: 1, timeoutMs: 60 })
+      .catch((e) => e);
+    expect(err).toBeInstanceOf(TimeoutError);
+    expect(String(err)).toContain('could not be read at all');
   });
 });

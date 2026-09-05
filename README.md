@@ -1089,15 +1089,16 @@ relocate on this same computer overwrites this move's row while the wait is
 running, and without an anchor the wait would report the new move's outcome as
 this one's. When that happens the wait fails at once with a `MandalaError`
 naming both stamps — the replacement does not un-happen, so there is nothing to
-wait out. A listing with no row for this computer at all is different: that is
-one which has not caught up yet, so the wait goes on polling and its deadline is
-what ends it.
+wait out.
 
-A row that was listed and then is not, on two consecutive polls of a listing
-this client could read whole, ends the wait with a `MandalaError`: a move's row
-leaves that listing when its computer is deleted, and when a finished move is
-dismissed. Two polls rather than one because the listing is eventually
-consistent, and a replica running behind can drop a row that is still there.
+A listing with **no** row for this computer ends the wait the same way, on the
+first poll. The row is written inside the transaction that precedes the 202 and
+the 202 is a read-back of it, so by the time you hold a move to wait on the row
+exists: absence is not a listing catching up, it is a row that has left, which
+happens when the computer is deleted and when a finished move is dismissed. The
+one exception is a listing this client could not read whole — a row it could not
+decode might be this very move, so nothing is claimed and the deadline is what
+ends the wait.
 
 **`waitForMove()` does not throw for a move that ended badly**, because the ways
 it can end are not one thing:

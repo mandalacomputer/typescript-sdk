@@ -10,7 +10,7 @@
  */
 
 import { MandalaError, ValidationError } from './errors.js';
-import { isRecord } from './paths.js';
+import { isRecord, MOVES } from './paths.js';
 
 /**
  * A string from a payload, with a fallback for an absent one.
@@ -1212,11 +1212,11 @@ export type Snapshot = {
  * `{ moves: [...] }` is the shape. Anything else is the platform failing to
  * answer, and reading it as `[]` turned one malformed 200 into two different
  * false statements: a quiet account from {@link Moves.list}, and — in
- * `Computer.waitForMove` — the claim that the computer had been DELETED. That
- * second claim costs two consecutive polls of a listing this client could read
- * whole, which is a good deal more than one malformed 200 can buy: an empty
- * array is a listing that does not carry the move, and a listing nobody can
- * parse is not one of those.
+ * `Computer.waitForMove` — the claim that the computer had been DELETED, which
+ * that wait now makes on the FIRST poll of a listing it could read whole. All
+ * the more reason the envelope has to be held to its shape here: an empty array
+ * is a listing that does not carry the move, and a listing nobody can parse is
+ * not one of those.
  */
 export function moveRows(
   data: unknown,
@@ -1307,22 +1307,46 @@ const RFC3339 = /^\d{4}-\d{2}-\d{2}[Tt ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[Zz]|[+-]\
  * is a move with no readable start at all, which is a move nothing can be
  * anchored to — `str()` renders an absent `started_at` as `''`, and an anchor of
  * `''` would match a row whose start the platform never sent.
+ *
+ * WHOSE MISTAKE IT WAS decides the class, and `raw` is what tells them apart.
+ * Every `Move` comes out of `toMove`, which always sets `raw`, so a value
+ * carrying one came off the wire: `Computer.relocate` guards its own 202, which
+ * leaves `client.moves.list()` as the route that can hand back a row the
+ * platform sent with no readable `started_at` — a platform omission, so a
+ * {@link MandalaError} naming that route, for the reason `relocate`'s guard
+ * exists. Anything else with no `raw` is a value the caller assembled or a
+ * misplaced options object, and stays a {@link ValidationError} — which now says
+ * what changed, because the old two-argument-optional signature let
+ * `waitForMove({ pollMs: 1 })` compile, and a message that only reports an
+ * unreadable `startedAt` never tells that caller where their options went.
  */
+const SIGNATURE =
+  `waitForMove's first argument is the move to wait for and is required; options are the ` +
+  `SECOND argument — waitForMove(move, { pollMs })`;
+
 export const moveAnchor = (move: Move | string): string => {
   if (typeof move === 'string') {
     if (!RFC3339.test(move)) {
       throw new ValidationError(
         `move must be the Move that relocate() returned, or an RFC3339 timestamp with a zone ` +
-          `like 2026-08-23T01:00:00Z — got ${JSON.stringify(move).slice(0, 120)}`,
+          `like 2026-08-23T01:00:00Z — got ${JSON.stringify(move).slice(0, 120)}. ${SIGNATURE}`,
       );
     }
     return move;
   }
   const startedAt = isRecord(move) ? str(move.startedAt) : '';
   if (Number.isNaN(Date.parse(startedAt))) {
+    const shown = `${JSON.stringify(move)}`.slice(0, 120);
+    if (isRecord(move) && isRecord(move.raw)) {
+      throw new MandalaError(
+        `this Move has no readable startedAt to wait from, which is what waitForMove anchors ` +
+          `to; a Move off GET ${MOVES} with no readable started_at is the platform having ` +
+          `omitted it, not a value you chose — got: ${shown}`,
+      );
+    }
     throw new ValidationError(
       `move must be the Move that relocate() returned, and this one has no readable startedAt ` +
-        `to wait from: ${`${JSON.stringify(move)}`.slice(0, 120)}`,
+        `to wait from: ${shown}. ${SIGNATURE}`,
     );
   }
   return startedAt;

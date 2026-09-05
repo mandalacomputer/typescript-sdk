@@ -405,18 +405,15 @@ const moveTimeoutText = (w: {
     );
   }
   // Its row was there and then was not, without that ever adding up to the
-  // refusal in the loop: either rows this client could not place were there too,
-  // so any one of THOSE might be it, or the listing only dropped it once and one
-  // poll of an eventually consistent listing is not a fact about anything.
+  // refusal in the loop — which has exactly one way of happening, since a whole
+  // listing missing this row ends the wait at once: rows this client could not
+  // place were on it too, so any one of THOSE might be it. `absent` is only ever
+  // set on such a poll, which is why the blindness is stated and not tested for.
   if (w.last && w.absent) {
-    const blind = blindness(w);
     return (
-      `${w.id}'s move stopped being listed by GET ${P.MOVES} within ${w.timeoutMs}ms` +
-      (blind
-        ? `, and ${blind} — so whether it is gone cannot be told from that listing`
-        : `, but never on two consecutive polls, which is what it takes before a listing that ` +
-          `has dropped a row is read as anything but a replica running behind`) +
-      `. When it last answered it was in state ${w.last.state}.`
+      `${w.id}'s move stopped being listed by GET ${P.MOVES} within ${w.timeoutMs}ms, and ` +
+      `${blindness(w)} — so whether it is gone cannot be told from that listing. When it last ` +
+      `answered it was in state ${w.last.state}.`
     );
   }
   if (w.last) {
@@ -426,12 +423,12 @@ const moveTimeoutText = (w: {
       `has — read moves.list for where it got to.`
     );
   }
-  // Never seen at all, on listings that were READ — which is two situations
-  // wearing one face: a row this account-wide listing has not caught up to, and
-  // one the platform dropped, which it does when the computer is deleted and
-  // when a finished move is dismissed. Saying only the first of those is how a
-  // wait on a computer that had never moved at all reported it as deleted.
-  // Nothing here is decidable, so all of it is said and none of it asserted.
+  // Never seen at all, on listings that were READ — which, since a listing read
+  // whole and missing this row ends the wait at once, means every one of those
+  // reads was partial. Rows this client could not decode were on them, any of
+  // which might have been this very move, and a poll that can only say "nobody
+  // could tell" is evidence neither way. So nothing is asserted about where the
+  // move got to; what is said is that no poll ever put the question.
   //
   // Two spans in one sentence, and they are marked as such. Whether anything was
   // EVER seen is the cumulative part — `reads`, `failures`, `aborts`, counted
@@ -446,9 +443,8 @@ const moveTimeoutText = (w: {
       `${w.timeoutMs}ms` +
       (blind ? `, and ${blind}` : '') +
       (w.failures > 0 ? `, and ${w.failures} poll(s) failed outright` : '') +
-      `. A move that was accepted and never appears here is one whose row the platform dropped, ` +
-      `which happens when the computer is deleted and when a finished move is dismissed; a move ` +
-      `that was never accepted never appears at all.`
+      `. No poll of it was ever both readable in full and missing this move, which is what it ` +
+      `takes to call the row gone, so what became of the move is not something this wait read.`
     );
   }
   // No poll ever finished, and the THREE ways that happens are not one
@@ -1051,9 +1047,13 @@ export class Computer {
    * exactly how `moved`, where the computer HAS changed hardware, gets read as
    * "nothing happened". Read `state`.
    *
-   * A LISTING WITH NO ROW FOR THIS COMPUTER IS NOT AN OUTCOME. It is the listing
-   * not showing the move yet, which an account-wide one need not do on the first
-   * poll after a 202, so this keeps polling and lets the deadline be the answer.
+   * A LISTING WITH NO ROW FOR THIS COMPUTER IS AN OUTCOME, and on the first
+   * poll. The platform writes the row with `INSERT OR REPLACE` inside the
+   * transaction that precedes the 202 and answers with a read-back of that row,
+   * out of one database with no replica behind it — so by the time a caller
+   * holds a move to wait on, the row exists. There is no "not visible yet" to
+   * wait out, and absence on a listing this client read whole is a row that has
+   * LEFT.
    *
    * Throws {@link MandalaError} at once if this computer's row carries a
    * DIFFERENT `startedAt`: on this platform that is another relocate having
@@ -1066,13 +1066,13 @@ export class Computer {
    * the waiting is, and there is no cancelling a disk crossing between two hosts
    * in any case.
    *
-   * Throws {@link MandalaError} if the move's row was on the listing and then
-   * was not on two consecutive polls of a listing this client could read whole
-   * — the computer was deleted and its move's row went with it, or a finished
-   * move was dismissed. Waiting longer cannot bring back a row that has left, so
-   * spending the rest of the deadline to say so would be its own defect; two
-   * polls rather than one because the listing is eventually consistent and a
-   * replica running behind can drop a row that is still there.
+   * Throws {@link MandalaError} on the first poll of a listing this client could
+   * read WHOLE that carries no row for this computer — the computer was deleted
+   * and its move's row went with it, or a finished move was dismissed. Waiting
+   * longer cannot bring back a row that has left, so spending the rest of the
+   * deadline to say so would be its own defect. Rows that could not be decoded
+   * are the exception: one of those might be this move, so a listing with any of
+   * them says nothing either way and the wait goes on.
    *
    * The default timeout is generous because the work is: a small overlay crosses
    * in seconds and a full Windows disk takes minutes, plus minutes more when the
@@ -1094,10 +1094,12 @@ export class Computer {
     // still moving": a claim about the present tense made from an observation
     // that may be the whole timeout old.
     let observed = false;
-    // Whether the most recent poll READ the listing and this move was not on
-    // it — the third thing a poll can say, and one the other two flags cannot
-    // spell: `observed` false covers a listing nobody could fetch as well, and
-    // those two end a wait with entirely different sentences.
+    // Whether the most recent poll read the listing, could not decode all of
+    // it, and this move was not among what it could — the third thing a poll can
+    // say, and one the other two flags cannot spell: `observed` false covers a
+    // listing nobody could fetch as well, and those two end a wait with entirely
+    // different sentences. A poll that read the listing WHOLE and did not find
+    // the row never sets this, because it does not come back.
     let absent = false;
     // THE LAST SUCCESSFUL POLL'S, and cleared by every poll that read no
     // listing, which is what makes that true. Left standing across one they
@@ -1108,12 +1110,6 @@ export class Computer {
     // half of that this loop went on getting wrong after it stopped getting the
     // other half wrong.
     let unreadableLast = 0;
-    // CONSECUTIVE, not cumulative. The listing is eventually consistent — that
-    // is the premise the whole "not visible YET" branch rests on — so a replica
-    // running behind can drop a row it served a moment ago, and ending a healthy
-    // wait on one such poll is the same false statement about a live computer,
-    // reached from the other side. Two in a row, both of listings read whole.
-    let vanished = 0;
     // Cumulative, and only for the sentence a timeout that never saw the move
     // ends with: "every poll failed" is a different statement from "they
     // answered and it was not there", and one wait can do both. `aborts` is the
@@ -1189,33 +1185,29 @@ export class Computer {
           );
         }
         if (!mine) {
-          // Absent, which is TWO situations wearing one face while this wait has
-          // never seen the row: one the account-wide listing has not caught up
-          // to, and one whose row the platform dropped — which it does when the
-          // computer is deleted, and when a finished move is dismissed. Reading
-          // either off the other is how a wait that had merely polled a second
-          // too early reported a live computer as gone, so nothing is claimed
-          // here and the deadline is left to be the answer.
+          // Absence is conclusive AT ONCE, and the platform is what makes it so.
+          // `insertMove` writes the row with `INSERT OR REPLACE` inside the
+          // transaction that precedes the 202 and returns a read-back of it,
+          // over one synchronous database keyed by computer id with no replica
+          // behind it — so the row exists before the caller can hold anything to
+          // wait on, and there is no "not visible yet" state to poll through.
+          // What is left is a row that has LEFT, which this platform does do:
+          // it drops the row when the computer is deleted, when a finished move
+          // is dismissed, and when the sweep clears finished rows that have
+          // aged out. Spending the rest of a quarter-hour deadline to reach that
+          // same sentence with less in it would be its own defect.
           //
-          // Once the row HAS been seen, though, its disappearance is evidence
-          // rather than inference, and waiting the rest of a fifteen-minute
-          // deadline to report it would be its own defect. TWICE RUNNING, and
-          // only on listings read whole: one poll of an eventually consistent
-          // listing can miss a row that is still there, and a row this client
-          // could not decode might be this very move — an empty result after
-          // dropping some is "nobody could tell", a different sentence, which
-          // must not borrow this one's certainty.
-          if (last && unreadable === 0) {
-            vanished += 1;
-            if (vanished >= 2) {
-              throw new MandalaError(
-                `${this.id}'s move is no longer listed by GET ${P.MOVES} and was not on the poll ` +
-                  `before it either; a move's row leaves that listing when its computer is ` +
-                  `deleted, and when a finished move is dismissed`,
-              );
-            }
-          } else {
-            vanished = 0;
+          // Rows this client could not decode are the one exception, and it is
+          // not a hedge: any one of THOSE might be this very move, so an empty
+          // result after dropping some says "nobody could tell" — a different
+          // sentence, which must not borrow this one's certainty. Then the
+          // deadline is left to be the answer.
+          if (unreadable === 0) {
+            throw new MandalaError(
+              `${this.id}'s move is not listed by GET ${P.MOVES}, on a listing read in full; a ` +
+                `move's row leaves that listing when its computer is deleted, and when a ` +
+                `finished move is dismissed`,
+            );
           }
           absent = true;
           observed = false;
@@ -1225,7 +1217,6 @@ export class Computer {
         last = mine;
         observed = true;
         absent = false;
-        vanished = 0;
         unreadableLast = unreadable;
         if (!mine.live) return mine;
       } catch (err) {
@@ -1238,28 +1229,30 @@ export class Computer {
         // inside a poll is not the platform failing to answer.
         if (isDeadlineAbort(err)) {
           aborts += 1;
-          // The blindness count goes, exactly as on the failure path below and
-          // for the identical reason: it is what the last listing READ could
-          // not make out, and a poll cut short never read one. Left standing,
-          // one poll that saw two undecodable rows and a quarter of an hour of
-          // aborts after it end in a timeout describing that first listing in
-          // the present tense — the sentence this wait was changed to stop
-          // writing, reached by the one path that had not been closed.
+          // Both of the last poll's readings go, exactly as on the failure path
+          // below and for the identical reason: each describes what the last
+          // listing READ could or could not be made out to hold, and a poll cut
+          // short read no listing. Left standing, one poll that saw two
+          // undecodable rows and a quarter of an hour of aborts after it end in
+          // a timeout describing that first listing in the present tense — the
+          // sentence this wait was changed to stop writing, reached by the one
+          // path that had not been closed. `absent` was half of that count and
+          // was being kept while its own explanation was thrown away, which
+          // leaves a timeout claiming the row stopped being listed and no
+          // longer able to say why that is not decidable.
+          absent = false;
           unreadableLast = 0;
           continue;
         }
         if (!isTransientForPoll(err)) throw err;
         observed = false;
         // A poll that never got an answer says nothing about whether the move is
-        // on the listing, so the flag that means "it answered and it was not
-        // there" has to go with it — and the run of absences it would otherwise
-        // be counted into, since a run broken by a poll nobody read is not two
-        // consecutive readings of anything. The blindness count goes too: it is
-        // what the LAST listing could not make out, and this poll read no
+        // on the listing, so the flag that means "it answered, partly, and this
+        // was not in the part" has to go with it. The blindness count goes too:
+        // it is what the LAST listing could not make out, and this poll read no
         // listing, so keeping it would date the timeout's sentence to whenever
         // the last successful poll happened to be.
         absent = false;
-        vanished = 0;
         unreadableLast = 0;
         failures += 1;
         delayMs = retryDelay(pollMs, err);
