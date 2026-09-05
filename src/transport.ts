@@ -39,6 +39,36 @@ const INCOMPLETE_HEADER = 'X-GC-Incomplete';
 /** Largest single event retained while waiting for its blank-line delimiter. */
 const MAX_SSE_EVENT_CHARS = 1 << 20;
 
+/**
+ * How big a request body is, when that can be known without consuming it.
+ *
+ * One definition because two decisions turn on it and they are the same
+ * question: whether a caller's `contentLength` can be checked against what is
+ * actually being sent, and whether undici needs `duplex: 'half'` to accept the
+ * body at all. Split, they drift — and they drift in opposite directions, each
+ * silent. A body wrongly called measurable has its length compared against
+ * `undefined` and is refused; a body wrongly called unmeasurable has a caller's
+ * number framed against bytes nobody counted.
+ *
+ * Measured off what the value has rather than what it is an instance of:
+ * `byteLength` covers a `Uint8Array`, a `DataView` and a bare `ArrayBuffer`,
+ * `size` covers a `Blob` or `File`, and all of those are bodies undici sends
+ * with a length it works out itself. An `instanceof` in either position asks
+ * where the constructor came from instead — which is how a cross-realm or
+ * polyfilled value gets the wrong answer.
+ *
+ * Everything left has no size until it is read: a native `ReadableStream`, a
+ * polyfilled or cross-realm one, the Node `Readable` an untyped caller can pass
+ * because undici accepts one. That is exactly the body whose declared length
+ * must be taken on trust, and exactly the body undici will not send without
+ * half-duplex.
+ */
+export function bodyByteLength(body: unknown): number | undefined {
+  const sized = body as { byteLength?: unknown; size?: unknown } | null | undefined;
+  const measured = sized?.byteLength ?? sized?.size;
+  return typeof measured === 'number' ? measured : undefined;
+}
+
 export type Query = Record<string, string | number | boolean | undefined>;
 
 export type RequestOptions = {
@@ -119,15 +149,23 @@ export type Bytes = {
 /**
  * A collection read the platform may have had to answer short.
  *
- * `incomplete` is the count of what the placement cache could account for, and
- * it is legitimately `0`: a computer created during an outage was never cached
- * against the host now holding it. So presence is the signal and the number is
- * detail — hence `null` versus a number, rather than a count that means nothing
- * at zero.
+ * `incomplete` present means the list is short. The number is one of two
+ * quantities and does not say which: the platform's own shortfall, counted out
+ * of what the placement cache could account for and legitimately `0` because a
+ * computer created during an outage was never cached against the host now
+ * holding it; or, when the platform called the answer whole, how many rows this
+ * client could not decode and dropped. Both leave the same array — one shorter
+ * than the estate — which is what a caller acts on, so they share the channel.
+ * Presence is the signal and the number is detail — hence `null` versus a
+ * number, rather than a count that means nothing at zero.
  */
 export type Listing<T> = {
   items: T[];
-  /** `null` when the answer was complete. A number — possibly 0 — when it was not. */
+  /**
+   * `null` when the answer was complete. A number — possibly 0 — when it was
+   * not, being either the platform's shortfall or this client's dropped rows,
+   * with no way to tell the two apart. Branch on presence, not on the number.
+   */
   incomplete: number | null;
 };
 
@@ -205,6 +243,16 @@ const incompleteCount = (header: string): number => {
   const n = Number(header);
   return Number.isFinite(n) ? n : 0;
 };
+
+/**
+ * How short an answer is, in {@link Listing.incomplete}'s spelling: `null` for
+ * not short at all, and the count otherwise.
+ *
+ * Zero is the one number this cannot report, and deliberately — the platform
+ * sends `0` for a shortfall it cannot size, so a `0` derived from counting
+ * would claim a fan-out failure that never happened.
+ */
+const shortfall = (missing: number): number | null => (missing > 0 ? missing : null);
 
 /**
  * A `Content-Range` on a response that carried bytes: `bytes 0-1048575/2147483648`.
@@ -378,9 +426,20 @@ export class Transport {
       // Without it every streamed upload — including `mandala scp file vm:/path`
       // — dies with "duplex option is required when sending a body" before a
       // byte leaves the machine. The test recorder consumes the stream itself
-      // and never hits this check. Set only for streams: a string or Uint8Array
-      // body does not need it, and a custom fetch that forwarded the flag on
-      // those would be a change in the request that is not the request.
+      // and never hits this check, so nothing below it is covered by a test and
+      // it has to be right by construction.
+      //
+      // Set for every body whose size cannot be read off it, not for every body
+      // that is a `ReadableStream` of this realm: those are different sets, and
+      // the difference is the bodies this SDK deliberately accepts from another
+      // realm. Asked as an instance test, a polyfilled or cross-realm stream —
+      // or the Node `Readable` undici takes from an untyped caller — goes out
+      // without the flag, and undici then either refuses it outright or, for a
+      // shape it recognises as neither stream nor bytes, stringifies it to
+      // `[object Object]` and frames THAT against the caller's Content-Length.
+      // A measurable body must not have the flag: undici works its length out
+      // itself, and a custom fetch that forwarded a duplex it never needed
+      // would be a change in the request that is not the request.
       const init: RequestInit & { duplex?: 'half' } = {
         method,
         headers,
@@ -398,7 +457,7 @@ export class Transport {
         // connection failure.
         redirect: 'manual',
       };
-      if (body instanceof ReadableStream) init.duplex = 'half';
+      if (opts.raw !== undefined && bodyByteLength(opts.raw) === undefined) init.duplex = 'half';
       resp = await this.#fetch(this.#url(path, opts.query), init);
     } catch (cause) {
       // A caller's own signal firing is a cancellation whatever its reason is
@@ -626,19 +685,33 @@ export class Transport {
     const sent = await this.#fetchRaw('GET', path, opts);
     const short = sent.resp.headers.get(INCOMPLETE_HEADER);
     const data = await this.#decode<unknown>(sent, 'GET', path, opts.signal);
+    // The same check and the same element filter {@link jsonArray}'s callers
+    // get, because these are the list routes a user actually calls. Cast to
+    // `T[]`, an object answer reached `items.map` as an anonymous TypeError,
+    // and a single null element reached toSnapshot as `d.id` of null — both of
+    // them naming neither the request nor the platform.
+    const rows = expectArray(data, 'GET', path);
+    const items = rows.filter(isRecord);
     return {
-      // The same check and the same element filter {@link jsonArray}'s callers
-      // get, because these are the list routes a user actually calls. Cast to
-      // `T[]`, an object answer reached `items.map` as an anonymous TypeError,
-      // and a single null element reached toSnapshot as `d.id` of null — both
-      // of them naming neither the request nor the platform.
-      items: expectArray(data, 'GET', path).filter(isRecord),
+      items,
       // A header that is not a number came from something other than the
       // platform, and Number() turns it into a NaN that poisons the first sum a
       // caller does with it. Presence is the signal — see {@link Listing} — so
       // the warning survives as a count of 0 rather than as arithmetic nobody
       // can trace back to a header.
-      incomplete: short === null ? null : incompleteCount(short),
+      //
+      // And a row the filter above threw away leaves the answer exactly as
+      // short as a row the platform could not fan out to, in the one shape the
+      // caller acts on: an array diffed against their own idea of the estate,
+      // with a delete on the difference. `X-GC-Incomplete` is a "this list is
+      // short" channel rather than a "a host was unreachable" one — it replaced
+      // a header that named hosts precisely so the count could stand for the
+      // shortfall by itself — so a client-side drop belongs in it rather than
+      // in a second signal nobody would read. Only when the platform has not
+      // already flagged the answer: presence is what a caller tests, and adding
+      // to a count the platform documents as best effort would make it no
+      // truer.
+      incomplete: short !== null ? incompleteCount(short) : shortfall(rows.length - items.length),
     };
   }
 

@@ -19,6 +19,13 @@ export type Call = {
   body: unknown;
   /** The raw request body, for the routes that send bytes. */
   raw?: Uint8Array;
+  /**
+   * `init.duplex`, which undici requires for any body it cannot measure and
+   * rejects nothing for. This stand-in never enforces that rule — it consumes
+   * the body itself — so recording what was asked for is the only part of it a
+   * test can hold to.
+   */
+  duplex?: string;
 };
 
 export type Responder = (call: Call) => Response | Promise<Response>;
@@ -59,6 +66,7 @@ export function recorder(respond: Responder): Recorder {
       headers: Object.fromEntries(Object.entries((init?.headers ?? {}) as Record<string, string>)),
       body,
       raw,
+      duplex: (init as { duplex?: string } | undefined)?.duplex,
     };
     calls.push(call);
     // The signal is honoured, because a mock that ignores it cannot model the
