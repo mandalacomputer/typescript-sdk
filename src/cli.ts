@@ -24,7 +24,7 @@
  * there can run.
  */
 
-import { createReadStream, realpathSync } from 'node:fs';
+import { realpathSync } from 'node:fs';
 import { open, stat } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import process from 'node:process';
@@ -342,21 +342,42 @@ export function waitForWebSocketOpen(ws: WebSocket, timeoutMs = CONNECT_TIMEOUT_
  * Drain terminal output, but always hand the TTY back and close the websocket.
  * The timeout covers a stdout stream that returned false and never emits
  * `drain`; the nested finally covers a write that throws or rejects.
+ *
+ * `queued` is a getter rather than the chain itself, because the chain is
+ * replaced by every frame that arrives — including one arriving during this.
  */
 export async function finishInteraction(
-  queued: Promise<void>,
+  queued: () => Promise<void>,
   cleanup: () => void,
   close: () => void,
   timeoutMs = EXIT_DRAIN_MS,
 ): Promise<void> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    await Promise.race([
-      queued,
-      new Promise<void>((resolve) => {
-        timer = setTimeout(resolve, timeoutMs);
-      }),
-    ]);
+    const deadline = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, timeoutMs);
+    });
+    // A getter, re-read after every await, rather than the promise itself. The
+    // socket is not closed until close() below, so a frame can land while this
+    // is running — and write() answers it by chaining onto a NEW promise. Given
+    // the old binding, this returned with those bytes still queued, and they
+    // were written after cleanup() had taken the terminal back out of raw mode.
+    // Settling is when the chain stops being replaced, which is what the loop
+    // waits for; the deadline still bounds the whole thing, so a guest printing
+    // without pause cannot hold the terminal open indefinitely.
+    const drained = (async () => {
+      for (let chain = queued(); ; ) {
+        await chain;
+        const next = queued();
+        if (next === chain) return;
+        chain = next;
+      }
+    })();
+    // Marked handled now, for queueTerminalWrite's reason: the race below still
+    // sees the rejection, but the deadline winning must not leave this one
+    // uncaught and take the process down on the way out of a session.
+    void drained.catch(() => {});
+    await Promise.race([drained, deadline]);
   } finally {
     if (timer) clearTimeout(timer);
     try {
@@ -505,10 +526,24 @@ async function interact(url: string): Promise<number> {
     if (ws.readyState === WebSocket.OPEN) ws.send(new Uint8Array([0x04]));
   };
 
+  // Held so cleanup can take it off again. Assigned below, where resolve() is
+  // in scope; declared here because the socket outlives this function's own
+  // exit path and a listener left on it can still reach stdout.
+  let onMessage: ((ev: MessageEvent) => void) | undefined;
+
   const cleanup = () => {
     if (pump) {
       clearInterval(pump);
       pump = undefined;
+    }
+    // Removed with the rest, and before the terminal is restored two lines
+    // down. The socket is still open at this point — close() runs after — so
+    // without this a frame arriving during the drain queued a write that ran
+    // once the shell had raw mode back, printing the tail of a dead session
+    // over the user's own prompt.
+    if (onMessage) {
+      ws.removeEventListener('message', onMessage);
+      onMessage = undefined;
     }
     stdin.off('data', onStdin);
     stdin.off('end', onStdinEnd);
@@ -544,7 +579,7 @@ async function interact(url: string): Promise<number> {
     }
 
     await new Promise<void>((resolve) => {
-      ws.addEventListener('message', (ev) => {
+      onMessage = (ev) => {
         const byteLength = terminalFrameByteLength(ev.data as string | ArrayBuffer);
         if (byteLength > MAX_FRAME) {
           process.stderr.write(
@@ -569,7 +604,14 @@ async function interact(url: string): Promise<number> {
                   : typeof control.code === 'string' && /^-?\d+$/.test(control.code)
                     ? Number(control.code)
                     : Number.NaN;
-              exitCode = Number.isInteger(code) ? code : 1;
+              // Clamped, not just checked for integrality. process.exit takes
+              // the low byte, so 256 left the shell reading exit 0 — a guest
+              // failure turned into the success `mandala ssh vm cmd && next`
+              // acts on, which is the one outcome the guard above exists to
+              // stop. Out of range is refused rather than masked to 256 % 256
+              // for the same reason a non-integer is: a code this process
+              // cannot faithfully pass on is not evidence of success.
+              exitCode = Number.isInteger(code) && code >= 0 && code <= 255 ? code : 1;
               // The shell has ended, but the output's tail may still be in
               // flight behind this frame — resolving now would drop it. Close
               // instead and let `close` resolve once the queue has drained;
@@ -589,20 +631,25 @@ async function interact(url: string): Promise<number> {
         }
         const bytes = new Uint8Array(ev.data as ArrayBuffer);
         write(bytes);
-      });
+      };
+      ws.addEventListener('message', onMessage);
       ws.addEventListener('close', () => resolve(), { once: true });
       ws.addEventListener('error', () => resolve(), { once: true });
     });
   } finally {
     // The tail of the output goes out before the terminal is handed back, or
     // the last screenful of a session lands after the shell prompt returns.
-    await finishInteraction(queued, cleanup, () => {
-      try {
-        ws.close();
-      } catch {
-        // Already closed; that is the ordinary way out of the loop above.
-      }
-    });
+    await finishInteraction(
+      () => queued,
+      cleanup,
+      () => {
+        try {
+          ws.close();
+        } catch {
+          // Already closed; that is the ordinary way out of the loop above.
+        }
+      },
+    );
   }
 
   if (exitCode === undefined) {
@@ -753,19 +800,43 @@ async function cmdScp(srcArg: string, dstArg: string): Promise<number> {
   const remote = dst!;
   if (!remote.path) die(`say where in the guest: ${remote.target}:/absolute/path`);
   const path = guestDestination(remote.path, srcArg);
-  const info = await stat(srcArg).catch(() => undefined);
-  if (!info?.isFile()) die(`${srcArg} is not a file`);
-  // Streamed rather than `readFile`'d: a guest-bound copy of a large file is
-  // the same 2 GB the download path already refuses to hold as one Buffer.
-  const body = Readable.toWeb(createReadStream(srcArg)) as ReadableStream<Uint8Array>;
-  const written = await (await resolve(client, remote.target)).writeFile(path, body, {
-    timeoutMs: SCP_TRANSFER_TIMEOUT_MS,
-    contentLength: info.size,
-  });
-  // What the platform said, or what was sent — labelled as which, since a
-  // platform that does not report a count is not evidence that everything
-  // landed.
-  const size = uploadSize(info.size, written);
+  if (!(await stat(srcArg).catch(() => undefined))?.isFile()) die(`${srcArg} is not a file`);
+  // Resolved before anything local is opened. The other order built the read
+  // stream first — and fs.ReadStream takes its descriptor in _construct whether
+  // or not anything reads it — so a target that does not resolve threw straight
+  // past the only reference to it and left the fd to the garbage collector.
+  const computer = await resolve(client, remote.target);
+  // Opened once, and measured through the OPEN handle. A `stat(path)` taken
+  // before the stream exists describes whatever was at that name a moment ago:
+  // a log rotated or a build rewritten in between makes contentLength disagree
+  // with the bytes that follow it, and undici refuses that itself with a bare
+  // `fetch failed`. The platform is no more forgiving — it treats the declared
+  // count as a promise and calls a short body "the guest stopped after N of M
+  // bytes" — so the number has to come from the same file the stream is reading.
+  const fh = await open(srcArg, 'r');
+  let size: string;
+  try {
+    const info = await fh.stat();
+    // Streamed rather than `readFile`'d: a guest-bound copy of a large file is
+    // the same 2 GB the download path already refuses to hold as one Buffer.
+    const body = Readable.toWeb(fh.createReadStream()) as ReadableStream<Uint8Array>;
+    const written = await computer.writeFile(path, body, {
+      timeoutMs: SCP_TRANSFER_TIMEOUT_MS,
+      contentLength: info.size,
+    });
+    // What the platform said, or what was sent — labelled as which, since a
+    // platform that does not report a count is not evidence that everything
+    // landed.
+    size = uploadSize(info.size, written);
+  } finally {
+    // For the paths where the stream is never consumed. A ReadStream built from
+    // a FileHandle closes that handle when it ends or is destroyed, so on the
+    // success path this is a second close and resolves as a no-op — but a
+    // writeFile that throws before reading a byte (an unresolvable path, a
+    // refused length, a request that never leaves) destroys nothing, and the
+    // descriptor would be left to the garbage collector.
+    await fh.close().catch(() => {});
+  }
   process.stderr.write(`${srcArg} -> ${remote.target}:${path} (${size})\n`);
   return 0;
 }
@@ -823,7 +894,15 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
       process.stderr.write(`mandala: ${err.message}\n`);
       return 1;
     }
-    if (err instanceof Error && 'code' in err) {
+    // A Node SystemError — ENOENT, EACCES, ECONNREFUSED — whose message is
+    // already the whole of what a user can act on. Tested on the type of
+    // `code` rather than its presence, which is what the transport's own two
+    // readers of the field do: every DOMException carries a NUMERIC legacy
+    // `code` on its prototype, so `'code' in err` also caught the internal
+    // faults the comment above says deserve their stack. A malformed terminal
+    // URL is one — `new WebSocket(url)` throws code 12 — and it printed as the
+    // unlocatable one-liner `mandala: hash`.
+    if (err instanceof Error && typeof (err as { code?: unknown }).code === 'string') {
       process.stderr.write(`mandala: ${err.message}\n`);
       return 1;
     }

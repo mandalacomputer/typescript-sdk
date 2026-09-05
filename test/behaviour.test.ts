@@ -63,6 +63,17 @@ describe('the computer record', () => {
     expect((await c.computers.get('vm-1')).screen).toEqual({ width: 1280, height: 800 });
   });
 
+  it('falls back for a resolution that is not a whole number of pixels', async () => {
+    // The guard tested positivity and finiteness, so `1280.5x800.2` walked past
+    // it and became a display_width_px of 1280.5 — a screen no screenshot can
+    // be, in the one place the docstring says the numbers have to equal what
+    // screenshots actually are. The platform's own parser takes only whole
+    // numbers (server/display.go), so this is the guard holding a line the API
+    // already holds rather than a live hazard.
+    const { client: c } = client(() => json({ ...COMPUTER, resolution: '1280.5x800.2x24' }));
+    expect((await c.computers.get('vm-1')).screen).toEqual({ width: 1280, height: 800 });
+  });
+
   it('keeps the id of a machine that was built and would not boot', async () => {
     // The machine exists and is billable, so it comes back rather than being
     // thrown away with an exception.
@@ -1466,6 +1477,24 @@ describe('what a payload cannot be allowed to mean', () => {
     expect(await computer.clearSchedule()).toMatchObject({ enabled: false });
   });
 
+  it('reads a cleared-schedule body that is not an object as the cleared schedule', async () => {
+    // `{}` is a real answer on this route and only on this one. An array or a
+    // scalar is not: it reached toSchedule, which read enabled/hour/minute/tz
+    // off it, got undefined for every one, and fabricated "disabled, midnight
+    // UTC" with the garbage spread into `raw`. It is dropped rather than
+    // refused — the DELETE already answered 2xx, so the schedule is gone
+    // whatever the acknowledgement said, and a platform that says `"cleared"`
+    // is not a reason to fail the call.
+    for (const body of [[1, 2, 3], 'cleared', 7]) {
+      const { client: c } = client((call) =>
+        call.method === 'DELETE' && call.path.endsWith('/schedule') ? json(body) : anyRoute(call),
+      );
+      const cleared = await (await c.computers.get('vm-1')).clearSchedule();
+      expect(cleared).toMatchObject({ enabled: false, hour: 0, minute: 0, tz: 'UTC' });
+      expect(cleared.raw).toEqual({});
+    }
+  });
+
   it('also treats a 200 empty object as an acknowledgement of the schedule body', async () => {
     const { client: c } = client((call) =>
       call.path.endsWith('/schedule') ? json({}) : anyRoute(call),
@@ -2759,6 +2788,25 @@ describe('the agent loop', () => {
     const computer = await c.computers.get('vm-1');
     await expect(computer.agentOnce({ prompt: 'go', modelKey: '   ' })).rejects.toThrow(/modelKey/);
     await expect(computer.agent({ prompt: 'go', modelKey: '   ' })).rejects.toThrow(/modelKey/);
+    expect(rec.calls.every((call) => !call.path.endsWith('/agent'))).toBe(true);
+  });
+
+  it('refuses a missing model key where the call was made, not at the first next()', async () => {
+    // An async generator's body does not run until the stream is iterated, so
+    // the check inside it let `agentStream({ prompt })` SUCCEED and surfaced the
+    // refusal wherever the stream was eventually consumed — possibly in another
+    // function, possibly never. And it named `agent()`, about a method the
+    // caller had not called.
+    const { rec, client: c } = client(anyRoute);
+    const computer = await c.computers.get('vm-1');
+    expect(() => computer.agentStream({ prompt: 'go', modelKey: '' })).toThrow(
+      /agentStream\(\) needs/,
+    );
+    // Each entry point still names itself.
+    await expect(computer.agent({ prompt: 'go', modelKey: '' })).rejects.toThrow(/agent\(\) needs/);
+    await expect(computer.agentOnce({ prompt: 'go', modelKey: '' })).rejects.toThrow(
+      /agentOnce\(\) needs/,
+    );
     expect(rec.calls.every((call) => !call.path.endsWith('/agent'))).toBe(true);
   });
 

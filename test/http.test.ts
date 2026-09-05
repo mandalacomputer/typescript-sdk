@@ -28,7 +28,7 @@ import {
   TooLargeError,
   UnavailableError,
 } from '../src/index.js';
-import { MAX_TIMER_MS } from '../src/transport.js';
+import { MAX_TIMER_MS, Transport } from '../src/transport.js';
 import { isTransientForPoll } from '../src/wait.js';
 import { anyRoute, BASE, bytes, COMPUTER, errorJson, json, recorder, SNAPSHOT } from './harness.js';
 
@@ -117,6 +117,20 @@ describe('the client deadline', () => {
 
   it('still takes 0, which is how the deadline is turned off', () => {
     expect(() => new Client({ apiKey: 'com_test', baseUrl: BASE, timeoutMs: 0 })).not.toThrow();
+  });
+
+  it('names a bad per-request timeout on every client, not only one with a deadline', async () => {
+    // The validation used to sit BEHIND the early return, so the same mistake
+    // was a ValidationError on a default client and silence on one built with
+    // `timeoutMs: 0` — whether a caller was told depended on a setting made
+    // somewhere else entirely.
+    for (const opts of [{}, { timeoutMs: 0 }]) {
+      const rec = recorder(anyRoute);
+      const c = await client(rec, opts).computers.get('vm-1');
+      await expect(c.readFile('/etc/hostname', { timeoutMs: Number.NaN })).rejects.toThrow(
+        /the timeout for this request must be/,
+      );
+    }
   });
 
   it('refuses a delay that Node would wrap to one millisecond', () => {
@@ -262,6 +276,44 @@ describe('the client deadline', () => {
     const err = await c.computers.list().catch((e) => e);
     expect(err).toBeInstanceOf(APIError);
     expect(err.status).toBe(301);
+  });
+});
+
+describe('what the constructor will not build on', () => {
+  it('names a runtime with no global fetch, rather than failing on `bind`', () => {
+    const saved = globalThis.fetch;
+    try {
+      // @ts-expect-error — modelling a runtime that has none at all.
+      delete globalThis.fetch;
+      // Was `TypeError: Cannot read properties of undefined (reading 'bind')`,
+      // which names neither fetch nor this SDK nor the way out of it.
+      expect(() => new Client({ apiKey: 'com_test', baseUrl: BASE })).toThrow(/no global fetch/);
+      // And the escape the message offers really is one.
+      expect(
+        () => new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: recorder(anyRoute).fetch }),
+      ).not.toThrow();
+    } finally {
+      globalThis.fetch = saved;
+    }
+  });
+
+  it('refuses a request that sets both raw and body', () => {
+    // Documented as exclusive and never enforced: `raw` won and the JSON the
+    // caller could see was dropped in silence. Unreachable from outside the
+    // package — neither this class nor RequestOptions is exported — which is
+    // why it is reached here through the transport directly.
+    const rec = recorder(anyRoute);
+    const t = new Transport({ apiKey: 'com_test', baseUrl: BASE, fetch: rec.fetch });
+    return expect(
+      t.json('PUT', 'computers/vm-1/files', {
+        raw: new Uint8Array([1, 2, 3]),
+        body: { path: '/tmp/x' },
+      }),
+    )
+      .rejects.toThrow(/raw or body, not both/)
+      .then(() => {
+        expect(rec.calls).toHaveLength(0);
+      });
   });
 });
 
@@ -687,6 +739,67 @@ describe('decoding', () => {
     const c = await client(rec).computers.get('vm-1');
     await expect(c.exec('true', { timeoutS: Number(undefined) })).rejects.toThrow(/finite/);
     await expect(c.exec('true', { timeoutS: Infinity })).rejects.toThrow(/finite/);
+  });
+});
+
+describe('a failure body from something that is not the platform', () => {
+  it('stops reading it at the ceiling instead of holding all of it', async () => {
+    // The platform's own failure body is a JSON message of a few hundred bytes.
+    // Anything larger came from an edge or a captive portal, and only its first
+    // pages are worth anything — the Ray ID support asks for sits in a footer a
+    // few kilobytes in, well inside the ceiling. Read to the end, a hostile or
+    // broken origin could put whatever it liked in this process's memory, with
+    // the composed deadline bounding a SLOW body and not a large one.
+    const over = 5_000;
+    const page = 'x'.repeat((1 << 20) + over);
+    const rec = recorder(
+      () => new Response(page, { status: 502, headers: { 'content-type': 'text/html' } }),
+    );
+    const err = await client(rec)
+      .computers.get('vm-1')
+      .catch((e) => e);
+    expect(err).toBeInstanceOf(APIError);
+    expect((err as APIError).body).toHaveLength(1 << 20);
+  });
+
+  it('stops at the same ceiling when the page arrived on a stream route', async () => {
+    // The most exposed of the buffered reads: a stream request passes
+    // `noTimeout`, so no deadline bounds this body, and only 200 characters of
+    // it are ever quoted. A proxy answering the agent route with a large HTML
+    // page had all of it read to produce that one sentence.
+    const chunk = new TextEncoder().encode('x'.repeat(1 << 16));
+    const offered = 1 << 24;
+    let pulled = 0;
+    const page = () =>
+      new ReadableStream<Uint8Array>({
+        pull(ctrl) {
+          if (pulled >= offered) return void ctrl.close();
+          pulled += chunk.length;
+          ctrl.enqueue(chunk);
+        },
+      });
+    const rec = recorder((call) =>
+      call.path.endsWith('/agent')
+        ? new Response(page(), { status: 200, headers: { 'content-type': 'text/html' } })
+        : anyRoute(call),
+    );
+    const c = await client(rec).computers.get('vm-1');
+    await expect(c.agent({ prompt: 'go', modelKey: 'sk' })).rejects.toThrow(
+      /expected an event stream from POST computers\/vm-1\/agent.*text\/html/s,
+    );
+    // Room for the chunk that crosses it; nowhere near what was on offer.
+    expect(pulled).toBeLessThanOrEqual((1 << 20) + chunk.length);
+  });
+
+  it('still keeps a page whole when it fits, so the Ray ID survives', async () => {
+    const page = `<html><body>error</body><!-- Ray ID: 8f0c${'.'.repeat(20_000)} --></html>`;
+    const rec = recorder(
+      () => new Response(page, { status: 502, headers: { 'content-type': 'text/html' } }),
+    );
+    const err = await client(rec)
+      .computers.get('vm-1')
+      .catch((e) => e);
+    expect((err as APIError).body).toBe(page);
   });
 });
 

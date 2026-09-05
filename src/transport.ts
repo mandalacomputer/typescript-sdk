@@ -40,6 +40,69 @@ const INCOMPLETE_HEADER = 'X-GC-Incomplete';
 const MAX_SSE_EVENT_CHARS = 1 << 20;
 
 /**
+ * Most of a failure's body worth holding, in bytes.
+ *
+ * Every other body here is bounded by what the platform will send — a file
+ * request moves at most 64 MiB, an exec result at most the guest agent's 16 MiB
+ * per stream — and is a body the caller asked for. A failure's is neither. The
+ * platform's own is a JSON message of a few hundred bytes; everything larger
+ * comes from something that is not the platform, and the one part of it worth
+ * keeping is the edge's error page, which carries a Cloudflare Ray ID in a
+ * footer a few kilobytes in. So the ceiling only has to clear an HTML error
+ * page, and the same 1 MiB the event stream already refuses to exceed does.
+ *
+ * Applied to both bodies read only to be reported: a failing response's, and
+ * the one {@link Transport.sse} reads when a route answered with something
+ * that is not an event stream. That second one is the more exposed of the two
+ * — a stream request passes `noTimeout`, so nothing but the caller's own
+ * signal bounds it — and only its first 200 characters ever reach the message,
+ * so a multi-megabyte error page was being buffered whole to quote a sentence
+ * of it.
+ *
+ * Deliberately not applied to {@link Transport.bytes} or the JSON decode:
+ * both have legitimate bodies whose size is the platform's to choose, and a
+ * ceiling below one of those would refuse a download the API is willing to
+ * serve.
+ */
+const MAX_ERROR_BODY_BYTES = 1 << 20;
+
+/**
+ * A response body as text, reading no more than `max` bytes of it.
+ *
+ * Read through rather than `.text()`'d and sliced: slicing happens after every
+ * byte is already resident, which is the cost worth avoiding. What is past the
+ * ceiling is dropped and the rest of the response cancelled — there is no
+ * caller for it, and holding the socket open to finish reading a body we have
+ * decided not to keep would be worse than either.
+ */
+const textUpTo = async (resp: Response, max: number): Promise<string> => {
+  // A null-body status has nothing to read and no reader to take; `.text()`
+  // answers '' without touching the network.
+  if (!resp.body) return resp.text();
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let text = '';
+  let seen = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      // The flush: a multi-byte character split across the last two chunks is
+      // only completed by a final decode with no input.
+      if (done) return text + decoder.decode();
+      const room = max - seen;
+      if (value.length >= room) return text + decoder.decode(value.subarray(0, room));
+      seen += value.length;
+      text += decoder.decode(value, { stream: true });
+    }
+  } finally {
+    // Never awaited. Cancelling a body the peer is still writing can wait on
+    // the socket, and this runs on the path that is already reporting a
+    // failure — the error is the news, not the teardown.
+    void reader.cancel().catch(() => {});
+  }
+};
+
+/**
  * How big a request body is, when that can be known without consuming it.
  *
  * One definition because two decisions turn on it and they are the same
@@ -369,6 +432,17 @@ export class Transport {
       );
     }
     this.#timeoutMs = timeoutMs;
+    // Named, like every other misconfiguration this constructor refuses. The
+    // line below is `globalThis.fetch.bind(...)`, so a runtime without one
+    // failed with `TypeError: Cannot read properties of undefined (reading
+    // 'bind')` — a message that names neither fetch, nor this SDK, nor the fix
+    // — on the first `new Client()`. cli.ts and events.ts both make exactly
+    // this check for `WebSocket` and say what is missing.
+    if (!opts.fetch && typeof globalThis.fetch !== 'function') {
+      throw new ValidationError(
+        'this runtime has no global fetch — pass one as `fetch`, or use Node 22 or newer',
+      );
+    }
     // Bound to globalThis rather than passed bare: an unbound `fetch` throws
     // "Illegal invocation" in some runtimes.
     this.#fetch = opts.fetch ?? globalThis.fetch.bind(globalThis);
@@ -384,18 +458,25 @@ export class Transport {
 
   /** This request's deadline in milliseconds, or 0 for none. */
   #deadlineMs(opts: RequestOptions): number {
-    if (opts.noTimeout || !this.#timeoutMs) return 0;
     const min = opts.minTimeoutMs ?? 0;
     // Refused rather than absorbed: a NaN — timeoutS: Number(unsetEnvVar) is
     // the usual spelling — poisons Math.max, reads as "no timeout" below, and
     // silently removes the one guard against a request hanging forever; an
     // Infinity surfaces later as a baffling "could not reach <baseUrl>" out
     // of AbortSignal.timeout. Both are caller mistakes, named as such here.
+    //
+    // Judged BEFORE the early return, though the branches below it never read
+    // the number. Behind it, the identical `timeoutMs: NaN` was named on a
+    // default client and accepted in silence on one built with `timeoutMs: 0`
+    // — so whether a caller learns their argument is nonsense depended on a
+    // setting made somewhere else entirely, which is the constructor's own
+    // "one hazard with two doors into it" the other way round.
     if (!Number.isFinite(min) || min < 0 || min > MAX_TIMER_MS) {
       throw new ValidationError(
         `the timeout for this request must be between 0 and ${MAX_TIMER_MS}ms (got ${min})`,
       );
     }
+    if (opts.noTimeout || !this.#timeoutMs) return 0;
     return Math.max(this.#timeoutMs, min);
   }
 
@@ -416,6 +497,15 @@ export class Transport {
     const timeoutMs = this.#deadlineMs(opts);
     const headers: Record<string, string> = { ...this.#headers, ...opts.headers };
     let body: string | Uint8Array | ReadableStream<Uint8Array> | undefined;
+    // The two are documented as exclusive and the branch below picks `raw`, so
+    // a caller who set both got a request that silently dropped the half they
+    // could see. Only reachable from inside this package — neither Transport
+    // nor RequestOptions is exported — which is why it is a refusal here rather
+    // than a type: an invariant no compiler is checking is one that has to be
+    // checked at the point it is relied on.
+    if (opts.raw !== undefined && opts.body !== undefined) {
+      throw new ValidationError('pass raw or body, not both');
+    }
     if (opts.raw !== undefined) {
       // The file upload's body IS the file. Content-Type is deliberately
       // octet-stream rather than guessed from the path: the platform writes the
@@ -603,7 +693,7 @@ export class Transport {
     // `ConflictError`, which this SDK documents as the one worth retrying.
     // #fetchRaw's rule, applied to the one body that was outside it.
     const text = await this.#readBody(
-      () => resp.text(),
+      () => textUpTo(resp, MAX_ERROR_BODY_BYTES),
       method,
       path,
       { resp, timeoutMs },
@@ -789,7 +879,7 @@ export class Transport {
     // it.
     const contentType = resp.headers.get('content-type') ?? '';
     if (!contentType.toLowerCase().includes('text/event-stream')) {
-      const text = await resp.text().catch(() => '');
+      const text = await textUpTo(resp, MAX_ERROR_BODY_BYTES).catch(() => '');
       throw new MandalaError(
         `expected an event stream from ${method} ${path}, got ` +
           `${contentType || 'no content type'}: ${text.slice(0, 200)}`,
