@@ -230,18 +230,51 @@ const b64 = (v: unknown, field: string): Uint8Array => {
       `expected ${field} to be base64 output, got ${v === undefined ? 'no such field' : typeof v}`,
     );
   }
-  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(v) || v.length % 4 !== 0) {
+  const bytes = base64Bytes(v);
+  if (bytes === undefined) {
     throw new MandalaError(`${field} is not base64 (${v.length} characters)`);
   }
+  return bytes;
+};
+
+/**
+ * Standard base64 with padding, decoded, or `undefined` for text that is not.
+ *
+ * ONE decoder, for {@link b64} here and for `verify()`'s signature entries in
+ * `webhooks.ts`, which is where it started. Two copies is what this avoids: the
+ * strictness is the substance of both — the webhook one decides what a MAC even
+ * is — and a rule tightened in one copy and not the other is the shape of drift
+ * that neither caller's tests would show. What each caller does with a failure
+ * still differs, which is why this ANSWERS rather than throws: an entry that is
+ * not base64 is a header this SDK skips, and an exec field that is not is a
+ * response it refuses.
+ *
+ * Checked before `atob`, which is lenient about whitespace and, on some
+ * runtimes, about padding. Neither a signature nor Go's `base64.StdEncoding` is
+ * ever written that way, and text that is nearly base64 is better said than
+ * decoded into something shorter than what was sent.
+ *
+ * `Buffer` first where there is one. The loop below is fine for a 32-byte MAC
+ * and is the hot path of `exec`, which carries up to 16 MiB per call: measured
+ * on that, `Buffer.from` is 6ms against 47ms. The loop stays for every runtime
+ * without one — this SDK's other web-standard paths (WebCrypto, TextDecoder)
+ * are the reason it cannot simply assume Node. Leniency in `Buffer.from`, which
+ * ignores characters outside the alphabet, costs nothing here: the text has
+ * already been checked.
+ */
+export function base64Bytes(text: string): Uint8Array | undefined {
+  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(text) || text.length % 4 !== 0) return undefined;
+  const buffer = (globalThis as { Buffer?: { from(s: string, enc: string): Uint8Array } }).Buffer;
+  if (buffer) return new Uint8Array(buffer.from(text, 'base64'));
   try {
-    const bin = atob(v);
+    const bin = atob(text);
     const out = new Uint8Array(bin.length);
     for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
     return out;
-  } catch (cause) {
-    throw new MandalaError(`${field} is not base64 (${v.length} characters)`, { cause });
+  } catch {
+    return undefined;
   }
-};
+}
 
 /**
  * Bytes as text, for the accessors beside {@link ExecResult.stdout}.
@@ -260,7 +293,29 @@ const b64 = (v: unknown, field: string): Uint8Array => {
  * form rather than a tidied version of them.
  */
 const TEXT = new TextDecoder('utf-8', { ignoreBOM: true });
-const asText = (b: Uint8Array): string => TEXT.decode(b);
+
+/**
+ * The two text accessors, decoded when they are read and not before.
+ *
+ * ON DEMAND rather than eagerly, which is the difference between a convenience
+ * and a tax. `exec` carries up to 16 MiB and a poll a megabyte per call, and the
+ * caller who most wants the bytes is the one this would charge the most: the
+ * README's own example reads a PNG out of the guest, and decoding it eagerly
+ * builds a 32 MB string of `U+FFFD` that nothing ever reads. Memoised on first
+ * read, so a caller that scans the text twice decodes once.
+ *
+ * Read through a getter in each decoder's own object literal, so `stdoutText` is
+ * an ordinary enumerable `string` property to every caller and to the type.
+ * NOT built here and spread in: object spread reads every getter it copies,
+ * which would have decoded both streams at the moment this tried not to.
+ */
+const lazyText = (bytes: Uint8Array): (() => string) => {
+  let text: string | undefined;
+  return () => {
+    text ??= TEXT.decode(bytes);
+    return text;
+  };
+};
 
 /**
  * The instant Go's zero `time.Time` names, in every spelling of it.
@@ -1819,12 +1874,18 @@ export function toExecResult(d: Record<string, unknown>): ExecResult {
   // in it. See b64: there is no absent output, only quiet commands.
   const stdout = b64(d.stdout_b64, 'stdout_b64');
   const stderr = b64(d.stderr_b64, 'stderr_b64');
+  const outText = lazyText(stdout);
+  const errText = lazyText(stderr);
   return {
     exitCode,
     stdout,
     stderr,
-    stdoutText: asText(stdout),
-    stderrText: asText(stderr),
+    get stdoutText() {
+      return outText();
+    },
+    get stderrText() {
+      return errText();
+    },
     timedOut,
     outTruncated,
     errTruncated,
@@ -1919,6 +1980,8 @@ export function toBackgroundExec(d: Record<string, unknown>): BackgroundExec {
   // rather than by telling it where it got to (OPL-4403).
   const stdout = b64(d.stdout_b64, 'stdout_b64');
   const stderr = b64(d.stderr_b64, 'stderr_b64');
+  const outText = lazyText(stdout);
+  const errText = lazyText(stderr);
   return {
     pid,
     running: stillRunning(d),
@@ -1939,8 +2002,12 @@ export function toBackgroundExec(d: Record<string, unknown>): BackgroundExec {
     exitCode: d.exit_code == null ? undefined : (count(d.exit_code) ?? -1),
     stdout,
     stderr,
-    stdoutText: asText(stdout),
-    stderrText: asText(stderr),
+    get stdoutText() {
+      return outText();
+    },
+    get stderrText() {
+      return errText();
+    },
     // FALSE on anything unreadable, and this is the counter-example worth
     // keeping: `more` reads like a caveat and behaves like a SWITCH. The loop in
     // this package's README polls again with no sleep while it is set, so the

@@ -1353,6 +1353,11 @@ describe('command output is bytes', () => {
     expect(res.stdoutText).toBe('\uFFFD\uFFFD ready\n');
     expect(res.stderrText).toBe('');
     expect(res.stderr.length).toBe(0);
+    // The text is decoded when it is read rather than when the result is built,
+    // and this is the part of that which a caller can see: an ordinary
+    // enumerable property, so it spreads and serialises like every other field.
+    expect(Object.keys(res)).toContain('stdoutText');
+    expect({ ...res }.stdoutText).toBe(res.stdoutText);
   });
 
   it('carries the same bytes through a poll and a kill', async () => {

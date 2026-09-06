@@ -3413,8 +3413,11 @@ describe('an options object where a point was expected', () => {
 
 describe('a body the route did not send', () => {
   it('refuses an empty exec body rather than reporting a command that failed', async () => {
-    // `toExecResult({})` is `exitCode: -1, ok: false` — a command that ran and
-    // failed, which is a sentence nobody said. Callers branch on `ok`.
+    // The decoder refuses an empty body too — `stdout_b64` is not there to read
+    // (OPL-4543) — but it can only name the field. What is pinned here is that
+    // the ROUTE is named, which is the part that says where to look; before the
+    // output fields were renamed, the decoder's own answer was a command that
+    // ran and failed, a sentence nobody said.
     const { client: c } = client((call) =>
       call.path.endsWith('/exec') ? new Response(null, { status: 204 }) : anyRoute(call),
     );
