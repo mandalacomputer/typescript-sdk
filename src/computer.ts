@@ -2658,13 +2658,10 @@ export class Computer {
       signal: opts.signal,
     });
     // Checked rather than defaulted to `{}`. A 204 or an empty body decodes to
-    // `undefined` here, and `toExecResult({})` now refuses it — "expected
-    // stdout_b64 to be base64 output" (OPL-4543), where before the output
-    // fields were renamed it read as `exitCode: -1`, `ok: false`, a command
-    // that ran and failed, which was a sentence nobody said. Both are refusals
-    // of a body that could not be read; this one names the ROUTE, which the
-    // decoder cannot, and `clipboard()` and `agentOnce()` refuse a non-record
-    // for the same reason (OPL-4215).
+    // `undefined` here, and the decoder refuses that too — but it can only name
+    // the FIELD it could not read. This names the ROUTE, which is what says
+    // where to look; `clipboard()` and `agentOnce()` refuse a non-record for
+    // the same reason (OPL-4215).
     if (!P.isRecord(data)) {
       throw new MandalaError(`expected an exec result from POST ${path}`);
     }

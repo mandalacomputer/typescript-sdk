@@ -226,9 +226,11 @@ export const count = (v: unknown): number | undefined => {
  */
 const b64 = (v: unknown, field: string): Uint8Array => {
   if (typeof v !== 'string') {
-    throw new MandalaError(
-      `expected ${field} to be base64 output, got ${v === undefined ? 'no such field' : typeof v}`,
-    );
+    // Null NAMED, rather than left to `typeof`, which calls it an object and
+    // makes the one shape an always-emits-every-key serialiser sends read like
+    // `{}` or `[]`. `toBackgroundExec`'s pid refusal draws the same line.
+    const got = v === undefined ? 'no such field' : v === null ? 'null' : typeof v;
+    throw new MandalaError(`expected ${field} to be base64 output, got ${got}`);
   }
   const bytes = base64Bytes(v);
   if (bytes === undefined) {

@@ -1438,6 +1438,24 @@ describe('command output is bytes', () => {
     }
   });
 
+  it('says which non-answer arrived, null included', async () => {
+    // `typeof null` is 'object', which would report the one shape an
+    // always-emits-every-key serialiser sends as though it were `{}`.
+    for (const [value, said] of [
+      [null, /got null/],
+      [42, /got number/],
+      [undefined, /no such field/],
+    ] as const) {
+      const { client: c } = client((call) =>
+        call.path.endsWith('/exec')
+          ? json({ exit_code: 0, stdout_b64: value, stderr_b64: '' })
+          : anyRoute(call),
+      );
+      const computer = await c.computers.get('vm-1');
+      await expect(computer.exec('true'), JSON.stringify(value ?? null)).rejects.toThrow(said);
+    }
+  });
+
   it('reads an empty stream as an empty one, not as a missing one', async () => {
     const { client: c } = client((call) =>
       call.path.endsWith('/exec')
