@@ -702,7 +702,7 @@ describe('decoding', () => {
     const rec = recorder(async (call) => {
       if (!call.path.endsWith('/exec')) return anyRoute(call);
       await new Promise((r) => setTimeout(r, 50));
-      return json({ exit_code: 0, stdout: '', stderr: '', timed_out: false });
+      return json({ exit_code: 0, stdout_b64: '', stderr_b64: '', timed_out: false });
     });
     const c = await client(rec, { timeoutMs: 10 }).computers.get('vm-1');
     await expect(c.exec('sleep 1', { timeoutS: 1 })).resolves.toMatchObject({ ok: true });

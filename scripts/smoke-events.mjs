@@ -100,7 +100,7 @@ async function sh(cmd) {
   const r = await vm.exec(cmd);
   if (!r.ok) {
     throw new Error(
-      `guest command failed (exit ${r.exitCode}): ${cmd} — ${r.stderr.trim().slice(0, 200) || '(no stderr)'}`,
+      `guest command failed (exit ${r.exitCode}): ${cmd} — ${r.stderrText.trim().slice(0, 200) || '(no stderr)'}`,
     );
   }
   return r;

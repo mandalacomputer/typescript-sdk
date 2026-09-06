@@ -259,7 +259,7 @@ describe('a caveat survives a value nobody can read', () => {
   it('does not affirm a command that may never have finished', async () => {
     const { client: c } = client((call) =>
       call.path.endsWith('/exec')
-        ? json({ exit_code: 0, stdout: 'out', stderr: '', timed_out: 'maybe' })
+        ? json({ exit_code: 0, stdout_b64: 'b3V0', stderr_b64: '', timed_out: 'maybe' })
         : anyRoute(call),
     );
     const computer = await c.computers.get('vm-1');
@@ -272,7 +272,13 @@ describe('a caveat survives a value nobody can read', () => {
   it('does not hand back a truncated stream as if it were whole', async () => {
     const { client: c } = client((call) =>
       call.path.endsWith('/exec')
-        ? json({ exit_code: 0, stdout: 'x', stderr: '', out_truncated: {}, err_truncated: 'maybe' })
+        ? json({
+            exit_code: 0,
+            stdout_b64: 'eA==',
+            stderr_b64: '',
+            out_truncated: {},
+            err_truncated: 'maybe',
+          })
         : anyRoute(call),
     );
     const computer = await c.computers.get('vm-1');
@@ -320,7 +326,7 @@ describe('more is a switch, not a caveat', () => {
     for (const value of UNREADABLE) {
       const { client: c } = client((call) =>
         /\/exec\/\d+$/.test(call.path)
-          ? json({ pid: 4242, running: true, more: value, stdout: '' })
+          ? json({ pid: 4242, running: true, more: value, stdout_b64: '', stderr_b64: '' })
           : anyRoute(call),
       );
       const computer = await c.computers.get('vm-1');
@@ -377,7 +383,12 @@ describe('more is a switch, not a caveat', () => {
       [{ pid: 42, running: false }, false],
     ] as const) {
       const { client: c } = client((call) =>
-        /\/exec\/\d+$/.test(call.path) ? json(payload) : anyRoute(call),
+        // The output fields under the payload rather than in every row of it:
+        // the platform sends both on every one of these, and a table about
+        // `running` should not have to keep saying so (OPL-4543).
+        /\/exec\/\d+$/.test(call.path)
+          ? json({ stdout_b64: '', stderr_b64: '', ...payload })
+          : anyRoute(call),
       );
       const computer = await c.computers.get('vm-1');
       const status = await computer.execPoll(42);
@@ -391,13 +402,18 @@ describe('more is a switch, not a caveat', () => {
     // Absent and null are a host that said nothing, not a host saying no, and
     // what "running" means in the first place is that no exit code has arrived.
     for (const [payload, expected] of [
-      [{ pid: 4242, stdout: '' }, true],
+      [{ pid: 4242 }, true],
       [{ pid: 4242, running: null, exit_code: '' }, true],
       [{ pid: 4242, exit_code: 0 }, false],
       [{ pid: 4242, running: null, exit_code: 3 }, false],
     ] as const) {
       const { client: c } = client((call) =>
-        /\/exec\/\d+$/.test(call.path) ? json(payload) : anyRoute(call),
+        // The output fields under the payload rather than in every row of it:
+        // the platform sends both on every one of these, and a table about
+        // `running` should not have to keep saying so (OPL-4543).
+        /\/exec\/\d+$/.test(call.path)
+          ? json({ stdout_b64: '', stderr_b64: '', ...payload })
+          : anyRoute(call),
       );
       const computer = await c.computers.get('vm-1');
       const status = await computer.execPoll(4242);
@@ -605,7 +621,7 @@ describe('a coerced value is not the value', () => {
     for (const code of [[], [0], false, true, ' ', {}, 'killed', 'signal:9']) {
       const { client: c } = client((call) =>
         call.path.endsWith('/exec')
-          ? json({ exit_code: code, stdout: '', stderr: '', timed_out: false })
+          ? json({ exit_code: code, stdout_b64: '', stderr_b64: '', timed_out: false })
           : anyRoute(call),
       );
       const computer = await c.computers.get('vm-1');
@@ -625,7 +641,7 @@ describe('a coerced value is not the value', () => {
     ] as const) {
       const { client: c } = client((call) =>
         call.path.endsWith('/exec')
-          ? json({ exit_code: code, stdout: '', stderr: '', timed_out: false })
+          ? json({ exit_code: code, stdout_b64: '', stderr_b64: '', timed_out: false })
           : anyRoute(call),
       );
       const computer = await c.computers.get('vm-1');
@@ -686,7 +702,7 @@ describe('a coerced value is not the value', () => {
     for (const code of ['0x10', '0b101', '0o17', 'Infinity', '1_000', '1,000', '12px']) {
       const { client: c } = client((call) =>
         call.path.endsWith('/exec')
-          ? json({ exit_code: code, stdout: '', stderr: '', timed_out: false })
+          ? json({ exit_code: code, stdout_b64: '', stderr_b64: '', timed_out: false })
           : anyRoute(call),
       );
       const computer = await c.computers.get('vm-1');
@@ -1308,5 +1324,122 @@ describe('an optional timestamp is absent unless there is a time in it', () => {
     );
     const build = await c.builds.get('bld-1');
     expect(build.finishedAt).toBe('[object Object]');
+  });
+});
+
+/**
+ * OPL-4543. `stdout` and `stderr` used to be JSON strings, and a JSON string is
+ * UTF-8 by definition: every byte the guest printed that was not valid UTF-8 was
+ * replaced with `U+FFFD` on the way out, irreversibly, with a 200 and no flag
+ * saying so. The platform renamed both fields to carry base64 instead, and these
+ * are the two halves of what that means here — the bytes arrive intact, and a
+ * daemon still sending the old field is refused rather than read as a command
+ * that printed nothing.
+ */
+describe('command output is bytes', () => {
+  const OUT = new Uint8Array([0xff, 0xfe, 0x20, 0x72, 0x65, 0x61, 0x64, 0x79, 0x0a]);
+  const B64 = '//4gcmVhZHkK';
+
+  it('hands back bytes no JSON string could have carried', async () => {
+    const { client: c } = client((call) =>
+      call.path.endsWith('/exec')
+        ? json({ exit_code: 0, stdout_b64: B64, stderr_b64: '', timed_out: false })
+        : anyRoute(call),
+    );
+    const res = await (await c.computers.get('vm-1')).exec('cat /tmp/blob');
+    expect(Array.from(res.stdout)).toEqual(Array.from(OUT));
+    // And the text accessor is the lossy one, deliberately: the caller asked for
+    // text about bytes that are not text, and the bytes are still beside it.
+    expect(res.stdoutText).toBe('\uFFFD\uFFFD ready\n');
+    expect(res.stderrText).toBe('');
+    expect(res.stderr.length).toBe(0);
+  });
+
+  it('carries the same bytes through a poll and a kill', async () => {
+    for (const call_ of ['poll', 'kill'] as const) {
+      const { client: c } = client((call) =>
+        /\/exec\/\d+$/.test(call.path)
+          ? json({ pid: 42, running: false, exit_code: 0, stdout_b64: B64, stderr_b64: B64 })
+          : anyRoute(call),
+      );
+      const computer = await c.computers.get('vm-1');
+      const status = call_ === 'poll' ? await computer.execPoll(42) : await computer.execKill(42);
+      expect(Array.from(status.stdout), call_).toEqual(Array.from(OUT));
+      expect(Array.from(status.stderr), call_).toEqual(Array.from(OUT));
+    }
+  });
+
+  /**
+   * The reachable case, and the plainer one. A background poll is cut at 1 MiB
+   * on a BYTE offset, so an ordinary UTF-8 log longer than that has a multi-byte
+   * rune split across the cut — which is what made a JSON string corrupt plain
+   * text and not only binary. Joined, the bytes are the log; decoded chunk by
+   * chunk, each half is a replacement character, which is why the text accessor
+   * says so in its own doc rather than pretending otherwise.
+   */
+  it('lets a rune split across two polls be rejoined', async () => {
+    const chunks = ['aMM=', 'qWxsbw=='];
+    let n = 0;
+    const { client: c } = client((call) =>
+      /\/exec\/\d+$/.test(call.path)
+        ? json({
+            pid: 42,
+            running: n < chunks.length - 1,
+            more: n < chunks.length - 1,
+            stdout_b64: chunks[n++] ?? '',
+            stderr_b64: '',
+          })
+        : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    const first = await computer.execPoll(42);
+    const second = await computer.execPoll(42);
+    expect([first.stdoutText, second.stdoutText]).toEqual(['h\uFFFD', '\uFFFDllo']);
+    const joined = new Uint8Array([...first.stdout, ...second.stdout]);
+    expect(new TextDecoder().decode(joined)).toBe('héllo');
+  });
+
+  /**
+   * The rename is the whole point: a daemon that predates it sends `stdout` and
+   * no `stdout_b64`, and reading an absent field as empty would report every
+   * command as having printed nothing, with the exit code and every flag intact
+   * so that nothing else looked wrong. There is no empty answer to give here —
+   * `''` is a real result — so this is one of the few places this file refuses.
+   */
+  it('refuses a daemon that still sends the old field', async () => {
+    const { client: c } = client((call) =>
+      call.path.endsWith('/exec')
+        ? json({ exit_code: 0, stdout: 'ready\n', stderr: '', timed_out: false })
+        : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    await expect(computer.exec('echo ready')).rejects.toThrow(/stdout_b64/);
+  });
+
+  it('refuses a background handle whose output is not base64', async () => {
+    for (const value of ['not base64!', 'YWJjZA', 42, null]) {
+      const { client: c } = client((call) =>
+        /\/exec\/\d+$/.test(call.path)
+          ? json({ ...EXEC_STARTED, stdout_b64: '', stderr_b64: value })
+          : anyRoute(call),
+      );
+      const computer = await c.computers.get('vm-1');
+      const poll = computer.execPoll(4242);
+      // 'YWJjZA' is the one a lenient decoder would take: it is `abcd` with
+      // the padding left off, which `atob` accepts on most runtimes and
+      // `base64.StdEncoding` never writes. The alphabet AND the length are
+      // checked, so text that is nearly base64 is said rather than decoded.
+      await expect(poll, JSON.stringify(value)).rejects.toThrow(MandalaError);
+    }
+  });
+
+  it('reads an empty stream as an empty one, not as a missing one', async () => {
+    const { client: c } = client((call) =>
+      call.path.endsWith('/exec')
+        ? json({ exit_code: 0, stdout_b64: '', stderr_b64: '', timed_out: false })
+        : anyRoute(call),
+    );
+    const res = await (await c.computers.get('vm-1')).exec('true');
+    expect([res.stdout.length, res.stdoutText, res.ok]).toEqual([0, '', true]);
   });
 });

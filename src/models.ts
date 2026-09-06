@@ -198,6 +198,71 @@ export const count = (v: unknown): number | undefined => {
 };
 
 /**
+ * The bytes a base64 field carries, or a refusal naming the field.
+ *
+ * THROWS where the rest of this file falls back, and the reason is that there is
+ * no empty answer to give. A command's output has no "the platform did not send
+ * one" spelling: `''` is a real, ordinary result — a command that printed
+ * nothing — so an unreadable field read as empty is indistinguishable from a
+ * quiet command, on the one route whose whole purpose is to carry what a command
+ * said. The shape this catches is a client pointed at a daemon that still sends
+ * `stdout`/`stderr` (before platform OPL-4403): every field absent, every
+ * command reported as having printed nothing, every exit code and flag intact so
+ * that nothing else looks wrong. `toBackgroundExec` refuses an unreadable pid
+ * for the same reason — a wrong answer that reads as fine is worse than a loud
+ * one.
+ *
+ * STRICT about the alphabet and the length rather than handing it to `atob`,
+ * which tolerates whitespace and, on some runtimes, missing padding. Go writes
+ * `base64.StdEncoding`, so padded standard base64 is the only thing that can
+ * arrive, and text that is not that is evidence the field is not what this
+ * thinks it is — better said than decoded into something shorter than what the
+ * command actually printed.
+ *
+ * The value is deliberately NOT quoted into the message: it is a command's
+ * output, up to 16 MiB of it, and quite possibly a token the caller passed in
+ * `env` and the command echoed back. The field name and the length are what
+ * identifies the failure.
+ */
+const b64 = (v: unknown, field: string): Uint8Array => {
+  if (typeof v !== 'string') {
+    throw new MandalaError(
+      `expected ${field} to be base64 output, got ${v === undefined ? 'no such field' : typeof v}`,
+    );
+  }
+  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(v) || v.length % 4 !== 0) {
+    throw new MandalaError(`${field} is not base64 (${v.length} characters)`);
+  }
+  try {
+    const bin = atob(v);
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  } catch (cause) {
+    throw new MandalaError(`${field} is not base64 (${v.length} characters)`, { cause });
+  }
+};
+
+/**
+ * Bytes as text, for the accessors beside {@link ExecResult.stdout}.
+ *
+ * LOSSY, and that is the difference between this and `readTextFile`, which
+ * throws. A caller reaching for `.stdoutText` has a log in mind, and the two
+ * ways a log arrives with a byte that is not UTF-8 are both ordinary: a stray
+ * latin-1 byte in a build's output, and — more often — a multi-byte rune split
+ * across the 1 MiB cut a background poll makes on a BYTE offset, where the next
+ * poll carries the other half. Throwing would make the text accessor unusable
+ * for exactly the streams it exists for, and the bytes are right there beside it
+ * for anyone who cannot accept a `U+FFFD`.
+ *
+ * `ignoreBOM` so that a leading `U+FEFF` survives into the string: the default
+ * decoder eats one, and this accessor is meant to be the same bytes in another
+ * form rather than a tidied version of them.
+ */
+const TEXT = new TextDecoder('utf-8', { ignoreBOM: true });
+const asText = (b: Uint8Array): string => TEXT.decode(b);
+
+/**
  * The instant Go's zero `time.Time` names, in every spelling of it.
  *
  * A number and not a string, because the zero time has more than one written
@@ -1671,11 +1736,36 @@ export function toHoldings(d: Record<string, unknown>): Holdings {
   };
 }
 
-/** The outcome of a shell command run inside the guest. */
+/**
+ * The outcome of a shell command run inside the guest.
+ *
+ * {@link stdout} and {@link stderr} are BYTES, and the text is beside them in
+ * {@link stdoutText} and {@link stderrText}. The platform sends both streams
+ * base64-encoded (OPL-4403) precisely because a JSON string could not carry
+ * them: a JSON string is UTF-8 by definition, so every byte that was not valid
+ * UTF-8 became `U+FFFD` on the way out, and a command that printed a tarball, a
+ * PNG, or a latin-1 build log came back altered with a 200 and no flag saying
+ * so. Decoding that back into a string here would move the same defect to this
+ * SDK's own boundary, so what this hands back is what the command wrote.
+ */
 export type ExecResult = {
   exitCode: number;
-  stdout: string;
-  stderr: string;
+  /** What the command wrote to stdout, byte for byte. */
+  stdout: Uint8Array;
+  /** The same for stderr. */
+  stderr: Uint8Array;
+  /**
+   * {@link stdout} decoded as UTF-8, with `U+FFFD` for anything that is not.
+   *
+   * The convenience for the ordinary case, where the command printed a line of
+   * text and you want to read it. It replaces rather than throws, because a
+   * build log with one stray byte in it is still a log; when the exact bytes
+   * matter — anything binary, anything you are hashing or writing to a file —
+   * read {@link stdout}.
+   */
+  stdoutText: string;
+  /** The same for {@link stderr}. */
+  stderrText: string;
   timedOut: boolean;
   /**
    * True when the guest agent stopped capturing stdout before the command
@@ -1724,10 +1814,17 @@ export function toExecResult(d: Record<string, unknown>): ExecResult {
   const timedOut = caveat(d.timed_out);
   const outTruncated = caveat(d.out_truncated);
   const errTruncated = caveat(d.err_truncated);
+  // Both streams decoded before anything is built, so that a payload this
+  // client cannot read is a refusal rather than a result with an empty stream
+  // in it. See b64: there is no absent output, only quiet commands.
+  const stdout = b64(d.stdout_b64, 'stdout_b64');
+  const stderr = b64(d.stderr_b64, 'stderr_b64');
   return {
     exitCode,
-    stdout: str(d.stdout),
-    stderr: str(d.stderr),
+    stdout,
+    stderr,
+    stdoutText: asText(stdout),
+    stderrText: asText(stderr),
     timedOut,
     outTruncated,
     errTruncated,
@@ -1749,8 +1846,23 @@ export type BackgroundExec = {
   running: boolean;
   /** Set once it has exited. `undefined` while it is still running. */
   exitCode?: number;
-  stdout: string;
-  stderr: string;
+  /** What the command has printed since the last poll, byte for byte. */
+  stdout: Uint8Array;
+  /** The same for stderr. */
+  stderr: Uint8Array;
+  /**
+   * {@link stdout} decoded as UTF-8, with `U+FFFD` for anything that is not.
+   *
+   * A poll is cut at 1 MiB on a BYTE offset, so a rune that straddles the cut
+   * arrives in halves and each half decodes to a replacement character here —
+   * which is the plainest reason to concatenate the BYTES across polls and
+   * decode once at the end if you are keeping the whole log. For printing each
+   * chunk as it arrives, write {@link stdout} to a stream and let it do the
+   * decoding.
+   */
+  stdoutText: string;
+  /** The same for {@link stderr}. */
+  stderrText: string;
   /** True when the platform has more output waiting — poll again straight away. */
   more: boolean;
   killed: boolean;
@@ -1800,6 +1912,13 @@ export function toBackgroundExec(d: Record<string, unknown>): BackgroundExec {
       `expected a background command's pid, got ${JSON.stringify(d.pid ?? null)}`,
     );
   }
+  // As in toExecResult, and for the same reason. The offsets the platform
+  // carries beside these — `stdout_offset`, `stderr_offset` — count DECODED
+  // bytes, which is worth knowing and nothing this SDK has to act on: the
+  // cursor lives on the platform, and a poll asks for what is new by pid alone
+  // rather than by telling it where it got to (OPL-4403).
+  const stdout = b64(d.stdout_b64, 'stdout_b64');
+  const stderr = b64(d.stderr_b64, 'stderr_b64');
   return {
     pid,
     running: stillRunning(d),
@@ -1818,8 +1937,10 @@ export function toBackgroundExec(d: Record<string, unknown>): BackgroundExec {
     // disagreed about a real payload; they disagreed about what this file
     // believes, which is worth more than the branch that carried it.
     exitCode: d.exit_code == null ? undefined : (count(d.exit_code) ?? -1),
-    stdout: str(d.stdout),
-    stderr: str(d.stderr),
+    stdout,
+    stderr,
+    stdoutText: asText(stdout),
+    stderrText: asText(stderr),
     // FALSE on anything unreadable, and this is the counter-example worth
     // keeping: `more` reads like a caveat and behaves like a SWITCH. The loop in
     // this package's README polls again with no sleep while it is set, so the

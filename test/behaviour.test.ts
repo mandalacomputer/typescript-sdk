@@ -1527,7 +1527,9 @@ describe('what a payload cannot be allowed to mean', () => {
     // False is the claim that the command is over, which is the finished-job
     // answer again by another route.
     const { client: c } = client((call) =>
-      call.path.endsWith('/exec') ? json({ pid: 7 }) : anyRoute(call),
+      call.path.endsWith('/exec')
+        ? json({ pid: 7, stdout_b64: '', stderr_b64: '' })
+        : anyRoute(call),
     );
     const computer = await c.computers.get('vm-1');
     expect((await computer.execBackground('sleep 60')).running).toBe(true);
@@ -1535,7 +1537,9 @@ describe('what a payload cannot be allowed to mean', () => {
 
   it('also reads an empty exit code as no evidence that a background job exited', async () => {
     const { client: c } = client((call) =>
-      call.path.endsWith('/exec') ? json({ pid: 7, exit_code: '' }) : anyRoute(call),
+      call.path.endsWith('/exec')
+        ? json({ pid: 7, exit_code: '', stdout_b64: '', stderr_b64: '' })
+        : anyRoute(call),
     );
     const computer = await c.computers.get('vm-1');
     expect((await computer.execBackground('sleep 60')).running).toBe(true);
@@ -1630,7 +1634,7 @@ describe('exec', () => {
   it('returns a non-zero exit rather than throwing it', async () => {
     const { client: c } = client((call) =>
       call.path.endsWith('/exec')
-        ? json({ exit_code: 1, stdout: '', stderr: 'no such file', timed_out: false })
+        ? json({ exit_code: 1, stdout_b64: '', stderr_b64: 'bm8gc3VjaCBmaWxl', timed_out: false })
         : anyRoute(call),
     );
     const computer = await c.computers.get('vm-1');
@@ -1662,7 +1666,7 @@ describe('exec', () => {
     // An empty or malformed response is not evidence the command succeeded,
     // and ok must not affirm what the platform never said.
     const { client: c } = client((call) =>
-      call.path.endsWith('/exec') ? json({}) : anyRoute(call),
+      call.path.endsWith('/exec') ? json({ stdout_b64: '', stderr_b64: '' }) : anyRoute(call),
     );
     const res = await (await c.computers.get('vm-1')).exec('true');
     expect(res.ok).toBe(false);
@@ -1674,7 +1678,7 @@ describe('exec', () => {
     for (const spelling of [null, '']) {
       const { client: c } = client((call) =>
         call.path.endsWith('/exec')
-          ? json({ exit_code: spelling, stdout: '', stderr: '', timed_out: false })
+          ? json({ exit_code: spelling, stdout_b64: '', stderr_b64: '', timed_out: false })
           : anyRoute(call),
       );
       const res = await (await c.computers.get('vm-1')).exec('true');
@@ -3233,7 +3237,9 @@ describe('answers that would leave a handle worse off', () => {
     // an exit code, and -1 is what this decoder says about a value it cannot
     // read. What it must never be is 0.
     const { client: c } = client((call) =>
-      /\/exec$/.test(call.path) ? json({ pid: 42, running: true, exit_code: '' }) : anyRoute(call),
+      /\/exec$/.test(call.path)
+        ? json({ pid: 42, running: true, exit_code: '', stdout_b64: '', stderr_b64: '' })
+        : anyRoute(call),
     );
     const computer = await c.computers.get('vm-1');
     const started = await computer.execBackground('sleep 60');
@@ -3252,7 +3258,7 @@ describe('answers that would leave a handle worse off', () => {
     for (const code of codes) {
       const { client: c } = client((call) =>
         /\/exec$/.test(call.path)
-          ? json({ pid: 42, running: true, exit_code: code })
+          ? json({ pid: 42, running: true, exit_code: code, stdout_b64: '', stderr_b64: '' })
           : anyRoute(call),
       );
       const computer = await c.computers.get('vm-1');
@@ -3268,7 +3274,7 @@ describe('answers that would leave a handle worse off', () => {
     for (const spelling of ['killed', 'signal:9', {}]) {
       const { client: c } = client((call) =>
         /\/exec$/.test(call.path)
-          ? json({ pid: 42, running: false, exit_code: spelling })
+          ? json({ pid: 42, running: false, exit_code: spelling, stdout_b64: '', stderr_b64: '' })
           : anyRoute(call),
       );
       const started = await (await c.computers.get('vm-1')).execBackground('sleep 60');
