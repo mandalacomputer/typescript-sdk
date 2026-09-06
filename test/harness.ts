@@ -453,10 +453,10 @@ export const SNAPSHOT = {
   resolution: '1920x1080x24',
 };
 
-export const EXEC_OK = { exit_code: 0, stdout: '', stderr: '', timed_out: false };
+export const EXEC_OK = { exit_code: 0, stdout_b64: '', stderr_b64: '', timed_out: false };
 
 /** What a background start answers with: a pid, and nothing having exited. */
-export const EXEC_STARTED = { pid: 4242, running: true, stdout: '', stderr: '' };
+export const EXEC_STARTED = { pid: 4242, running: true, stdout_b64: '', stderr_b64: '' };
 
 const isRecord = (v: unknown): v is Record<string, unknown> =>
   typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -732,7 +732,8 @@ export const anyRoute: Responder = (call) => {
   if (path.endsWith('/exec')) {
     return json(isRecord(call.body) && call.body.background ? EXEC_STARTED : EXEC_OK);
   }
-  if (/\/exec\/\d+$/.test(path)) return json({ pid: 42, running: false, exit_code: 0 });
+  if (/\/exec\/\d+$/.test(path))
+    return json({ pid: 42, running: false, exit_code: 0, stdout_b64: '', stderr_b64: '' });
   // Both verbs on one path, told apart by the method: the read answers text and
   // the write answers an ack, and a mock that gave both the same shape would let
   // a decoder that reads the wrong field pass.
