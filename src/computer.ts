@@ -2573,6 +2573,11 @@ export class Computer {
    * Uses the guest's native shell — bash on Linux, cmd.exe on Windows. A
    * non-zero exit is returned, not thrown; check {@link ExecResult.ok}.
    *
+   * {@link ExecResult.stdout} and {@link ExecResult.stderr} are `Uint8Array` —
+   * what the command actually wrote — with {@link ExecResult.stdoutText} and
+   * {@link ExecResult.stderrText} beside them for the ordinary case of reading a
+   * line of text back.
+   *
    * By default the command runs in the system context: as `root` on Linux, with
    * no display attached. Pass `desktop: true` to run it in the logged-in desktop
    * session instead — as the desktop user, with `DISPLAY`, `HOME` and
@@ -2653,11 +2658,10 @@ export class Computer {
       signal: opts.signal,
     });
     // Checked rather than defaulted to `{}`. A 204 or an empty body decodes to
-    // `undefined` here, and `toExecResult({})` reads that as `exitCode: -1`,
-    // `ok: false` — a command that ran and failed, which is a sentence nobody
-    // said. Callers branch on `ok`, so inventing a failure is worse than
-    // saying the body could not be read; `clipboard()` and `agentOnce()` both
-    // refuse a non-record for the same reason (OPL-4215).
+    // `undefined` here, and the decoder refuses that too — but it can only name
+    // the FIELD it could not read. This names the ROUTE, which is what says
+    // where to look; `clipboard()` and `agentOnce()` refuse a non-record for
+    // the same reason (OPL-4215).
     if (!P.isRecord(data)) {
       throw new MandalaError(`expected an exec result from POST ${path}`);
     }
@@ -2709,6 +2713,12 @@ export class Computer {
    * bytes, so two readers on one pid split the output between them rather than
    * each seeing all of it. When {@link BackgroundExec.more} is set there is
    * further output waiting — poll again straight away.
+   *
+   * Those bytes are bytes: the platform cuts a poll at 1 MiB on a byte offset,
+   * so a chunk can begin or end mid-rune. Write {@link BackgroundExec.stdout}
+   * straight to a stream, or join the chunks and decode once —
+   * {@link BackgroundExec.stdoutText} decodes each chunk on its own, which is
+   * right for a line of output and lossy across a cut.
    */
   async execPoll(pid: number, opts: CallOptions = {}): Promise<BackgroundExec> {
     const path = P.execHandle(this.id, pid);

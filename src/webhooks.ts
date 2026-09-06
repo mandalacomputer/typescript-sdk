@@ -30,6 +30,10 @@
  */
 
 import { ValidationError } from './errors.js';
+// The one strict base64 decoder, shared with the exec decoders rather than
+// written twice: a signature is not a place for leniency, and neither is a
+// command's output, so the strictness has to be the same rule in one place.
+import { base64Bytes as base64 } from './models.js';
 
 /** The prefix on every signing secret the platform mints. */
 export const WEBHOOK_SECRET_PREFIX = 'whsec_';
@@ -323,26 +327,6 @@ function header(headers: WebhookHeaders, name: string): string | undefined {
     return typeof first === 'string' ? first : undefined;
   }
   return undefined;
-}
-
-/**
- * Standard base64 with padding, decoded, or `undefined` for text that is not.
- *
- * Checked before `atob`, which is lenient about whitespace and, on some
- * runtimes, about padding — and a signature is not a place for leniency. Strict
- * on the alphabet and the length, so an entry that is not base64 is skipped
- * rather than decoded into something and compared.
- */
-function base64(text: string): Uint8Array | undefined {
-  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(text) || text.length % 4 !== 0) return undefined;
-  try {
-    const bin = atob(text);
-    const out = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-    return out;
-  } catch {
-    return undefined;
-  }
 }
 
 const encodeText = (s: string): Uint8Array => new TextEncoder().encode(s);

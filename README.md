@@ -502,8 +502,24 @@ does all of it in one call.
 
 ```ts
 const res = await c.exec('ls /home/user');
-if (!res.ok) console.error(res.stderr);
+if (!res.ok) console.error(res.stderrText);
 if (res.truncated) { /* the guest agent capped output at 16 MiB */ }
+```
+
+`stdout` and `stderr` are `Uint8Array` — the bytes the command wrote — and
+`stdoutText` and `stderrText` are those bytes decoded as UTF-8 for the ordinary
+case of reading a line back. The platform sends both streams base64-encoded, and
+this SDK hands you the bytes rather than a string, because a string is where the
+output used to be quietly damaged: JSON strings are UTF-8 by definition, so a
+command that printed a tarball, a PNG or a latin-1 build log came back with every
+invalid byte replaced by `U+FFFD`, with a 200 and no flag saying so. The text
+accessors do replace — a build log with one stray byte in it is still a log — so
+reach for the bytes when the exact ones matter:
+
+```ts
+const png = await c.exec('cat /tmp/shot.png');
+await writeFile('shot.png', png.stdout);           // bytes, unaltered
+console.log(png.stderrText);                       // text, when text is meant
 ```
 
 A non-zero exit is returned, not thrown. The guest gets `timeoutS` to finish —
@@ -576,7 +592,7 @@ const job = await c.execBackground('apt-get install -y build-essential');
 
 for (;;) {
   const s = await c.execPoll(job.pid);
-  process.stdout.write(s.stdout);             // only the NEW bytes
+  process.stdout.write(s.stdout);             // only the NEW bytes, as bytes
   if (!s.running) break;
   if (!s.more) await new Promise((r) => setTimeout(r, 1000));
 }
@@ -587,6 +603,11 @@ await c.execKill(job.pid);                    // if you change your mind
 The output is a **cursor, not a buffer**: each poll gives you only what has been
 printed since the last one, so two readers on one pid split the output between
 them rather than each seeing all of it.
+
+And it is cut at 1 MiB on a *byte* offset, so a chunk can begin or end part-way
+through a multi-byte character. Write the bytes to a stream as above, or join
+them and decode once at the end; `s.stdoutText` decodes each chunk on its own,
+which is what you want for a line of output and lossy across a cut.
 
 ### Events
 
