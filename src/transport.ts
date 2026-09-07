@@ -774,8 +774,13 @@ export class Transport {
    * empty account. Three of them — computers, snapshots and, since OPL-3840,
    * builds — and on the build listing the header is the whole of the evidence,
    * because nothing in its rows marks what is gone. It is the whole of the
-   * evidence on the other two as well for a workspace-scoped key, which the
-   * platform deliberately hands no stub rows.
+   * evidence on a SNAPSHOT listing too for a workspace-scoped key, which the
+   * platform deliberately hands no stub rows: naming the missing ids means
+   * reading them out of a placement cache with no workspace column. The
+   * computer listing is the exception since OPL-4554 — its unreachable rows
+   * come from the control plane's record, which has that column — but the
+   * header is still what a caller branches on, since a row is only ever
+   * evidence of the gaps somebody could name.
    */
   async listing(
     path: string,

@@ -359,12 +359,24 @@ export type ComputerState = (typeof COMPUTER_STATES)[number];
  */
 export function computerState(v: ComputerState | undefined): ComputerState | undefined {
   if (v === undefined) return undefined;
-  if (typeof v !== 'string' || !(COMPUTER_STATES as readonly string[]).includes(v)) {
+  // The two refusals are separate for the reason {@link templateVersion} keeps
+  // them separate: `JSON.stringify` THROWS on a BigInt and on a cyclic object,
+  // so quoting the argument before knowing it is a string turns the local
+  // refusal this function exists to be into a TypeError out of the message
+  // that was meant to explain it (grok review, OPL-4556).
+  if (typeof v !== 'string') {
+    throw new ValidationError(
+      `state must be one of ${COMPUTER_STATES.join(', ')} (got ${v === null ? 'null' : typeof v})`,
+    );
+  }
+  if (!(COMPUTER_STATES as readonly string[]).includes(v)) {
     throw new ValidationError(
       `state must be one of ${COMPUTER_STATES.join(', ')} (got ${JSON.stringify(v)})`,
     );
   }
-  return v;
+  // The checked primitive, as {@link templateVersion} returns its own: a boxed
+  // String cannot reach here, and what leaves should not depend on that.
+  return `${v}` as ComputerState;
 }
 
 export const build = (id: string): string => `${BUILDS}/${pathId(id, 'build id')}`;

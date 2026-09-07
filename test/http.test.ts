@@ -869,8 +869,13 @@ describe('listings', () => {
     // already knows.
     const rec = recorder(anyRoute);
     // Cast, because the union is exactly what a JavaScript caller does not
-    // have: this is the population the guard exists for.
-    for (const bad of ['DELETED', 'deleted ', 'gone', '', 1, null] as unknown[]) {
+    // have: this is the population the guard exists for. A BigInt and a cyclic
+    // object are in it because `JSON.stringify` THROWS on both: quoting the
+    // argument before knowing it is a string would answer a TypeError out of
+    // the message rather than the refusal (grok review, OPL-4556).
+    const cyclic: Record<string, unknown> = {};
+    cyclic.self = cyclic;
+    for (const bad of ['DELETED', 'deleted ', 'gone', '', 1, null, 1n, cyclic] as unknown[]) {
       await expect(client(rec).computers.list({ state: bad as ComputerState })).rejects.toThrow(
         ValidationError,
       );
