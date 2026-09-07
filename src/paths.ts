@@ -319,6 +319,66 @@ export function noReuse(v: boolean | undefined): Query {
   return flag(v, 'noReuse') ? { no_reuse: 'true' } : {};
 }
 
+/**
+ * Where the platform's own record says a computer has got to.
+ *
+ * A different question from a {@link Computer.status}, which is what the host
+ * says the machine is DOING. This says whether it exists at all:
+ *
+ * - `live` — a host listed it.
+ * - `unreachable` — no host answered for it, and the row was served from the
+ *   record instead. It is per-request and says nothing has happened to the
+ *   computer; most such rows are a host that was busy for a moment.
+ * - `deleting` — a delete was sent and has not been answered.
+ * - `deleted` — a delete that was answered.
+ * - `lost` — an operator wrote off the host while the computer was on it.
+ *
+ * The last two are terminal, and a listing never shows them unless asked for by
+ * state: no host has them to list, so they come from the record alone.
+ *
+ * Closed, where the strings this SDK READS off the wire are open. This one is
+ * only ever SENT, and the platform answers 400 for a word outside the set — so
+ * a closed union is the compile error that saves the round trip, and
+ * {@link computerState} is the same refusal for the callers the annotation is
+ * erased for.
+ */
+export const COMPUTER_STATES = ['live', 'unreachable', 'deleting', 'deleted', 'lost'] as const;
+export type ComputerState = (typeof COMPUTER_STATES)[number];
+
+/**
+ * The `state` query parameter, refused when it is not one of the five.
+ *
+ * Checked here rather than left to the platform for the reason every other
+ * validator in this file exists: from JavaScript, and through `any`, the union
+ * above is not there. What arrives instead is `state: 'deleted '` or
+ * `state: 'DELETED'`, and what comes back is a 400 naming the parameter but not
+ * the call — a round trip spent to learn something this line already knows.
+ *
+ * `undefined` stays undefined: no state asked for is the ordinary listing, and
+ * that is a third state rather than a default to fill in.
+ */
+export function computerState(v: ComputerState | undefined): ComputerState | undefined {
+  if (v === undefined) return undefined;
+  // The two refusals are separate for the reason {@link templateVersion} keeps
+  // them separate: `JSON.stringify` THROWS on a BigInt and on a cyclic object,
+  // so quoting the argument before knowing it is a string turns the local
+  // refusal this function exists to be into a TypeError out of the message
+  // that was meant to explain it (grok review, OPL-4556).
+  if (typeof v !== 'string') {
+    throw new ValidationError(
+      `state must be one of ${COMPUTER_STATES.join(', ')} (got ${v === null ? 'null' : typeof v})`,
+    );
+  }
+  if (!(COMPUTER_STATES as readonly string[]).includes(v)) {
+    throw new ValidationError(
+      `state must be one of ${COMPUTER_STATES.join(', ')} (got ${JSON.stringify(v)})`,
+    );
+  }
+  // The checked primitive, as {@link templateVersion} returns its own: a boxed
+  // String cannot reach here, and what leaves should not depend on that.
+  return `${v}` as ComputerState;
+}
+
 export const build = (id: string): string => `${BUILDS}/${pathId(id, 'build id')}`;
 export const webhook = (id: string): string => `${WEBHOOKS}/${pathId(id, 'webhook id')}`;
 export const webhookAction = (id: string, action: 'rotate' | 'test' | 'deliveries'): string =>

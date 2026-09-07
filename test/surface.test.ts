@@ -87,7 +87,7 @@ async function exerciseEverything(client: Client): Promise<void> {
   await client.sizes.list();
   await client.computers.list();
   await client.computers.list({ allowPartial: true });
-  await client.computers.listWithStatus({ allowPartial: true });
+  await client.computers.listWithStatus({ allowPartial: true, state: 'live' });
   await client.computers.get('vm-1');
 
   const c = await client.computers.create({ template: 'base' });

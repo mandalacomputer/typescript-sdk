@@ -179,7 +179,7 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
   ['GET builds/:id/events', []],
   ['GET sizes', []],
 
-  ['GET computers', ['query:allow_partial']],
+  ['GET computers', ['query:allow_partial', 'query:state']],
   [
     'POST computers',
     [

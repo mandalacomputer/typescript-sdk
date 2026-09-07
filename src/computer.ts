@@ -743,6 +743,37 @@ export class Computer {
   }
 
   /**
+   * Where the control plane's own record says this computer has got to.
+   *
+   * `"live"`, `"unreachable"`, `"deleting"`, `"deleted"` or `"lost"` — see
+   * {@link P.ComputerState} for what each one means. NOT the same question as
+   * {@link status}: that is what the host says the machine is doing, this is
+   * whether it exists at all, and the two are answered by different tiers. A
+   * computer can be `"live"` and `"stopped"` at once.
+   *
+   * `''` on a computer that came from a route serving ONE of them, and that is
+   * the platform's answer rather than an omission: such a response is served by
+   * the host, so a computer that answered it is live by construction. The
+   * listing is where this is carried.
+   *
+   * Read like {@link status} is read — coerced, and open to a word this SDK
+   * predates. {@link P.ComputerState} is closed because it is only ever sent.
+   */
+  get state(): string {
+    return str(this.#data.state);
+  }
+
+  /** When the delete was answered, RFC 3339, or `''` on a computer still there. */
+  get deletedAt(): string {
+    return str(this.#data.deleted_at);
+  }
+
+  /** When an operator wrote off this computer's host, RFC 3339, or `''`. */
+  get lostAt(): string {
+    return str(this.#data.lost_at);
+  }
+
+  /**
    * Credentials and URLs for this computer's live desktop, or `undefined`.
    *
    * What makes it possible to show somebody their own screen — in your page, not
