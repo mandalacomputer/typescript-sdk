@@ -947,9 +947,12 @@ describe('a short build listing', () => {
    * The platform keeps no record of which hypervisor ran which build, so there
    * is nothing to append. The status is therefore the only evidence a caller
    * who opted in has, and its count is `0` for the same reason. Computers and
-   * snapshots do append an `{ id, unreachable: true }` row per thing they could
-   * not reach — for an account-wide key; a workspace-scoped one gets none
-   * either. Presence is the signal; see Listing.
+   * snapshots do append a row per thing they could not reach: a snapshot's is
+   * the bare `{ id, unreachable: true }` stub and arrives only for an
+   * account-wide key, while a computer's carries the identity the control
+   * plane keeps and reaches a workspace-scoped key too, because that record
+   * has the column the placement cache lacks (OPL-4554). Presence is the
+   * signal; see Listing.
    */
   it('says it was short through the status, since no row can say so', async () => {
     const { client: c } = client((call) =>

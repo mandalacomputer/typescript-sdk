@@ -14,6 +14,7 @@ import {
   APIError,
   AuthenticationError,
   Client,
+  type ComputerState,
   ConflictError,
   ConnectionError,
   ConnectionInterruptedError,
@@ -841,6 +842,45 @@ describe('listings', () => {
     const rec = recorder(anyRoute);
     await client(rec).computers.list();
     expect(rec.last().query).not.toHaveProperty('allow_partial');
+  });
+
+  it('narrows the fleet read to one lifecycle state when asked', async () => {
+    const rec = recorder(anyRoute);
+    await client(rec).computers.list({ state: 'deleted' });
+    expect(rec.last().query.state).toBe('deleted');
+
+    await client(rec).computers.listWithStatus({ allowPartial: true, state: 'unreachable' });
+    expect(rec.last().query.state).toBe('unreachable');
+    expect(rec.last().query.allow_partial).toBe('1');
+  });
+
+  it('leaves the listing unnarrowed when no state was named', async () => {
+    const rec = recorder(anyRoute);
+    await client(rec).computers.list();
+    expect(rec.last().query).not.toHaveProperty('state');
+    await client(rec).computers.list({ state: undefined });
+    expect(rec.last().query).not.toHaveProperty('state');
+  });
+
+  it('refuses a state outside the five before spending the round trip on a 400', async () => {
+    // The annotation is erased for a JavaScript caller, so this is where a
+    // typo is caught: the platform answers 400 naming the parameter but not
+    // the call, which is a round trip spent to learn what the local check
+    // already knows.
+    const rec = recorder(anyRoute);
+    // Cast, because the union is exactly what a JavaScript caller does not
+    // have: this is the population the guard exists for. A BigInt and a cyclic
+    // object are in it because `JSON.stringify` THROWS on both: quoting the
+    // argument before knowing it is a string would answer a TypeError out of
+    // the message rather than the refusal (grok review, OPL-4556).
+    const cyclic: Record<string, unknown> = {};
+    cyclic.self = cyclic;
+    for (const bad of ['DELETED', 'deleted ', 'gone', '', 1, null, 1n, cyclic] as unknown[]) {
+      await expect(client(rec).computers.list({ state: bad as ComputerState })).rejects.toThrow(
+        ValidationError,
+      );
+    }
+    expect(rec.calls).toHaveLength(0);
   });
 });
 
