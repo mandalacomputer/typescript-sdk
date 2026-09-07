@@ -31,9 +31,12 @@ export MANDALA_API_KEY=com_…
 
 Requests go to `https://app.mandala.computer/api/v1`; `MANDALA_BASE_URL` or
 `new Client({ baseUrl })` points them elsewhere, and `apiKey` is the same
-option for the key. `timeoutMs` is the per-request budget — 60 seconds unless a
-call knows it needs longer, `0` to disable — and `fetch` takes an implementation
-of your own if you have proxies or certificates to configure. Each method takes
+option for the key. `timeoutMs` on the client is the per-request budget — 60
+seconds unless a call knows it needs longer, `0` to disable — and `fetch` takes
+an implementation of your own if you have proxies or certificates to configure.
+The `timeoutMs` a *wait* takes is a different number and is documented with each:
+it bounds the whole loop rather than one request, and can be far longer, because
+what those wait for outlives any single request. Each method takes
 a `signal` among its options, so any one request can be cancelled.
 
 ## Use
@@ -1354,7 +1357,16 @@ await client.snapshots.restore(snap.id);            // back onto its source
 await client.snapshots.delete(snap.id);             // waits for the row to go
 ```
 
-**`delete()` waits too, and what it waits for is the row's absence.** The route
+**`delete()` waits too, and what it waits for is the row's absence.** It blocks
+for up to **30 minutes** by default, polling at up to 5s — `timeoutMs` and
+`pollMs` change both, and `{ wait: false }` opts out entirely. That deadline is
+for the case that needs it: a deletion scales with the chain, and a lone snapshot
+is seconds (measured at 436ms at `pending` and 3.2s at `durable` for 2.43 GB), so
+the poll interval ramps from 250ms and the ordinary call returns in about the
+time the deletion takes. But a deletion that stalls at the flatten — the one
+conflict the platform cannot refuse up front — holds the call for the full half
+hour, so `delete()` inside a request handler wants a `timeoutMs` of its own. The
+route
 answers 202 with the snapshot's row the moment the deletion is accepted, and the
 work happens afterwards: flattening every dependent, committing the index, then
 walking both the local files and the bucket objects, which scales with the chain

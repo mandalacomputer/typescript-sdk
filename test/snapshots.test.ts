@@ -442,6 +442,45 @@ describe('snapshots.delete() waits for the row to go', () => {
     await c.snapshots.delete('snap-1', { pollMs: 1, timeoutMs: 5_000 });
   });
 
+  it('does not sit out the full interval on a deletion that finishes at once', async () => {
+    // A deletion is usually seconds — 436ms for a lone snapshot at `pending` on
+    // the deployed fleet — so a flat five-second interval would make the
+    // ordinary call ten times slower than the synchronous one it replaced. The
+    // sleep ramps from 250ms toward `pollMs` instead, so the first poll after
+    // the 202 is not held behind a capture-sized interval (/code-review).
+    let polls = 0;
+    const { client: c } = client(
+      unfinished(() => {
+        polls += 1;
+        return json(polls < 3 ? [SNAPSHOT] : []);
+      }),
+    );
+    const before = Date.now();
+    await c.snapshots.delete('snap-1', { timeoutMs: 60_000 });
+    const took = Date.now() - before;
+
+    expect(polls).toBe(3);
+    // Two sleeps at the default 5000 ceiling would be 10s; ramped they are
+    // 250ms and 500ms. Bounded generously — this pins the ramp, not a stopwatch.
+    expect(took).toBeLessThan(3_000);
+  });
+
+  it('takes pollMs as a ceiling, so a caller’s own interval is never exceeded', async () => {
+    // The ramp may only ever make a wait poll SOONER than asked. A caller who
+    // set an interval to be kind to the platform must still get it.
+    const { rec, client: c } = client(unfinished(() => json([SNAPSHOT])));
+    const before = Date.now();
+    await c.snapshots.delete('snap-1', { pollMs: 20, timeoutMs: 300 }).catch(() => {});
+    const polled = rec.calls.filter((call) => call.path === '/snapshots' && call.method === 'GET');
+    const elapsed = Date.now() - before;
+
+    // At the 20ms ceiling a 300ms wait cannot fit more than ~16 polls; a ramp
+    // that ignored the ceiling and kept doubling would fit far fewer, and one
+    // that ignored it downward would fit far more.
+    expect(polled.length).toBeGreaterThan(4);
+    expect(polled.length).toBeLessThanOrEqual(Math.ceil(elapsed / 20) + 2);
+  });
+
   it('returns at the 202 under wait: false, and polls nothing', async () => {
     const { rec, client: c } = client(anyRoute);
     const before = rec.calls.length;
@@ -542,6 +581,28 @@ describe('a deletion that does not finish', () => {
 
       expect(err).toBeInstanceOf(TimeoutError);
       expect(`${shown}: ${(err as Error).message}`).toContain(`in state ${shown} rather than`);
+    }
+  });
+
+  it('is not concluded gone over a row whose id this poll could not match on', async () => {
+    // The hole `incomplete` does not cover, and the one that runs the dangerous
+    // way (/code-review). The match is strict equality on the RAW id, precisely
+    // so `String(['snap-1'])` cannot stand in for this snapshot — but a row
+    // carrying `['snap-1']` is still a record, so the transport keeps it and
+    // counts no shortfall, and the row is then missing from a listing that reads
+    // whole. Returning on that says a snapshot is destroyed while it is still on
+    // a host, still holding objects and still billed.
+    for (const id of [['snap-1'], 42, null, undefined]) {
+      const row: Record<string, unknown> = { ...SNAPSHOT, id };
+      if (id === undefined) delete row.id;
+      const { client: c } = client(unfinished(() => json([row])));
+      const err = await c.snapshots.delete('snap-1', { pollMs: 1, timeoutMs: 40 }).catch((e) => e);
+
+      // The wait ran out; it did not pronounce the snapshot gone.
+      expect(`${JSON.stringify(id)}: ${err instanceof TimeoutError}`).toBe(
+        `${JSON.stringify(id)}: true`,
+      );
+      expect((err as Error).message).toContain('that listing was short');
     }
   });
 

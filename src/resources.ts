@@ -367,10 +367,27 @@ export class Computers {
  * finish rather than merely arrived before its first retry.
  *
  * Five seconds between polls, again as the capture wait: the answer is a listing
- * the dashboard reads on a timer anyway.
+ * the dashboard reads on a timer anyway. But it is a CEILING here rather than a
+ * fixed interval, which is where this parts company with every other wait in
+ * this SDK, and the measurements above are the reason. A capture is minutes, so
+ * five seconds is a few percent of it; a deletion is usually seconds, so a flat
+ * five-second interval makes the ordinary `delete()` — a lone snapshot, no
+ * dependents, gone in 436ms — take five seconds where the synchronous call took
+ * under one, and calls that a wait. A tenfold regression on the common path is
+ * not a fair price for the chain case, which the deadline is what covers.
+ *
+ * So the sleep RAMPS: 250ms, doubling to `pollMs` and staying there. A deletion
+ * that finishes in the first second is noticed in the first second, the
+ * half-hour chain reaches the full interval after five polls and about ten
+ * seconds, and a caller who passes their own `pollMs` gets it as the ceiling —
+ * `pollMs: 1` is still every millisecond, which is what the suite relies on.
+ * A poll the platform FAILED goes straight to the full interval, backing off
+ * rather than ramping: that is {@link retryDelay}'s business and the ramp has
+ * nothing to say about a host that is not answering.
  */
 const SNAP_DELETE_WAIT_MS = 1_800_000;
 const SNAP_DELETE_POLL_MS = 5_000;
+const SNAP_DELETE_FIRST_POLL_MS = 250;
 
 /**
  * What a deletion wait ran out of time doing, in the sentence that is true of it.
@@ -667,6 +684,16 @@ export class Snapshots {
     const { timeoutMs = SNAP_DELETE_WAIT_MS, pollMs = SNAP_DELETE_POLL_MS, signal } = opts;
     const waitForIt = P.flag(opts.wait, 'wait') ?? true;
     checkWait(timeoutMs, pollMs);
+    // The ORDINARY request budget, and a failure of it is a failure of this
+    // call rather than something to poll through. A pre-OPL-4572 host still
+    // deleting inside its request could exceed 60s and arrive as
+    // {@link ConnectionInterruptedError} before the wait below ever starts,
+    // which is the symptom this change exists to remove — but swallowing that
+    // to poll anyway would read a request that never ARRIVED as a deletion in
+    // flight, and spend half an hour to report a stall that never began. The
+    // platform answers this route in about 400ms now (measured), so the case is
+    // historical, and the honest reading of a connection that failed is that
+    // this client does not know whether anything was accepted (/code-review).
     await this.#t.json('DELETE', P.snapshot(snapshotId), { signal });
     // No predicate on the answer, and that is the difference from
     // {@link Computer.snapshot}, which needs one. There a wait can only be
@@ -711,7 +738,11 @@ export class Snapshots {
   ): Promise<void> {
     const deadline = Date.now() + timeoutMs;
     let polled = false;
-    let delayMs = pollMs;
+    // The NEXT sleep, ramping toward `pollMs` rather than sitting on it. See
+    // {@link SNAP_DELETE_POLL_MS}: a deletion is usually seconds, so the
+    // interval that suits a capture makes the ordinary case ten times slower
+    // than the call it replaced.
+    let delayMs = Math.min(SNAP_DELETE_FIRST_POLL_MS, pollMs);
     // The LAST poll's, all three, as in the capture wait: whether it read the
     // row at all, what state it read, and whether it read a listing that was
     // short and did not carry the row. A poll that failed or was cut short read
@@ -751,7 +782,7 @@ export class Snapshots {
       // something else is one round trip from being known to have finished.
       if (polled) await sleepUntilNextPoll(delayMs, deadline, signal);
       polled = true;
-      delayMs = pollMs;
+      delayMs = Math.min(delayMs * 2, pollMs);
       if (Date.now() >= deadline) continue;
       try {
         const { items, incomplete } = await this.#t.listing(P.SNAPSHOTS, {
@@ -784,7 +815,20 @@ export class Snapshots {
         // that did not answer a 503 rather than a quiet short listing, so a 200
         // with no shortfall is every host having answered. What `incomplete`
         // catches is the remaining case, this client's own undecodable rows.
-        if (incomplete === null) return;
+        //
+        // `incomplete` DOES NOT CATCH ALL OF THEM, which is the second half of
+        // this test and the finding that put it here (/code-review). A row whose
+        // `id` is not a string is still a record, so the transport keeps it and
+        // counts no shortfall — and the match above, which is strict equality on
+        // the raw `id` precisely so that `String(['snap-1'])` cannot stand in
+        // for this snapshot, then cannot match it either. Absence over such a
+        // listing is not absence: this row might BE the one, and returning on it
+        // reports a snapshot as destroyed while it is still on a host, still
+        // holding objects and still billed. So it is the same shortfall
+        // `incomplete` describes, found the only other place it can hide, and it
+        // reads the same way: this poll says nothing, and the wait goes on.
+        const unmatchable = items.some((d) => typeof d.id !== 'string');
+        if (incomplete === null && !unmatchable) return;
         shortLast = true;
       } catch (err) {
         if (signal?.aborted) throw err;
@@ -796,12 +840,14 @@ export class Snapshots {
           aborts += 1;
           stillListed = false;
           stalled = false;
+          lastState = undefined;
           shortLast = false;
           continue;
         }
         if (!isTransientForPoll(err)) throw err;
         stillListed = false;
         stalled = false;
+        lastState = undefined;
         shortLast = false;
         failures += 1;
         delayMs = retryDelay(pollMs, err);
