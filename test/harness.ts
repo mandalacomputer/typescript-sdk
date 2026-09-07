@@ -475,6 +475,17 @@ export const CAPTURE_ACCEPTED = { ...SNAPSHOT, state: 'capturing', size_bytes: 0
  */
 export const DELETE_ACCEPTED = { ...SNAPSHOT, state: 'deleting' };
 
+/**
+ * A deletion of ANOTHER snapshot that began and did not finish.
+ *
+ * What `include=unfinished` adds, and the id is deliberately not
+ * {@link SNAPSHOT}'s: the flag is ADDITIVE on the platform — a bare listing plus
+ * the rows a half-deleted snapshot leaves out — so a fixture where asking for
+ * more answered less would be modelling a platform that cannot exist, and would
+ * agree with a `list()` that dropped rows under the flag (/code-review).
+ */
+export const DELETING_OTHER = { ...SNAPSHOT, id: 'snap-2', state: 'deleting' };
+
 export const EXEC_OK = { exit_code: 0, stdout_b64: '', stderr_b64: '', timed_out: false };
 
 /** What a background start answers with: a pid, and nothing having exited. */
@@ -801,13 +812,16 @@ export const anyRoute: Responder = (call) => {
     // listing above is where the same row is read once it has landed, and a
     // mock that answered a finished snapshot to the POST would let a client
     // that never polls pass.
-    // The listing under `include=unfinished` is the DELETION's view, and it is
-    // empty because this is the answer that comes after one: there is no state
-    // that means deleted, so a row that is gone from the unfinished listing is
-    // the deletion having finished, and that is what lets `snapshots.delete()`
-    // return against a test that set up no listing of its own. The bare listing
-    // above is unchanged, so nothing that reads snapshots sees this.
-    if (get && path === '/snapshots' && call.query.include === 'unfinished') return json([]);
+    // `include=unfinished` is ADDITIVE: the same listing, plus the deletions that
+    // began and did not finish. A default that answered fewer rows for the
+    // larger question would model a platform that cannot exist — and this is the
+    // listing `snapshots.delete()`'s wait polls, so getting the direction wrong
+    // here would agree with a poll that read a stalled deletion as a finished
+    // one. A delete that has to RETURN against this default sets up its own
+    // listing, or passes `wait: false`.
+    if (get && path === '/snapshots' && call.query.include === 'unfinished') {
+      return json([SNAPSHOT, DELETING_OTHER]);
+    }
     return get ? json([SNAPSHOT]) : json(CAPTURE_ACCEPTED, { status: 202 });
   }
   // DELETE /snapshots/:id is a 202 and the row, like the capture's POST: the

@@ -389,6 +389,15 @@ const SNAP_DELETE_POLL_MS = 5_000;
  * row exactly as it was, having destroyed nothing, and what finishes it is
  * another delete rather than waiting.
  *
+ * `lastState` is `unknown` and is encoded ONCE, here. Held as a string and
+ * encoded again at the point of use, it was encoded twice: a numeric `42` read
+ * back as the string `"42"`, and an absent `state` went through
+ * `JSON.stringify(undefined)` — which answers the VALUE `undefined` rather than
+ * a string — to arrive in a `string` variable and render as bare `undefined`.
+ * The state is the only thing this branch tells a caller, so a quoted value
+ * means a string and an unquoted one means the row's `state` was not one
+ * (/code-review).
+ *
  * `stillListed`, `stalled`, `lastState` and `shortLast` are the LAST poll's;
  * `everSeen`, `reads`, `failures` and `aborts` are the whole wait's. Kept apart
  * for the reason the other waits keep them apart: the present tense belongs only
@@ -399,7 +408,7 @@ const deleteTimeoutText = (w: {
   timeoutMs: number;
   stillListed: boolean;
   stalled: boolean;
-  lastState: string;
+  lastState: unknown;
   shortLast: boolean;
   everSeen: boolean;
   reads: number;
@@ -407,6 +416,10 @@ const deleteTimeoutText = (w: {
   aborts: number;
 }): string => {
   if (w.stillListed) {
+    // `?? String(v)` for the one value JSON has no encoding of: `undefined` is
+    // what `stringify` answers `undefined` FOR, and returning it unchanged puts
+    // a non-string into a template.
+    const state = JSON.stringify(w.lastState) ?? String(w.lastState);
     const where =
       `it is on snapshots.list({ includeUnfinished: true }) under that id, and it still holds ` +
       `objects and is still billed`;
@@ -416,7 +429,7 @@ const deleteTimeoutText = (w: {
           `retries these itself every fifteen minutes, and a fresh delete of this id is accepted ` +
           `again rather than refused — ${where}.`
       : `${w.snapshotId} was still listed after ${w.timeoutMs}ms, in state ` +
-          `${JSON.stringify(w.lastState)} rather than \`deleting\` — so either the deletion is ` +
+          `${state} rather than \`deleting\` — so either the deletion is ` +
           `still detaching the snapshots that read through it, or it stopped there having ` +
           `destroyed nothing, which is what a dependent that is ITSELF being deleted does to it. ` +
           `The platform's fifteen-minute sweep only picks up rows that reached \`deleting\`, so ` +
@@ -607,6 +620,14 @@ export class Snapshots {
    * deletion stalled it is accepted again and finishes the job. Neither is a
    * reason to give up on the id.
    *
+   * A RETRY CAN ALSO LAND ON 404, and that one is the success arriving as an
+   * exception. The platform's own sweep may finish a stalled deletion between
+   * this wait giving up and the caller acting on the timeout, and a delete of an
+   * id that is no longer there is {@link NotFoundError} — the same class a bad
+   * id answers, which is why it is worth saying: after a `TimeoutError` from
+   * this method, a 404 means the snapshot is gone rather than that it was never
+   * there.
+   *
    * ONE CONFLICT ARRIVES AFTER THE 202 and cannot be raised by this call, which
    * is the one gap a wait on a row's absence has: a dependent that is ITSELF
    * being deleted cannot be flattened, and whether that is so is settled when
@@ -696,7 +717,7 @@ export class Snapshots {
     // listing from half an hour ago in the present tense.
     let stillListed = false;
     let stalled = false;
-    let lastState = '';
+    let lastState: unknown;
     let shortLast = false;
     // Whether the row was EVER read, which the flags above cannot say between
     // them: a wait that watched the deletion for twenty minutes and then lost
@@ -749,7 +770,7 @@ export class Snapshots {
           // classify. Only `deleting` is a stall — every other state is a
           // deletion still working through the chain ahead of it.
           stalled = row.state === 'deleting';
-          lastState = typeof row.state === 'string' ? row.state : JSON.stringify(row.state);
+          lastState = row.state;
           continue;
         }
         stillListed = false;

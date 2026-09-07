@@ -482,6 +482,47 @@ describe('a deletion that does not finish', () => {
     expect((err as Error).message).not.toContain('stalled');
   });
 
+  it('reads the row on the unfinished view, not the one a bare listing would give', async () => {
+    // The two views split exactly where a stall lives: a `deleting` row is left
+    // out of a bare listing, so a poll reading that view sees an account the
+    // snapshot has already left. Answered here as the platform splits them — the
+    // bare listing without the row, the unfinished one with it — so a wait that
+    // dropped the flag would return at once and call a stalled deletion done.
+    const { rec, client: c } = client((call) => {
+      if (call.path !== '/snapshots' || call.method !== 'GET') return anyRoute(call);
+      return json(call.query.include === 'unfinished' ? [DELETING] : []);
+    });
+    const err = await c.snapshots.delete('snap-1', { pollMs: 1, timeoutMs: 40 }).catch((e) => e);
+
+    expect(err).toBeInstanceOf(TimeoutError);
+    expect((err as Error).message).toContain('stalled');
+    const polled = rec.calls.filter((call) => call.path === '/snapshots' && call.method === 'GET');
+    expect(polled.every((call) => call.query.include === 'unfinished')).toBe(true);
+  });
+
+  it('names an unreadable state once, rather than encoding it twice', async () => {
+    // The state is the whole content of this branch, and it decides what the
+    // caller does next. Held as a string and encoded again at the point of use,
+    // a numeric 42 read back as the string `"42"` and an ABSENT state went
+    // through `JSON.stringify(undefined)` — which answers the value `undefined`
+    // rather than a string — to render as bare `undefined` out of a variable
+    // typed `string` (/code-review).
+    for (const [state, shown] of [
+      [42, '42'],
+      [['deleting'], '["deleting"]'],
+      [undefined, 'undefined'],
+      ['durable', '"durable"'],
+    ] as const) {
+      const row: Record<string, unknown> = { ...SNAPSHOT, state };
+      if (state === undefined) delete row.state;
+      const { client: c } = client(unfinished(() => json([row])));
+      const err = await c.snapshots.delete('snap-1', { pollMs: 1, timeoutMs: 40 }).catch((e) => e);
+
+      expect(err).toBeInstanceOf(TimeoutError);
+      expect(`${shown}: ${(err as Error).message}`).toContain(`in state ${shown} rather than`);
+    }
+  });
+
   it('is not concluded gone from a listing this client could not read whole', async () => {
     // The rule that matters most in this direction. Rows nobody could decode
     // might have been this one, so absence says NOTHING — and reading it as
