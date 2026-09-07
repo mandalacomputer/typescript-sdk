@@ -468,6 +468,125 @@ const moveTimeoutText = (w: {
     : `${gaveUp}no poll finished before the deadline did, so nothing about the move was ever read`;
 };
 
+/**
+ * What a capture's row disappearing means, which is the only thing it can mean.
+ *
+ * A failure after the 202 has no response left to fail in: the platform logs it
+ * on the host, drops the `capturing` row and puts nothing in its place, and that
+ * absence is the whole signal (platform OPL-4562). Said as a capture that FAILED
+ * rather than as a snapshot that is missing, because a caller who reads the
+ * latter goes looking for a row that was never stored.
+ *
+ * Only ever said of a listing this client read WHOLE — see
+ * {@link Computer.snapshot}'s wait, which asks without `allow_partial` so that a
+ * host which did not answer is a 503 the loop rides out rather than a short
+ * listing read as a capture that died.
+ */
+const captureFailed = (computerId: string, snapshotId: string): string =>
+  `the capture of ${computerId} failed: ${snapshotId} stopped being listed by GET ${P.SNAPSHOTS} ` +
+  `before it landed, and a capture that fails leaves no snapshot and no row`;
+
+/**
+ * What a capture wait ran out of time doing, in the sentence that is true of it.
+ *
+ * {@link moveTimeoutText}'s shape and its reasons, over the silences this wait
+ * has: a copy still running is not a platform that stopped answering, and
+ * neither of those is a listing that came back short every time — where the row
+ * being absent says nothing at all, since the rows this client never saw might
+ * have held it.
+ *
+ * `stillCapturing` and `shortLast` are the LAST poll's; `everSeen`, `reads`,
+ * `failures` and `aborts` are the whole wait's. Kept apart for the reason the
+ * move wait keeps them apart: the present tense belongs only to what the last
+ * poll actually read, and everything else has to be said in the past.
+ *
+ * The id is in every one of them, because it is what a caller picks the wait
+ * back up with — the id the 202 handed over, and the id the snapshot keeps.
+ */
+const captureTimeoutText = (w: {
+  id: string;
+  snapshotId: string;
+  timeoutMs: number;
+  stillCapturing: boolean;
+  shortLast: boolean;
+  everSeen: boolean;
+  reads: number;
+  failures: number;
+  aborts: number;
+}): string => {
+  if (w.stillCapturing) {
+    return (
+      `${w.snapshotId} was still capturing after ${w.timeoutMs}ms (the capture of ${w.id} has ` +
+      `not stopped, only this wait has; it is on snapshots.list() under that id)`
+    );
+  }
+  if (w.shortLast) {
+    return (
+      `${w.snapshotId} was not on the last listing GET ${P.SNAPSHOTS} answered within ` +
+      `${w.timeoutMs}ms, and that listing was short — so whether the capture failed cannot be ` +
+      `told from it, since the rows it did not carry might have held this one`
+    );
+  }
+  // Seen capturing, and then not reachable — which is a statement about the
+  // polls rather than about the capture, and is worded as one. The row was
+  // there, so "it stopped being listed" is exactly what this wait may not say.
+  if (w.everSeen) {
+    return (
+      `the capture ${w.snapshotId} of ${w.id} could not be reached for the last part of ` +
+      `${w.timeoutMs}ms; when the listing last carried it, it was still capturing. The capture ` +
+      `has not stopped, only this wait has — read snapshots.list() for where it got to.`
+    );
+  }
+  if (w.reads > 0) {
+    return (
+      `${w.snapshotId} never appeared on GET ${P.SNAPSHOTS} within ${w.timeoutMs}ms, on ` +
+      `${w.reads} listing(s) that were read` +
+      (w.failures > 0 ? ` and ${w.failures} poll(s) that failed outright` : '') +
+      `. None of those listings was both readable in full and missing this row, which is what it ` +
+      `takes to call the capture failed, so what became of it is not something this wait read.`
+    );
+  }
+  // No poll ever finished, and the three ways that happens are three sentences
+  // — Builds.wait's, for its reason: charging the platform for silences this
+  // wait's own deadline caused is a bill sent to the wrong place.
+  const gaveUp = `the capture ${w.snapshotId} of ${w.id} could not be observed within ${w.timeoutMs}ms: `;
+  if (w.failures > 0 && w.aborts > 0) {
+    return (
+      `${gaveUp}no poll finished — ${w.failures} failed outright and ${w.aborts} were cut short ` +
+      `by this wait's own deadline`
+    );
+  }
+  return w.failures > 0
+    ? `${gaveUp}every poll failed`
+    : `${gaveUp}no poll finished before the deadline did, so nothing about the capture was ever read`;
+};
+
+/**
+ * How long {@link Computer.snapshot} waits for a capture to land, and how often
+ * it asks.
+ *
+ * A POLL DEADLINE, not a request budget, and it was the second of those in the
+ * Python SDK until OPL-4568. `POST computers/:id/snapshots` no longer holds the
+ * request open for the `qemu-img convert`: it settles every refusal, registers
+ * the capture and answers 202 with a placeholder row (platform OPL-4562), so
+ * the copying happens after the request and the number belongs on the loop that
+ * watches it.
+ *
+ * 1800000 because that is what the PLATFORM allows a capture — its `snapCtx` is
+ * a 30-minute context, so this is that number rather than an estimate of it —
+ * and because it is already {@link Builds.wait}'s default, this SDK's existing
+ * figure for how long a platform-side image operation takes. The full half hour
+ * is reachable now on every deployment, which it was not as a request budget: a
+ * proxy that abandons one long request at about two minutes has nothing to
+ * abandon in a wait made of many short listings (OPL-4563).
+ *
+ * Five seconds between polls is {@link Builds.wait}'s interval too, for its
+ * reason: a capture is minutes, so this is a poll every few percent of the wait,
+ * and the answer is a listing the dashboard reads on a timer anyway.
+ */
+const SNAPSHOT_WAIT_MS = 1_800_000;
+const SNAPSHOT_POLL_MS = 5_000;
+
 export class Computer {
   #t: Transport;
   #data: Record<string, unknown>;
@@ -3210,7 +3329,7 @@ export class Computer {
   // --- snapshots ------------------------------------------------------
 
   /**
-   * Capture a snapshot of this computer.
+   * Capture a snapshot of this computer, and wait for it.
    *
    * Works while it is running. `memory: true` also captures live RAM and device
    * state, so a restore or fork resumes exactly where it was instead of booting
@@ -3222,17 +3341,221 @@ export class Computer {
    * an account's listing fills with generated names that say only when each was
    * taken — which is exactly the information a restore does not need. Omitted,
    * the platform generates one.
+   *
+   * THE REQUEST NO LONGER WAITS FOR THE CAPTURE; this method does. The route
+   * answers **202** the moment the capture is accepted, with a placeholder row
+   * in state `capturing` carrying the id the snapshot will keep (platform
+   * OPL-4562). A capture is minutes and scales with how much has been written to
+   * the disk, which is longer than an HTTP request survives. The POST ran on
+   * this client's ordinary 60-second budget, which is less than the 119-124s the
+   * smallest capture this platform will take was measured at three times over
+   * (OPL-4561) — and widening that budget buys only until the proxy in front of
+   * `app.mandala.computer` gives up at about two minutes, whatever the client
+   * says (OPL-4563). A capture the client abandons is not cancelled: it finishes,
+   * and before this change the caller never learned the id.
+   *
+   * So this polls `snapshots.list()` for that id and returns when the row stops
+   * reading `capturing`. `pending` is where a finished capture lands and is the
+   * point the snapshot can be restored, cloned or deleted; it is not waited for
+   * BY NAME, because replication to backup storage can carry a small snapshot
+   * on to `durable` between two polls and a loop watching for the literal string
+   * would never match.
+   *
+   * RETURNING IS THE SNAPSHOT BEING USABLE, NOT THE COMPUTER BEING FREE. The
+   * capture's claim on the COMPUTER is released only after the push to backup
+   * storage — the step that makes the row `durable` — so a second capture of
+   * this computer, and a {@link delete} that purges snapshots, are still
+   * {@link ConflictError} until that finishes. Restoring, cloning and deleting
+   * the snapshot itself work from `pending`.
+   *
+   * `wait: false` returns the placeholder instead, for a caller who would rather
+   * hold the id and poll on their own schedule:
+   *
+   * ```ts
+   * const held = await c.snapshot({ name: 'before-upgrade', wait: false });
+   * held.capturing; // true — and held.id is already the final id
+   * ```
+   *
+   * EVERY REFUSAL IS STILL SYNCHRONOUS and still carries the status it always
+   * did: 404 for no such computer, {@link ConflictError} for a capture already
+   * running or a disk still being copied, a plan limit for an allowance that
+   * will not stretch, 400 for a memory snapshot of a computer that is not
+   * running. A 202 means the capture started.
+   *
+   * Throws {@link MandalaError} if the capture FAILS. There is no response left
+   * to carry that news by then, so the platform drops the `capturing` row and
+   * stores nothing; the row disappearing is the whole signal, and it is the one
+   * thing that tells a failed capture from one still running.
+   *
+   * Throws {@link TimeoutError} if the capture is still going when the timeout
+   * runs out. The capture is not stopped by that, only the waiting is, and the
+   * id in the message is the one to poll on. `timeoutMs` and `pollMs` are
+   * checked before anything is captured, and whether or not `wait` is going to
+   * use them: a number this refuses is a mistake in the CALL, and finding it
+   * after a capture has started is finding it too late to be worth anything.
    */
-  async snapshot(opts: { memory?: boolean; name?: string } & CallOptions = {}): Promise<Snapshot> {
+  async snapshot(
+    opts: { memory?: boolean; name?: string; wait?: boolean } & WaitOptions & CallOptions = {},
+  ): Promise<Snapshot> {
+    const { timeoutMs = SNAPSHOT_WAIT_MS, pollMs = SNAPSHOT_POLL_MS, signal } = opts;
+    // Both before the POST, and both validated the way `memory` is: a `wait`
+    // that is not a boolean is a DIFFERENT CALL from the one the caller wrote,
+    // and the one it turns into leaves a capture running with nobody waiting on
+    // it. See {@link P.flag}.
+    const waitForIt = P.flag(opts.wait, 'wait') ?? true;
+    checkWait(timeoutMs, pollMs);
     const path = P.computerAction(this.id, 'snapshots');
     const data = await this.#t.json<Record<string, unknown>>('POST', path, {
       body: P.snapshotBody(opts.memory, opts.name),
-      signal: opts.signal,
+      signal,
     });
+    // The id check stays AHEAD of both returns, which is where it already was
+    // and where it matters more now. The id is the whole content of an accepted
+    // capture — it is what a poll matches, and no route answers "the capture you
+    // just started" — so a 202 without one is unusable to either caller, and the
+    // one who asked not to wait is the worse off: handed something that looks
+    // like a handle, cannot be polled, and leaving a snapshot billed for and
+    // reachable only by guessing which row it is.
     if (!P.isRecord(data) || !data.id) {
       throw new MandalaError(`expected a snapshot from POST ${path}`);
     }
-    return toSnapshot(data);
+    const accepted = toSnapshot(data);
+    // A row that is not `capturing` is a stored snapshot and there is nothing to
+    // wait for — which is what a platform predating OPL-4562 answers, having
+    // done the whole capture inside the request, and is also the honest reading
+    // of any future answer that arrives already landed.
+    if (!waitForIt || !accepted.capturing) return accepted;
+    return this.#awaitCapture(accepted.id, timeoutMs, pollMs, signal);
+  }
+
+  /**
+   * Poll the account's snapshots until this capture lands, fails, or runs out.
+   *
+   * The listing rather than a per-capture route, because there is no per-capture
+   * route: `GET /snapshots` is where a capture in flight is visible, and the
+   * dashboard's own panel polls exactly this.
+   *
+   * MATCHED ON THE ID, never on "the newest snapshot of this computer". The 202
+   * hands over the id the snapshot will keep, so there is something exact to
+   * match — and the guess it replaces is wrong precisely where it matters, since
+   * a scheduled capture landing during a long manual one puts a stranger at the
+   * front of a listing that has no account-wide ordering to read anything from
+   * in any case.
+   *
+   * The raw `id` and strict equality, for the reason the move wait filters on
+   * the raw row: `str()` is a coercion and `String(['snap-1'])` is `'snap-1'`,
+   * so a coerced match would let a malformed row stand in for the capture and be
+   * returned as the finished snapshot.
+   *
+   * Not filtered to this computer first. The id is unique across the account, so
+   * such a filter could only ever remove the row that was asked for — and a
+   * partial listing carries stubs with no `computer_id` at all, which is exactly
+   * the shape that would then read as a capture that failed.
+   *
+   * ASKED WITHOUT `allow_partial`, which is what makes an absent row readable as
+   * a failure: a host that did not answer is then a 503 this loop rides out,
+   * rather than a short listing reported as a capture that died. The listing can
+   * still come back short in the one way the platform cannot prevent — rows this
+   * client could not decode — and on such a poll absence says nothing, since any
+   * of those rows might have been this one.
+   */
+  async #awaitCapture(
+    snapshotId: string,
+    timeoutMs: number,
+    pollMs: number,
+    signal?: AbortSignal,
+  ): Promise<Snapshot> {
+    const deadline = Date.now() + timeoutMs;
+    let polled = false;
+    let delayMs = pollMs;
+    // The LAST poll's, both of them, as in `waitForMove`: whether it read the
+    // row still capturing, and whether it read a listing that was short and
+    // did not carry the row. A poll that failed or was cut short read no
+    // listing, so it clears both rather than letting a timeout describe a
+    // listing from half an hour ago in the present tense.
+    let stillCapturing = false;
+    let shortLast = false;
+    // Whether the row was EVER read, which the two above cannot say between
+    // them: a wait that watched the capture for twenty minutes and then lost
+    // the platform has something true to report that "it never appeared" is
+    // not, and the two send a reader to different places.
+    let everSeen = false;
+    // Cumulative, and only for the sentence a timeout that never saw the row
+    // ends with. `aborts` is kept apart from `failures` because a poll this
+    // wait's own deadline cut short is not a poll the platform failed.
+    let reads = 0;
+    let failures = 0;
+    let aborts = 0;
+    for (;;) {
+      if (Date.now() >= deadline) {
+        throw new TimeoutError(
+          captureTimeoutText({
+            id: this.id,
+            snapshotId,
+            timeoutMs,
+            stillCapturing,
+            shortLast,
+            everSeen,
+            reads,
+            failures,
+            aborts,
+          }),
+        );
+      }
+      // The sleep comes before every poll but the first, as every other wait
+      // here does it: a capture that landed while the caller was doing
+      // something else is one round trip from being known to have landed.
+      if (polled) await sleepUntilNextPoll(delayMs, deadline, signal);
+      polled = true;
+      delayMs = pollMs;
+      if (Date.now() >= deadline) continue;
+      try {
+        const { items, incomplete } = await this.#t.listing(P.SNAPSHOTS, {
+          signal: deadlineSignal(deadline - Date.now(), signal),
+        });
+        reads += 1;
+        const row = items.find((d) => d.id === snapshotId);
+        if (row) {
+          const snap = toSnapshot(row);
+          stillCapturing = snap.capturing;
+          everSeen = true;
+          shortLast = false;
+          if (!snap.capturing) return snap;
+          continue;
+        }
+        stillCapturing = false;
+        // Absence is conclusive AT ONCE on a listing read in full, and the
+        // platform is what makes it so: the row is registered before the copy
+        // starts, so there is no window in which a running capture is unlisted.
+        // What is left is a row that has LEFT, which on this route means one
+        // thing only — the capture failed, and nothing was stored. Spending the
+        // rest of a half-hour deadline to reach that same sentence with less in
+        // it would be its own defect.
+        if (incomplete === null) {
+          throw new MandalaError(captureFailed(this.id, snapshotId));
+        }
+        shortLast = true;
+      } catch (err) {
+        if (signal?.aborted) throw err;
+        // This wait's own timer firing inside a poll, which is not a failed
+        // poll — `aborts` is counted apart for that reason. Both of the last
+        // poll's readings still go, because a poll cut short read no listing at
+        // all, and a timeout that quotes one from half an hour ago writes it in
+        // the present tense. `everSeen` stays: it is a fact about the whole
+        // wait rather than about the poll that just ended.
+        if (isDeadlineAbort(err)) {
+          aborts += 1;
+          stillCapturing = false;
+          shortLast = false;
+          continue;
+        }
+        if (!isTransientForPoll(err)) throw err;
+        stillCapturing = false;
+        shortLast = false;
+        failures += 1;
+        delayMs = retryDelay(pollMs, err);
+      }
+    }
   }
 
   /**

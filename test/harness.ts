@@ -453,6 +453,17 @@ export const SNAPSHOT = {
   resolution: '1920x1080x24',
 };
 
+/**
+ * The same snapshot as the platform hands it over at the 202: accepted, and not
+ * taken yet.
+ *
+ * `state` and `size_bytes` are the whole difference. The id is deliberately
+ * {@link SNAPSHOT}'s, because that is the platform's guarantee — the id is
+ * allocated before the copy starts and does not change when it lands, which is
+ * the entire reason a poll has something to match on.
+ */
+export const CAPTURE_ACCEPTED = { ...SNAPSHOT, state: 'capturing', size_bytes: 0 };
+
 export const EXEC_OK = { exit_code: 0, stdout_b64: '', stderr_b64: '', timed_out: false };
 
 /** What a background start answers with: a pid, and nothing having exited. */
@@ -772,7 +783,14 @@ export const anyRoute: Responder = (call) => {
   if (path.endsWith('/snapshots')) {
     // GET computers/:id/snapshots is the holdings triple, not a listing.
     if (get && path !== '/snapshots') return json({ count: 0, size_bytes: 0, fingerprint: 'f' });
-    return json(get ? [SNAPSHOT] : SNAPSHOT);
+    // The POST is a 202 and a PLACEHOLDER, which is what the platform answers
+    // since OPL-4562: the capture is accepted here and runs afterwards, so what
+    // comes back reads `capturing` and carries no bytes yet. Its id is the one
+    // the finished snapshot keeps, which is why it is `SNAPSHOT`'s — the
+    // listing above is where the same row is read once it has landed, and a
+    // mock that answered a finished snapshot to the POST would let a client
+    // that never polls pass.
+    return get ? json([SNAPSHOT]) : json(CAPTURE_ACCEPTED, { status: 202 });
   }
   // The two halves of a move answer different moments of the same operation:
   // the POST is the 202 with `live` true, and the listing is where it ended up.

@@ -359,6 +359,15 @@ export class Snapshots {
    * They are not usable — nothing can be restored or cloned from one — but they
    * still hold objects and are still billed, so this is the flag for when the
    * question is about storage rather than about what can be restored.
+   *
+   * CAPTURES IN FLIGHT ARE LISTED TOO, and they are not snapshots yet: a row in
+   * state `capturing` is a placeholder that restore, clone and delete all answer
+   * 404 on. Its id is nonetheless the id the snapshot will keep, which is what
+   * makes this listing the thing to poll after {@link Computer.snapshot} — see
+   * {@link Snapshot.capturing}. Read `state` on every row rather than on the
+   * newest one: this is one answer per host concatenated in a fixed host order,
+   * so it carries no account-wide ordering to read anything from, and a capture
+   * running on one host appears after finished snapshots from another.
    */
   async list(
     opts: ListOptions & { computerId?: string; includeUnfinished?: boolean } = {},

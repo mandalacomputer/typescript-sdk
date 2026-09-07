@@ -1309,6 +1309,16 @@ export function toUsageReport(d: Record<string, unknown>): UsageReport {
   };
 }
 
+/**
+ * The one snapshot state that is not a snapshot.
+ *
+ * A capture registers its row before any bytes move and that row becomes
+ * `pending` in place, under the id it was allocated (platform OPL-4562). So
+ * "still going" is a STATE to read and not an id to recognise — it used to be
+ * both, when the placeholder was called `cap-` and the computer's own id.
+ */
+const CAPTURING = 'capturing';
+
 export type Snapshot = {
   id: string;
   computerId: string;
@@ -1327,10 +1337,18 @@ export type Snapshot = {
   /**
    * Where these bytes have got to, and what may be done with them.
    *
-   * - `"capturing"` — still being taken, and NOT a snapshot yet. A listing puts
-   *   these first, their ids begin `cap-`, and restore, clone and delete all
-   *   answer 404 on one. Acting on the newest row of a fresh listing is exactly
-   *   how this is met.
+   * - `"capturing"` — still being taken, and NOT a snapshot yet: restore, clone
+   *   and delete all answer 404 on one, and a listing puts these first. THE ID
+   *   IS ALREADY THE SNAPSHOT'S OWN — allocated before the copy starts and kept
+   *   when it lands — so this is the row to poll rather than a stand-in that
+   *   gets replaced by something under another id (platform OPL-4562). It used
+   *   to be `cap-` and the computer's own id, which named the WORK rather than
+   *   the thing, leaving a caller nothing to match on but "the newest row of a
+   *   fresh listing" — a guess a scheduled capture landing in the same window
+   *   gets wrong. See {@link capturing}.
+   *
+   *   A capture that FAILS leaves nothing: the row disappears and no snapshot
+   *   takes its place, which is the only signal there is.
    * - `"pending"` — on its host and usable. This is the point to act from.
    * - `"durable"` — in backup storage too. See {@link durable}.
    * - `"deleting"` — a deletion that began and did not finish; only listed when
@@ -1344,6 +1362,15 @@ export type Snapshot = {
   auto: boolean;
   /** True once replicated to backup storage. */
   durable: boolean;
+  /**
+   * True while this is a capture in flight rather than a snapshot.
+   *
+   * What {@link Computer.snapshot} hands back under `wait: false`, and what a
+   * listing shows for a capture somebody else started. Restore, clone and
+   * delete all answer 404 on one; {@link id} is nonetheless the id the snapshot
+   * will keep, so it is what to poll on.
+   */
+  capturing: boolean;
   /** A live capture: forks and restores without booting. */
   memory: boolean;
   /**
@@ -1651,6 +1678,13 @@ export function toSnapshot(d: Record<string, unknown>): Snapshot {
     // coerced `state` and `kind` above are still what gets REPORTED; they are
     // not what gets decided on.
     durable: d.state === 'durable',
+    // THE RAW state here too, and it decides the same way `durable` does: a
+    // value nobody can classify is not a claim, so a malformed one reads as a
+    // stored snapshot rather than as a capture still running. That is the safe
+    // direction for this field as well — {@link Computer.snapshot}'s wait
+    // returns the row rather than polling a listing until its deadline over a
+    // state it will never be able to read.
+    capturing: d.state === CAPTURING,
     memory: d.kind === 'memory',
     orphaned: said(d.orphaned),
     unreachable: snapshotUnreachable(d),
