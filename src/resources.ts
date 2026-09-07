@@ -350,12 +350,14 @@ export class Computers {
  * two minutes, whatever the client says (OPL-4563). A wait made of many short
  * listings has nothing for a proxy to abandon.
  *
- * WHAT THE BUDGET ACTUALLY HAS TO COVER is not the size on its own. A `pending`
- * snapshot has never left its host, so deleting one is a chain walk and some
- * local files and is over in under a second — measured at 436ms for 2.43 GB on
- * the dev fleet. A `durable` one has been pushed to backup storage, and the same
- * deletion then walks the bucket objects too, which is the half that ran past
- * the 60 seconds (OPL-4575).
+ * WHAT THE BUDGET HAS TO COVER IS THE CHAIN, not the size, and measurement is
+ * what says so. A lone 2.43 GB snapshot with no dependents was deleted on the
+ * deployed fleet in 3.2s at `durable` — bucket objects walked and all — and in
+ * 436ms at `pending`, where it had never left its host. The same 2.43 GB is what
+ * ran past 60 seconds in the report this ticket came from, so neither the size
+ * nor the push to backup storage is what did that: what scales is flattening the
+ * snapshots that read THROUGH the one being deleted, which a single capture has
+ * none of. The budget is set for the chain that has them.
  *
  * 1800000 for {@link Builds.wait}'s reason and {@link Computer.snapshot}'s: it
  * is this SDK's figure for how long a platform-side image operation takes, and
@@ -593,9 +595,9 @@ export class Snapshots {
    * {@link ConnectionInterruptedError} while the deletion went on and finished,
    * so the caller was told nothing about what had happened and the next
    * `DELETE` on that id answered `this snapshot is already being deleted`
-   * (OPL-4575). The size is not what did that on its own — see
-   * {@link SNAP_DELETE_WAIT_MS} — it is the walk over the bucket objects a
-   * `durable` snapshot has.
+   * (OPL-4575). The size is not what did that — a lone snapshot of the same
+   * 2.43 GB deletes in seconds on the deployed fleet — it is the chain. See
+   * {@link SNAP_DELETE_WAIT_MS}.
    *
    * WHAT IS POLLED IS THE ROW'S ABSENCE. There is no state that means deleted —
    * `GET /snapshots` no longer listing the id is the deletion having finished —

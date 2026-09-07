@@ -394,6 +394,28 @@ describe('snapshots.delete() waits for the row to go', () => {
     expect(polls).toBe(3);
   });
 
+  it('waits on whatever state the 202 carries, because the answer does not say', async () => {
+    // THE 202 DOES NOT SAY `deleting`. The intent is committed only after the
+    // dependents are flattened — the sweep destroys what it finds in that state
+    // WITHOUT flattening — so the row comes back exactly as it stood, which the
+    // deployed platform confirmed by answering `durable` here. A client waiting
+    // for the answer to say `deleting` would wait for something that never
+    // comes; one reading the unchanged state as "nothing was accepted" would not
+    // wait at all. So the body decides nothing and the listing decides
+    // everything, and this holds for any state the 202 might carry.
+    for (const state of ['durable', 'pending', 'deleting', undefined]) {
+      let polls = 0;
+      const { client: c } = client((call) => {
+        if (call.method === 'DELETE') return json({ ...SNAPSHOT, state }, { status: 202 });
+        if (call.path !== '/snapshots' || call.method !== 'GET') return anyRoute(call);
+        polls += 1;
+        return json(polls < 2 ? [SNAPSHOT] : []);
+      });
+      await c.snapshots.delete('snap-1', { pollMs: 1, timeoutMs: 5_000 });
+      expect(`${state}: ${polls}`).toBe(`${state}: 2`);
+    }
+  });
+
   it('asks with include=unfinished, without which a stall reads as a deletion', async () => {
     // Not optional and not a nicety. Once the dependents are detached the daemon
     // marks the snapshot `deleting`, and a BARE listing leaves that state out —
