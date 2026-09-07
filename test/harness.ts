@@ -466,14 +466,23 @@ export const CAPTURE_ACCEPTED = { ...SNAPSHOT, state: 'capturing', size_bytes: 0
 
 /**
  * The same snapshot as `DELETE /snapshots/:id` hands it back at the 202:
- * accepted for deletion, and still there.
+ * accepted for deletion, and still exactly as it was.
  *
- * `state` is the whole difference, and the row is the snapshot's own rather than
- * an ack — the platform stopped answering `{"ok":true}` here when the deletion
- * moved out of the request (platform OPL-4572). A mock that answered the ack
- * would let a client reading the 202 as a finished deletion pass.
+ * The row rather than an ack — the platform stopped answering `{"ok":true}` here
+ * when the deletion moved out of the request (platform OPL-4572), and a mock
+ * that answered the ack would let a client reading the 202 as a finished
+ * deletion pass.
+ *
+ * ITS `state` IS UNCHANGED, and that is the part worth pinning rather than the
+ * body. The 202 does NOT say `deleting`: the intent is committed only after the
+ * dependents are flattened, deliberately, because the sweep destroys what it
+ * finds in that state without flattening. Verified on the deployed platform,
+ * which answered this row at `durable`. So a client that waited for the ANSWER
+ * to say `deleting` would wait for something that never comes, and one that read
+ * the unchanged state as "nothing was accepted" would not wait at all — which is
+ * why `delete()` reads nothing off this body and polls the listing instead.
  */
-export const DELETE_ACCEPTED = { ...SNAPSHOT, state: 'deleting' };
+export const DELETE_ACCEPTED = { ...SNAPSHOT };
 
 /**
  * A deletion of ANOTHER snapshot that began and did not finish.
