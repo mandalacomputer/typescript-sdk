@@ -1594,6 +1594,37 @@ export const belongsToComputer = (d: Record<string, unknown>, id: string): boole
   d.computer_id === id;
 
 /**
+ * How many of these rows carry no string at `key`: the shortfall a MATCH cannot
+ * see, and the one a listing's own shortfall count does not report.
+ *
+ * Every wait in this SDK that watches for a row reaches a verdict when the row
+ * is not there — "the capture failed", "this move is not listed", "the deletion
+ * finished" — and every one of them guards that verdict with a test for whether
+ * the listing was read whole, because a row nobody could decode might have been
+ * the row. That guard counts rows which failed {@link isRecord}: `incomplete` on
+ * a {@link Listing}, `unreadable` out of {@link moveRows}.
+ *
+ * THERE IS A SECOND WAY TO BE SHORT, and it falls between the two tests. Those
+ * waits match on the RAW field and by strict equality, deliberately — `str()` is
+ * a coercion and `String(['snap-1'])` is `'snap-1'`, so a coerced match lets a
+ * malformed row stand in for the very thing being waited on and be returned as
+ * the finished snapshot or the settled move (OPL-3850). The cost of that
+ * correctness is this: a row carrying `['snap-1']` is still a RECORD, so it is
+ * kept and counted as readable, and it is also unmatchable — so the row is
+ * missing from a listing every one of these waits believes it read in full, and
+ * each reaches its verdict over it (OPL-4587).
+ *
+ * A COUNT rather than a boolean, because the move wait says how short its
+ * listing was in the sentence it ends with, and "some" is not something to put
+ * in a message that exists to be precise.
+ *
+ * `key` because the field differs and the reasoning does not: a snapshot is
+ * matched by its own `id`, a move by the `computer_id` it is attributed to.
+ */
+export const unmatchableRows = (rows: Record<string, unknown>[], key: string): number =>
+  rows.reduce((n, d) => (typeof d[key] === 'string' ? n : n + 1), 0);
+
+/**
  * Whether a snapshot ROW stands in for one nobody could read.
  *
  * The documented placeholder is an id and this flag and nothing more:

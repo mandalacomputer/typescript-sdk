@@ -1319,11 +1319,18 @@ held.capturing;                                     // true — and held.id is f
 
 for (;;) {
   const { items, incomplete } = await client.snapshots.listWithStatus();
-  const row = items.find((s) => s.id === held.id);
+  // `raw.id`, not `id`. The decoded field has been through a string coercion,
+  // and `String(['snap-1'])` is `'snap-1'` — so matching on it lets a malformed
+  // row stand in for your capture and be read as the one that landed.
+  const row = items.find((s) => s.raw.id === held.id);
   if (row && !row.capturing) break;                 // landed
   // A row that has gone from a listing read WHOLE is a capture that failed. On
   // a short one it says nothing — the rows nobody could read might have held it.
-  if (!row && incomplete === null) throw new Error('the capture failed: no snapshot and no row');
+  // A row whose own `id` is not a string is the second way to be short: it is
+  // kept by the listing, so `incomplete` does not count it, and it cannot be
+  // matched either, so it might be this one.
+  const blind = incomplete !== null || items.some((s) => typeof s.raw.id !== 'string');
+  if (!row && !blind) throw new Error('the capture failed: no snapshot and no row');
   await new Promise((r) => setTimeout(r, 5_000));
 }
 ```
