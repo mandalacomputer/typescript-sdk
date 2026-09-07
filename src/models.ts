@@ -1648,6 +1648,34 @@ const snapshotId = (d: Record<string, unknown>): string => {
   return id;
 };
 
+/**
+ * Whether a `POST computers/:id/snapshots` answer is an accepted CAPTURE rather
+ * than a stored snapshot.
+ *
+ * The protocol signal is the status — 202 against 200 — and {@link Transport.json}
+ * does not carry one, so this reads the body instead. It reads it the other way
+ * round from {@link Snapshot.capturing}, and the inversion is the point: this
+ * answers "is there something to wait for", where an unreadable answer must mean
+ * YES.
+ *
+ * `capturing` decides the way `durable` does, on the raw value, so a state
+ * nobody can classify is not a claim — the safe direction inside a poll loop,
+ * where the alternative is polling a row whose state can never be read until the
+ * deadline. Here the same reading is the unsafe one. A 202 whose `state` arrives
+ * missing, empty, misspelled or under another key would then read as a finished
+ * snapshot: {@link Computer.snapshot} would hand back the placeholder unwaited,
+ * with `sizeBytes: 0` and an id that restore, clone and delete all 404 on, which
+ * is precisely the bug OPL-4568 exists to remove — reinstated silently, by drift
+ * this SDK cannot see.
+ *
+ * So only a state this client can actually READ as a landed one skips the wait.
+ * Anything else is waited on, and waiting on a snapshot that had in fact landed
+ * costs one listing: the row is there, carrying whatever state it really has,
+ * and the poll returns it at once (/code-review, OPL-4568).
+ */
+export const acceptedCapture = (d: Record<string, unknown>): boolean =>
+  typeof d.state !== 'string' || d.state === '' || d.state === CAPTURING;
+
 export function toSnapshot(d: Record<string, unknown>): Snapshot {
   return {
     // Refused rather than coerced to `''`, the way {@link buildId} refuses a

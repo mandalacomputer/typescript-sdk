@@ -51,6 +51,7 @@ import type {
   WindowResult,
 } from './models.js';
 import {
+  acceptedCapture,
   belongsToComputer,
   count,
   isWindowResult,
@@ -3420,11 +3421,18 @@ export class Computer {
       throw new MandalaError(`expected a snapshot from POST ${path}`);
     }
     const accepted = toSnapshot(data);
-    // A row that is not `capturing` is a stored snapshot and there is nothing to
-    // wait for — which is what a platform predating OPL-4562 answers, having
-    // done the whole capture inside the request, and is also the honest reading
-    // of any future answer that arrives already landed.
-    if (!waitForIt || !accepted.capturing) return accepted;
+    // A row carrying a landed state this client can READ is a stored snapshot
+    // and there is nothing to wait for — which is what a platform predating
+    // OPL-4562 answers, having done the whole capture inside the request, and is
+    // the honest reading of any future answer that arrives already landed.
+    //
+    // Read through {@link acceptedCapture} rather than off `accepted.capturing`,
+    // and the two are deliberately not the same test: a state this client cannot
+    // classify has to mean "wait" HERE and "landed" in the poll loop. See that
+    // function — returning a placeholder unwaited is the whole of the bug this
+    // change removes, and an omitted or renamed `state` would reinstate it in
+    // silence.
+    if (!waitForIt || !acceptedCapture(data)) return accepted;
     return this.#awaitCapture(accepted.id, timeoutMs, pollMs, signal);
   }
 
@@ -3525,12 +3533,25 @@ export class Computer {
         }
         stillCapturing = false;
         // Absence is conclusive AT ONCE on a listing read in full, and the
-        // platform is what makes it so: the row is registered before the copy
-        // starts, so there is no window in which a running capture is unlisted.
-        // What is left is a row that has LEFT, which on this route means one
-        // thing only — the capture failed, and nothing was stored. Spending the
-        // rest of a half-hour deadline to reach that same sentence with less in
-        // it would be its own defect.
+        // platform is what makes it so. `StartSnapshot` registers the capture
+        // and only then answers, `GET /v1/snapshots` merges the host's live
+        // in-flight captures with its stored rows, and `dropLanded` makes the
+        // pair appear exactly once — so a healthy capture is on every listing
+        // from before the 202 until the snapshot itself is, with no window
+        // between them. What is left is a row that has LEFT, which on this route
+        // means one thing only: the capture failed and nothing was stored.
+        // Spending the rest of a half-hour deadline to reach that same sentence
+        // with less in it would be its own defect.
+        //
+        // A FAN-OUT, unlike the single computer-keyed table `waitForMove` fails
+        // fast off, and that is what the `incomplete` test below is for rather
+        // than an argument against failing fast at all (/code-review, OPL-4568).
+        // The captures live in one hypervisor's memory, so a host that did not
+        // answer would take this row with it — and `web/lib/surface` turns that
+        // answer into a 503 for a caller who did not pass `allow_partial`, which
+        // this poll deliberately does not. So a 200 with no shortfall is every
+        // host having answered. The remaining shortfall is this client's own
+        // undecodable rows, and that is what `incomplete` catches.
         if (incomplete === null) {
           throw new MandalaError(captureFailed(this.id, snapshotId));
         }

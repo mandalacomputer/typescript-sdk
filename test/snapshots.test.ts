@@ -114,6 +114,32 @@ describe('snapshot() waits for the capture', () => {
     expect(rec.calls.length).toBe(before + 1);
   });
 
+  it('waits on a 202 whose state it cannot read, rather than calling it landed', async () => {
+    // The status is the protocol's signal — 202 against 200 — and the transport
+    // does not carry one, so the body decides. A `state` that arrives missing,
+    // empty or not a string must therefore mean "there is something to wait
+    // for": read the other way, this hands back a placeholder with no bytes and
+    // an id that restore, clone and delete all 404 on, which is the whole of the
+    // bug this change removes (/code-review).
+    for (const state of [undefined, '', ['capturing'], 42]) {
+      const { rec, client: c } = client((call) =>
+        call.path.endsWith('/snapshots') && call.method === 'POST'
+          ? json({ ...CAPTURE_ACCEPTED, state }, { status: 202 })
+          : anyRoute(call),
+      );
+      const computer = await c.computers.get('vm-1');
+      const before = rec.calls.length;
+      const snap = await computer.snapshot({ pollMs: 1, timeoutMs: 500 });
+      // The listing is what settles it, and it costs exactly one poll when the
+      // row has in fact landed.
+      expect(`${JSON.stringify(state)}: ${rec.calls.length - before}`).toBe(
+        `${JSON.stringify(state)}: 2`,
+      );
+      expect(snap.state).toBe(SNAPSHOT.state);
+      expect(snap.sizeBytes).toBe(SNAPSHOT.size_bytes);
+    }
+  });
+
   it('does not poll a platform that answered with a finished snapshot', async () => {
     // The pre-202 answer, which this half still has to work against: a row that
     // is not `capturing` is a stored snapshot and there is nothing to wait for.
