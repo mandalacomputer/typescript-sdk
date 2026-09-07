@@ -2595,6 +2595,53 @@ describe('snapshots', () => {
     expect(rows[1]!.unreachable).toBe(true);
   });
 
+  it('marks the answer short when a row names no computer it could match', async () => {
+    // The other side of OPL-4587's rule. There an unmatchable row stops a
+    // verdict about a row that is MISSING; here it is the missing row — dropped,
+    // because a strict `computer_id` is the whole of what keeps somebody else's
+    // snapshots out of a listing usually read just before an irreversible
+    // delete, and `['vm-1']` is exactly the shape of a row that is this
+    // computer's and malformed.
+    //
+    // Dropping it stays right. Saying nothing about it does not: `incomplete`
+    // read `null` over a list one row shorter than the estate, which is this
+    // method claiming it answered in full.
+    const { client: c } = client(() =>
+      json([SNAPSHOT, { ...SNAPSHOT, id: 'snap-9', computer_id: ['vm-1'] }]),
+    );
+    const listed = await c.snapshots.listWithStatus({ computerId: 'vm-1' });
+
+    expect(listed.items.map((s) => s.id)).toEqual(['snap-1']);
+    expect(listed.incomplete).toBe(1);
+  });
+
+  it('adds a dropped row to a shortfall the platform already reported', async () => {
+    // One channel, deliberately — presence is the signal and the number is
+    // detail — so a client-side drop over a listing the platform already called
+    // short must not overwrite the platform's count with its own.
+    const { client: c } = client(
+      () =>
+        new Response(
+          JSON.stringify([SNAPSHOT, { ...SNAPSHOT, id: 'snap-9', computer_id: 42 }]),
+          { status: 200, headers: { 'content-type': 'application/json', 'X-GC-Incomplete': '2' } },
+        ),
+    );
+    const listed = await c.snapshots.listWithStatus({ computerId: 'vm-1' });
+    expect(listed.incomplete).toBe(3);
+  });
+
+  it('does not count an unreachable stub as a row it could not attribute', async () => {
+    // A stub carries no `computer_id` at all and is KEPT by the filter — it is
+    // the platform's own marker that its answer was short, already visible in
+    // the rows. Counting it would report the same shortfall twice, and would
+    // make every partial listing look worse than it is.
+    const { client: c } = client(() => json([SNAPSHOT, { id: 'snap-3', unreachable: true }]));
+    const listed = await c.snapshots.listWithStatus({ computerId: 'vm-1' });
+
+    expect(listed.items.map((s) => s.id)).toEqual(['snap-1', 'snap-3']);
+    expect(listed.incomplete).toBe(null);
+  });
+
   it('decodes what a clone of a snapshot will come up as', async () => {
     // These describe the CAPTURE, not the computer: the source may be gone and
     // an orphan is still cloneable, and a computer resized since no longer says

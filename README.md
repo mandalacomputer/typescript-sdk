@@ -1326,9 +1326,11 @@ for (;;) {
   if (row && !row.capturing) break;                 // landed
   // A row that has gone from a listing read WHOLE is a capture that failed. On
   // a short one it says nothing — the rows nobody could read might have held it.
-  // A row whose own `id` is not a string is the second way to be short: it is
-  // kept by the listing, so `incomplete` does not count it, and it cannot be
-  // matched either, so it might be this one.
+  // A row whose `id` is a non-string that still coerces (`['snap-1']`, `42`) is
+  // the second way to be short: it is kept, so `incomplete` does not count it,
+  // and it cannot be matched, so it might be this one. One that coerces to
+  // nothing (`null`, absent, `''`) never reaches here at all — `listWithStatus`
+  // refuses a snapshot with no id and throws.
   const blind = incomplete !== null || items.some((s) => typeof s.raw.id !== 'string');
   if (!row && !blind) throw new Error('the capture failed: no snapshot and no row');
   await new Promise((r) => setTimeout(r, 5_000));
@@ -1418,9 +1420,14 @@ await client.snapshots.delete(snap.id, { wait: false });
 const { items, incomplete } = await client.snapshots.listWithStatus({
   includeUnfinished: true,
 });
-// `incomplete` first: rows this client could not read might have been this one,
-// so absence on a short listing is not a snapshot that is gone.
-const gone = incomplete === null && !items.some((s) => s.id === snap.id);
+// Two ways this listing can be short, and absence means nothing under either:
+// rows this client could not read at all, which `incomplete` counts, and a row
+// whose `id` is a non-string that still coerces, which it does not — that one is
+// kept, and cannot be matched, so it might be this snapshot. (An `id` that
+// coerces to nothing never gets this far: `listWithStatus` throws on it.)
+const blind = incomplete !== null || items.some((s) => typeof s.raw.id !== 'string');
+// `raw.id`, not `id`: the decoded field has been through `str()`.
+const gone = !blind && !items.some((s) => s.raw.id === snap.id);
 ```
 
 Taking them on a timer is a property of the computer:
@@ -1437,6 +1444,13 @@ returns the computer to never having had one.
 `{ computerId }` narrows it to one computer's, and `{ includeUnfinished: true }`
 adds deletions that began and did not finish — nothing can be restored or
 cloned from one, but they still hold storage and are still billed.
+
+The `{ computerId }` filter drops a row whose `computer_id` is not a string,
+since a strict comparison is the whole of what keeps another computer's
+snapshots out of the answer — and `listWithStatus()` counts that row into
+`incomplete`, so a list one row shorter than the estate never comes back
+claiming to be whole. That matters most where these listings are usually read:
+just before a purge.
 
 A schedule says when they are taken and not how long they survive. That is your
 plan's, account-wide, and read-only:

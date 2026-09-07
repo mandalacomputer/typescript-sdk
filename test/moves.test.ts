@@ -765,7 +765,7 @@ describe('waitForMove', () => {
 
     expect(err).toBeInstanceOf(TimeoutError);
     expect((err as Error).message).toContain('that started at 2026-08-23T02:00:12.699Z');
-    expect((err as Error).message).toContain('readable in full');
+    expect((err as Error).message).toContain('accounted for every row');
     expect((err as Error).message).not.toContain('deleted');
   });
 });
