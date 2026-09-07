@@ -520,6 +520,77 @@ describe('waitForMove', () => {
     expect((err as Error).message).toContain("cut short by this wait's own deadline");
   });
 
+  it('does not call a move unlisted over a row that names no computer it can match', async () => {
+    // OPL-4587, and the hole `unreadable` cannot see. The filter is
+    // `computer_id === this.id` on the RAW row — strict, so a coerced
+    // `String(['vm-1'])` cannot pick a malformed row out of this account-wide
+    // listing and hand its state back as this computer's move (OPL-3850). The
+    // cost: a row carrying `['vm-1']` is still an OBJECT, so `unreadable` counts
+    // it as fine, and the filter drops it — leaving the row missing from a
+    // listing this wait believed it read whole. `['vm-1']` is precisely the
+    // shape of a row that is this computer's and malformed, so the verdict
+    // "your move is not listed" was being reached over the very row that might
+    // have been it.
+    for (const cid of [['vm-1'], 42, null, undefined]) {
+      const row: Record<string, unknown> = { ...MOVE_DONE, computer_id: cid };
+      if (cid === undefined) delete row.computer_id;
+      const { client: c } = client((call) =>
+        call.path === '/moves' ? json({ moves: [row] }) : anyRoute(call),
+      );
+      const computer = await c.computers.get('vm-1');
+      const err = await computer.waitForMove(SINCE, { pollMs: 1, timeoutMs: 40 }).catch((e) => e);
+
+      expect(`${JSON.stringify(cid)}: ${err instanceof TimeoutError}`).toBe(
+        `${JSON.stringify(cid)}: true`,
+      );
+      expect((err as Error).message).not.toContain('is not listed by GET moves');
+      expect((err as Error).message).toContain('named no computer this client could match on');
+    }
+  });
+
+  it('drops the unattributable count on both silent paths, as it drops the other', async () => {
+    // The new count is the last poll's, exactly as `unreadable` is, so a wait
+    // that saw one unattributable row and then lost the platform — by failure or
+    // by its own deadline — must not end by describing that listing in the
+    // present tense. Both catch branches, because they are two ways of reading
+    // no listing at all and only one of them was ever wired up by hand.
+    for (const after of ['fail', 'hang'] as const) {
+      let polls = 0;
+      const { client: c } = client((call) => {
+        if (call.path !== '/moves') return anyRoute(call);
+        polls += 1;
+        if (polls === 1) return json({ moves: [{ ...MOVE_DONE, computer_id: ['vm-1'] }] });
+        return after === 'fail'
+          ? errorJson(503, 'the moves listing is briefly unavailable')
+          : (new Promise<Response>(() => {}) as unknown as Response);
+      });
+      const computer = await c.computers.get('vm-1');
+      const err = await computer.waitForMove(SINCE, { pollMs: 1, timeoutMs: 60 }).catch((e) => e);
+
+      expect(`${after}: ${err instanceof TimeoutError}`).toBe(`${after}: true`);
+      expect(`${after}: ${(err as Error).message}`).not.toContain('named no computer');
+    }
+  });
+
+  it('says a row it could not read apart from a row it could not attribute', async () => {
+    // Two kinds of short, and they send a reader to different places: a row that
+    // is not a JSON object could not be read AT ALL, and a row that is one and
+    // carries no string `computer_id` was read perfectly well and belongs to
+    // nobody this client can name. Both stop the verdict; neither may borrow the
+    // other's wording.
+    const { client: c } = client((call) =>
+      call.path === '/moves'
+        ? json({ moves: [42, { ...MOVE_DONE, computer_id: ['vm-1'] }] })
+        : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    const err = await computer.waitForMove(SINCE, { pollMs: 1, timeoutMs: 40 }).catch((e) => e);
+
+    expect(err).toBeInstanceOf(TimeoutError);
+    expect((err as Error).message).toContain('1 row(s) of the last listing read could not be read');
+    expect((err as Error).message).toContain('1 row(s) of it named no computer');
+  });
+
   it('does not describe a listing read a quarter of an hour ago as what it can see now', async () => {
     // `unreadable` is written on a poll that READ the listing and is not
     // evidence about any other one, so a wait that decoded two bad rows
@@ -541,6 +612,7 @@ describe('waitForMove', () => {
     expect(err).toBeInstanceOf(TimeoutError);
     expect(polls).toBeGreaterThan(1);
     expect((err as Error).message).not.toContain('could not be read at all');
+    expect((err as Error).message).not.toContain('named no computer');
     expect((err as Error).message).toContain('poll(s) failed outright');
   });
 
@@ -693,7 +765,7 @@ describe('waitForMove', () => {
 
     expect(err).toBeInstanceOf(TimeoutError);
     expect((err as Error).message).toContain('that started at 2026-08-23T02:00:12.699Z');
-    expect((err as Error).message).toContain('readable in full');
+    expect((err as Error).message).toContain('accounted for every row');
     expect((err as Error).message).not.toContain('deleted');
   });
 });

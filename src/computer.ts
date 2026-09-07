@@ -69,6 +69,7 @@ import {
   toVncConnect,
   toWindowListing,
   toWindowResult,
+  unmatchableRows,
   vncEventsUrl,
   windowContradiction,
 } from './models.js';
@@ -363,10 +364,23 @@ function pointPastTheCeiling(err: unknown): unknown {
  * short — so the span it describes is never longer than one listing and the
  * reader is told which one.
  */
-const blindness = (w: { unreadable: number }): string =>
-  w.unreadable > 0
-    ? `${w.unreadable} row(s) of the last listing read could not be read at all`
-    : '';
+const blindness = (w: { unreadable: number; unmatchable: number }): string => {
+  // TWO KINDS OF SHORT, said apart because they are not the same fact about the
+  // answer and a caller chasing one would look in the wrong place for the other.
+  // A row that is not a JSON object could not be read at all; a row that is one
+  // and carries no string `computer_id` was read perfectly well and cannot be
+  // attributed to any computer, this one included (OPL-4587). Both mean the same
+  // thing for the verdict — the row might have been this move — and neither may
+  // borrow the other's wording.
+  const parts: string[] = [];
+  if (w.unreadable > 0) {
+    parts.push(`${w.unreadable} row(s) of the last listing read could not be read at all`);
+  }
+  if (w.unmatchable > 0) {
+    parts.push(`${w.unmatchable} row(s) of it named no computer this client could match on`);
+  }
+  return parts.join(', and ');
+};
 
 /**
  * What a move wait ran out of time doing, in the sentence that is true of it.
@@ -396,6 +410,7 @@ const moveTimeoutText = (w: {
   observed: boolean;
   absent: boolean;
   unreadable: number;
+  unmatchable: number;
   reads: number;
   failures: number;
   aborts: number;
@@ -445,7 +460,7 @@ const moveTimeoutText = (w: {
       `${w.timeoutMs}ms` +
       (blind ? `, and ${blind}` : '') +
       (w.failures > 0 ? `, and ${w.failures} poll(s) failed outright` : '') +
-      `. No poll of it was ever both readable in full and missing this move, which is what it ` +
+      `. No poll of it both accounted for every row and was missing this move, which is what it ` +
       `takes to call the row gone, so what became of the move is not something this wait read.`
     );
   }
@@ -492,9 +507,16 @@ const captureFailed = (computerId: string, snapshotId: string): string =>
  *
  * {@link moveTimeoutText}'s shape and its reasons, over the silences this wait
  * has: a copy still running is not a platform that stopped answering, and
- * neither of those is a listing that came back short every time — where the row
- * being absent says nothing at all, since the rows this client never saw might
- * have held it.
+ * neither of those is a listing that could not be read as a whole one — where
+ * the row being absent says nothing at all, since the rows this client never
+ * saw, or saw under an id it could not match, might have held it.
+ *
+ * "COULD NOT BE READ AS A WHOLE ONE" rather than "was short", and "accounted for
+ * every row" rather than "readable in full", because `shortLast` covers two
+ * things now (OPL-4587). One is a listing that dropped rows. The other is a
+ * listing that carried every one of them and held a row this client could not
+ * match on, which is not short at all — and telling a caller rows went missing
+ * sends them after a transport fault that did not happen (/code-review).
  *
  * `stillCapturing` and `shortLast` are the LAST poll's; `everSeen`, `reads`,
  * `failures` and `aborts` are the whole wait's. Kept apart for the reason the
@@ -524,8 +546,9 @@ const captureTimeoutText = (w: {
   if (w.shortLast) {
     return (
       `${w.snapshotId} was not on the last listing GET ${P.SNAPSHOTS} answered within ` +
-      `${w.timeoutMs}ms, and that listing was short — so whether the capture failed cannot be ` +
-      `told from it, since the rows it did not carry might have held this one`
+      `${w.timeoutMs}ms, and that listing could not be read as a whole one — so whether the ` +
+      `capture failed cannot be told from it, since the rows it did not carry, or carried under ` +
+      `an id this client could not match, might have held this one`
     );
   }
   // Seen capturing, and then not reachable — which is a statement about the
@@ -543,8 +566,9 @@ const captureTimeoutText = (w: {
       `${w.snapshotId} never appeared on GET ${P.SNAPSHOTS} within ${w.timeoutMs}ms, on ` +
       `${w.reads} listing(s) that were read` +
       (w.failures > 0 ? ` and ${w.failures} poll(s) that failed outright` : '') +
-      `. None of those listings was both readable in full and missing this row, which is what it ` +
-      `takes to call the capture failed, so what became of it is not something this wait read.`
+      `. None of those listings both accounted for every row and was missing this one, which is ` +
+      `what it takes to call the capture failed, so what became of it is not something this wait ` +
+      `read.`
     );
   }
   // No poll ever finished, and the three ways that happens are three sentences
@@ -1269,6 +1293,10 @@ export class Computer {
     // half of that this loop went on getting wrong after it stopped getting the
     // other half wrong.
     let unreadableLast = 0;
+    // The other half of the last poll's shortfall, kept beside it rather than
+    // added into it: a row that is not an object and a row that names no
+    // computer are two different things to have found. See {@link blindness}.
+    let unmatchableLast = 0;
     // Cumulative, and only for the sentence a timeout that never saw the move
     // ends with: "every poll failed" is a different statement from "they
     // answered and it was not there", and one wait can do both. `aborts` is the
@@ -1290,6 +1318,7 @@ export class Computer {
             observed,
             absent,
             unreadable: unreadableLast,
+            unmatchable: unmatchableLast,
             reads,
             failures,
             aborts,
@@ -1312,6 +1341,15 @@ export class Computer {
         // rows are other computers'. Refusing the whole listing over one of
         // those would abort a wait whose own move is present and readable.
         const { rows, unreadable } = moveRows(moves, 'GET', P.MOVES);
+        // The rows that are objects and still cannot be attributed. The filter
+        // below is `computer_id === this.id` on the RAW row — strict, so that a
+        // coerced `String(['vm-1'])` cannot pick a malformed row out of this
+        // account-wide listing and return it as this computer's move (OPL-3850)
+        // — and the cost of that is a row carrying `['vm-1']` being dropped by
+        // the filter while `unreadable` counts it as fine. Such a row might be
+        // THIS computer's, so a listing holding one cannot support "your move is
+        // not listed" (OPL-4587).
+        const unmatchable = unmatchableRows(rows, 'computer_id');
         reads += 1;
         const ours = rows
           .map(toMove)
@@ -1361,7 +1399,7 @@ export class Computer {
           // result after dropping some says "nobody could tell" — a different
           // sentence, which must not borrow this one's certainty. Then the
           // deadline is left to be the answer.
-          if (unreadable === 0) {
+          if (unreadable === 0 && unmatchable === 0) {
             throw new MandalaError(
               `${this.id}'s move is not listed by GET ${P.MOVES}, on a listing read in full; a ` +
                 `move's row leaves that listing when its computer is deleted, and when a ` +
@@ -1371,12 +1409,14 @@ export class Computer {
           absent = true;
           observed = false;
           unreadableLast = unreadable;
+          unmatchableLast = unmatchable;
           continue;
         }
         last = mine;
         observed = true;
         absent = false;
         unreadableLast = unreadable;
+        unmatchableLast = unmatchable;
         if (!mine.live) return mine;
       } catch (err) {
         if (signal?.aborted) throw err;
@@ -1401,6 +1441,7 @@ export class Computer {
           // longer able to say why that is not decidable.
           absent = false;
           unreadableLast = 0;
+          unmatchableLast = 0;
           continue;
         }
         if (!isTransientForPoll(err)) throw err;
@@ -1413,6 +1454,7 @@ export class Computer {
         // the last successful poll happened to be.
         absent = false;
         unreadableLast = 0;
+        unmatchableLast = 0;
         failures += 1;
         delayMs = retryDelay(pollMs, err);
       }
@@ -3552,7 +3594,19 @@ export class Computer {
         // this poll deliberately does not. So a 200 with no shortfall is every
         // host having answered. The remaining shortfall is this client's own
         // undecodable rows, and that is what `incomplete` catches.
-        if (incomplete === null) {
+        //
+        // `incomplete` DOES NOT CATCH ALL OF THEM (OPL-4587). A row whose `id`
+        // is not a string is still a record, so it is kept and counted as
+        // readable, and the strict match above — which is strict precisely so a
+        // coerced `String(['snap-1'])` cannot stand in for this capture — cannot
+        // match it either. The row is then missing from a listing this loop
+        // believes it read whole, and the verdict below is reached over it: a
+        // capture running normally reported as one that FAILED, about which the
+        // caller is told there is nothing to find and nothing being billed.
+        // Both false. See {@link unmatchableRows} — it is the same shortfall,
+        // found in the one place `incomplete` cannot look, and it reads the
+        // same way.
+        if (incomplete === null && unmatchableRows(items, 'id') === 0) {
           throw new MandalaError(captureFailed(this.id, snapshotId));
         }
         shortLast = true;
