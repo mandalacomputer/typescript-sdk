@@ -337,6 +337,163 @@ export class Computers {
   }
 }
 
+/**
+ * How long {@link Snapshots.delete} waits for a row to go, and how often it asks.
+ *
+ * A POLL DEADLINE, not a request budget. `DELETE /v1/snapshots/:id` settles
+ * every refusal, marks the snapshot and answers 202 (platform OPL-4572), so the
+ * flattening, the index commit and the walk over the local files and the bucket
+ * objects all happen after the request and the number belongs on the loop that
+ * watches them. As a request budget it was this client's ordinary 60 seconds,
+ * which a 2.43 GB snapshot on the dev fleet ran straight past — and widening it
+ * buys only until the proxy in front of `app.mandala.computer` gives up at about
+ * two minutes, whatever the client says (OPL-4563). A wait made of many short
+ * listings has nothing for a proxy to abandon.
+ *
+ * WHAT THE BUDGET HAS TO COVER IS THE CHAIN, not the size, and measurement is
+ * what says so. A lone 2.43 GB snapshot with no dependents was deleted on the
+ * deployed fleet in 3.2s at `durable` — bucket objects walked and all — and in
+ * 436ms at `pending`, where it had never left its host. The same 2.43 GB is what
+ * ran past 60 seconds in the report this ticket came from, so neither the size
+ * nor the push to backup storage is what did that: what scales is flattening the
+ * snapshots that read THROUGH the one being deleted, which a single capture has
+ * none of. The budget is set for the chain that has them.
+ *
+ * 1800000 for {@link Builds.wait}'s reason and {@link Computer.snapshot}'s: it
+ * is this SDK's figure for how long a platform-side image operation takes, and
+ * the work here is the same order — a deletion walks a chain the captures built.
+ * It also spans the daemon's own fifteen-minute retry of a stalled deletion
+ * twice over, so a wait that gives up has genuinely seen the platform decline to
+ * finish rather than merely arrived before its first retry.
+ *
+ * Five seconds between polls, again as the capture wait: the answer is a listing
+ * the dashboard reads on a timer anyway. But it is a CEILING here rather than a
+ * fixed interval, which is where this parts company with every other wait in
+ * this SDK, and the measurements above are the reason. A capture is minutes, so
+ * five seconds is a few percent of it; a deletion is usually seconds, so a flat
+ * five-second interval makes the ordinary `delete()` — a lone snapshot, no
+ * dependents, gone in 436ms — take five seconds where the synchronous call took
+ * under one, and calls that a wait. A tenfold regression on the common path is
+ * not a fair price for the chain case, which the deadline is what covers.
+ *
+ * So the sleep RAMPS: 250ms, doubling to `pollMs` and staying there. A deletion
+ * that finishes in the first second is noticed in the first second, the
+ * half-hour chain reaches the full interval after five polls and about ten
+ * seconds, and a caller who passes their own `pollMs` gets it as the ceiling —
+ * `pollMs: 1` is still every millisecond, which is what the suite relies on.
+ * A poll the platform FAILED goes straight to the full interval, backing off
+ * rather than ramping: that is {@link retryDelay}'s business and the ramp has
+ * nothing to say about a host that is not answering.
+ */
+const SNAP_DELETE_WAIT_MS = 1_800_000;
+const SNAP_DELETE_POLL_MS = 5_000;
+const SNAP_DELETE_FIRST_POLL_MS = 250;
+
+/**
+ * What a deletion wait ran out of time doing, in the sentence that is true of it.
+ *
+ * {@link captureTimeoutText}'s shape and its reasons, over the silences this
+ * wait has — and one sentence the capture wait has no equivalent of. A ROW THAT
+ * STAYS IS A DELETION THAT STALLED, where a capture that stalls is a row that
+ * goes, so the reading that is bad news there is bad news here in the opposite
+ * direction and needs its own remedy said out loud: the platform retries these
+ * every fifteen minutes on its own, and a fresh `delete()` is accepted against
+ * one rather than refused.
+ *
+ * A ROW THAT STAYS IN ITS ORDINARY STATE is the third sentence, and it is not
+ * the same news. Only a row that reached `deleting` is picked up by the
+ * platform's fifteen-minute sweep — the intent is committed after the dependents
+ * are flattened, deliberately, because the sweep destroys what it finds in that
+ * state WITHOUT flattening. So a deletion that stopped at the flatten leaves the
+ * row exactly as it was, having destroyed nothing, and what finishes it is
+ * another delete rather than waiting.
+ *
+ * `lastState` is `unknown` and is encoded ONCE, here. Held as a string and
+ * encoded again at the point of use, it was encoded twice: a numeric `42` read
+ * back as the string `"42"`, and an absent `state` went through
+ * `JSON.stringify(undefined)` — which answers the VALUE `undefined` rather than
+ * a string — to arrive in a `string` variable and render as bare `undefined`.
+ * The state is the only thing this branch tells a caller, so a quoted value
+ * means a string and an unquoted one means the row's `state` was not one
+ * (/code-review).
+ *
+ * `stillListed`, `stalled`, `lastState` and `shortLast` are the LAST poll's;
+ * `everSeen`, `reads`, `failures` and `aborts` are the whole wait's. Kept apart
+ * for the reason the other waits keep them apart: the present tense belongs only
+ * to what the last poll actually read.
+ */
+const deleteTimeoutText = (w: {
+  snapshotId: string;
+  timeoutMs: number;
+  stillListed: boolean;
+  stalled: boolean;
+  lastState: unknown;
+  shortLast: boolean;
+  everSeen: boolean;
+  reads: number;
+  failures: number;
+  aborts: number;
+}): string => {
+  if (w.stillListed) {
+    // `?? String(v)` for the one value JSON has no encoding of: `undefined` is
+    // what `stringify` answers `undefined` FOR, and returning it unchanged puts
+    // a non-string into a template.
+    const state = JSON.stringify(w.lastState) ?? String(w.lastState);
+    const where =
+      `it is on snapshots.list({ includeUnfinished: true }) under that id, and it still holds ` +
+      `objects and is still billed`;
+    return w.stalled
+      ? `the deletion of ${w.snapshotId} stalled: it was still listed as \`deleting\` after ` +
+          `${w.timeoutMs}ms, which is a deletion that began and did not finish. The platform ` +
+          `retries these itself every fifteen minutes, and a fresh delete of this id is accepted ` +
+          `again rather than refused — ${where}.`
+      : `${w.snapshotId} was still listed after ${w.timeoutMs}ms, in state ` +
+          `${state} rather than \`deleting\` — so either the deletion is ` +
+          `still detaching the snapshots that read through it, or it stopped there having ` +
+          `destroyed nothing, which is what a dependent that is ITSELF being deleted does to it. ` +
+          `The platform's fifteen-minute sweep only picks up rows that reached \`deleting\`, so ` +
+          `this one is finished by deleting the id again once that dependent has gone — ` +
+          `${where}.`;
+  }
+  if (w.shortLast) {
+    return (
+      `${w.snapshotId} was not on the last listing GET ${P.SNAPSHOTS} answered within ` +
+      `${w.timeoutMs}ms, and that listing was short — so whether the deletion finished cannot be ` +
+      `told from it, since the rows it did not carry might have held this one`
+    );
+  }
+  // Seen listed, and then not reachable — a statement about the polls rather
+  // than about the deletion, and worded as one.
+  if (w.everSeen) {
+    return (
+      `the deletion of ${w.snapshotId} could not be reached for the last part of ${w.timeoutMs}ms; ` +
+      `when the listing last carried it, the row was still there. The deletion has not stopped, ` +
+      `only this wait has — read snapshots.list({ includeUnfinished: true }) for where it got to.`
+    );
+  }
+  const gaveUp = `the deletion of ${w.snapshotId} could not be observed within ${w.timeoutMs}ms: `;
+  if (w.reads > 0) {
+    return (
+      `${gaveUp}${w.reads} listing(s) were read` +
+      (w.failures > 0 ? ` and ${w.failures} poll(s) failed outright` : '') +
+      `, and none of those listings was both readable in full and missing this row, which is what ` +
+      `it takes to call the deletion finished`
+    );
+  }
+  // No poll ever finished, and the three ways that happens are three sentences —
+  // Builds.wait's, for its reason: charging the platform for silences this
+  // wait's own deadline caused is a bill sent to the wrong place.
+  if (w.failures > 0 && w.aborts > 0) {
+    return (
+      `${gaveUp}no poll finished — ${w.failures} failed outright and ${w.aborts} were cut short ` +
+      `by this wait's own deadline`
+    );
+  }
+  return w.failures > 0
+    ? `${gaveUp}every poll failed`
+    : `${gaveUp}no poll finished before the deadline did, so nothing about the deletion was ever read`;
+};
+
 export class Snapshots {
   #t: Transport;
 
@@ -358,7 +515,10 @@ export class Snapshots {
    * `includeUnfinished` also returns deletions that began and did not finish.
    * They are not usable — nothing can be restored or cloned from one — but they
    * still hold objects and are still billed, so this is the flag for when the
-   * question is about storage rather than about what can be restored.
+   * question is about storage rather than about what can be restored. It is also
+   * what {@link delete}'s own wait polls with, and for that reading it is not
+   * optional: without it a stalled deletion is missing from the listing and
+   * reads as one that finished.
    *
    * CAPTURES IN FLIGHT ARE LISTED TOO, and they are not snapshots yet: a row in
    * state `capturing` is a placeholder that restore, clone and delete all answer
@@ -435,9 +595,264 @@ export class Snapshots {
     return oneComputer(this.#t, data, 'POST', path);
   }
 
-  /** Remove a snapshot permanently. Later snapshots in the same chain are unaffected. */
-  async delete(snapshotId: string, opts: CallOptions = {}): Promise<void> {
-    await this.#t.json('DELETE', P.snapshot(snapshotId), { signal: opts.signal });
+  /**
+   * Remove a snapshot permanently, and wait for it to be gone.
+   *
+   * Later snapshots in the same chain are unaffected: the ones that read
+   * through this snapshot are flattened onto what it held before it goes.
+   *
+   * THE REQUEST NO LONGER WAITS FOR THE DELETION; this method does. The route
+   * answers **202** the moment the deletion is accepted, with the snapshot's own
+   * row, and does the work afterwards (platform OPL-4572). Flattening every
+   * dependent, committing the index and then walking both the local files and
+   * the bucket objects scales with the chain and with what is stored, which is
+   * longer than an HTTP request survives — the same reason a capture could not
+   * be delivered inside its own request. Deleting a 2.43 GB snapshot on the dev
+   * fleet ran past this client's 60-second budget and surfaced as a
+   * {@link ConnectionInterruptedError} while the deletion went on and finished,
+   * so the caller was told nothing about what had happened and the next
+   * `DELETE` on that id answered `this snapshot is already being deleted`
+   * (OPL-4575). The size is not what did that — a lone snapshot of the same
+   * 2.43 GB deletes in seconds on the deployed fleet — it is the chain. See
+   * {@link SNAP_DELETE_WAIT_MS}.
+   *
+   * WHAT IS POLLED IS THE ROW'S ABSENCE. There is no state that means deleted —
+   * `GET /snapshots` no longer listing the id is the deletion having finished —
+   * so this polls {@link list} and returns when the row is gone. The polarity is
+   * the opposite of {@link Computer.snapshot}'s, where absence is a capture that
+   * FAILED: a capture that dies leaves no row, and a deletion that dies leaves
+   * one.
+   *
+   * ASKED WITH `includeUnfinished`, which is not optional here. Once the
+   * dependents are detached the daemon marks the snapshot `deleting`, and a bare
+   * listing leaves that state out — so a poll without the flag would read a
+   * deletion that had stalled as one that had finished, and say a snapshot was
+   * gone while it was still holding objects and still being billed.
+   *
+   * EVERY REFUSAL IS STILL SYNCHRONOUS and still carries the status it always
+   * did: 404 for no such snapshot, {@link ConflictError} for a capture reading
+   * through it, for a clone or a migration holding it, and for a deletion of
+   * this id that is already running. A 202 means the deletion started.
+   *
+   * A SECOND `delete()` IS NOT FATAL, which is what makes a retry safe. While
+   * the first is working it is refused with `ConflictError`; against a row whose
+   * deletion stalled it is accepted again and finishes the job. Neither is a
+   * reason to give up on the id.
+   *
+   * A RETRY CAN ALSO LAND ON 404, and that one is the success arriving as an
+   * exception. The platform's own sweep may finish a stalled deletion between
+   * this wait giving up and the caller acting on the timeout, and a delete of an
+   * id that is no longer there is {@link NotFoundError} — the same class a bad
+   * id answers, which is why it is worth saying: after a `TimeoutError` from
+   * this method, a 404 means the snapshot is gone rather than that it was never
+   * there.
+   *
+   * ONE CONFLICT ARRIVES AFTER THE 202 and cannot be raised by this call, which
+   * is the one gap a wait on a row's absence has: a dependent that is ITSELF
+   * being deleted cannot be flattened, and whether that is so is settled when
+   * the flatten runs rather than when the request is accepted. Nothing is
+   * destroyed — the row stays exactly as it was, in its ordinary state rather
+   * than `deleting` — so this wait sees a row that will not go and says so at
+   * its deadline. Deleting a chain one link at a time, each `delete()` waiting
+   * for its row to leave the listing, never meets it.
+   *
+   * `wait: false` returns as soon as the 202 lands, for a caller who would
+   * rather hold the id and poll on their own schedule — the shape
+   * {@link Computer.snapshot} has:
+   *
+   * ```ts
+   * await client.snapshots.delete('snap-1', { wait: false });
+   * const { items, incomplete } = await client.snapshots.listWithStatus({
+   *   includeUnfinished: true,
+   * });
+   * const gone = incomplete === null && !items.some((s) => s.id === 'snap-1');
+   * ```
+   *
+   * Throws {@link TimeoutError} if the row is still listed when the timeout runs
+   * out. That is a deletion that STALLED rather than a timeout of this call, and
+   * the message says so: the platform retries these itself every fifteen
+   * minutes, and a fresh `delete()` on the same id is accepted again. `timeoutMs`
+   * and `pollMs` are checked before anything is deleted, and whether or not
+   * `wait` is going to use them — a number this refuses is a mistake in the
+   * CALL, and finding it after a deletion has started is finding it too late to
+   * be worth anything.
+   */
+  async delete(
+    snapshotId: string,
+    opts: { wait?: boolean } & WaitOptions & CallOptions = {},
+  ): Promise<void> {
+    const { timeoutMs = SNAP_DELETE_WAIT_MS, pollMs = SNAP_DELETE_POLL_MS, signal } = opts;
+    const waitForIt = P.flag(opts.wait, 'wait') ?? true;
+    checkWait(timeoutMs, pollMs);
+    // The ORDINARY request budget, and a failure of it is a failure of this
+    // call rather than something to poll through. A pre-OPL-4572 host still
+    // deleting inside its request could exceed 60s and arrive as
+    // {@link ConnectionInterruptedError} before the wait below ever starts,
+    // which is the symptom this change exists to remove — but swallowing that
+    // to poll anyway would read a request that never ARRIVED as a deletion in
+    // flight, and spend half an hour to report a stall that never began. The
+    // platform answers this route in about 400ms now (measured), so the case is
+    // historical, and the honest reading of a connection that failed is that
+    // this client does not know whether anything was accepted (/code-review).
+    await this.#t.json('DELETE', P.snapshot(snapshotId), { signal });
+    // No predicate on the answer, and that is the difference from
+    // {@link Computer.snapshot}, which needs one. There a wait can only be
+    // decided from the body, because the placeholder and a stored snapshot are
+    // the same shape and the transport does not carry the status. Here the
+    // wait's own terminating condition — the row is not listed — is already
+    // true of a platform that deleted synchronously and answered 200
+    // `{"ok":true}`, so the older answer costs one listing and returns. There is
+    // nothing an unreadable body could tell this call that the listing does not.
+    if (!waitForIt) return;
+    await this.#awaitDeletion(snapshotId, timeoutMs, pollMs, signal);
+  }
+
+  /**
+   * Poll the account's snapshots until this row is gone, or time runs out.
+   *
+   * The listing rather than a per-snapshot read, because a read of a deleted
+   * snapshot is a 404 and a 404 is also what a bad id answers — the listing is
+   * where "not there" is a fact about this account rather than a guess.
+   *
+   * MATCHED ON THE ID, on the raw `id` and by strict equality, for the reason
+   * {@link Computer.snapshot}'s wait matches that way: `str()` is a coercion and
+   * `String(['snap-1'])` is `'snap-1'`, so a coerced match would let a malformed
+   * row stand in for this snapshot — and here that error runs the other way and
+   * is worse, since a row that fails to match reads as a deletion that FINISHED.
+   *
+   * ASKED WITHOUT `allow_partial`, which is what makes an absent row mean
+   * anything: a host that did not answer is then a 503 this loop rides out,
+   * rather than a short listing read as a snapshot that is gone. The listing can
+   * still come back short in the one way the platform cannot prevent — rows this
+   * client could not decode — and on such a poll absence says nothing, since any
+   * of those rows might have been this one. Both halves are the mirror of the
+   * capture wait's rule, and both matter more here: there, reading absence
+   * wrongly reports a failure that did not happen; here it reports a snapshot as
+   * destroyed while it is still on a host.
+   */
+  async #awaitDeletion(
+    snapshotId: string,
+    timeoutMs: number,
+    pollMs: number,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    let polled = false;
+    // The NEXT sleep, ramping toward `pollMs` rather than sitting on it. See
+    // {@link SNAP_DELETE_POLL_MS}: a deletion is usually seconds, so the
+    // interval that suits a capture makes the ordinary case ten times slower
+    // than the call it replaced.
+    let delayMs = Math.min(SNAP_DELETE_FIRST_POLL_MS, pollMs);
+    // The LAST poll's, all three, as in the capture wait: whether it read the
+    // row at all, what state it read, and whether it read a listing that was
+    // short and did not carry the row. A poll that failed or was cut short read
+    // no listing, so it clears them rather than letting a timeout describe a
+    // listing from half an hour ago in the present tense.
+    let stillListed = false;
+    let stalled = false;
+    let lastState: unknown;
+    let shortLast = false;
+    // Whether the row was EVER read, which the flags above cannot say between
+    // them: a wait that watched the deletion for twenty minutes and then lost
+    // the platform has something true to report that "it was still listed" is
+    // not.
+    let everSeen = false;
+    let reads = 0;
+    let failures = 0;
+    let aborts = 0;
+    for (;;) {
+      if (Date.now() >= deadline) {
+        throw new TimeoutError(
+          deleteTimeoutText({
+            snapshotId,
+            timeoutMs,
+            stillListed,
+            stalled,
+            lastState,
+            shortLast,
+            everSeen,
+            reads,
+            failures,
+            aborts,
+          }),
+        );
+      }
+      // The sleep comes before every poll but the first, as every other wait
+      // here does it: a deletion that finished while the caller was doing
+      // something else is one round trip from being known to have finished.
+      if (polled) await sleepUntilNextPoll(delayMs, deadline, signal);
+      polled = true;
+      delayMs = Math.min(delayMs * 2, pollMs);
+      if (Date.now() >= deadline) continue;
+      try {
+        const { items, incomplete } = await this.#t.listing(P.SNAPSHOTS, {
+          // `unfinished`, and this is the whole reason the flag exists on this
+          // route. A `deleting` row is left out of a bare listing, so without it
+          // a stalled deletion reads as a finished one on the very first poll.
+          query: { include: 'unfinished' },
+          signal: deadlineSignal(deadline - Date.now(), signal),
+        });
+        reads += 1;
+        const row = items.find((d) => d.id === snapshotId);
+        if (row) {
+          stillListed = true;
+          everSeen = true;
+          shortLast = false;
+          // THE RAW state, the way the snapshot decoders read theirs: this
+          // chooses which sentence a timeout ends with, and a coercion cannot
+          // classify. Only `deleting` is a stall — every other state is a
+          // deletion still working through the chain ahead of it.
+          stalled = row.state === 'deleting';
+          lastState = row.state;
+          continue;
+        }
+        stillListed = false;
+        stalled = false;
+        // The row is gone from a listing read WHOLE, which on this route is the
+        // deletion having finished — there is no state that means deleted, so
+        // absence is the entire signal. Conclusive at once for the reason the
+        // capture wait's absence is: not passing `allow_partial` makes a host
+        // that did not answer a 503 rather than a quiet short listing, so a 200
+        // with no shortfall is every host having answered. What `incomplete`
+        // catches is the remaining case, this client's own undecodable rows.
+        //
+        // `incomplete` DOES NOT CATCH ALL OF THEM, which is the second half of
+        // this test and the finding that put it here (/code-review). A row whose
+        // `id` is not a string is still a record, so the transport keeps it and
+        // counts no shortfall — and the match above, which is strict equality on
+        // the raw `id` precisely so that `String(['snap-1'])` cannot stand in
+        // for this snapshot, then cannot match it either. Absence over such a
+        // listing is not absence: this row might BE the one, and returning on it
+        // reports a snapshot as destroyed while it is still on a host, still
+        // holding objects and still billed. So it is the same shortfall
+        // `incomplete` describes, found the only other place it can hide, and it
+        // reads the same way: this poll says nothing, and the wait goes on.
+        const unmatchable = items.some((d) => typeof d.id !== 'string');
+        if (incomplete === null && !unmatchable) return;
+        shortLast = true;
+      } catch (err) {
+        if (signal?.aborted) throw err;
+        // This wait's own timer firing inside a poll, which is not a failed
+        // poll — `aborts` is counted apart for that reason. The last poll's
+        // readings go, because a poll cut short read no listing at all;
+        // `everSeen` stays, being a fact about the whole wait.
+        if (isDeadlineAbort(err)) {
+          aborts += 1;
+          stillListed = false;
+          stalled = false;
+          lastState = undefined;
+          shortLast = false;
+          continue;
+        }
+        if (!isTransientForPoll(err)) throw err;
+        stillListed = false;
+        stalled = false;
+        lastState = undefined;
+        shortLast = false;
+        failures += 1;
+        delayMs = retryDelay(pollMs, err);
+      }
+    }
   }
 
   /**
