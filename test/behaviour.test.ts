@@ -2621,10 +2621,10 @@ describe('snapshots', () => {
     // short must not overwrite the platform's count with its own.
     const { client: c } = client(
       () =>
-        new Response(
-          JSON.stringify([SNAPSHOT, { ...SNAPSHOT, id: 'snap-9', computer_id: 42 }]),
-          { status: 200, headers: { 'content-type': 'application/json', 'X-GC-Incomplete': '2' } },
-        ),
+        new Response(JSON.stringify([SNAPSHOT, { ...SNAPSHOT, id: 'snap-9', computer_id: 42 }]), {
+          status: 200,
+          headers: { 'content-type': 'application/json', 'X-GC-Incomplete': '2' },
+        }),
     );
     const listed = await c.snapshots.listWithStatus({ computerId: 'vm-1' });
     expect(listed.incomplete).toBe(3);
