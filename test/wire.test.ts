@@ -665,17 +665,28 @@ describe('a coerced value is not the value', () => {
         : anyRoute(call),
     );
     const computer = await c.computers.get('vm-1');
-    // No row belongs to this computer, and the row that only coerces to it is
-    // still a row this client READ — so the listing is whole and the answer is
-    // the one a listing without this computer's row gets. What matters is which
-    // answer it is NOT: the coerced row's own `state` handed back as this move's
-    // outcome.
+    // What matters first is which answer this is NOT: the coerced row's own
+    // `state` handed back as this move's outcome. That is what OPL-3850 fixed
+    // and it is unchanged.
+    //
+    // WHAT THIS ASSERTED SECOND WAS THE BUG (OPL-4587). It said the listing was
+    // whole — the coerced row being one this client READ — and so expected "your
+    // move is not listed", a verdict about where the move GOT TO. But a row that
+    // cannot be attributed to any computer might be attributable to THIS one,
+    // and this wait cannot tell: `['vm-1']` is exactly the shape of a row that
+    // is this computer's and malformed. So the row is refused for the match AND
+    // counted against the verdict, and what is left is a wait that ran out
+    // saying it could not tell — the same sentence a row nobody could decode
+    // produces, for the same reason.
     const err = await computer
       .waitForMove(MOVE_STARTED.started_at, { pollMs: 1, timeoutMs: 60 })
       .catch((e) => e);
-    expect(err).toBeInstanceOf(MandalaError);
-    expect(String(err)).toContain('not listed by GET moves');
+    expect(err).toBeInstanceOf(TimeoutError);
+    expect(String(err)).not.toContain('not listed by GET moves');
     expect(String(err)).not.toContain('replaced');
+    // Said as what it is: read in full, and still not something to conclude
+    // from.
+    expect(String(err)).toContain('named no computer this client could match on');
   });
 
   it('still picks the move the platform did attribute to this computer', async () => {

@@ -39,6 +39,7 @@ import {
   toWebhook,
   toWebhookCreated,
   toWebhookDelivery,
+  unmatchableRows,
 } from './models.js';
 import * as P from './paths.js';
 import type { Listing, SSEEvent, Transport } from './transport.js';
@@ -827,8 +828,11 @@ export class Snapshots {
         // holding objects and still billed. So it is the same shortfall
         // `incomplete` describes, found the only other place it can hide, and it
         // reads the same way: this poll says nothing, and the wait goes on.
-        const unmatchable = items.some((d) => typeof d.id !== 'string');
-        if (incomplete === null && !unmatchable) return;
+        // {@link unmatchableRows}, shared with the capture and move waits since
+        // OPL-4587 rather than spelled out here: all three make the same
+        // verdict over an absent row, all three match strictly, and a second
+        // copy is a second chance to omit one of them.
+        if (incomplete === null && unmatchableRows(items, 'id') === 0) return;
         shortLast = true;
       } catch (err) {
         if (signal?.aborted) throw err;

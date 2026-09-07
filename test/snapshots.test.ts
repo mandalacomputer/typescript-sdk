@@ -188,6 +188,33 @@ describe('a capture that fails', () => {
     expect(polls).toBe(2);
   });
 
+  it('is not concluded over a row whose id this poll could not match on', async () => {
+    // The shortfall `incomplete` cannot see (OPL-4587). A row carrying
+    // `['snap-1']` is still a RECORD, so the transport keeps it and counts no
+    // shortfall — and the match is strict equality on the raw id, deliberately,
+    // so that a coerced `String(['snap-1'])` cannot stand in for this capture.
+    // The row is therefore missing from a listing this loop believes it read
+    // whole, and the verdict was reached over it: a capture running normally
+    // reported as one that FAILED, with the caller told there is nothing to find
+    // and nothing being billed.
+    for (const id of [['snap-1'], 42, null, undefined]) {
+      const row: Record<string, unknown> = { ...CAPTURE_ACCEPTED, id };
+      if (id === undefined) delete row.id;
+      const { client: c } = client(listing(() => json([row])));
+      const computer = await c.computers.get('vm-1');
+      const err = await computer.snapshot({ pollMs: 1, timeoutMs: 40 }).catch((e) => e);
+
+      // The wait ran out; it did not pronounce the capture dead.
+      expect(`${JSON.stringify(id)}: ${err instanceof TimeoutError}`).toBe(
+        `${JSON.stringify(id)}: true`,
+      );
+      expect((err as Error).message).toContain('that listing was short');
+      // The verdict, not the word: the correct message says whether the capture
+      // failed cannot be TOLD from this listing, which is the opposite claim.
+      expect((err as Error).message).not.toContain('the capture of vm-1 failed');
+    }
+  });
+
   it('is not concluded from a listing this client could not read whole', async () => {
     // Rows nobody could decode might have been this one, so absence says
     // nothing — the same exception `waitForMove` makes, for the same reason.
