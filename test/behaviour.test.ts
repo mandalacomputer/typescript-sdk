@@ -3487,6 +3487,9 @@ describe('a payload whose strings cannot be read', () => {
         resolution: unreadable,
         created_at: unreadable,
         start_error: unreadable,
+        state: unreadable,
+        deleted_at: unreadable,
+        lost_at: unreadable,
       }),
     );
     const computer = await c.computers.get('vm-1');
@@ -3496,11 +3499,92 @@ describe('a payload whose strings cannot be read', () => {
     expect(computer.template).toBe('');
     expect(computer.createdAt).toBe('');
     expect(computer.startError).toBe('');
+    expect(computer.state).toBe('');
+    expect(computer.deletedAt).toBe('');
+    expect(computer.lostAt).toBe('');
     // The default, not a throw and not an empty string: an unreadable
     // resolution is a resolution nobody sent.
     expect(computer.resolution).toBe('1280x800x24');
     // `raw` still carries what could not be read.
     expect(computer.raw.name).toEqual(unreadable);
+  });
+});
+
+describe('a computer the control plane has a record of', () => {
+  it('reads the lifecycle fields off a listing row without disturbing the status', async () => {
+    // Two tiers answering two different questions. `state` is the record's:
+    // does this computer exist. `status` is the host's: what is it doing. A
+    // row can carry both, and a deleted one carries only the first.
+    const { client: c } = client(() =>
+      json([
+        { ...COMPUTER, state: 'live' },
+        {
+          id: 'vm-gone',
+          name: 'gone',
+          state: 'deleted',
+          deleted_at: '2026-09-07T10:00:00Z',
+        },
+        {
+          id: 'vm-lost',
+          name: 'lost',
+          state: 'lost',
+          lost_at: '2026-09-07T11:00:00Z',
+        },
+      ]),
+    );
+    const [live, deleted, lost] = await c.computers.list({ state: undefined });
+    expect(live?.state).toBe('live');
+    expect(live?.status).toBe(COMPUTER.status);
+    expect(deleted?.state).toBe('deleted');
+    expect(deleted?.deletedAt).toBe('2026-09-07T10:00:00Z');
+    // A terminal row is served from the record alone, so no host said what it
+    // was doing and there is no status to read.
+    expect(deleted?.status).toBe('');
+    expect(lost?.state).toBe('lost');
+    expect(lost?.lostAt).toBe('2026-09-07T11:00:00Z');
+  });
+
+  it('reads an unreachable row as the identity it now carries rather than a bare id', async () => {
+    // OPL-4554: such a row used to be `{id, unreachable: true}` and nothing
+    // else. It now carries everything the record keeps — and still no status,
+    // because no host answered for it.
+    const { client: c } = client(
+      () =>
+        new Response(
+          JSON.stringify([
+            {
+              id: 'vm-2',
+              name: 'quiet',
+              os: 'ubuntu',
+              template: 'base',
+              cpu: 2,
+              ram_mb: 4096,
+              disk_gb: 40,
+              created_at: '2026-09-01T00:00:00Z',
+              state: 'unreachable',
+              unreachable: true,
+            },
+          ]),
+          { status: 200, headers: { 'content-type': 'application/json', 'X-GC-Incomplete': '1' } },
+        ),
+    );
+    const { items, incomplete } = await c.computers.listWithStatus({ allowPartial: true });
+    expect(incomplete).toBe(1);
+    expect(items[0]?.name).toBe('quiet');
+    expect(items[0]?.cpu).toBe(2);
+    expect(items[0]?.state).toBe('unreachable');
+    expect(items[0]?.status).toBe('');
+    expect(items[0]?.raw.unreachable).toBe(true);
+  });
+
+  it('leaves the lifecycle fields empty on the single-computer routes', async () => {
+    // A computer served by its host is live by construction, so the platform
+    // sends none of these — and an absent field is `''` rather than a guess.
+    const { client: c } = client(() => json(COMPUTER));
+    const computer = await c.computers.get('vm-1');
+    expect(computer.state).toBe('');
+    expect(computer.deletedAt).toBe('');
+    expect(computer.lostAt).toBe('');
   });
 });
 

@@ -65,11 +65,25 @@ import {
  * how, and it is `null` exactly when the answer was complete. On
  * {@link Builds.list} it is the ONLY way, because that listing never carries
  * stub rows to notice — so `listWithStatus` is the spelling to reach for there.
- * It is the only way on the other two as well whenever the key is scoped to one
- * workspace: the platform withholds the stubs from such a credential rather
- * than name it ids from workspaces it cannot see.
+ * It is the only way on a SNAPSHOT listing too whenever the key is scoped to
+ * one workspace: those stubs come from the placement cache, which has no
+ * workspace column, and the platform withholds them rather than name such a
+ * credential ids from workspaces it cannot see. The computer listing is the one
+ * exception since OPL-4554 — its unreachable rows are served from the control
+ * plane's own record, which does have that column, so a workspace-scoped key
+ * sees them.
  */
 export type ListOptions = { allowPartial?: boolean; signal?: AbortSignal };
+
+/**
+ * {@link ListOptions}, plus the lifecycle filter only the computer listing has.
+ *
+ * Its own type rather than a field on `ListOptions`, because the other two
+ * listings do not read a `state`: widening the shared type would make
+ * `snapshots.list({ state: 'deleted' })` compile and then narrow nothing —
+ * which is the silent no-op this SDK refuses everywhere else it can.
+ */
+export type ComputerListOptions = ListOptions & { state?: P.ComputerState };
 
 /** What every method here accepts beyond its own arguments. */
 export type CallOptions = { signal?: AbortSignal };
@@ -109,8 +123,12 @@ export class Computers {
    *
    * Throws `UnavailableError` if part of the fleet could not be reached, unless
    * `allowPartial` is set. Use {@link listWithStatus} to see how short it was.
+   *
+   * `state` narrows the listing to one point of the lifecycle — and is the only
+   * way to see a `deleted` or `lost` computer at all, since no host holds one to
+   * list. See {@link P.ComputerState}.
    */
-  async list(opts: ListOptions = {}): Promise<Computer[]> {
+  async list(opts: ComputerListOptions = {}): Promise<Computer[]> {
     return (await this.listWithStatus(opts)).items;
   }
 
@@ -121,13 +139,18 @@ export class Computers {
    * short is the whole reason opting in is safe, and a method that dropped it
    * would turn "here is part of the fleet" into "here is the fleet".
    */
-  async listWithStatus(opts: ListOptions = {}): Promise<Listing<Computer>> {
+  async listWithStatus(opts: ComputerListOptions = {}): Promise<Listing<Computer>> {
     const { items, incomplete } = await this.#t.listing(P.COMPUTERS, {
       // Validated, not tested for truthiness: `allowPartial: "false"` used to
       // send `allow_partial=1` and turn the fail-closed guarantee this method
       // documents into a partial fleet handed over as the whole one. See
       // {@link P.flag}.
-      query: { allow_partial: P.flag(opts.allowPartial, 'allowPartial') ? 1 : undefined },
+      query: {
+        allow_partial: P.flag(opts.allowPartial, 'allowPartial') ? 1 : undefined,
+        // Refused here rather than at the platform's 400, for the reason
+        // {@link P.computerState} gives.
+        state: P.computerState(opts.state),
+      },
       signal: opts.signal,
     });
     return {
@@ -654,10 +677,13 @@ export class Builds {
    * simply absent — {@link listWithStatus} is the only thing that can tell you
    * the answer was short, and its count is always `0` for the same reason.
    *
-   * Computers and snapshots do append an `{ id, unreachable: true }` stub per
-   * row they could not reach, but only for a key that spans the account: a
-   * workspace-scoped one gets none either, so on such a key all three listings
-   * are the status and nothing else.
+   * Computers and snapshots do append a row per one they could not reach — a
+   * snapshot's is the `{ id, unreachable: true }` stub and nothing more, while
+   * a computer's carries the identity the control plane has on record (name,
+   * os, template, size, workspace, `created_at`, `state`) and nothing only its
+   * host knows, so it has no `status`. A snapshot listing appends none of those
+   * for a workspace-scoped key, so on such a key builds and snapshots are both
+   * the status and nothing else.
    */
   async list(opts: ListOptions = {}): Promise<TemplateBuild[]> {
     return (await this.listWithStatus(opts)).items;

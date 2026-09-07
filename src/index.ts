@@ -173,6 +173,7 @@ export type {
   WindowResult,
 } from './models.js';
 export type {
+  ComputerState,
   CreateArgs,
   ExecArgs,
   MoveArgs,
@@ -183,12 +184,18 @@ export type {
   WindowAction,
 } from './paths.js';
 export {
+  COMPUTER_STATES,
   SCROLL_DIRECTIONS,
   WEBHOOK_COMPUTERS_MAX,
   WEBHOOK_DESCRIPTION_MAX,
   WINDOW_ACTIONS,
 } from './paths.js';
-export type { CallOptions, ListOptions, UsageOptions } from './resources.js';
+export type {
+  CallOptions,
+  ComputerListOptions,
+  ListOptions,
+  UsageOptions,
+} from './resources.js';
 export {
   Builds,
   Computers,

@@ -1451,13 +1451,52 @@ partial build listing appends nothing: the missing ones are simply not there,
 and `incomplete` is `0` rather than a count. Use `builds.listWithStatus()`
 rather than `builds.list()` whenever you pass `allowPartial`.
 
-Computers and snapshots do append an `{ id, unreachable: true }` stub for each
-row they could not reach, so a partial answer is visible in the rows themselves
-— but only for a key that spans the account. A key scoped to one workspace gets
-no stubs from any of the three, because naming the missing ids means reading
-them out of a placement cache with no workspace column, and that would hand a
-confined credential ids from the workspaces it is confined away from. On such a
-key, read the status on every listing.
+Computers and snapshots do append a row for each one they could not reach, so a
+partial answer is visible in the rows themselves. A snapshot's is the bare
+`{ id, unreachable: true }` stub, and it arrives only for a key that spans the
+account: naming the missing ids means reading them out of a placement cache with
+no workspace column, and handing a confined credential ids from the workspaces
+it is confined away from is not something the platform will do. So on a
+workspace-scoped key a snapshot listing is the status and nothing else, exactly
+as a build listing always is.
+
+A computer's unreachable row is fuller, and is the one exception to that scoping.
+It carries `unreachable: true` plus the identity the control plane keeps on
+record — `name`, `os`, `template`, the size, the workspace and `createdAt` — and
+nothing only its host knows, so `status` is `''` on it and `state` reads
+`unreachable`. The record has the workspace column the cache lacks, so a
+workspace-scoped key sees these rows too.
+
+### The lifecycle of a computer
+
+`status` is what a computer's host says it is **doing** — `running`, `stopped`,
+`suspended`. `state` is what the control plane's own record says about whether
+it **exists**:
+
+| `state` | meaning |
+| --- | --- |
+| `live` | a host listed it |
+| `unreachable` | no host answered for this request; nothing has happened to the computer |
+| `deleting` | a delete was sent and has not been answered |
+| `deleted` | a delete that was answered |
+| `lost` | an operator wrote off the host it was on |
+
+The listing carries it; a route that serves one computer does not, because such
+a response comes from the host and a computer that answered is live by
+construction. `deletedAt` and `lostAt` are RFC 3339 and set with the matching
+state.
+
+`deleted` and `lost` are terminal, and no host holds one to list — so asking for
+them by name is the only way to see them at all:
+
+```ts
+const gone = await client.computers.list({ state: 'deleted' });
+for (const c of gone) console.log(c.id, c.deletedAt);
+```
+
+The filter is the control plane's, not a host's: it is read where the record is,
+and never forwarded. A word outside the five is refused here rather than at the
+platform's 400.
 
 ### Errors
 
