@@ -188,6 +188,39 @@ describe('a capture that fails', () => {
     expect(polls).toBe(2);
   });
 
+  it('is not concluded over a row whose id this poll could not match on', async () => {
+    // The shortfall `incomplete` cannot see (OPL-4587). A row carrying
+    // `['snap-1']` is still a RECORD, so the transport keeps it and counts no
+    // shortfall — and the match is strict equality on the raw id, deliberately,
+    // so that a coerced `String(['snap-1'])` cannot stand in for this capture.
+    // The row is therefore missing from a listing this loop believes it read
+    // whole, and the verdict was reached over it: a capture running normally
+    // reported as one that FAILED, with the caller told there is nothing to find
+    // and nothing being billed.
+    for (const id of [['snap-1'], 42, null, undefined]) {
+      const row: Record<string, unknown> = { ...CAPTURE_ACCEPTED, id };
+      if (id === undefined) delete row.id;
+      const { client: c } = client(listing(() => json([row])));
+      const computer = await c.computers.get('vm-1');
+      const err = await computer.snapshot({ pollMs: 1, timeoutMs: 40 }).catch((e) => e);
+
+      // The wait ran out; it did not pronounce the capture dead.
+      expect(`${JSON.stringify(id)}: ${err instanceof TimeoutError}`).toBe(
+        `${JSON.stringify(id)}: true`,
+      );
+      expect((err as Error).message).toContain('could not be read as a whole one');
+      // The verdict, not the word: the correct message says whether the capture
+      // failed cannot be TOLD from this listing, which is the opposite claim.
+      expect((err as Error).message).not.toContain('the capture of vm-1 failed');
+      // AND IT MAY NOT SAY ROWS WENT MISSING. `shortLast` covers two things now,
+      // and this is the one where the listing carried every row and held one
+      // this client could not match on — telling the caller rows were dropped
+      // sends them after a transport fault that did not happen (/code-review).
+      expect((err as Error).message).not.toContain('that listing was short');
+      expect((err as Error).message).toContain('under an id this client could not match');
+    }
+  });
+
   it('is not concluded from a listing this client could not read whole', async () => {
     // Rows nobody could decode might have been this one, so absence says
     // nothing — the same exception `waitForMove` makes, for the same reason.
@@ -197,7 +230,7 @@ describe('a capture that fails', () => {
     const err = await computer.snapshot({ pollMs: 1, timeoutMs: 40 }).catch((e) => e);
 
     expect(err).toBeInstanceOf(TimeoutError);
-    expect((err as Error).message).toContain('that listing was short');
+    expect((err as Error).message).toContain('could not be read as a whole one');
     // The wait ran out; it did not pronounce on the capture.
     expect((err as Error).message).not.toContain('the capture of vm-1 failed');
   });
@@ -219,7 +252,7 @@ describe('a capture that fails', () => {
     const err = await computer.snapshot({ pollMs: 1, timeoutMs: 40 }).catch((e) => e);
 
     expect(err).toBeInstanceOf(TimeoutError);
-    expect((err as Error).message).toContain('that listing was short');
+    expect((err as Error).message).toContain('could not be read as a whole one');
   });
 });
 
@@ -461,8 +494,10 @@ describe('snapshots.delete() waits for the row to go', () => {
 
     expect(polls).toBe(3);
     // Two sleeps at the default 5000 ceiling would be 10s; ramped they are
-    // 250ms and 500ms. Bounded generously — this pins the ramp, not a stopwatch.
-    expect(took).toBeLessThan(3_000);
+    // 250ms and 500ms. The bound is deliberately far from BOTH: this pins the
+    // ramp, not a stopwatch, and a wall-clock assertion with only a second of
+    // slack is a test that fails on a loaded CI runner rather than on a bug.
+    expect(took).toBeLessThan(6_000);
   });
 
   it('takes pollMs as a ceiling, so a caller’s own interval is never exceeded', async () => {
@@ -602,7 +637,7 @@ describe('a deletion that does not finish', () => {
       expect(`${JSON.stringify(id)}: ${err instanceof TimeoutError}`).toBe(
         `${JSON.stringify(id)}: true`,
       );
-      expect((err as Error).message).toContain('that listing was short');
+      expect((err as Error).message).toContain('could not be read as a whole one');
     }
   });
 
@@ -615,7 +650,7 @@ describe('a deletion that does not finish', () => {
     const err = await c.snapshots.delete('snap-1', { pollMs: 1, timeoutMs: 40 }).catch((e) => e);
 
     expect(err).toBeInstanceOf(TimeoutError);
-    expect((err as Error).message).toContain('that listing was short');
+    expect((err as Error).message).toContain('could not be read as a whole one');
   });
 
   it('is not concluded gone from a listing the PLATFORM answered short', async () => {
@@ -631,7 +666,7 @@ describe('a deletion that does not finish', () => {
     const err = await c.snapshots.delete('snap-1', { pollMs: 1, timeoutMs: 40 }).catch((e) => e);
 
     expect(err).toBeInstanceOf(TimeoutError);
-    expect((err as Error).message).toContain('that listing was short');
+    expect((err as Error).message).toContain('could not be read as a whole one');
   });
 
   it('does not say a row it watched for a while was still listed at the end', async () => {
@@ -646,7 +681,11 @@ describe('a deletion that does not finish', () => {
         return polls < 2 ? json([DELETING]) : errorJson(503, 'a hypervisor is away');
       }),
     );
-    const err = await c.snapshots.delete('snap-1', { pollMs: 1, timeoutMs: 60 }).catch((e) => e);
+    // Long enough that the FIRST poll is certain to land inside it — the whole
+    // point of this test is a wait that saw the row and then lost the platform,
+    // and a deadline tight enough to expire mid-first-poll tests something else
+    // on a loaded machine.
+    const err = await c.snapshots.delete('snap-1', { pollMs: 1, timeoutMs: 250 }).catch((e) => e);
 
     expect(err).toBeInstanceOf(TimeoutError);
     expect((err as Error).message).toContain('could not be reached for the last part');
