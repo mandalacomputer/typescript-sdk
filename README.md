@@ -1372,7 +1372,13 @@ Every refusal still arrives on the request and still carries the status it did:
 clone or migration holding it, and for a deletion of the same id already running.
 That last one is progress rather than a fault, and a second `delete()` against a
 row whose deletion stalled is accepted again and finishes the job — so a retry is
-always safe.
+worth making.
+
+A retry can also land on `NotFoundError`, and after a `TimeoutError` from
+`delete()` that is the success arriving as an exception: the platform's own sweep
+may have finished the deletion between the wait giving up and you acting on it.
+The 404 is the same class a bad id answers, so it is worth reading in context —
+the snapshot is gone, not never there.
 
 **The polarity is the opposite of a capture's.** A capture that fails leaves no
 row; a deletion that fails leaves one. So a `TimeoutError` here means the row was
