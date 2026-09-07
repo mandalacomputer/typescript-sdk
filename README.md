@@ -1286,6 +1286,66 @@ Naming one is worth the keystrokes. Snapshots outlive the computers they came
 from, so an account's listing fills up with generated names that record only when
 each was taken — which is the one thing a restore does not need to know.
 
+**`snapshot()` waits for the capture, and the request does not.** A capture is
+minutes, and scales with how much has been written to the disk — longer than any
+HTTP request survives, so the platform answers `202` the moment it accepts one
+and copies the disk afterwards. What comes back at that point is a placeholder
+row in state `capturing`, carrying the id the snapshot will keep. `snapshot()`
+polls the snapshot listing for that id and returns when the row stops reading
+`capturing`, which is the point the snapshot can be restored, cloned or deleted.
+It does not wait for `durable` by name — that is backup replication, it can
+happen between two polls, and nothing you can do with a snapshot is gated on it.
+
+Every refusal is still immediate and still the exception it always was: a
+`ConflictError` for a capture already running or a disk still being copied, a
+`PlanLimitError` for an allowance that will not stretch, a `MandalaError` for a
+memory snapshot of a computer that is not running.
+
+**Returning is the snapshot being usable, not the computer being free.** The
+capture's claim on the *computer* is released only after the snapshot has been
+pushed to backup storage — the step that turns `pending` into `durable` — so for
+as long as that push runs, a second `c.snapshot()` and a
+`c.delete({ deleteSnapshots: true })` are both still `ConflictError`. Restoring,
+cloning and deleting the snapshot itself work from `pending`.
+
+Pass `wait: false` to hold the id and poll on your own schedule:
+
+```ts
+const held = await c.snapshot({ name: 'before-upgrade', wait: false });
+held.capturing;                                     // true — and held.id is final
+
+for (;;) {
+  const { items, incomplete } = await client.snapshots.listWithStatus();
+  const row = items.find((s) => s.id === held.id);
+  if (row && !row.capturing) break;                 // landed
+  // A row that has gone from a listing read WHOLE is a capture that failed. On
+  // a short one it says nothing — the rows nobody could read might have held it.
+  if (!row && incomplete === null) throw new Error('the capture failed: no snapshot and no row');
+  await new Promise((r) => setTimeout(r, 5_000));
+}
+```
+
+That missing row is a capture that failed: it leaves no snapshot and no row, and
+the absence is the only thing there is to tell it from one still running — which
+is why the loop asks without `allowPartial` and checks `incomplete` before
+concluding anything. Without the flag a hypervisor that did not answer arrives as
+a 503 rather than as a row that has gone; `incomplete` is what says the rest of
+the time whether the answer was one this client could read whole.
+
+`snapshot()`'s two failures read differently for the same reason. A
+`TimeoutError` means the *wait* stopped and not the capture — the id is in the
+message and the snapshot is still coming. A `MandalaError` saying the capture
+failed means the row went and nothing took its place; there is nothing to find
+and nothing being billed.
+
+```ts
+try {
+  await c.snapshot({ name: 'before-upgrade', timeoutMs: 600_000 });
+} catch (err) {
+  if (err instanceof TimeoutError) { /* still capturing; poll for the id it names */ }
+}
+```
+
 A memory snapshot forks into a live twin — same processes, same open windows,
 same network identity until it is re-identified.
 
