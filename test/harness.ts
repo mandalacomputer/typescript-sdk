@@ -464,6 +464,17 @@ export const SNAPSHOT = {
  */
 export const CAPTURE_ACCEPTED = { ...SNAPSHOT, state: 'capturing', size_bytes: 0 };
 
+/**
+ * The same snapshot as `DELETE /snapshots/:id` hands it back at the 202:
+ * accepted for deletion, and still there.
+ *
+ * `state` is the whole difference, and the row is the snapshot's own rather than
+ * an ack — the platform stopped answering `{"ok":true}` here when the deletion
+ * moved out of the request (platform OPL-4572). A mock that answered the ack
+ * would let a client reading the 202 as a finished deletion pass.
+ */
+export const DELETE_ACCEPTED = { ...SNAPSHOT, state: 'deleting' };
+
 export const EXEC_OK = { exit_code: 0, stdout_b64: '', stderr_b64: '', timed_out: false };
 
 /** What a background start answers with: a pid, and nothing having exited. */
@@ -790,7 +801,20 @@ export const anyRoute: Responder = (call) => {
     // listing above is where the same row is read once it has landed, and a
     // mock that answered a finished snapshot to the POST would let a client
     // that never polls pass.
+    // The listing under `include=unfinished` is the DELETION's view, and it is
+    // empty because this is the answer that comes after one: there is no state
+    // that means deleted, so a row that is gone from the unfinished listing is
+    // the deletion having finished, and that is what lets `snapshots.delete()`
+    // return against a test that set up no listing of its own. The bare listing
+    // above is unchanged, so nothing that reads snapshots sees this.
+    if (get && path === '/snapshots' && call.query.include === 'unfinished') return json([]);
     return get ? json([SNAPSHOT]) : json(CAPTURE_ACCEPTED, { status: 202 });
+  }
+  // DELETE /snapshots/:id is a 202 and the row, like the capture's POST: the
+  // deletion is accepted here and runs afterwards. Three-segment paths — the
+  // `restore` and `clone` actions — are POSTs and do not reach this.
+  if (method === 'DELETE' && /^\/snapshots\/[^/]+$/.test(path)) {
+    return json(DELETE_ACCEPTED, { status: 202 });
   }
   // The two halves of a move answer different moments of the same operation:
   // the POST is the 202 with `live` true, and the listing is where it ended up.

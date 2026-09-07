@@ -1351,7 +1351,56 @@ same network identity until it is re-identified.
 
 ```ts
 await client.snapshots.restore(snap.id);            // back onto its source
-await client.snapshots.delete(snap.id);
+await client.snapshots.delete(snap.id);             // waits for the row to go
+```
+
+**`delete()` waits too, and what it waits for is the row's absence.** The route
+answers 202 with the snapshot's row the moment the deletion is accepted, and the
+work happens afterwards: flattening every dependent, committing the index, then
+walking both the local files and the bucket objects, which scales with the chain
+and with what is stored. There is no state that means deleted — `client.snapshots.list()`
+no longer carrying the id is the deletion having finished — so that is what the
+wait polls for, and it asks with `includeUnfinished` because a row that reached
+`deleting` is left out of a bare listing.
+
+That flag is not optional in a loop of your own. Without it, a deletion that
+stalled reads as one that finished, and you record a snapshot as gone while it
+is still holding objects and still being billed.
+
+Every refusal still arrives on the request and still carries the status it did:
+404 for no such snapshot, `ConflictError` for a capture reading through it, for a
+clone or migration holding it, and for a deletion of the same id already running.
+That last one is progress rather than a fault, and a second `delete()` against a
+row whose deletion stalled is accepted again and finishes the job — so a retry is
+always safe.
+
+**The polarity is the opposite of a capture's.** A capture that fails leaves no
+row; a deletion that fails leaves one. So a `TimeoutError` here means the row was
+still listed, and the message says which of the two that is, because the remedies
+differ. Still `deleting` is a stall the platform sweeps up itself every fifteen
+minutes. Still in its ordinary state is a deletion that stopped at the flatten
+having destroyed nothing — the one conflict that arrives after the 202, when a
+dependent is itself being deleted — and the sweep never picks those up, so what
+finishes it is another `delete()` once that dependent has gone. Deleting a chain
+one link at a time, waiting for each row to leave the listing, never meets it.
+
+`{ wait: false }` returns as soon as the 202 lands, for a caller who would rather
+poll on their own schedule:
+
+```ts
+await client.snapshots.delete(snap.id, { wait: false });
+
+const { items, incomplete } = await client.snapshots.listWithStatus({
+  includeUnfinished: true,
+});
+// `incomplete` first: rows this client could not read might have been this one,
+// so absence on a short listing is not a snapshot that is gone.
+const gone = incomplete === null && !items.some((s) => s.id === snap.id);
+```
+
+Taking them on a timer is a property of the computer:
+
+```ts
 await c.setSchedule({ enabled: true, hour: 4, tz: 'America/New_York' });
 ```
 
