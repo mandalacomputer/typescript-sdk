@@ -932,10 +932,14 @@ describe('the parameters a drive loop needs', () => {
   it('names a snapshot when asked, and lets the platform name it otherwise', async () => {
     const rec = recorder(anyRoute);
     const c = await client(rec).computers.get('vm-1');
+    // The POST rather than `last()`, because the call no longer ends there: a
+    // capture is accepted with a 202 and this waits for it, so the last request
+    // of a snapshot() is the listing it polled.
+    const posted = () => rec.calls.filter((c) => c.method === 'POST').at(-1)?.body;
     await c.snapshot();
-    expect(rec.last().body).toEqual({ memory: false });
+    expect(posted()).toEqual({ memory: false });
     await c.snapshot({ memory: true, name: 'before-upgrade' });
-    expect(rec.last().body).toEqual({ memory: true, name: 'before-upgrade' });
+    expect(posted()).toEqual({ memory: true, name: 'before-upgrade' });
   });
 });
 

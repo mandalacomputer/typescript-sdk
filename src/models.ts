@@ -1309,6 +1309,26 @@ export function toUsageReport(d: Record<string, unknown>): UsageReport {
   };
 }
 
+/**
+ * The one snapshot state that is not a snapshot.
+ *
+ * A capture registers its row before any bytes move and that row becomes
+ * `pending` in place, under the id it was allocated (platform OPL-4562). So
+ * "still going" is a STATE to read and not an id to recognise — it used to be
+ * both, when the placeholder was called `cap-` and the computer's own id.
+ */
+const CAPTURING = 'capturing';
+
+/**
+ * The snapshot states that are not a capture in flight, named rather than
+ * inferred.
+ *
+ * Only {@link acceptedCapture} reads this, and only about a POST answer — see
+ * there for why that one question needs an allow-list where every other state
+ * test on this surface is a deny-list.
+ */
+const LANDED = ['pending', 'durable', 'deleting'];
+
 export type Snapshot = {
   id: string;
   computerId: string;
@@ -1327,10 +1347,18 @@ export type Snapshot = {
   /**
    * Where these bytes have got to, and what may be done with them.
    *
-   * - `"capturing"` — still being taken, and NOT a snapshot yet. A listing puts
-   *   these first, their ids begin `cap-`, and restore, clone and delete all
-   *   answer 404 on one. Acting on the newest row of a fresh listing is exactly
-   *   how this is met.
+   * - `"capturing"` — still being taken, and NOT a snapshot yet: restore, clone
+   *   and delete all answer 404 on one, and a listing puts these first. THE ID
+   *   IS ALREADY THE SNAPSHOT'S OWN — allocated before the copy starts and kept
+   *   when it lands — so this is the row to poll rather than a stand-in that
+   *   gets replaced by something under another id (platform OPL-4562). It used
+   *   to be `cap-` and the computer's own id, which named the WORK rather than
+   *   the thing, leaving a caller nothing to match on but "the newest row of a
+   *   fresh listing" — a guess a scheduled capture landing in the same window
+   *   gets wrong. See {@link capturing}.
+   *
+   *   A capture that FAILS leaves nothing: the row disappears and no snapshot
+   *   takes its place, which is the only signal there is.
    * - `"pending"` — on its host and usable. This is the point to act from.
    * - `"durable"` — in backup storage too. See {@link durable}.
    * - `"deleting"` — a deletion that began and did not finish; only listed when
@@ -1344,6 +1372,15 @@ export type Snapshot = {
   auto: boolean;
   /** True once replicated to backup storage. */
   durable: boolean;
+  /**
+   * True while this is a capture in flight rather than a snapshot.
+   *
+   * What {@link Computer.snapshot} hands back under `wait: false`, and what a
+   * listing shows for a capture somebody else started. Restore, clone and
+   * delete all answer 404 on one; {@link id} is nonetheless the id the snapshot
+   * will keep, so it is what to poll on.
+   */
+  capturing: boolean;
   /** A live capture: forks and restores without booting. */
   memory: boolean;
   /**
@@ -1621,6 +1658,45 @@ const snapshotId = (d: Record<string, unknown>): string => {
   return id;
 };
 
+/**
+ * Whether a `POST computers/:id/snapshots` answer is an accepted CAPTURE rather
+ * than a stored snapshot.
+ *
+ * The protocol signal is the status — 202 against 200 — and {@link Transport.json}
+ * does not carry one, so this reads the body instead. It reads it the other way
+ * round from {@link Snapshot.capturing}, and the inversion is the point: this
+ * answers "is there something to wait for", where an unreadable answer must mean
+ * YES.
+ *
+ * `capturing` decides the way `durable` does, on the raw value, so a state
+ * nobody can classify is not a claim — the safe direction inside a poll loop,
+ * where the alternative is polling a row whose state can never be read until the
+ * deadline. Here the same reading is the unsafe one. A 202 whose `state` arrives
+ * missing, empty, misspelled or under another key would then read as a finished
+ * snapshot: {@link Computer.snapshot} would hand back the placeholder unwaited,
+ * with `sizeBytes: 0` and an id that restore, clone and delete all 404 on, which
+ * is precisely the bug OPL-4568 exists to remove — reinstated silently, by drift
+ * this SDK cannot see.
+ *
+ * So only a state this client can actually READ as a landed one skips the wait,
+ * and that is an ALLOW-LIST rather than "anything but `capturing`" (Codex
+ * review, gpt-5.6-sol). The deny-list spelling says the same thing about a
+ * missing state and the opposite thing about a misspelt or renamed one:
+ * `state: "capturin"` is every bit as unreadable as no state at all, and it read
+ * as landed — which is the failure above reached through a typo instead of an
+ * omission. The three names are the ones `web/lib/apidoc` documents beside
+ * `capturing`, and `deleting` is among them because a row in it is a row the
+ * capture is over for, whatever else is true of it.
+ *
+ * Waiting on a snapshot that had in fact landed costs one listing: the row is
+ * there, carrying whatever state it really has, and the poll returns it at once
+ * — which is also what a platform that invents a FOURTH landed name gets, since
+ * the loop's own rule is the deny-list. So the cost of this list going stale is
+ * a round trip, and the cost of the other spelling is the bug.
+ */
+export const acceptedCapture = (d: Record<string, unknown>): boolean =>
+  typeof d.state !== 'string' || !LANDED.includes(d.state);
+
 export function toSnapshot(d: Record<string, unknown>): Snapshot {
   return {
     // Refused rather than coerced to `''`, the way {@link buildId} refuses a
@@ -1651,6 +1727,13 @@ export function toSnapshot(d: Record<string, unknown>): Snapshot {
     // coerced `state` and `kind` above are still what gets REPORTED; they are
     // not what gets decided on.
     durable: d.state === 'durable',
+    // THE RAW state here too, and it decides the same way `durable` does: a
+    // value nobody can classify is not a claim, so a malformed one reads as a
+    // stored snapshot rather than as a capture still running. That is the safe
+    // direction for this field as well — {@link Computer.snapshot}'s wait
+    // returns the row rather than polling a listing until its deadline over a
+    // state it will never be able to read.
+    capturing: d.state === CAPTURING,
     memory: d.kind === 'memory',
     orphaned: said(d.orphaned),
     unreachable: snapshotUnreachable(d),
