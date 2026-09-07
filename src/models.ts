@@ -1362,7 +1362,10 @@ export type Snapshot = {
    * - `"pending"` — on its host and usable. This is the point to act from.
    * - `"durable"` — in backup storage too. See {@link durable}.
    * - `"deleting"` — a deletion that began and did not finish; only listed when
-   *   asked for.
+   *   asked for, with `includeUnfinished`. THERE IS NO STATE THAT MEANS DELETED:
+   *   a deletion that finished takes its row with it, so what a deletion is
+   *   waited on is the row's ABSENCE — the opposite polarity to a capture, which
+   *   leaves no row when it FAILS. See {@link Snapshots.delete}.
    */
   state: string;
   sizeBytes: number;
