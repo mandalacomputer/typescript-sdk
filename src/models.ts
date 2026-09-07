@@ -1319,6 +1319,16 @@ export function toUsageReport(d: Record<string, unknown>): UsageReport {
  */
 const CAPTURING = 'capturing';
 
+/**
+ * The snapshot states that are not a capture in flight, named rather than
+ * inferred.
+ *
+ * Only {@link acceptedCapture} reads this, and only about a POST answer — see
+ * there for why that one question needs an allow-list where every other state
+ * test on this surface is a deny-list.
+ */
+const LANDED = ['pending', 'durable', 'deleting'];
+
 export type Snapshot = {
   id: string;
   computerId: string;
@@ -1668,13 +1678,24 @@ const snapshotId = (d: Record<string, unknown>): string => {
  * is precisely the bug OPL-4568 exists to remove — reinstated silently, by drift
  * this SDK cannot see.
  *
- * So only a state this client can actually READ as a landed one skips the wait.
- * Anything else is waited on, and waiting on a snapshot that had in fact landed
- * costs one listing: the row is there, carrying whatever state it really has,
- * and the poll returns it at once (/code-review, OPL-4568).
+ * So only a state this client can actually READ as a landed one skips the wait,
+ * and that is an ALLOW-LIST rather than "anything but `capturing`" (Codex
+ * review, gpt-5.6-sol). The deny-list spelling says the same thing about a
+ * missing state and the opposite thing about a misspelt or renamed one:
+ * `state: "capturin"` is every bit as unreadable as no state at all, and it read
+ * as landed — which is the failure above reached through a typo instead of an
+ * omission. The three names are the ones `web/lib/apidoc` documents beside
+ * `capturing`, and `deleting` is among them because a row in it is a row the
+ * capture is over for, whatever else is true of it.
+ *
+ * Waiting on a snapshot that had in fact landed costs one listing: the row is
+ * there, carrying whatever state it really has, and the poll returns it at once
+ * — which is also what a platform that invents a FOURTH landed name gets, since
+ * the loop's own rule is the deny-list. So the cost of this list going stale is
+ * a round trip, and the cost of the other spelling is the bug.
  */
 export const acceptedCapture = (d: Record<string, unknown>): boolean =>
-  typeof d.state !== 'string' || d.state === '' || d.state === CAPTURING;
+  typeof d.state !== 'string' || !LANDED.includes(d.state);
 
 export function toSnapshot(d: Record<string, unknown>): Snapshot {
   return {

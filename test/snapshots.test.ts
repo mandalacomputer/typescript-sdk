@@ -121,7 +121,12 @@ describe('snapshot() waits for the capture', () => {
     // for": read the other way, this hands back a placeholder with no bytes and
     // an id that restore, clone and delete all 404 on, which is the whole of the
     // bug this change removes (/code-review).
-    for (const state of [undefined, '', ['capturing'], 42]) {
+    //
+    // A MISSPELT in-flight state is on the list for the reason an absent one is:
+    // `capturin` is exactly as unreadable, and under "anything but capturing" it
+    // read as landed — the same bug through a typo rather than an omission
+    // (Codex review, gpt-5.6-sol).
+    for (const state of [undefined, '', ['capturing'], 42, 'capturin', 'CAPTURING']) {
       const { rec, client: c } = client((call) =>
         call.path.endsWith('/snapshots') && call.method === 'POST'
           ? json({ ...CAPTURE_ACCEPTED, state }, { status: 202 })
