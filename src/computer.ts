@@ -460,7 +460,7 @@ const moveTimeoutText = (w: {
       `${w.timeoutMs}ms` +
       (blind ? `, and ${blind}` : '') +
       (w.failures > 0 ? `, and ${w.failures} poll(s) failed outright` : '') +
-      `. No poll of it was ever both readable in full and missing this move, which is what it ` +
+      `. No poll of it both accounted for every row and was missing this move, which is what it ` +
       `takes to call the row gone, so what became of the move is not something this wait read.`
     );
   }
@@ -507,9 +507,16 @@ const captureFailed = (computerId: string, snapshotId: string): string =>
  *
  * {@link moveTimeoutText}'s shape and its reasons, over the silences this wait
  * has: a copy still running is not a platform that stopped answering, and
- * neither of those is a listing that came back short every time — where the row
- * being absent says nothing at all, since the rows this client never saw might
- * have held it.
+ * neither of those is a listing that could not be read as a whole one — where
+ * the row being absent says nothing at all, since the rows this client never
+ * saw, or saw under an id it could not match, might have held it.
+ *
+ * "COULD NOT BE READ AS A WHOLE ONE" rather than "was short", and "accounted for
+ * every row" rather than "readable in full", because `shortLast` covers two
+ * things now (OPL-4587). One is a listing that dropped rows. The other is a
+ * listing that carried every one of them and held a row this client could not
+ * match on, which is not short at all — and telling a caller rows went missing
+ * sends them after a transport fault that did not happen (/code-review).
  *
  * `stillCapturing` and `shortLast` are the LAST poll's; `everSeen`, `reads`,
  * `failures` and `aborts` are the whole wait's. Kept apart for the reason the
@@ -539,8 +546,9 @@ const captureTimeoutText = (w: {
   if (w.shortLast) {
     return (
       `${w.snapshotId} was not on the last listing GET ${P.SNAPSHOTS} answered within ` +
-      `${w.timeoutMs}ms, and that listing was short — so whether the capture failed cannot be ` +
-      `told from it, since the rows it did not carry might have held this one`
+      `${w.timeoutMs}ms, and that listing could not be read as a whole one — so whether the ` +
+      `capture failed cannot be told from it, since the rows it did not carry, or carried under ` +
+      `an id this client could not match, might have held this one`
     );
   }
   // Seen capturing, and then not reachable — which is a statement about the
@@ -558,8 +566,9 @@ const captureTimeoutText = (w: {
       `${w.snapshotId} never appeared on GET ${P.SNAPSHOTS} within ${w.timeoutMs}ms, on ` +
       `${w.reads} listing(s) that were read` +
       (w.failures > 0 ? ` and ${w.failures} poll(s) that failed outright` : '') +
-      `. None of those listings was both readable in full and missing this row, which is what it ` +
-      `takes to call the capture failed, so what became of it is not something this wait read.`
+      `. None of those listings both accounted for every row and was missing this one, which is ` +
+      `what it takes to call the capture failed, so what became of it is not something this wait ` +
+      `read.`
     );
   }
   // No poll ever finished, and the three ways that happens are three sentences

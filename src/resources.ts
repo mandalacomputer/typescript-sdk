@@ -459,8 +459,9 @@ const deleteTimeoutText = (w: {
   if (w.shortLast) {
     return (
       `${w.snapshotId} was not on the last listing GET ${P.SNAPSHOTS} answered within ` +
-      `${w.timeoutMs}ms, and that listing was short — so whether the deletion finished cannot be ` +
-      `told from it, since the rows it did not carry might have held this one`
+      `${w.timeoutMs}ms, and that listing could not be read as a whole one — so whether the ` +
+      `deletion finished cannot be told from it, since the rows it did not carry, or carried ` +
+      `under an id this client could not match, might have held this one`
     );
   }
   // Seen listed, and then not reachable — a statement about the polls rather
@@ -477,8 +478,8 @@ const deleteTimeoutText = (w: {
     return (
       `${gaveUp}${w.reads} listing(s) were read` +
       (w.failures > 0 ? ` and ${w.failures} poll(s) failed outright` : '') +
-      `, and none of those listings was both readable in full and missing this row, which is what ` +
-      `it takes to call the deletion finished`
+      `, and none of those listings both accounted for every row and was missing this one, which ` +
+      `is what it takes to call the deletion finished`
     );
   }
   // No poll ever finished, and the three ways that happens are three sentences —
@@ -512,6 +513,13 @@ export class Snapshots {
    * platform could not reach, with no `computerId` on it because there was no
    * host to say what it belongs to. Filtering on equality would delete precisely
    * the markers that say something is missing, and then report a confident count.
+   *
+   * It **drops a row it cannot attribute to any computer** — one whose
+   * `computer_id` is not a string — and says so through `incomplete` on
+   * {@link listWithStatus}. Dropping is right: a strict `computer_id` is the
+   * whole of what keeps somebody else's snapshots out of this answer. Saying
+   * nothing about it was not, because the caller then holds a list one row
+   * shorter than the estate over a listing that claims to be whole (OPL-4587).
    *
    * `includeUnfinished` also returns deletions that began and did not finish.
    * They are not usable — nothing can be restored or cloned from one — but they
@@ -549,18 +557,46 @@ export class Snapshots {
     });
     const all = items.map(toSnapshot);
     const id = opts.computerId;
+    if (!id) return { items: all, incomplete };
+    // THE ROW on both halves, not the decoded fields. `unreachable` is the
+    // marker saying this listing is short, and filtering it out reports a
+    // confident count over an incomplete answer — but a FULL row carrying the
+    // flag is a real snapshot belonging to a real computer, and admitting one
+    // hands somebody else's snapshots to a caller who asked for their own,
+    // from a listing usually read just before an irreversible delete
+    // (OPL-3850). Only the row's shape tells the two apart, and only the raw
+    // `computer_id` decides which computer it is: the decoded one has been
+    // through `str()`, and `String(['vm-1'])` is `'vm-1'`.
+    const kept = all.filter((s) => belongsToComputer(s.raw, id) || isUnreachableStub(s.raw));
+    // A ROW THIS FILTER COULD NOT ATTRIBUTE MAKES THIS ANSWER SHORT, and it is
+    // the same rule the three waits follow, on the other side of it (OPL-4587).
+    // There an unmatchable row stops a verdict about a row that is missing; here
+    // it IS the missing row — dropped, because a strict `computer_id` is the
+    // whole of what keeps somebody else's snapshots out, and `['vm-1']` is
+    // exactly the shape of a row that is this computer's and malformed.
+    //
+    // Dropping it stays right; saying nothing about it does not. `incomplete`
+    // read `null` over a list one row shorter than the estate, which is this
+    // method telling a caller it answered in full — and the caller most likely
+    // to act on that is the one reading a computer's snapshots before purging
+    // them. So the row is counted into the channel that already exists for
+    // exactly this: "how many rows this client could not decode and dropped".
+    //
+    // STUBS ARE NOT COUNTED. They carry no `computer_id` at all, they are KEPT
+    // by the filter above, and they are the platform's own marker that its
+    // answer was short — counting them would double-report a shortfall that is
+    // already visible in the rows themselves.
+    const unattributable = unmatchableRows(
+      all.map((s) => s.raw).filter((r) => !isUnreachableStub(r)),
+      'computer_id',
+    );
     return {
-      // THE ROW on both halves, not the decoded fields. `unreachable` is the
-      // marker saying this listing is short, and filtering it out reports a
-      // confident count over an incomplete answer — but a FULL row carrying the
-      // flag is a real snapshot belonging to a real computer, and admitting one
-      // hands somebody else's snapshots to a caller who asked for their own,
-      // from a listing usually read just before an irreversible delete
-      // (OPL-3850). Only the row's shape tells the two apart, and only the raw
-      // `computer_id` decides which computer it is: the decoded one has been
-      // through `str()`, and `String(['vm-1'])` is `'vm-1'`.
-      items: id ? all.filter((s) => belongsToComputer(s.raw, id) || isUnreachableStub(s.raw)) : all,
-      incomplete,
+      items: kept,
+      // Presence is the signal and the number is detail, which is why this adds
+      // rather than replaces: a platform shortfall and a client-side one are
+      // both "this list is shorter than the estate", and {@link Listing} keeps
+      // them on one channel deliberately.
+      incomplete: unattributable > 0 ? (incomplete ?? 0) + unattributable : incomplete,
     };
   }
 
@@ -666,7 +702,18 @@ export class Snapshots {
    * const { items, incomplete } = await client.snapshots.listWithStatus({
    *   includeUnfinished: true,
    * });
-   * const gone = incomplete === null && !items.some((s) => s.id === 'snap-1');
+   * // `raw.id`, not `id`: the decoded field has been through `str()`, and
+   * // `String(['snap-1'])` is `'snap-1'`, so matching on it lets a malformed
+   * // row stand in for this snapshot — here the SAFE direction, but the same
+   * // mistake the wait refuses. A row whose own id is not a string is the
+   * // second way a listing is short: kept, so `incomplete` does not count it,
+   * // and unmatchable, so it might be this one. An id coercing to nothing
+   * // never reaches here — {@link listWithStatus} refuses such a row and throws
+   * // — which is why the SDK's own wait, reading the RAW listing, sees a case
+   * // this loop cannot.
+   * const blind =
+   *   incomplete !== null || items.some((s) => typeof s.raw.id !== 'string');
+   * const gone = !blind && !items.some((s) => s.raw.id === 'snap-1');
    * ```
    *
    * Throws {@link TimeoutError} if the row is still listed when the timeout runs
