@@ -71,7 +71,7 @@ describe('the computer record', () => {
     // it and became a display_width_px of 1280.5 — a screen no screenshot can
     // be, in the one place the docstring says the numbers have to equal what
     // screenshots actually are. The platform's own parser takes only whole
-    // numbers (server/display.go), so this is the guard holding a line the API
+    // numbers, so this is the guard holding a line the API
     // already holds rather than a live hazard.
     const { client: c } = client(() => json({ ...COMPUTER, resolution: '1280.5x800.2x24' }));
     expect((await c.computers.get('vm-1')).screen).toEqual({ width: 1280, height: 800 });

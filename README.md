@@ -1387,7 +1387,7 @@ await client.snapshots.delete(snap.id);             // waits for the row to go
 for up to **30 minutes** by default, polling at up to 5s — `timeoutMs` and
 `pollMs` change both, and `{ wait: false }` opts out entirely. That deadline is
 for the case that needs it: a deletion scales with the chain, and a lone snapshot
-is seconds (measured at 436ms at `pending` and 3.2s at `durable` for 2.43 GB), so
+is seconds even at multi-gigabyte sizes, so
 the poll interval ramps from 250ms and the ordinary call returns in about the
 time the deletion takes. But a deletion that stalls at the flatten — the one
 conflict the platform cannot refuse up front — holds the call for the full half
@@ -1890,10 +1890,10 @@ one `GET computers/:id`, and the state it answers with is what the message says
 — inference, named as such, and better than "the connection failed" about a
 machine somebody suspended.
 
-**Only `/api/v1`.** Never the hypervisor daemon's own routes. Its ops endpoints
-(`/host`, `/fleet`, `/audit`) are not owner-scoped inside the daemon, because
-nothing user-facing was ever meant to reach them. The retention WRITES are kept
-out for a different reason worth not confusing with that one: `PUT /retention`
+**Only `/api/v1`.** Never the platform's internal operator routes: nothing
+user-facing was ever meant to reach them, and this client does not know they
+exist. The retention WRITES are kept out for a different reason worth not
+confusing with that one: `PUT /retention`
 is owner-scoped — it sets the calling tenant's own policy — but the plan owns
 retention, so a tenant setting its own would be granting itself history it has
 not paid for. `test/surface.test.ts` asserts the mirror stays clear of the ops

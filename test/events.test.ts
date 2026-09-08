@@ -2,8 +2,8 @@
  * The event stream: what comes off the wire, and what the iterator does with it.
  *
  * Two halves, and they fail differently. The parsing half is pure and is tested
- * against frames written the way the platform writes them — `server/events.go`
- * and `server/eventsocket.go`, whose shapes are quoted in the fixtures below.
+ * against frames written the way the platform writes them, whose shapes are
+ * quoted in the fixtures below.
  * The stream half is a socket, a queue and a reconnect, and every test in it
  * drives a {@link FakeSocket} rather than a mock of this SDK's own machinery:
  * a test that calls the frame handler directly proves the handler and not the
@@ -528,7 +528,7 @@ describe('the opening frame', () => {
   });
 
   it('reports a collection that is not an array as short by an unknown amount', () => {
-    // A guard rather than a live hazard — `eventsocket.go` sends `[]` for an
+    // A guard rather than a live hazard — the platform sends `[]` for an
     // empty set, and the watch frames only run under a non-empty one — but a
     // frame reaching this decoder through a proxy is not a frame that daemon
     // wrote. Discarded silently, a non-array leaves `undefined`, which is what
@@ -2488,8 +2488,8 @@ describe('the numbers a stream is given', () => {
  * A connect surface the platform sent short a desktop credential (OPL-4215).
  *
  * The shape that actually arrives is a VIEWER's, and it is worth writing it out
- * rather than inventing a tidier one: `web/lib/vncconnect.ts` answers a viewer
- * with `view_url`, `view_token`, `embed_url` and `clipboard` and nothing else —
+ * rather than inventing a tidier one: the platform answers a viewer with
+ * `view_url`, `view_token`, `embed_url` and `clipboard` and nothing else —
  * no `token`, no `url`, and no `events_url`, because the stream URL is built
  * over the controlling credential and a watch-only one is not given window
  * titles.

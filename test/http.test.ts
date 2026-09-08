@@ -1411,7 +1411,7 @@ describe('answers that are not what the route promised', () => {
     // route that legitimately answers 204 must not be refused and the
     // documented contract is a list; but not an empty ESTATE, which is what
     // `incomplete: null` beside it would have said. The hazard is the one
-    // `web/lib/surface.ts` names — a caller diffs the array against its own
+    // the platform names — a caller diffs the array against its own
     // idea of the world and tidies up the computers that "disappeared" — and
     // it does not care which hop lost the rows.
     const nothing = recorder(() => new Response(null, { status: 204 }));

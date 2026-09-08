@@ -303,8 +303,8 @@ export function flag(v: boolean | undefined, what: string): boolean | undefined 
 /**
  * The `no_reuse` query parameter, refused when it is not a boolean.
  *
- * lib/apidoc gives this parameter `enum: ['true']` and server/buildjob.go
- * compares it to `"true"`, so `true` is the only value that means anything and
+ * The platform documents this parameter as `enum: ['true']` and compares it to
+ * the literal string, so `true` is the only value that means anything and
  * `false` is omitted rather than sent.
  *
  * Getting it wrong is expensive rather than merely wrong: `no_reuse=true` skips
@@ -813,11 +813,14 @@ export function execBody(args: ExecArgs): Json {
     if (finite(args.timeoutS, 'timeoutS') <= 0) {
       throw new ValidationError(`timeoutS must be positive (got ${args.timeoutS})`);
     }
-    // server/api.go decodes timeout_s into int before checking Background.
+    // The platform decodes timeout_s into an integer before it checks the
+    // background flag, so a fractional value is refused there whatever the
+    // flag says.
     if (!Number.isInteger(args.timeoutS)) {
       throw new ValidationError(`timeoutS must be a positive integer (got ${args.timeoutS})`);
     }
-    // Mirrors server/api.go's execMaxTimeoutSec and its foreground-only refusal.
+    // Mirrors the platform's own foreground timeout ceiling and the fact that
+    // it refuses only in the foreground.
     if (!flag(args.background, 'background')) {
       if (args.timeoutS > 600) {
         throw new ValidationError(
@@ -877,9 +880,9 @@ export function shellQuote(s: string): string {
 /**
  * The most a guest path may be, in BYTES of UTF-8 rather than characters.
  *
- * The platform's own bound: `server/guestfile.go` refuses a path longer than
- * `guestPathMax` before it ever reaches the guest agent, and Go counts the
- * bytes of the string rather than its runes. Mirrored here for the reason every
+ * The platform's own bound: a path longer than this is refused before it ever
+ * reaches the guest agent, and the server counts the bytes of the string rather
+ * than its characters. Mirrored here for the reason every
  * other cap in this file is — it is a refusal knowable without a round trip —
  * and deliberately NOT the tighter 256 the event stream applies to a watch,
  * which is that route's own limit and would turn away paths the file routes
@@ -1031,8 +1034,8 @@ export function rangeHeaders(offset?: number, length?: number): Record<string, s
  * Mirrored rather than left to the server, like the env caps above and for the
  * same reason: it is a refusal knowable without a round trip. Unlike the routes
  * and parameters, it is NOT machine-checked — `scripts/check-surface.mjs` reads
- * the platform's `web/lib`, and this number lives in its `server/clipboard.go`
- * as `clipboardWriteMax`. The number is not arbitrary and is not ours — the
+ * the platform's route and parameter tables, and this number is not among them.
+ * The number is not arbitrary and is not ours — the
  * platform puts the text inside one argument of
  * one command, Linux caps a single argv string at 128 KiB, and two layers of
  * base64 stand between the text and that ceiling, so each byte costs about 1.8

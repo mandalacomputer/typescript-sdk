@@ -141,7 +141,7 @@ describe('checking a document', () => {
    * the route had no projector, so it answered the daemon's own row carrying
    * `family`, and decoding that through `toTemplate` would have put the
    * projection's field names on a record that did not have them. OPL-4190 gave
-   * the route `publicTemplate` and the two shapes became one, so the reason
+   * the route the public projection and the two shapes became one, so the reason
    * went — but a raw record fails QUIETLY, which is what makes it worth a test:
    * `check.template.family` went from a string to `undefined` on the day the
    * control plane rolled, with nothing thrown and nothing for TypeScript to
@@ -194,8 +194,8 @@ describe('checking a document', () => {
   });
 
   it('reads why a layered document has no build digest, rather than only that it has none', async () => {
-    // The daemon is an if/else on `spec.from` (server/templateschema.go): no
-    // parent gets `build_digest`, a parent gets `build_digest_needs` instead.
+    // The platform decides on `spec.from`: no parent gets `build_digest`, a
+    // parent gets `build_digest_needs` instead.
     // So a client watching only for the digest sees a field missing and is told
     // nothing about why — and the platform sent the reason, naming what cannot
     // be computed and the command that computes it.
@@ -384,11 +384,12 @@ describe('starting a build', () => {
   });
 
   /**
-   * Omitted rather than sent as `false`, because lib/apidoc gives this parameter
-   * `enum: ['true']` — so `true` is the only value the reference admits.
+   * Omitted rather than sent as `false`, because the platform documents this
+   * parameter as `enum: ['true']` — so `true` is the only value the reference
+   * admits.
    *
    * This docstring used to claim the platform reads the key's presence, which is
-   * false: server/buildjob.go compares it to `"true"`.
+   * false: it compares the value to the literal string.
    */
   it('sends no_reuse only when it is asked for', async () => {
     const { rec, client: c } = client();
@@ -724,8 +725,8 @@ describe('watching a build', () => {
 
   /**
    * `done` alone was too weak a test, and the first version of this check used
-   * it. server/buildjob.go declares three statuses and no more — running,
-   * succeeded, failed — so a record saying `done: true, status: "running"`
+   * it. The platform declares three statuses and no more — running, succeeded,
+   * failed — so a record saying `done: true, status: "running"`
    * contradicts itself. Taking `done` at its word turned that into a finished
    * build whose own status said otherwise, in the two places a caller learns
    * the outcome (adversarial review, second pass, OPL-3835).
@@ -898,8 +899,8 @@ describe('a short build listing', () => {
   /**
    * The DEFAULT is still the refusal, and that is the point.
    *
-   * lib/hvproxy sets X-GC-Incomplete on a short build listing and `forward` in
-   * lib/surface turns it into a 503 for every v1 route generically, so a caller
+   * The platform sets X-GC-Incomplete on a short build listing and turns it
+   * into a 503 for every v1 route generically, so a caller
    * who asked no question about partial answers gets an error rather than a
    * list that has quietly lost a hypervisor's worth of builds.
    */
@@ -982,7 +983,7 @@ describe('a template row carries its ref', () => {
    * Since OPL-3789 a template an account published is named by its ref and by
    * nothing else — the short `name` still resolves to the platform's own
    * catalogue. A listing that drops it cannot tell a caller how to launch their
-   * own template, which is what `publicTemplate` publishes it for. Found by
+   * own template, which is what the platform publishes it for. Found by
    * /code-review on the Python SDK; the same model was dropping it here.
    */
   it('keeps the pinned ref off a published template', async () => {
@@ -1011,7 +1012,7 @@ describe('a template row carries its ref', () => {
 /**
  * OPL-4259. The same miss as `ref`, one field along.
  *
- * `publicTemplate` publishes `desktop` and argues for it where it argues
+ * The platform publishes `desktop` and argues for it where it argues
  * `family` is internal: it changes what a caller gets from routes they already
  * use. `os` is `linux` for a Wayland guest and an X11 one alike, so this is the
  * only field that separates them, and a caller who cannot see it cannot tell
