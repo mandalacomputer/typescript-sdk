@@ -1,6 +1,6 @@
 /** The capture that outlives its request, from the 202 to the row that lands. */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { Client, MandalaError, TimeoutError, ValidationError } from '../src/index.js';
 import {
   anyRoute,
@@ -36,6 +36,19 @@ const listing = (rows: (call: { path: string }) => Response): Responder => {
 };
 
 describe('snapshot() waits for the capture', () => {
+  it('recovers when an empty listing id becomes the captured snapshot', async () => {
+    let polls = 0;
+    const { client: c } = client(
+      listing(() => {
+        polls += 1;
+        return json([polls === 1 ? { ...CAPTURE_ACCEPTED, id: '' } : SNAPSHOT]);
+      }),
+    );
+    const computer = await c.computers.get('vm-1');
+    expect((await computer.snapshot({ pollMs: 1, timeoutMs: 5_000 })).id).toBe(SNAPSHOT.id);
+    expect(polls).toBe(2);
+  });
+
   it('returns the landed row rather than the placeholder it was handed', async () => {
     let polls = 0;
     const { client: c } = client(
@@ -197,7 +210,7 @@ describe('a capture that fails', () => {
     // whole, and the verdict was reached over it: a capture running normally
     // reported as one that FAILED, with the caller told there is nothing to find
     // and nothing being billed.
-    for (const id of [['snap-1'], 42, null, undefined]) {
+    for (const id of ['', ['snap-1'], 42, null, undefined]) {
       const row: Record<string, unknown> = { ...CAPTURE_ACCEPTED, id };
       if (id === undefined) delete row.id;
       const { client: c } = client(listing(() => json([row])));
@@ -415,6 +428,19 @@ const unfinished = (rows: (call: { path: string }) => Response): Responder => {
 const DELETING = { ...SNAPSHOT, state: 'deleting' };
 
 describe('snapshots.delete() waits for the row to go', () => {
+  it('waits through an empty id and a recovered row until a complete empty listing', async () => {
+    let polls = 0;
+    const { client: c } = client(
+      unfinished(() => {
+        polls += 1;
+        if (polls === 1) return json([{ ...DELETING, id: '' }]);
+        return json(polls === 2 ? [DELETING] : []);
+      }),
+    );
+    await c.snapshots.delete('snap-1', { pollMs: 1, timeoutMs: 5_000 });
+    expect(polls).toBe(3);
+  });
+
   it('returns when the row has left the listing, not when the DELETE answers', async () => {
     let polls = 0;
     const { client: c } = client(
@@ -475,45 +501,85 @@ describe('snapshots.delete() waits for the row to go', () => {
     await c.snapshots.delete('snap-1', { pollMs: 1, timeoutMs: 5_000 });
   });
 
-  it('does not sit out the full interval on a deletion that finishes at once', async () => {
-    // A deletion is usually seconds — 436ms for a lone snapshot at `pending` on
-    // the deployed fleet — so a flat five-second interval would make the
-    // ordinary call ten times slower than the synchronous one it replaced. The
-    // sleep ramps from 250ms toward `pollMs` instead, so the first poll after
-    // the 202 is not held behind a capture-sized interval (/code-review).
-    let polls = 0;
-    const { client: c } = client(
-      unfinished(() => {
-        polls += 1;
-        return json(polls < 3 ? [SNAPSHOT] : []);
-      }),
-    );
-    const before = Date.now();
-    await c.snapshots.delete('snap-1', { timeoutMs: 60_000 });
-    const took = Date.now() - before;
-
-    expect(polls).toBe(3);
-    // Two sleeps at the default 5000 ceiling would be 10s; ramped they are
-    // 250ms and 500ms. The bound is deliberately far from BOTH: this pins the
-    // ramp, not a stopwatch, and a wall-clock assertion with only a second of
-    // slack is a test that fails on a loaded CI runner rather than on a bug.
-    expect(took).toBeLessThan(6_000);
+  it.each([
+    [undefined, [0, 250, 750, 1_750, 3_750, 7_750, 12_750]],
+    [20, [0, 20, 40, 60]],
+    [300, [0, 250, 550, 850]],
+  ] as const)('ramps from the first sleep toward the %s polling ceiling', async (pollMs, times) => {
+    vi.useFakeTimers();
+    try {
+      const before = Date.now();
+      const polls: number[] = [];
+      const { client: c } = client(
+        unfinished(() => {
+          polls.push(Date.now() - before);
+          return json(polls.length < times.length ? [SNAPSHOT] : []);
+        }),
+      );
+      const deletion = c.snapshots.delete('snap-1', { pollMs, timeoutMs: 60_000 });
+      // The immediate poll must not advance the ramp: the first actual sleeps
+      // are 250 and 500ms. Check each boundary without relying on runner speed.
+      await vi.advanceTimersByTimeAsync(0);
+      expect(polls).toEqual([0]);
+      for (let i = 1; i < times.length; i += 1) {
+        await vi.advanceTimersByTimeAsync(times[i]! - times[i - 1]! - 1);
+        expect(polls).toEqual(times.slice(0, i));
+        await vi.advanceTimersByTimeAsync(1);
+        expect(polls).toEqual(times.slice(0, i + 1));
+      }
+      await expect(deletion).resolves.toBeUndefined();
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
   });
 
-  it('takes pollMs as a ceiling, so a caller’s own interval is never exceeded', async () => {
-    // The ramp may only ever make a wait poll SOONER than asked. A caller who
-    // set an interval to be kind to the platform must still get it.
-    const { rec, client: c } = client(unfinished(() => json([SNAPSHOT])));
-    const before = Date.now();
-    await c.snapshots.delete('snap-1', { pollMs: 20, timeoutMs: 300 }).catch(() => {});
-    const polled = rec.calls.filter((call) => call.path === '/snapshots' && call.method === 'GET');
-    const elapsed = Date.now() - before;
+  it('ends at the total deadline when the next ramped sleep would exceed it', async () => {
+    vi.useFakeTimers();
+    try {
+      const before = Date.now();
+      const polls: number[] = [];
+      const { client: c } = client(
+        unfinished(() => {
+          polls.push(Date.now() - before);
+          return json([SNAPSHOT]);
+        }),
+      );
+      const deletion = c.snapshots.delete('snap-1', { timeoutMs: 600 }).catch((e) => e);
+      await vi.advanceTimersByTimeAsync(600);
+      expect(await deletion).toBeInstanceOf(TimeoutError);
+      expect(Date.now() - before).toBe(600);
+      expect(polls).toEqual([0, 250]);
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
 
-    // At the 20ms ceiling a 300ms wait cannot fit more than ~16 polls; a ramp
-    // that ignored the ceiling and kept doubling would fit far fewer, and one
-    // that ignored it downward would fit far more.
-    expect(polled.length).toBeGreaterThan(4);
-    expect(polled.length).toBeLessThanOrEqual(Math.ceil(elapsed / 20) + 2);
+  it('honours Retry-After before resuming at the polling ceiling', async () => {
+    vi.useFakeTimers();
+    try {
+      const before = Date.now();
+      const polls: number[] = [];
+      const { client: c } = client(
+        unfinished(() => {
+          polls.push(Date.now() - before);
+          if (polls.length === 1) return errorJson(429, 'slow down', { 'Retry-After': '2' });
+          return json(polls.length === 2 ? [SNAPSHOT] : []);
+        }),
+      );
+      const deletion = c.snapshots.delete('snap-1', { pollMs: 300, timeoutMs: 5_000 });
+      await vi.advanceTimersByTimeAsync(1_999);
+      expect(polls).toEqual([0]);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(polls).toEqual([0, 2_000]);
+      await vi.advanceTimersByTimeAsync(300);
+      await expect(deletion).resolves.toBeUndefined();
+      expect(polls).toEqual([0, 2_000, 2_300]);
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
   });
 
   it('returns at the 202 under wait: false, and polls nothing', async () => {
@@ -627,7 +693,7 @@ describe('a deletion that does not finish', () => {
     // counts no shortfall, and the row is then missing from a listing that reads
     // whole. Returning on that says a snapshot is destroyed while it is still on
     // a host, still holding objects and still billed.
-    for (const id of [['snap-1'], 42, null, undefined]) {
+    for (const id of ['', ['snap-1'], 42, null, undefined]) {
       const row: Record<string, unknown> = { ...SNAPSHOT, id };
       if (id === undefined) delete row.id;
       const { client: c } = client(unfinished(() => json([row])));

@@ -828,9 +828,11 @@ export class Snapshots {
       // The sleep comes before every poll but the first, as every other wait
       // here does it: a deletion that finished while the caller was doing
       // something else is one round trip from being known to have finished.
-      if (polled) await sleepUntilNextPoll(delayMs, deadline, signal);
+      if (polled) {
+        await sleepUntilNextPoll(delayMs, deadline, signal);
+        delayMs = Math.min(delayMs * 2, pollMs);
+      }
       polled = true;
-      delayMs = Math.min(delayMs * 2, pollMs);
       if (Date.now() >= deadline) continue;
       try {
         const { items, incomplete } = await this.#t.listing(P.SNAPSHOTS, {
@@ -866,7 +868,7 @@ export class Snapshots {
         //
         // `incomplete` DOES NOT CATCH ALL OF THEM, which is the second half of
         // this test and the finding that put it here (/code-review). A row whose
-        // `id` is not a string is still a record, so the transport keeps it and
+        // `id` is not a nonempty string is still a record, so the transport keeps it and
         // counts no shortfall — and the match above, which is strict equality on
         // the raw `id` precisely so that `String(['snap-1'])` cannot stand in
         // for this snapshot, then cannot match it either. Absence over such a
