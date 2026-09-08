@@ -1225,3 +1225,72 @@ describe('what the second review pass found', () => {
     expect((err as Error).message).not.toContain('sent nothing at all');
   });
 });
+
+describe('template listing completeness', () => {
+  it.each([undefined, '0', '3'])('retains rows and header presence %s', async (header) => {
+    const row = { name: 'base', desktop: 'wayland', icon: 'linux', future: 7 };
+    const { client: c, rec } = client(() =>
+      json([row], {
+        headers: header === undefined ? {} : { 'X-GC-Incomplete': header },
+      }),
+    );
+    const listing = await c.templates.listWithStatus();
+    expect(listing.incomplete).toBe(header === undefined ? null : Number(header));
+    expect(listing.items[0]).toMatchObject({
+      name: 'base',
+      desktop: 'wayland',
+      icon: 'linux',
+      raw: row,
+    });
+    expect(await c.templates.list()).toEqual(listing.items);
+    expect(rec.last().query).toEqual({});
+  });
+
+  it('retains an empty degraded catalogue', async () => {
+    const { client: c } = client(() => json([], { headers: { 'X-GC-Incomplete': '0' } }));
+    expect(await c.templates.listWithStatus()).toEqual({ items: [], incomplete: 0 });
+  });
+
+  it.each([{}, 'broken', 7])('refuses a malformed listing %j', async (body) => {
+    const { client: c } = client(() => json(body));
+    await expect(c.templates.listWithStatus()).rejects.toBeInstanceOf(MandalaError);
+    await expect(c.templates.list()).rejects.toBeInstanceOf(MandalaError);
+  });
+
+  it('propagates cancellation', async () => {
+    const { client: c } = client(() => new Promise<Response>(() => {}));
+    const controller = new AbortController();
+    const pending = c.templates.listWithStatus({ signal: controller.signal });
+    controller.abort(new Error('cancel catalogue'));
+    await expect(pending).rejects.toThrow(/cancel catalogue/);
+  });
+
+  it.each([undefined, null])('keeps omitted icon and desktop absent: %s', async (value) => {
+    const { client: c } = client(() => json([{ name: 'base', icon: value, desktop: value }]));
+    const [template] = await c.templates.list();
+    expect(template).not.toHaveProperty('icon');
+    expect(template).not.toHaveProperty('desktop');
+  });
+});
+
+describe('malformed template listing rows', () => {
+  it('reports discarded rows while retaining valid templates', async () => {
+    const { client: c } = client(() => json([null, 7, { name: 'base' }]));
+    const listing = await c.templates.listWithStatus();
+    expect(listing.items.map((item) => item.name)).toEqual(['base']);
+    expect(listing.incomplete).toBe(2);
+    expect((await c.templates.list()).map((item) => item.name)).toEqual(['base']);
+  });
+
+  it('does not call an absent response a complete empty catalogue', async () => {
+    const { client: c } = client(() => new Response(null, { status: 204 }));
+    const listing = await c.templates.listWithStatus();
+    expect(listing.items).toEqual([]);
+    expect(listing.incomplete).not.toBeNull();
+  });
+
+  it('preserves an explicitly empty icon', async () => {
+    const { client: c } = client(() => json([{ name: 'base', icon: '' }]));
+    expect((await c.templates.list())[0]).toHaveProperty('icon', '');
+  });
+});

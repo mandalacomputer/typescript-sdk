@@ -568,7 +568,11 @@ never arrived would be refused for a command it could have run.
 
 ### Long-running commands
 
-**`exec` cannot wait longer than about two minutes**, whatever `timeoutS` says.
+Foreground `timeoutS` must be an integer from **1 through 600 seconds**; the
+SDK rejects larger or fractional values before sending the command. Use
+`execBackground` for longer commands.
+
+**Hosted `exec` requests can still time out after about two minutes.**
 The HTTP budget is derived from it and the platform stretches its own deadline
 to match, but a proxy in front of the platform abandons a request that has
 produced no response for roughly that long and answers 524, which arrives as
@@ -578,11 +582,9 @@ produced no response for roughly that long and answers 524, which arrives as
 |---|---|---|---|
 | `sleep 110` | 230 | ok | 110.6s |
 | `sleep 130` | 300 | `GatewayTimeoutError` | 125.2s |
-| `sleep 130` | 3600 | `GatewayTimeoutError` | 125.3s |
 
-The last two rows are the point: a twelvefold difference in what was asked for,
-a tenth of a second in where it ended, because the hop that gives up never saw
-the argument. The command also survives the request that abandoned it, so the
+The server's 600-second maximum does not extend this hosted proxy deadline.
+The command also survives the request that abandoned it, so the
 call after one of these often raises `ConflictError` — the guest agent still
 busy with it, which is the first failure continuing rather than a second one.
 
@@ -596,12 +598,16 @@ const job = await c.execBackground('apt-get install -y build-essential');
 for (;;) {
   const s = await c.execPoll(job.pid);
   process.stdout.write(s.stdout);             // only the NEW bytes, as bytes
-  if (!s.running) break;
+  process.stderr.write(s.stderr);
+  if (!s.running && !s.more) break;
   if (!s.more) await new Promise((r) => setTimeout(r, 1000));
 }
 
 await c.execKill(job.pid);                    // if you change your mind
 ```
+
+A command can stop while several chunks of output remain. Keep polling while
+`more` is true, and stop only once it is no longer running and its output is drained.
 
 The output is a **cursor, not a buffer**: each poll gives you only what has been
 printed since the last one, so two readers on one pid split the output between
