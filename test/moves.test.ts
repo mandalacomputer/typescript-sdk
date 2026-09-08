@@ -531,7 +531,7 @@ describe('waitForMove', () => {
     // shape of a row that is this computer's and malformed, so the verdict
     // "your move is not listed" was being reached over the very row that might
     // have been it.
-    for (const cid of [['vm-1'], 42, null, undefined]) {
+    for (const cid of ['', ['vm-1'], 42, null, undefined]) {
       const row: Record<string, unknown> = { ...MOVE_DONE, computer_id: cid };
       if (cid === undefined) delete row.computer_id;
       const { client: c } = client((call) =>
@@ -546,6 +546,18 @@ describe('waitForMove', () => {
       expect((err as Error).message).not.toContain('is not listed by GET moves');
       expect((err as Error).message).toContain('named no computer this client could match on');
     }
+  });
+
+  it('recovers when an empty computer id becomes an attributable move', async () => {
+    let polls = 0;
+    const { client: c } = client((call) => {
+      if (call.path !== '/moves') return anyRoute(call);
+      polls += 1;
+      return json({ moves: [polls === 1 ? { ...MOVE_DONE, computer_id: '' } : MOVE_DONE] });
+    });
+    const computer = await c.computers.get('vm-1');
+    expect((await computer.waitForMove(SINCE, { pollMs: 1, timeoutMs: 5_000 })).state).toBe('done');
+    expect(polls).toBe(2);
   });
 
   it('drops the unattributable count on both silent paths, as it drops the other', async () => {
