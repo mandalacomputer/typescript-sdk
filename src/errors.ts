@@ -406,10 +406,11 @@ export class UnavailableError extends APIError {
  *
  * Against `app.mandala.computer` that hop is Cloudflare and the ceiling is about
  * two minutes. Measured 2026-08-20: `sleep 130` died at 125.2s with
- * `timeoutS: 300` and at 125.3s with `timeoutS: 3600`, while `sleep 110`
- * returned normally at 110.6s. A foreground {@link Computer.exec} slower than
- * that always ends here; {@link Computer.execBackground} is the shape that does
- * not, because it answers as soon as the command has started.
+ * `timeoutS: 300`, while `sleep 110` returned normally at 110.6s. Foreground
+ * `timeoutS` must be an integer from 1 through 600; the server's maximum does
+ * not extend the hosted proxy's roughly 120-second deadline. Use
+ * {@link Computer.execBackground} for longer commands: it answers as soon as
+ * the command has started.
  *
  * The abandoned command keeps running, which is why the next call on the same
  * computer often raises {@link ConflictError} — the guest agent is still busy
@@ -576,10 +577,9 @@ const GATEWAY_TIMEOUT_MESSAGE =
   'cancelled: the platform never saw this deadline, so anything the request had already ' +
   'set going carries on without it — usually it has the request and is still working, ' +
   'though a 504 can come from a hop that never reached it. Most often that is a ' +
-  'foreground exec(), which ends this ' +
-  'way after about two minutes however large a timeoutS it was given — the ceiling ' +
-  'belongs to the proxy, not to the platform or to this client, so raising timeoutS ' +
-  'cannot buy time from it and execBackground() is the way to run something slower. ' +
+  'foreground exec(), which can meet the hosted proxy deadline after about two minutes. ' +
+  'Foreground timeoutS must be an integer from 1 through 600 seconds; the server maximum ' +
+  'does not extend the proxy deadline. Use execBackground() for longer commands. ' +
   'After one of those, the next call on that computer may report the guest agent as ' +
   'busy with the command that outlived the request';
 

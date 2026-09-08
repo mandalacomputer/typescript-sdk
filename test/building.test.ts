@@ -910,3 +910,28 @@ describe('the chord itself', () => {
     });
   });
 });
+
+describe.each([false, true])('exec timeout decoding with background=%s', (background) => {
+  it.each([0.5, 1.5, 600.5])('refuses fractional timeout %s before serialization', (timeoutS) => {
+    expect(() => P.execBody({ command: 'true', background, timeoutS })).toThrow(ValidationError);
+  });
+
+  it.each([1, 300, 600])('preserves whole timeout %s', (timeoutS) => {
+    expect(P.execBody({ command: 'true', background, timeoutS }).timeout_s).toBe(timeoutS);
+  });
+
+  it.each([true, false, null, '1', Number.NaN, Infinity, -Infinity, 0, -1])(
+    'refuses malformed or nonpositive timeout %s',
+    (timeoutS) => {
+      expect(() =>
+        P.execBody({ command: 'true', background, timeoutS: timeoutS as number }),
+      ).toThrow(/timeoutS/);
+    },
+  );
+
+  it('applies the server ceiling only to foreground commands', () => {
+    const args = { command: 'true', background, timeoutS: 601 };
+    if (background) expect(P.execBody(args).timeout_s).toBe(601);
+    else expect(() => P.execBody(args)).toThrow(/no greater than 600/);
+  });
+});

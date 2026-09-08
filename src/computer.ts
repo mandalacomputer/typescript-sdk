@@ -71,28 +71,19 @@ import {
   toWindowResult,
   unmatchableRows,
   vncEventsUrl,
+  WIRE,
   windowContradiction,
+  wire,
 } from './models.js';
 import * as P from './paths.js';
 import type { CallOptions } from './resources.js';
 import {
   type Bytes,
   bodyByteLength,
-  MAX_TIMER_MS,
   MODEL_KEY_HEADER,
   type Query,
   type Transport,
 } from './transport.js';
-
-/**
- * The largest `timeoutS` {@link Computer.exec} can honour.
- *
- * Derived rather than chosen: the request deadline is the command's own budget
- * plus 30 seconds, and Node cannot represent a longer one. Far past anything
- * useful — a reverse proxy answers 524 long before two minutes — so this
- * refuses an absurd argument by name rather than capping a plausible one.
- */
-const MAX_EXEC_TIMEOUT_S = Math.floor(MAX_TIMER_MS / 1_000) - 30;
 
 import {
   checkWait,
@@ -833,10 +824,12 @@ export class Computer {
    * This is the coordinate space every pointer method and every screenshot is
    * in. Read it rather than assuming 1280x800: since resolution became a
    * create-time choice, assuming makes every click land proportionally short on
-   * any computer that asked for something else.
+   * any computer that asked for something else. A control-plane row with no
+   * host status or reported geometry returns `''`; only legacy host responses
+   * fall back to the default.
    */
   get resolution(): string {
-    return str(this.#data.resolution) || DEFAULT_RESOLUTION;
+    return str(this.#data.resolution) || ('status' in this.#data ? DEFAULT_RESOLUTION : '');
   }
 
   /**
@@ -844,10 +837,18 @@ export class Computer {
    *
    * What the computer-use tool definition wants — `display_width_px` and
    * `display_height_px` have to equal what screenshots actually are, or the
-   * model's coordinates are wrong.
+   * model's coordinates are wrong. Unreachable, deleted and lost control-plane
+   * records can report no geometry. Guard with `if (c.resolution)` before
+   * reading `c.screen`; an empty resolution throws {@link ValidationError}.
    */
   get screen(): { width: number; height: number } {
-    const [w, h] = this.resolution.split('x').map(Number);
+    const resolution = this.resolution;
+    if (!resolution) {
+      throw new ValidationError(
+        `${this.id} reports no resolution: check unreachable/state before reading its screen`,
+      );
+    }
+    const [w, h] = resolution.split('x').map(Number);
     // `> 0` rather than truthiness: `!(-100)` is false, so a resolution of
     // `-100x-100` walked past a guard whose whole job is to hand back something
     // a screenshot could actually be. These two numbers become
@@ -880,6 +881,29 @@ export class Computer {
     // honestly say. Number() would answer NaN, which is a minute count that
     // silently fails every comparison rather than an absence a caller can see.
     return count(this.#data.idle_suspend_min);
+  }
+
+  /** The workspace containing this computer, or `''` when none was reported. */
+  get workspaceId(): string {
+    return str(this.#data.workspace_id);
+  }
+
+  /** A deep copy of the reported snapshot schedule, or `undefined` when absent or empty. */
+  get snapshotSchedule(): Record<string, unknown> | undefined {
+    const schedule = this.#data.snapshot_schedule;
+    return P.isRecord(schedule) && Object.keys(schedule).length > 0
+      ? structuredClone(schedule)
+      : undefined;
+  }
+
+  /** Whether this request missed the host's answer; not a claim about the machine's health. */
+  get unreachable(): boolean {
+    const flag = wire(this.#data.unreachable);
+    if (flag === WIRE.TRUE || flag === WIRE.FALSE) return flag === WIRE.TRUE;
+    // Terminal control-plane rows also lack status, but their host is no longer
+    // expected to answer. Only older responses need the status-presence fallback.
+    if (this.state) return this.state === 'unreachable';
+    return !('status' in this.#data);
   }
 
   get createdAt(): string {
@@ -2790,8 +2814,9 @@ export class Computer {
    * abandons a request that has produced no response for roughly that long and
    * answers 524 — arriving as {@link GatewayTimeoutError}. Measured against
    * `app.mandala.computer`, `sleep 130` failed at 125.2s with `timeoutS: 300`
-   * and at 125.3s with `timeoutS: 3600`: the ceiling belongs to a hop that never
-   * saw the argument, so raising it buys nothing. The command survives the
+   * despite the larger guest budget. Foreground `timeoutS` must be an integer
+   * from 1 through 600; the server limit does not extend the hosted proxy's
+   * roughly 120-second ceiling. The command survives the
    * request that abandoned it, so the next call on this computer may report the
    * guest agent as busy with it.
    *
@@ -2820,33 +2845,11 @@ export class Computer {
     // was guaranteed to be aborted client-side while the command ran on in the
     // guest with its output unreachable.
     //
-    // Checked against the timer ceiling HERE, where the deadline is derived,
-    // rather than left to the transport: `execBody` asks only that timeoutS be
-    // positive and finite, so a large one arrived at the transport as a
-    // request timeout past MAX_TIMER_MS and came back named as the deadline
-    // rather than as the argument that set it. `holdKeyBody` caps its own
-    // duration for the same reason (OPL-4215).
+    // Validate the server's foreground limit before deriving the HTTP deadline.
+    const body = P.execBody({ command, timeoutS, desktop, cwd, env });
     const minTimeoutMs = (timeoutS + 30) * 1_000;
-    // Tested on `timeoutS` itself rather than on the deadline derived from it,
-    // because the derivation is where the evidence is lost: `(1e308 + 30) *
-    // 1000` overflows to Infinity, which is not greater than MAX_TIMER_MS, so a
-    // ceiling checked on the product let the largest arguments through to the
-    // very error this refusal exists to replace.
-    //
-    // Finite AND too large. A NaN or an Infinity is a different mistake with a
-    // better answer already written for it — `execBody` names the argument and
-    // says it must be finite — and testing the ceiling first would have taken
-    // that sentence away from every caller who reached here with
-    // `timeoutS: Number(unsetEnvVar)`.
-    if (Number.isFinite(timeoutS) && timeoutS > MAX_EXEC_TIMEOUT_S) {
-      throw new ValidationError(
-        `timeoutS must be no greater than ${MAX_EXEC_TIMEOUT_S} (got ${timeoutS}): the request ` +
-          "has to outlive the command by 30s, and a longer deadline than that overflows Node's " +
-          'timer maximum',
-      );
-    }
     const data = await this.#t.json<Record<string, unknown>>('POST', path, {
-      body: P.execBody({ command, timeoutS, desktop, cwd, env }),
+      body,
       minTimeoutMs,
       signal: opts.signal,
     });

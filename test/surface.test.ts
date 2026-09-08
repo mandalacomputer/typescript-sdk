@@ -51,6 +51,7 @@ const SURFACE = inventory();
  */
 async function exerciseEverything(client: Client): Promise<void> {
   await client.templates.list();
+  await client.templates.listWithStatus();
   // The document format, and the store on top of it (platform OPL-3568,
   // OPL-3789, OPL-3830). Both spellings of the ref routes, because `version` is
   // a parameter like any other and a call that never sends one is the gap the
