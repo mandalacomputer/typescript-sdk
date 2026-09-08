@@ -11,11 +11,17 @@
  * on this feature (OPL-3785, review 16).
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 // Not on the package's export list, which is a gap of its own — every local
 // refusal in this SDK is one of these and a caller cannot name the class.
 import { ValidationError } from '../src/errors.js';
-import { toComputerEvent, toHello, withCursor, withWatches } from '../src/events.js';
+import {
+  ComputerEvents,
+  toComputerEvent,
+  toHello,
+  withCursor,
+  withWatches,
+} from '../src/events.js';
 import {
   Client,
   type ComputerEvent,
@@ -1280,6 +1286,189 @@ describe('reconnecting', () => {
     }
     expect(got.map((e) => e.type)).toEqual(['computer.idle']);
   });
+});
+
+describe('explicit event stream cancellation', () => {
+  const promptly = async <T>(promise: Promise<T>): Promise<T | 'still pending'> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        promise,
+        new Promise<'still pending'>((resolve) => {
+          timer = setTimeout(() => resolve('still pending'), 200);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+
+  const deferred = <T>() => {
+    let resolve!: (value: T) => void;
+    let reject!: (reason: unknown) => void;
+    const promise = new Promise<T>((yes, no) => {
+      resolve = yes;
+      reject = no;
+    });
+    return { promise, resolve, reject };
+  };
+
+  it.each(['close', 'abort'] as const)(
+    'ends ignored URL discovery on %s, ignoring late results',
+    async (stop) => {
+      const url = deferred<string>();
+      const requested = deferred<void>();
+      const controller = new AbortController();
+      const sockets = vi.fn(socketFactory(() => {}));
+      let signal: AbortSignal | undefined;
+      const stream = new ComputerEvents(
+        (given) => {
+          signal = given;
+          requested.resolve();
+          return url.promise;
+        },
+        async () => new Error('refused'),
+        { signal: controller.signal, webSocket: sockets },
+      );
+      const next = stream[Symbol.asyncIterator]().next();
+      await requested.promise;
+      if (stop === 'close') stream.close();
+      else controller.abort(new Error('caller stopped'));
+      try {
+        await expect(promptly(next)).resolves.toMatchObject({ done: true });
+        expect(signal?.aborted).toBe(true);
+      } finally {
+        url.resolve('wss://example.test/events');
+        stream.close();
+        await next;
+      }
+      await Promise.resolve();
+      expect(sockets).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['close', 'abort'] as const)(
+    'ends ignored refusal discovery on %s, handling late rejection',
+    async (stop) => {
+      const refusal = deferred<Error>();
+      const requested = deferred<void>();
+      const controller = new AbortController();
+      const connected = vi.fn();
+      let socket: FakeSocket | undefined;
+      let signal: AbortSignal | undefined;
+      const stream = new ComputerEvents(
+        async () => 'wss://example.test/events',
+        (given) => {
+          signal = given;
+          requested.resolve();
+          return refusal.promise;
+        },
+        {
+          signal: controller.signal,
+          onConnect: connected,
+          webSocket: socketFactory((s) => {
+            socket = s;
+            s.linger = true;
+            s.emitError();
+          }),
+        },
+      );
+      const next = stream[Symbol.asyncIterator]().next();
+      await requested.promise;
+      if (stop === 'close') stream.close();
+      else controller.abort();
+      try {
+        await expect(promptly(next)).resolves.toMatchObject({ done: true });
+        expect(signal?.aborted).toBe(true);
+        socket?.emitOpen();
+        socket?.send(hello());
+        expect(connected).not.toHaveBeenCalled();
+        expect(stream.hello).toBeUndefined();
+      } finally {
+        refusal.reject(new Error('late refusal failure'));
+        socket?.emitClose();
+        stream.close();
+        await next;
+      }
+    },
+  );
+
+  it.each(
+    ['handshake', 'hello', 'failed backoff', 'closed backoff'].flatMap((phase) =>
+      ['close', 'abort'].map((stop) => ({ phase, stop })),
+    ),
+  )(
+    'ends a pending $phase on $stop without waiting for its timer or socket close',
+    async ({ phase, stop }) => {
+      vi.useFakeTimers();
+      const controller = new AbortController();
+      let socket: FakeSocket | undefined;
+      const connected = vi.fn();
+      const sockets = vi.fn(
+        socketFactory((s) => {
+          socket = s;
+          s.linger = true;
+          if (phase === 'failed backoff') s.emitError();
+          else if (phase !== 'handshake') s.emitOpen();
+          if (phase === 'closed backoff') {
+            s.send(hello({ ready: false }));
+            s.emitClose();
+          }
+        }),
+      );
+      const stream = new ComputerEvents(
+        async () => 'wss://example.test/events',
+        async () => new ConnectionError('refused'),
+        {
+          signal: controller.signal,
+          webSocket: sockets,
+          onConnect: connected,
+          backoffMs: 10_000,
+          connectTimeoutMs: 10_000,
+        },
+      );
+      const result = vi.fn();
+      const next = stream[Symbol.asyncIterator]().next().then(result);
+      try {
+        await vi.advanceTimersByTimeAsync(0);
+        expect(sockets).toHaveBeenCalledTimes(1);
+        if (stop === 'close') stream.close();
+        else controller.abort();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(result).toHaveBeenCalledWith({ value: undefined, done: true });
+        expect(vi.getTimerCount()).toBe(0);
+        socket?.emitOpen();
+        socket?.send(hello());
+        expect(connected).toHaveBeenCalledTimes(phase === 'closed backoff' ? 1 : 0);
+        expect(sockets).toHaveBeenCalledTimes(1);
+      } finally {
+        stream.close();
+        socket?.emitClose();
+        await vi.runAllTimersAsync();
+        await next;
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each(['close', 'abort'])(
+    'does not deliver queued readiness or events after onConnect triggers %s',
+    async (stop) => {
+      const { computer: c } = await computer();
+      const controller = new AbortController();
+      const stream = c.events({
+        signal: controller.signal,
+        onConnect: () => (stop === 'close' ? stream.close() : controller.abort()),
+        webSocket: socketFactory((s) => {
+          s.emitOpen();
+          s.send(hello({ ready: true }));
+          s.send(event());
+        }),
+      });
+      expect(await collect(stream)).toEqual([]);
+      expect(stream.cursor).toBe('ep-1:0');
+    },
+  );
 });
 
 describe('a connection that fails after it was told hello', () => {

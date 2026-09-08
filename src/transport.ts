@@ -971,7 +971,10 @@ export class Transport {
       const tail = parseEvent(buffer);
       if (tail) yield tail;
     } finally {
-      await reader.cancel().catch(() => {});
+      // A cloned response tees its body. Cancellation starts immediately, but
+      // its promise can wait for the other branch indefinitely; finishing this
+      // iterator must not depend on a peer reader finishing too.
+      void reader.cancel().catch(() => {});
     }
   }
 }
