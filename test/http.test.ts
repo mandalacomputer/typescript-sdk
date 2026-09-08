@@ -944,6 +944,81 @@ describe('the parameters a drive loop needs', () => {
 });
 
 describe('server-sent events', () => {
+  it('starts reader cancellation and handles its rejection on early return', async () => {
+    const cancel = vi.fn(async () => {
+      throw new Error('source cancellation failed');
+    });
+    const response = new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(
+            new TextEncoder().encode('event: step\ndata: {"n":1,"tool":"computer"}\n\n'),
+          );
+        },
+        cancel,
+      }),
+      { headers: { 'content-type': 'text/event-stream' } },
+    );
+    const rec = recorder((call) => (call.path.endsWith('/agent') ? response : anyRoute(call)));
+    const c = await client(rec).computers.get('vm-1');
+    const iterator = c.agentStream({ prompt: 'go', modelKey: 'sk' });
+    try {
+      expect((await iterator.next()).value?.type).toBe('step');
+      await expect(iterator.return(undefined)).resolves.toMatchObject({ done: true });
+      expect(cancel).toHaveBeenCalledTimes(1);
+    } finally {
+      await iterator.return(undefined);
+    }
+  });
+
+  it.each(['done', 'error', 'return'] as const)(
+    'settles %s while a cloned live response remains open',
+    async (ending) => {
+      let source!: ReadableStreamDefaultController<Uint8Array>;
+      const response = new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            source = controller;
+          },
+        }),
+        { headers: { 'content-type': 'text/event-stream' } },
+      );
+      const peer = response.clone();
+      const rec = recorder((call) => (call.path.endsWith('/agent') ? response : anyRoute(call)));
+      const c = await client(rec).computers.get('vm-1');
+      const frame =
+        ending === 'return'
+          ? 'event: step\ndata: {"n":1,"tool":"computer","action":"left_click"}\n\n'
+          : ending === 'error'
+            ? 'event: error\ndata: {"error":"revoked","status":401}\n\n'
+            : 'event: done\ndata: {"stop":"end_turn"}\n\n';
+      source.enqueue(new TextEncoder().encode(frame));
+      const iterator = c.agentStream({ prompt: 'go', modelKey: 'sk' });
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      try {
+        if (ending === 'return') expect((await iterator.next()).value?.type).toBe('step');
+        const result = await Promise.race([
+          (ending === 'return'
+            ? iterator.return(undefined)
+            : c.agent({ prompt: 'go', modelKey: 'sk' })
+          ).catch((err: unknown) => err),
+          new Promise((resolve) => {
+            timeout = setTimeout(() => resolve('still pending'), 200);
+          }),
+        ]);
+        if (ending === 'error') expect(result).toBeInstanceOf(AuthenticationError);
+        else
+          expect(result).toMatchObject(ending === 'return' ? { done: true } : { finished: true });
+      } finally {
+        clearTimeout(timeout);
+        // Release both tee branches even when the regression fails.
+        source.close();
+        await peer.body?.cancel();
+        await iterator.return(undefined);
+      }
+    },
+  );
+
   /** The stream for the agent route, and ordinary answers for everything else. */
   const streaming = (text: string) => (call: Parameters<typeof anyRoute>[0]) =>
     call.path.endsWith('/agent') ? stream(text) : anyRoute(call);
