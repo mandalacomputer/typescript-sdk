@@ -1788,7 +1788,8 @@ npx --package=mandala-computer mandala scp my-computer:/var/log/app.log ./app.lo
 Disconnecting **detaches** rather than ending it; running the same command
 reattaches and replays recent output.
 
-Output waiting for stdout is limited to 16 MiB, including a blocked write. If a
+Output waiting for stdout is limited to 16 MiB, including writes stdout has
+accepted but has not yet finished. If a
 slow consumer exceeds that limit, the CLI detaches and reports a nonzero exit
 code. Output that cannot drain during shutdown also reports a nonzero exit code;
 pending output is discarded when the terminal is restored.
