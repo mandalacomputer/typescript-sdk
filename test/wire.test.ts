@@ -1477,3 +1477,22 @@ describe('command output is bytes', () => {
     expect([res.stdout.length, res.stdoutText, res.ok]).toEqual([0, '', true]);
   });
 });
+
+describe('computer reachability metadata', () => {
+  it.each([
+    [{ id: 'vm-1' }, true],
+    [{ id: 'vm-1', status: null }, false],
+    [{ id: 'vm-1', status: 'running', unreachable: 'maybe' }, false],
+    [{ id: 'vm-1', unreachable: 'maybe' }, true],
+    [{ id: 'vm-1', state: 'deleted' }, false],
+    [{ id: 'vm-1', state: 'lost', unreachable: 'maybe' }, false],
+    [{ id: 'vm-1', state: 'unreachable', unreachable: null }, true],
+    [{ id: 'vm-1', state: 'live' }, false],
+    [{ id: 'vm-1', state: 'future-state' }, false],
+    [{ id: 'vm-1', state: 'unreachable', unreachable: 'false' }, false],
+    [{ id: 'vm-1', status: 'running', unreachable: 'true' }, true],
+  ])('reads %j as unreachable=%s', async (row, expected) => {
+    const { client: c } = client(() => json(row));
+    expect((await c.computers.get('vm-1')).unreachable).toBe(expected);
+  });
+});

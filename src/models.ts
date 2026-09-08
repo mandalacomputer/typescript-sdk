@@ -626,6 +626,8 @@ export type Template = {
    * that reason.
    */
   desktop?: string;
+  /** The template's icon, absent when the platform did not supply one. */
+  icon?: string;
   cpu: number;
   ramMb: number;
   diskGb: number;
@@ -643,6 +645,7 @@ export function toTemplate(d: Record<string, unknown>): Template {
     // fallback of 'x11' would be this client claiming something the platform
     // deliberately declines to claim.
     ...(d.desktop == null ? {} : { desktop: str(d.desktop) }),
+    ...(d.icon == null ? {} : { icon: str(d.icon) }),
     cpu: num(d.cpu),
     ramMb: num(d.ram_mb),
     diskGb: num(d.disk_gb),
@@ -2056,14 +2059,14 @@ export type BackgroundExec = {
  * Whether a background command is still going.
  *
  * AFFIRMATIVE EVIDENCE TO STOP. `false` here is the claim that the command has
- * exited, and the README's loop breaks on it — so an absent, null or unreadable
- * flag must not make that claim on the platform's behalf.
+ * exited. The README's loop also checks that no output remains before stopping,
+ * so an absent, null or unreadable flag must not claim an exit on the platform's behalf.
  *
  * All three fall back to the EXIT CODE instead, which is what "running" means in
  * the first place. An unreadable flag was read as running outright at first, and
  * that is the one reading that can never end: `{running: "maybe", exit_code: 0}`
  * is a command that has plainly exited, reported as running forever, and the
- * loop in this package's README breaks on `running` and so never breaks (Codex
+ * loop in this package's README requires `!running` and so never breaks (Codex
  * adversarial review, OPL-3850). With no exit code the fallback still answers
  * running, which is the property the first reading was reaching for — a poll is
  * not ended on a field nobody could read, abandoning a command with its output
@@ -2133,8 +2136,8 @@ export function toBackgroundExec(d: Record<string, unknown>): BackgroundExec {
     // this package's README polls again with no sleep while it is set, so the
     // caveat reading — true when in doubt — turns a poll every second into a
     // poll as fast as the network allows, against a metered endpoint (OPL-3850).
-    // Sleeping a second longer than necessary costs a caller nothing: `running`
-    // ends that loop, not this, so no output is dropped by waiting.
+    // A stopped command can still have unread output: drain while `more` is
+    // true, and stop only when `running` and `more` are both false.
     more: said(d.more),
     // A claim that something killed the command. Nobody said it.
     killed: said(d.killed),

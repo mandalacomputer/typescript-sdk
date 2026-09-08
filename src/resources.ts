@@ -944,8 +944,16 @@ export class Templates {
 
   /** The base images a computer can be created from. */
   async list(opts: CallOptions = {}): Promise<Template[]> {
-    const data = await this.#t.jsonArray('GET', P.TEMPLATES, { signal: opts.signal });
-    return data.filter(P.isRecord).map(toTemplate);
+    return (await this.listWithStatus(opts)).items;
+  }
+
+  /**
+   * {@link list}, plus whether the catalogue is incomplete. A present header
+   * with a count of `0` still means degraded; only `null` means complete.
+   */
+  async listWithStatus(opts: CallOptions = {}): Promise<Listing<Template>> {
+    const { items, incomplete } = await this.#t.listing(P.TEMPLATES, { signal: opts.signal });
+    return { items: items.map(toTemplate), incomplete };
   }
 
   /**

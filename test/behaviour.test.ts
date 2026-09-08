@@ -1,5 +1,7 @@
 /** What the handles do, as distinct from where they send it. */
 
+import { readFileSync } from 'node:fs';
+import { runInNewContext } from 'node:vm';
 import { describe, expect, it, vi } from 'vitest';
 import {
   APIError,
@@ -19,6 +21,7 @@ import {
   TooLargeError,
   ValidationError,
 } from '../src/index.js';
+import * as P from '../src/paths.js';
 import {
   anyRoute,
   BASE,
@@ -3707,5 +3710,149 @@ describe('an exec deadline that cannot be represented', () => {
     const { client: c } = client(anyRoute);
     const computer = await c.computers.get('vm-1');
     expect((await computer.exec('true', { timeoutS: 60 })).ok).toBe(true);
+  });
+});
+
+describe('control-plane computer metadata', () => {
+  it.each(['unreachable', 'deleted', 'lost'])('does not invent geometry for %s', async (state) => {
+    const { client: c } = client(() =>
+      json([{ id: 'vm-1', state, ...(state === 'unreachable' ? { unreachable: true } : {}) }]),
+    );
+    const [computer] = await c.computers.list();
+    expect(computer!.resolution).toBe('');
+    expect(() => computer!.screen).toThrow(/no resolution.*unreachable.*state/);
+    expect(computer!.unreachable).toBe(state === 'unreachable');
+  });
+
+  it('retains the host default even when a live lifecycle state is present', async () => {
+    const { client: c } = client(() => json({ ...COMPUTER, state: 'live', resolution: undefined }));
+    const computer = await c.computers.get('vm-1');
+    expect(computer.resolution).toBe('1280x800x24');
+    expect(computer.screen).toEqual({ width: 1280, height: 800 });
+  });
+
+  it('preserves reported geometry even without host status', async () => {
+    const { client: c } = client(() => json({ id: 'vm-1', resolution: '1920x1080x24' }));
+    expect((await c.computers.get('vm-1')).screen).toEqual({ width: 1920, height: 1080 });
+  });
+
+  it.each([undefined, null, {}, [], 'unknown'])(
+    'leaves missing or non-object schedules unknown: %j',
+    async (schedule) => {
+      const { client: c } = client(() => json({ ...COMPUTER, snapshot_schedule: schedule }));
+      const computer = await c.computers.get('vm-1');
+      expect(computer.workspaceId).toBe('');
+      expect(computer.snapshotSchedule).toBeUndefined();
+      expect(computer.unreachable).toBe(false);
+    },
+  );
+
+  it('copies schedule metadata deeply and preserves unknown fields without defaults', async () => {
+    const schedule = { future: { values: [1, 2] } };
+    const { client: c } = client(() =>
+      json({ ...COMPUTER, workspace_id: 'ws-1', snapshot_schedule: schedule }),
+    );
+    const computer = await c.computers.get('vm-1');
+    expect(computer.workspaceId).toBe('ws-1');
+    expect(computer.snapshotSchedule).toEqual(schedule);
+    (computer.snapshotSchedule!.future as { values: number[] }).values.push(3);
+    (computer.raw.snapshot_schedule as typeof schedule).future.values.push(4);
+    expect(computer.snapshotSchedule).toEqual(schedule);
+    expect(computer.raw.snapshot_schedule).toEqual(schedule);
+  });
+});
+
+describe('foreground exec server timeout contract', () => {
+  it.each([1, 300, 301, 600])(
+    'sends the allowed timeout %s and derives its request deadline',
+    async (timeoutS) => {
+      const { client: c, rec } = client(anyRoute);
+      const computer = await c.computers.get('vm-1');
+      const timer = vi.spyOn(AbortSignal, 'timeout');
+      try {
+        expect((await computer.exec('true', { timeoutS })).ok).toBe(true);
+        expect(rec.last().body).toMatchObject({ timeout_s: timeoutS });
+        expect(
+          timer.mock.calls.some(([delay]) => delay === Math.max(60_000, (timeoutS + 30) * 1000)),
+        ).toBe(true);
+      } finally {
+        timer.mockRestore();
+      }
+    },
+  );
+
+  it.each([601, 1.5, 0, -1, Number.NaN, Infinity, -Infinity, true, false])(
+    'refuses %s before dispatch',
+    async (value) => {
+      const timeoutS = value as number;
+      const { client: c, rec } = client(anyRoute);
+      const computer = await c.computers.get('vm-1');
+      const before = rec.calls.length;
+      await expect(computer.exec('true', { timeoutS })).rejects.toThrow(/timeoutS/);
+      expect(rec.calls).toHaveLength(before);
+      expect(() => P.execBody({ command: 'true', timeoutS })).toThrow(/timeoutS/);
+    },
+  );
+
+  it('keeps background whole timeouts, public timeout omission and fractional waits', async () => {
+    expect(P.execBody({ command: 'true', background: true, timeoutS: 3600 })).toMatchObject({
+      timeout_s: 3600,
+      background: true,
+    });
+    expect(() => P.execBody({ command: 'true', background: true, timeoutS: 1.5 })).toThrow(
+      /timeoutS must be a positive integer/,
+    );
+    const { client: c, rec } = client(anyRoute);
+    const computer = await c.computers.get('vm-1');
+    await computer.execBackground('true');
+    expect(rec.last().body).toEqual({ command: 'true', background: true });
+    await expect(computer.waitUntilRunning({ timeoutMs: 0.5, pollMs: 0.25 })).resolves.toBe(
+      computer,
+    );
+  });
+});
+
+describe('the documented background polling loop', () => {
+  it('drains all stdout and stderr chunks after the command stops', async () => {
+    const chunks = [
+      { stdout: 'first', stderr: 'warning', more: true },
+      { stdout: 'second', stderr: 'detail', more: true },
+      { stdout: 'third', stderr: 'end', more: false },
+    ];
+    let polls = 0;
+    const { client: c } = client((call) => {
+      if (!/\/exec\/\d+$/.test(call.path)) return anyRoute(call);
+      const chunk = chunks[polls++];
+      if (!chunk) throw new Error('polled after draining');
+      return json({
+        pid: 4242,
+        running: false,
+        exit_code: 0,
+        more: chunk.more,
+        stdout_b64: Buffer.from(chunk.stdout).toString('base64'),
+        stderr_b64: Buffer.from(chunk.stderr).toString('base64'),
+      });
+    });
+    const computer = await c.computers.get('vm-1');
+    const readme = readFileSync(new URL('../README.md', import.meta.url), 'utf8');
+    const start = readme.indexOf(
+      "const job = await c.execBackground('apt-get install -y build-essential');",
+    );
+    const end = readme.indexOf('await c.execKill(job.pid);', start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const stdout: Uint8Array[] = [];
+    const stderr: Uint8Array[] = [];
+    await runInNewContext(`(async () => { ${readme.slice(start, end)} })()`, {
+      c: computer,
+      process: {
+        stdout: { write: (chunk: Uint8Array) => stdout.push(chunk) },
+        stderr: { write: (chunk: Uint8Array) => stderr.push(chunk) },
+      },
+      setTimeout: (callback: () => void) => callback(),
+    });
+    expect(polls).toBe(3);
+    expect(Buffer.concat(stdout).toString()).toBe('firstsecondthird');
+    expect(Buffer.concat(stderr).toString()).toBe('warningdetailend');
   });
 });
