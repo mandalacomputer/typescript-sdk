@@ -2606,13 +2606,15 @@ describe('snapshots', () => {
     // Dropping it stays right. Saying nothing about it does not: `incomplete`
     // read `null` over a list one row shorter than the estate, which is this
     // method claiming it answered in full.
-    const { client: c } = client(() =>
-      json([SNAPSHOT, { ...SNAPSHOT, id: 'snap-9', computer_id: ['vm-1'] }]),
-    );
-    const listed = await c.snapshots.listWithStatus({ computerId: 'vm-1' });
+    for (const computerId of ['', ['vm-1']]) {
+      const { client: c } = client(() =>
+        json([SNAPSHOT, { ...SNAPSHOT, id: 'snap-9', computer_id: computerId }]),
+      );
+      const listed = await c.snapshots.listWithStatus({ computerId: 'vm-1' });
 
-    expect(listed.items.map((s) => s.id)).toEqual(['snap-1']);
-    expect(listed.incomplete).toBe(1);
+      expect(listed.items.map((s) => s.id)).toEqual(['snap-1']);
+      expect(listed.incomplete).toBe(1);
+    }
   });
 
   it('adds a dropped row to a shortfall the platform already reported', async () => {

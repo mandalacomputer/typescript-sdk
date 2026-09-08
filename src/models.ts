@@ -1594,7 +1594,7 @@ export const belongsToComputer = (d: Record<string, unknown>, id: string): boole
   d.computer_id === id;
 
 /**
- * How many of these rows carry no string at `key`: the shortfall a MATCH cannot
+ * How many rows carry no nonempty string at `key`: the shortfall a MATCH cannot
  * see, and the one a listing's own shortfall count does not report.
  *
  * Every wait in this SDK that watches for a row reaches a verdict when the row
@@ -1612,7 +1612,8 @@ export const belongsToComputer = (d: Record<string, unknown>, id: string): boole
  * correctness is this: a row carrying `['snap-1']` is still a RECORD, so it is
  * kept and counted as readable, and it is also unmatchable — so the row is
  * missing from a listing every one of these waits believes it read in full, and
- * each reaches its verdict over it (OPL-4587).
+ * each reaches its verdict over it (OPL-4587). An empty string likewise names
+ * nothing, so it must count against the verdict too.
  *
  * A COUNT rather than a boolean, because the move wait says how short its
  * listing was in the sentence it ends with, and "some" is not something to put
@@ -1622,7 +1623,7 @@ export const belongsToComputer = (d: Record<string, unknown>, id: string): boole
  * matched by its own `id`, a move by the `computer_id` it is attributed to.
  */
 export const unmatchableRows = (rows: Record<string, unknown>[], key: string): number =>
-  rows.reduce((n, d) => (typeof d[key] === 'string' ? n : n + 1), 0);
+  rows.reduce((n, d) => (typeof d[key] === 'string' && d[key] !== '' ? n : n + 1), 0);
 
 /**
  * Whether a snapshot ROW stands in for one nobody could read.
