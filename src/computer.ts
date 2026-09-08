@@ -837,8 +837,9 @@ export class Computer {
    *
    * What the computer-use tool definition wants — `display_width_px` and
    * `display_height_px` have to equal what screenshots actually are, or the
-   * model's coordinates are wrong. Throws when a control-plane row reports no
-   * geometry; check {@link unreachable} and {@link state} before using it.
+   * model's coordinates are wrong. Unreachable, deleted and lost control-plane
+   * records can report no geometry. Guard with `if (c.resolution)` before
+   * reading `c.screen`; an empty resolution throws {@link ValidationError}.
    */
   get screen(): { width: number; height: number } {
     const resolution = this.resolution;

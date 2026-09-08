@@ -286,6 +286,17 @@ const c = await client.computers.create({ template: 'base', resolution: '1920x10
 const { width, height } = c.screen;           // what every coordinate is in
 ```
 
+Unreachable, deleted and lost records can have no screen to report. Check
+`c.resolution` directly before reading `c.screen`; when it is empty, `c.screen`
+throws `ValidationError`:
+
+```ts
+if (c.resolution) {
+  const { width, height } = c.screen;
+  console.log(width, height);
+}
+```
+
 Read `c.screen` rather than assuming 1280x800. Computer-use accuracy is
 resolution-sensitive, and a model told the wrong numbers clicks proportionally
 short of everything it aims at:

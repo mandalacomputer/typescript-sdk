@@ -3794,16 +3794,18 @@ describe('foreground exec server timeout contract', () => {
     },
   );
 
-  it('leaves background timeout and fractional polling durations unchanged', async () => {
+  it('keeps background whole timeouts, public timeout omission and fractional waits', async () => {
     expect(P.execBody({ command: 'true', background: true, timeoutS: 3600 })).toMatchObject({
       timeout_s: 3600,
       background: true,
     });
-    expect(P.execBody({ command: 'true', background: true, timeoutS: 1.5 })).toMatchObject({
-      timeout_s: 1.5,
-    });
-    const { client: c } = client(anyRoute);
+    expect(() => P.execBody({ command: 'true', background: true, timeoutS: 1.5 })).toThrow(
+      /timeoutS must be a positive integer/,
+    );
+    const { client: c, rec } = client(anyRoute);
     const computer = await c.computers.get('vm-1');
+    await computer.execBackground('true');
+    expect(rec.last().body).toEqual({ command: 'true', background: true });
     await expect(computer.waitUntilRunning({ timeoutMs: 0.5, pollMs: 0.25 })).resolves.toBe(
       computer,
     );

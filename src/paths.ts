@@ -644,7 +644,7 @@ export const nameBody = (name?: string): Json => {
 
 export type ExecArgs = {
   command: string;
-  /** Integer seconds from 1 through 600 for foreground execution. Ignored when `background` is set. */
+  /** Positive integer seconds; at most 600 in foreground, ignored after decoding in background. */
   timeoutS?: number;
   /** Run in the logged-in desktop session — with DISPLAY, HOME, XAUTHORITY. */
   desktop?: boolean;
@@ -813,14 +813,16 @@ export function execBody(args: ExecArgs): Json {
     if (finite(args.timeoutS, 'timeoutS') <= 0) {
       throw new ValidationError(`timeoutS must be positive (got ${args.timeoutS})`);
     }
+    // server/api.go decodes timeout_s into int before checking Background.
+    if (!Number.isInteger(args.timeoutS)) {
+      throw new ValidationError(`timeoutS must be a positive integer (got ${args.timeoutS})`);
+    }
+    // Mirrors server/api.go's execMaxTimeoutSec and its foreground-only refusal.
     if (!flag(args.background, 'background')) {
       if (args.timeoutS > 600) {
         throw new ValidationError(
           `timeoutS must be no greater than 600 (got ${args.timeoutS}); use execBackground for longer commands`,
         );
-      }
-      if (!Number.isInteger(args.timeoutS)) {
-        throw new ValidationError(`timeoutS must be a positive integer (got ${args.timeoutS})`);
       }
     }
     body.timeout_s = args.timeoutS;
