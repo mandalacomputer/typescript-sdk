@@ -1663,7 +1663,7 @@ import {
   RangeNotSatisfiableError,// 416 — that range names no byte the file has
   RateLimitError,      //     429 — retry after retryAfterMs when present
   UnavailableError,    //     503 — a listing would have been short
-  GatewayTimeoutError, //     504/524 — a proxy gave up; the work carries on
+  GatewayTimeoutError, //     504/524 — a proxy gave up; work may carry on
   OriginResponseError, //     520 — it answered, unreadably; work may have happened
   OriginUnreachableError,//   521-523 — a proxy could not reach it. NOT in
                        //     `isTransient`: the outcome is unknown, not "nothing happened"
@@ -1727,20 +1727,22 @@ means somewhere else in the region can run that size and `relocate()` takes the
 offer up, false means nowhere can and the size is the thing to change. See
 **Growing past the host**.
 
-`GatewayTimeoutError` is the one that does not clear and is not the platform's
-answer at all. The request reached it, and any work it had already started
-carries on; what ended was one hop's willingness to hold a connection open with
-nothing crossing it, which is why retrying unchanged reproduces it exactly.
+`GatewayTimeoutError` reports a proxy timeout, rather than the platform's own
+answer. The request may have reached it, and any work it had already
+started carries on; the status alone cannot establish the outcome. What ended
+was one hop's willingness to hold a connection open with nothing crossing it,
+which is why retrying unchanged can reproduce it.
 After one on an `exec()` the next call may report the guest agent busy; after
 one on a read there is nothing left behind. `err.message` carries the response's
 own message where it sent a structured one, and this SDK's explanation where the
 hop sent an empty or HTML body — which is the usual case, since a 524 is
 generated at the edge. See [Long-running commands](#long-running-commands).
 
-`OriginUnreachableError` is its opposite and is why the two are different types.
-A gateway timeout means the request arrived and its work carries on; these mean
-it never arrived, so nothing was started and there is nothing to account for.
-521-523 are usually the platform restarting and clear on their own. 525 and 526
+`OriginUnreachableError` covers 521-523, when a proxy could not reach the platform.
+The request usually never arrived, but that is not a guarantee: a 522 can happen
+after a connection was established, so work may already have started. Check
+whether the first attempt took effect before repeating anything that creates.
+These failures can clear on their own. 525 and 526
 are `OriginTLSError` instead — a handshake that will fail the same way on every
 retry, so it is a deployment to fix rather than an outage to wait out.
 
@@ -1757,31 +1759,39 @@ neighbouring number it means the platform **was** reached and its answer could
 not be read, so the work may have happened in full, in part, or not at all.
 Before retrying anything that creates something, check whether the first attempt
 took effect.
-Neither is in `isTransient`, and nor are 502, 504 or 521-523. That predicate is
-exported, so its caller may be wrapping a `create` — and every one of those
-statuses means the outcome is unknown, which is how one computer becomes two.
-What it names is the four classes that both clear on their own and are safe to
-replay blind: `ConflictError`, `RateLimitError`, `UnavailableError`,
-`ConnectionError`.
+These proxy failures are not in `isTransient`, including 502, 504 and 520-526.
+That predicate is exported, so its caller may be wrapping a `create`. Several
+of these statuses leave the outcome unknown, which is how one computer becomes
+two; TLS failures require a configuration fix before retrying.
+Its default retryable classes are `ConflictError`, `RateLimitError`,
+`UnavailableError` and `ConnectionError`. It excludes `MoveRequiredError` and
+`ConnectionInterruptedError` (including request timeouts), and honors recognized
+API error reasons that identify temporary or permanent failures.
 
 The wait helpers do not ask it. They replay idempotent reads under a deadline
-you set, so they ride out every status above — including the ones here — and
-give up only on a failure that describes the *request* rather than the moment.
-Two audiences, two predicates; the same three classes and the same four
-answer identically in the Python SDK and the MCP server.
+you set, so they can ride out 502, 504 and 520-523. They stop on 524 (a proxy
+timeout that retrying unchanged will not fix) and 525/526 (TLS failures), as well
+as permanent request failures. Two audiences, two predicates: the internal
+`isTransientForPoll` can retry an uncertain read that the public `isTransient`
+cannot safely recommend replaying for an arbitrary operation.
 
 ## The `mandala` CLI
 
 ```sh
-npx mandala ssh my-computer                 # an interactive shell in the guest
-npx mandala ssh my-computer -s build        # a second, named session
-npx mandala scp ./setup.sh my-computer:/tmp/setup.sh
-npx mandala scp my-computer:/var/log/app.log ./app.log
+npx --package=mandala-computer mandala ssh my-computer          # an interactive shell
+npx --package=mandala-computer mandala ssh my-computer -s build # a named session
+npx --package=mandala-computer mandala scp ./setup.sh my-computer:/tmp/setup.sh
+npx --package=mandala-computer mandala scp my-computer:/var/log/app.log ./app.log
 ```
 
 `ssh` rides the platform's terminal websocket — a PTY kept alive server-side.
 Disconnecting **detaches** rather than ending it; running the same command
 reattaches and replays recent output.
+
+Output waiting for stdout is limited to 16 MiB, including a blocked write. If a
+slow consumer exceeds that limit, the CLI detaches and reports a nonzero exit
+code. Output that cannot drain during shutdown also reports a nonzero exit code;
+pending output is discarded when the terminal is restored.
 
 The guest's PTY is sized from the first of stdin, stdout and stderr that is a
 terminal — stdin first, since that is the one raw mode is set from — and the

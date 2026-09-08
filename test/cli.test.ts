@@ -1,12 +1,10 @@
 /**
  * The `mandala` command.
  *
- * The pure parts are tested directly; the ssh loop is not, because it wants a
- * real PTY and a real websocket and a test that faked both would be testing the
- * fakes. What is here is where the mistakes actually live: which side of an scp
- * is the guest, and what the argument parser does with what it was handed.
+ * Pure helpers and the socket/stream boundaries of the interactive ssh loop.
  */
 
+import { EventEmitter } from 'node:events';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -17,10 +15,12 @@ import {
   flushOutput,
   guestBasename,
   guestDestination,
+  interact,
   queueTerminalWrite,
   remoteSide,
   STDIN_HIGH_WATER,
   stdinBackpressure,
+  TerminalOutputQueue,
   terminalFd,
   terminalFrameByteLength,
   terminalSessionUrl,
@@ -200,6 +200,207 @@ describe('terminal frames', () => {
     expect(terminalFrameByteLength('abc')).toBe(3);
     expect(terminalFrameByteLength('🚀')).toBe(4);
     expect(terminalFrameByteLength(new ArrayBuffer(7))).toBe(7);
+  });
+});
+
+describe('terminal receive/output pipeline', () => {
+  const session = async (
+    drive: (io: {
+      socket: FakeSocket;
+      stdout: EventEmitter & { write: ReturnType<typeof vi.fn> };
+      stdin: { setRawMode: ReturnType<typeof vi.fn>; pause: ReturnType<typeof vi.fn> };
+      diagnostic: string[];
+      result: Promise<number>;
+      removed: ReturnType<typeof vi.spyOn>;
+    }) => Promise<void>,
+  ) => {
+    const savedWS = globalThis.WebSocket;
+    let socket!: FakeSocket;
+    globalThis.WebSocket = class extends FakeSocket {
+      static OPEN = 1;
+      constructor(url: string) {
+        super(url);
+        socket = this;
+        this.linger = true;
+        queueMicrotask(() => this.emitOpen());
+      }
+    } as unknown as typeof WebSocket;
+    const stdin = Object.assign(new EventEmitter(), {
+      isTTY: true,
+      setRawMode: vi.fn(),
+      pause: vi.fn(),
+      resume: vi.fn(),
+    });
+    const stdout = Object.assign(new EventEmitter(), { write: vi.fn(() => false) });
+    const diagnostic: string[] = [];
+    const result = interact('ws://terminal', {
+      stdin: stdin as unknown as typeof process.stdin,
+      stdout: stdout as unknown as NodeJS.WritableStream,
+      stderr: {
+        write: (text: string) => diagnostic.push(text),
+      } as unknown as NodeJS.WritableStream,
+      maxQueuedBytes: 8,
+      drainTimeoutMs: 10,
+      measureTerminal: () => undefined,
+    });
+    const removed = vi.spyOn(socket, 'removeEventListener');
+    try {
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(stdin.setRawMode).toHaveBeenCalledWith(true);
+      await drive({ socket, stdout, stdin, diagnostic, result, removed });
+    } finally {
+      socket.emitClose();
+      stdout.emit('drain');
+      await result;
+      globalThis.WebSocket = savedWS;
+    }
+  };
+
+  const frame = (...bytes: number[]) => Uint8Array.from(bytes).buffer;
+
+  it('writes ordinary unblocked output in order without accumulating a backlog', async () => {
+    await session(async ({ socket, stdout, diagnostic, result }) => {
+      stdout.write.mockReturnValue(true);
+      for (let i = 0; i < 20; i += 1) socket.sendRaw(frame(i));
+      socket.send({ type: 'exit', code: 0 });
+      socket.emitClose();
+      expect(await result).toBe(0);
+      expect(stdout.write.mock.calls.map(([chunk]) => chunk[0])).toEqual(
+        Array.from({ length: 20 }, (_, i) => i),
+      );
+      expect(diagnostic).toEqual([]);
+    });
+  });
+
+  it('accepts the exact aggregate boundary and drains frames in order', async () => {
+    await session(async ({ socket, stdout, stdin, diagnostic, result }) => {
+      socket.sendRaw(frame(1, 2, 3, 4));
+      socket.sendRaw(frame(5, 6, 7, 8));
+      socket.send({ type: 'exit', code: 7 });
+      socket.emitClose();
+      expect(stdout.write).toHaveBeenCalledTimes(1);
+      expect(stdin.setRawMode).not.toHaveBeenCalledWith(false);
+      stdout.emit('drain');
+      expect(stdout.write).toHaveBeenCalledTimes(2);
+      expect(stdout.write.mock.calls.map(([chunk]) => [...chunk])).toEqual([
+        [1, 2, 3, 4],
+        [5, 6, 7, 8],
+      ]);
+      stdout.emit('drain');
+      expect(await result).toBe(7);
+      expect(diagnostic).toEqual([]);
+      expect(stdin.setRawMode).toHaveBeenLastCalledWith(false);
+      expect(stdin.pause).toHaveBeenCalled();
+      expect(stdout.listenerCount('drain')).toBe(0);
+      expect(stdout.listenerCount('error')).toBe(0);
+    });
+  });
+
+  it('detaches on overload without waiting for close or drain and ignores sustained late frames', async () => {
+    await session(async ({ socket, stdout, stdin, diagnostic, result, removed }) => {
+      socket.sendRaw(frame(1, 2, 3, 4));
+      socket.sendRaw(frame(5, 6, 7, 8));
+      socket.sendRaw(frame(9));
+      expect(socket.closing).toBe(true);
+      expect(removed.mock.calls.some(([type]) => type === 'message')).toBe(true);
+      for (let i = 0; i < 1_000; i += 1) socket.sendRaw(frame(10, 11, 12, 13));
+      socket.send({ type: 'exit', code: 0 });
+      expect(await result).toBe(1);
+      expect(diagnostic.join('')).toMatch(/exceeded 8 buffered bytes.*detached/);
+      expect(stdin.setRawMode).toHaveBeenLastCalledWith(false);
+      stdout.emit('drain');
+      expect(stdout.write).toHaveBeenCalledTimes(1);
+      expect(stdout.listenerCount('drain')).toBe(0);
+    });
+  });
+
+  it('lets output arriving during shutdown drain before restoring the terminal', async () => {
+    await session(async ({ socket, stdout, stdin, result }) => {
+      socket.sendRaw(frame(1));
+      socket.emitError();
+      await Promise.resolve();
+      socket.sendRaw(frame(2));
+      stdout.emit('drain');
+      expect(stdin.setRawMode).not.toHaveBeenCalledWith(false);
+      stdout.emit('drain');
+      expect(await result).toBe(0);
+      expect(stdout.write).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  it('keeps an overload during exit shutdown from becoming exit zero', async () => {
+    await session(async ({ socket, stdout, result }) => {
+      socket.send({ type: 'exit', code: 0 });
+      socket.sendRaw(frame(1, 2, 3, 4));
+      socket.sendRaw(frame(5, 6, 7, 8));
+      socket.sendRaw(frame(9));
+      expect(await result).toBe(1);
+      stdout.emit('drain');
+      expect(stdout.write).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  for (const failure of ['throw', 'error event']) {
+    it(`detaches and restores the terminal on a stdout ${failure}`, async () => {
+      await session(async ({ socket, stdout, stdin, diagnostic, result }) => {
+        if (failure === 'throw') {
+          stdout.write.mockImplementation(() => {
+            throw new Error('EPIPE');
+          });
+        }
+        socket.sendRaw(frame(1));
+        if (failure === 'error event') stdout.emit('error', new Error('EPIPE'));
+        expect(await result).toBe(1);
+        expect(socket.closing).toBe(true);
+        expect(diagnostic.join('')).toMatch(/EPIPE.*detached/);
+        expect(stdin.setRawMode).toHaveBeenLastCalledWith(false);
+        stdout.emit('drain');
+        expect(stdout.write).toHaveBeenCalledTimes(1);
+      });
+    });
+  }
+
+  it('bounds shutdown when stdout never drains and prevents late-drain writes', async () => {
+    vi.useFakeTimers();
+    try {
+      await session(async ({ socket, stdout, stdin, diagnostic, result }) => {
+        socket.sendRaw(frame(1));
+        socket.sendRaw(frame(2));
+        socket.send({ type: 'exit', code: 0 });
+        // Neither the close handshake nor stdout will finish by itself.
+        await vi.advanceTimersByTimeAsync(20);
+        expect(await result).toBe(1);
+        expect(diagnostic.join('')).toMatch(/timed out.*detached/);
+        expect(stdin.setRawMode).toHaveBeenLastCalledWith(false);
+        stdout.emit('drain');
+        socket.sendRaw(frame(3));
+        expect(stdout.write).toHaveBeenCalledTimes(1);
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('releases queued buffers on failure and makes a captured drain callback inert', async () => {
+    const stdout = Object.assign(new EventEmitter(), { write: vi.fn(() => false) });
+    const failed = vi.fn();
+    const output = new TerminalOutputQueue(stdout as unknown as NodeJS.WritableStream, failed, 8);
+    output.write(new Uint8Array(4));
+    const lateDrain = stdout.listeners('drain')[0]!;
+    for (let i = 0; i < 1_000; i += 1) output.write(new Uint8Array(0));
+    expect(output.pendingBytes).toBe(4);
+    output.write(new Uint8Array(4));
+    expect(output.pendingBytes).toBe(8);
+    output.write(new Uint8Array(1));
+    expect(output.pendingBytes).toBe(0);
+    expect(failed).toHaveBeenCalledTimes(1);
+    await output.drained;
+    lateDrain();
+    output.write(new Uint8Array(1));
+    expect(stdout.write).toHaveBeenCalledTimes(1);
+    expect(stdout.listenerCount('drain')).toBe(0);
+    expect(stdout.listenerCount('error')).toBe(0);
   });
 });
 

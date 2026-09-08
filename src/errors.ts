@@ -428,14 +428,11 @@ export class GatewayTimeoutError extends APIError {
  * culprit and no way out.
  *
  * A different event from a gateway timeout, which is why it is a different type
- * rather than more entries on that one. A 524 means the request arrived and is
- * still being worked on; these mean it almost certainly never arrived, so
- * nothing was started and there is no command outliving anything. Almost,
- * because a 522 can also be a connection that timed out after it was
- * established, and bytes already on the wire are not unsent because the answer
- * never came back — so a caller branching on the class to decide whether its
- * work survived gets opposite answers, and should still look before repeating
- * something that creates.
+ * rather than more entries on that one. These usually mean the request never
+ * arrived, but do not guarantee that nothing started: a 522 can also be a
+ * connection that timed out after it was established. Bytes already on the
+ * wire are not unsent because the answer never came back. Check whether the
+ * first attempt took effect before repeating anything that creates.
  *
  * mandala-computer-mcp reached this first and argued the divergence the other
  * way: that a developer-facing client did not need it, because its messages are
@@ -454,14 +451,13 @@ export class OriginUnreachableError extends APIError {
  * 520 — the platform answered a proxy with something it could not read.
  *
  * Sits between the other two and must not be filed with either, because the
- * question a caller is really asking is whether their work happened, and this is
- * the one status whose honest answer is "unknown".
+ * question a caller is really asking is whether their work happened. As with
+ * other proxy failures, the outcome is unknown.
  *
- * A 524 means the request arrived and is still being worked on. 521-523 mean it
- * never arrived, so nothing was started. A 520 means it **did** arrive — the
- * platform received it and then returned an empty, unknown or oversized
- * response, so it may have been carried out in full, in part, or not at all, and
- * the answer was lost rather than never produced.
+ * A 524 can leave work running after the proxy gives up. 521-523 usually mean
+ * the request never arrived, but cannot prove that nothing started. A 520 means
+ * the platform answered with an empty, unknown or oversized response, so the
+ * request may have been carried out in full, in part, or not at all.
  *
  * Which makes a blind retry the thing to be careful about. Re-sending a read
  * costs nothing; re-sending a create can leave two computers where one was
