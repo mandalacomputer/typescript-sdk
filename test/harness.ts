@@ -115,7 +115,7 @@ export const bytes = (data: string, contentType = 'image/png'): Response =>
  * responder that simply handed back slices would agree with a paging loop that
  * had all four of those wrong.
  *
- * Mirrors `resolve` and `openGuestRead` in the platform's `server/guestfile.go`.
+ * Mirrors how the platform resolves a guest path and opens it for reading.
  */
 export function guestFile(
   contents: Uint8Array,
@@ -229,7 +229,7 @@ export const cloudflareJson = (status: number): Response =>
  *
  * In full, and `visible` is the daemon's own name for the property as well as
  * the one it sends. There is no `minimized` on this wire and there never was
- * (server/windows.go, OPL-3583), so a fixture carrying one would let a decoder
+ * (OPL-3583), so a fixture carrying one would let a decoder
  * that reads it pass.
  *
  * `pid` is here for the same reason it is on the wire: it is sent on real
@@ -643,11 +643,11 @@ export const RETIRED_TEMPLATES = {
  * A valid document, as the validator reports one.
  *
  * All six keys a valid answer carries, and the SDK read four of them until
- * OPL-4195. `template` and `canonical` are sent on every valid document
- * (`server/templateschema.go`), so a fixture that omitted them was the same
+ * OPL-4195. `template` and `canonical` are sent on every valid document, so a
+ * fixture that omitted them was the same
  * trap the window fixture was: it asserted the reading that produced the gap.
  *
- * `template` is `publicTemplate`'s output, the shape `GET /templates` lists and
+ * `template` is the public projection of the document, the shape `GET /templates` lists and
  * `GET /templates/{ns}/{name}` answers, since OPL-4190 gave this route the
  * projector it had been forwarded without. It carried `{namespace, name,
  * version, family}` here until OPL-4256, which no deployment has ever sent:

@@ -588,8 +588,8 @@ const captureTimeoutText = (w: {
  * the copying happens after the request and the number belongs on the loop that
  * watches it.
  *
- * 1800000 because that is what the PLATFORM allows a capture — its `snapCtx` is
- * a 30-minute context, so this is that number rather than an estimate of it —
+ * 1800000 because that is what the PLATFORM allows a capture — it works to a
+ * 30-minute budget, so this is that number rather than an estimate of it —
  * and because it is already {@link Builds.wait}'s default, this SDK's existing
  * figure for how long a platform-side image operation takes. The full half hour
  * is reachable now on every deployment, which it was not as a request budget: a
@@ -3171,10 +3171,9 @@ export class Computer {
     // the file's FIRST bytes returned as its last, and a 416 with a total of
     // zero ends the read as an empty file rather than as one truncated out from
     // under it. The platform can serve either — a guest file re-created between
-    // two requests is measurable for one and not the next (openGuestRead in
-    // server/guestfile.go ignores a Range on a file whose length the seek
-    // cannot give and answers 200) — so this is not a shape only a broken
-    // origin can produce.
+    // two requests is measurable for one and not the next, and a Range on a file
+    // whose length cannot be determined up front is ignored and answered 200 —
+    // so this is not a shape only a broken origin can produce.
     for (let first = total === undefined; ; first = false) {
       const length =
         remaining === undefined
@@ -3330,12 +3329,11 @@ export class Computer {
       // of 20 bytes and the request ends in a 408), while over-declaring is
       // refused locally as a bare `TypeError: fetch failed`. Neither reaches the
       // caller as the mistake they made. The under-declared half is the one
-      // that costs data rather than clarity: the control plane streams this
-      // route and forwards the declared length as `X-GC-Expect-Bytes`, so
-      // gorillad writes exactly that many bytes into the guest and answers 200
-      // with a matching count (writeGuestFile in server/guestfile.go checks the
-      // body against the declaration, and a body cut to the declaration
-      // agrees) — a truncated guest file reported as a complete write.
+      // that costs data rather than clarity: the platform streams this route
+      // and carries the declared length through to the guest write, so exactly
+      // that many bytes are written and answered 200 with a matching count —
+      // the declaration and the body agree, and a truncated guest file is
+      // reported as a complete write.
       //
       // A body whose size cannot be read off it is the only one the option is
       // for, and it is the only one that keeps the header unchecked. That set
@@ -3578,12 +3576,11 @@ export class Computer {
         }
         stillCapturing = false;
         // Absence is conclusive AT ONCE on a listing read in full, and the
-        // platform is what makes it so. `StartSnapshot` registers the capture
-        // and only then answers, `GET /v1/snapshots` merges the host's live
-        // in-flight captures with its stored rows, and `dropLanded` makes the
-        // pair appear exactly once — so a healthy capture is on every listing
-        // from before the 202 until the snapshot itself is, with no window
-        // between them. What is left is a row that has LEFT, which on this route
+        // platform is what makes it so. The capture is registered before the
+        // 202 is answered, and `GET /v1/snapshots` reports in-flight captures
+        // alongside stored rows, exactly once each — so a healthy capture is on
+        // every listing from before the 202 until the snapshot itself is, with
+        // no window between them. What is left is a row that has LEFT, which on this route
         // means one thing only: the capture failed and nothing was stored.
         // Spending the rest of a half-hour deadline to reach that same sentence
         // with less in it would be its own defect.
@@ -3592,7 +3589,7 @@ export class Computer {
         // fast off, and that is what the `incomplete` test below is for rather
         // than an argument against failing fast at all (/code-review, OPL-4568).
         // The captures live in one hypervisor's memory, so a host that did not
-        // answer would take this row with it — and `web/lib/surface` turns that
+        // answer would take this row with it — and the platform turns that
         // answer into a 503 for a caller who did not pass `allow_partial`, which
         // this poll deliberately does not. So a 200 with no shortfall is every
         // host having answered. The remaining shortfall is this client's own

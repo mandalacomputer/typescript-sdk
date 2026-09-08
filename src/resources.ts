@@ -346,25 +346,25 @@ export class Computers {
  * flattening, the index commit and the walk over the local files and the bucket
  * objects all happen after the request and the number belongs on the loop that
  * watches them. As a request budget it was this client's ordinary 60 seconds,
- * which a 2.43 GB snapshot on the dev fleet ran straight past — and widening it
+ * which a multi-gigabyte snapshot ran straight past in testing — and widening it
  * buys only until the proxy in front of `app.mandala.computer` gives up at about
  * two minutes, whatever the client says (OPL-4563). A wait made of many short
  * listings has nothing for a proxy to abandon.
  *
  * WHAT THE BUDGET HAS TO COVER IS THE CHAIN, not the size, and measurement is
- * what says so. A lone 2.43 GB snapshot with no dependents was deleted on the
- * deployed fleet in 3.2s at `durable` — bucket objects walked and all — and in
- * 436ms at `pending`, where it had never left its host. The same 2.43 GB is what
- * ran past 60 seconds in the report this ticket came from, so neither the size
- * nor the push to backup storage is what did that: what scales is flattening the
- * snapshots that read THROUGH the one being deleted, which a single capture has
- * none of. The budget is set for the chain that has them.
+ * what says so. A lone multi-gigabyte snapshot with no dependents was measured
+ * deleting in a few seconds at `durable` — backing store walked and all — and in
+ * well under one at `pending`, where it had never left its host. A snapshot of
+ * that same size is what ran past 60 seconds in the report this came from, so
+ * neither the size nor the push to backup storage is what did that: what scales
+ * is flattening the snapshots that read THROUGH the one being deleted, which a
+ * single capture has none of. The budget is set for the chain that has them.
  *
  * 1800000 for {@link Builds.wait}'s reason and {@link Computer.snapshot}'s: it
  * is this SDK's figure for how long a platform-side image operation takes, and
  * the work here is the same order — a deletion walks a chain the captures built.
- * It also spans the daemon's own fifteen-minute retry of a stalled deletion
- * twice over, so a wait that gives up has genuinely seen the platform decline to
+ * It also spans the platform's own periodic retry of a stalled deletion twice
+ * over, so a wait that gives up has genuinely seen the platform decline to
  * finish rather than merely arrived before its first retry.
  *
  * Five seconds between polls, again as the capture wait: the answer is a listing
@@ -373,7 +373,7 @@ export class Computers {
  * this SDK, and the measurements above are the reason. A capture is minutes, so
  * five seconds is a few percent of it; a deletion is usually seconds, so a flat
  * five-second interval makes the ordinary `delete()` — a lone snapshot, no
- * dependents, gone in 436ms — take five seconds where the synchronous call took
+ * dependents, gone in well under a second — take five seconds where the synchronous call took
  * under one, and calls that a wait. A tenfold regression on the common path is
  * not a fair price for the chain case, which the deadline is what covers.
  *
@@ -402,12 +402,10 @@ const SNAP_DELETE_FIRST_POLL_MS = 250;
  * one rather than refused.
  *
  * A ROW THAT STAYS IN ITS ORDINARY STATE is the third sentence, and it is not
- * the same news. Only a row that reached `deleting` is picked up by the
- * platform's fifteen-minute sweep — the intent is committed after the dependents
- * are flattened, deliberately, because the sweep destroys what it finds in that
- * state WITHOUT flattening. So a deletion that stopped at the flatten leaves the
- * row exactly as it was, having destroyed nothing, and what finishes it is
- * another delete rather than waiting.
+ * the same news. Only a row that reached `deleting` is picked up by that retry.
+ * A deletion that stopped before it got there leaves the row exactly as it was,
+ * having destroyed nothing, and what finishes it is another delete rather than
+ * waiting.
  *
  * `lastState` is `unknown` and is encoded ONCE, here. Held as a string and
  * encoded again at the point of use, it was encoded twice: a numeric `42` read
@@ -644,13 +642,13 @@ export class Snapshots {
    * dependent, committing the index and then walking both the local files and
    * the bucket objects scales with the chain and with what is stored, which is
    * longer than an HTTP request survives — the same reason a capture could not
-   * be delivered inside its own request. Deleting a 2.43 GB snapshot on the dev
-   * fleet ran past this client's 60-second budget and surfaced as a
+   * be delivered inside its own request. Deleting a multi-gigabyte snapshot ran
+   * past this client's 60-second budget and surfaced as a
    * {@link ConnectionInterruptedError} while the deletion went on and finished,
    * so the caller was told nothing about what had happened and the next
    * `DELETE` on that id answered `this snapshot is already being deleted`
-   * (OPL-4575). The size is not what did that — a lone snapshot of the same
-   * 2.43 GB deletes in seconds on the deployed fleet — it is the chain. See
+   * (OPL-4575). The size is not what did that — a lone snapshot of that same
+   * size deletes in seconds — it is the chain. See
    * {@link SNAP_DELETE_WAIT_MS}.
    *
    * WHAT IS POLLED IS THE ROW'S ABSENCE. There is no state that means deleted —
