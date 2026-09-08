@@ -813,11 +813,14 @@ export function execBody(args: ExecArgs): Json {
     if (finite(args.timeoutS, 'timeoutS') <= 0) {
       throw new ValidationError(`timeoutS must be positive (got ${args.timeoutS})`);
     }
-    // server/api.go decodes timeout_s into int before checking Background.
+    // The platform decodes timeout_s into an integer before it checks the
+    // background flag, so a fractional value is refused there whatever the
+    // flag says.
     if (!Number.isInteger(args.timeoutS)) {
       throw new ValidationError(`timeoutS must be a positive integer (got ${args.timeoutS})`);
     }
-    // Mirrors server/api.go's execMaxTimeoutSec and its foreground-only refusal.
+    // Mirrors the platform's own foreground timeout ceiling and the fact that
+    // it refuses only in the foreground.
     if (!flag(args.background, 'background')) {
       if (args.timeoutS > 600) {
         throw new ValidationError(
