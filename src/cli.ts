@@ -42,6 +42,9 @@ import { Client } from './index.js';
  */
 const MAX_FRAME = 1 << 22;
 
+/** Four maximum-size frames (16 MiB), including a write waiting for drain. */
+const MAX_QUEUED_OUTPUT = 4 * MAX_FRAME;
+
 /**
  * How long after the exit announcement a session waits for the socket to close.
  *
@@ -133,6 +136,110 @@ export function queueTerminalWrite(
   const next = queued.then(() => new Promise<void>((done) => write(done)));
   void next.catch(() => {});
   return next;
+}
+
+interface TerminalOutputEntry {
+  chunk: Uint8Array;
+  next?: TerminalOutputEntry;
+}
+
+/**
+ * The CLI's output queue, exported only for lifecycle tests. Pending chunks
+ * have explicit owners so detaching releases them even if stdout never drains.
+ * The active blocked write counts against the limit until its drain event.
+ */
+export class TerminalOutputQueue {
+  #head: TerminalOutputEntry | undefined;
+  #tail: TerminalOutputEntry | undefined;
+  #activeBytes = 0;
+  #bytes = 0;
+  #disposed = false;
+  #settle: (() => void) | undefined;
+  #drained = Promise.resolve();
+
+  constructor(
+    private readonly stdout: NodeJS.WritableStream,
+    private readonly fail: (error: Error) => void,
+    private readonly limit = MAX_QUEUED_OUTPUT,
+  ) {
+    stdout.on('error', this.#onError);
+  }
+
+  get pendingBytes(): number {
+    return this.#bytes;
+  }
+
+  get drained(): Promise<void> {
+    return this.#drained;
+  }
+
+  write(chunk: Uint8Array): void {
+    if (this.#disposed || chunk.byteLength === 0) return;
+    if (chunk.byteLength > this.limit - this.#bytes) {
+      this.#onError(new Error(`terminal output exceeded ${this.limit} buffered bytes`));
+      return;
+    }
+    if (!this.#settle) {
+      this.#drained = new Promise((resolve) => {
+        this.#settle = resolve;
+      });
+    }
+    const entry: TerminalOutputEntry = { chunk };
+    if (this.#tail) this.#tail.next = entry;
+    else this.#head = entry;
+    this.#tail = entry;
+    this.#bytes += chunk.byteLength;
+    this.#pump();
+  }
+
+  #pump(): void {
+    if (this.#disposed || this.#activeBytes) return;
+    while (this.#head && !this.#disposed) {
+      const { chunk, next } = this.#head;
+      this.#head = next;
+      if (!next) this.#tail = undefined;
+      this.#activeBytes = chunk.byteLength;
+      try {
+        if (!this.stdout.write(chunk)) {
+          if (!this.#disposed) this.stdout.once('drain', this.#onDrain);
+          return;
+        }
+      } catch (error) {
+        this.#onError(error instanceof Error ? error : new Error(String(error)));
+        return;
+      }
+      if (this.#disposed) return;
+      this.#bytes -= this.#activeBytes;
+      this.#activeBytes = 0;
+    }
+    this.#settle?.();
+    this.#settle = undefined;
+  }
+
+  #onDrain = (): void => {
+    if (this.#disposed) return;
+    this.#bytes -= this.#activeBytes;
+    this.#activeBytes = 0;
+    this.#pump();
+  };
+
+  #onError = (error: Error): void => {
+    if (this.#disposed) return;
+    this.dispose();
+    this.fail(error);
+  };
+
+  dispose(): void {
+    this.#disposed = true;
+    this.stdout.off('drain', this.#onDrain);
+    this.stdout.off('error', this.#onError);
+    this.#head = undefined;
+    this.#tail = undefined;
+    this.#bytes = 0;
+    this.#activeBytes = 0;
+    this.#settle?.();
+    this.#settle = undefined;
+  }
 }
 
 /** Wait for both output streams before process.exit can discard either tail. */
@@ -450,23 +557,58 @@ async function cmdSsh(target: string, session: string): Promise<number> {
  * Uses the global `WebSocket`, which is why this package requires Node 22 and
  * has no dependencies. A websocket library would be the SDK's only runtime
  * dependency, carried by every user of the library for the sake of one command.
+ * Exported with injectable streams and bounds only to test the real receive
+ * pipeline; this module is not part of the package's library exports.
  */
-async function interact(url: string): Promise<number> {
+export async function interact(
+  url: string,
+  {
+    stdin = process.stdin,
+    stdout = process.stdout as NodeJS.WritableStream,
+    stderr = process.stderr as NodeJS.WritableStream,
+    maxQueuedBytes = MAX_QUEUED_OUTPUT,
+    drainTimeoutMs = EXIT_DRAIN_MS,
+    measureTerminal = terminalFd,
+  } = {},
+): Promise<number> {
   if (typeof WebSocket === 'undefined') {
     die('this Node has no global WebSocket — mandala ssh needs Node 22 or newer');
   }
   const ws = new WebSocket(url);
   ws.binaryType = 'arraybuffer';
 
-  const stdin = process.stdin;
-  const stdout = process.stdout;
   // The terminal this session is sized from, which is not necessarily the one
   // its output is written to: a piped stdout is still a session in a window.
-  const ttyFd = terminalFd();
+  const ttyFd = measureTerminal();
   let raw = false;
   let winch = false;
   let exitCode: number | undefined;
   let pump: ReturnType<typeof setInterval> | undefined;
+  let exitTimer: ReturnType<typeof setTimeout> | undefined;
+  let outputFailure: Error | undefined;
+  let endInteraction: (() => void) | undefined;
+  let onMessage: ((ev: MessageEvent) => void) | undefined;
+  const stopReceiving = () => {
+    if (onMessage) ws.removeEventListener('message', onMessage);
+    onMessage = undefined;
+  };
+  const close = () => {
+    try {
+      ws.close();
+    } catch {
+      // Already closed; that is the ordinary way out of the loop.
+    }
+  };
+  const output = new TerminalOutputQueue(
+    stdout,
+    (error) => {
+      outputFailure = error;
+      stopReceiving();
+      endInteraction?.();
+      close();
+    },
+    maxQueuedBytes,
+  );
 
   const sendSize = () => {
     if (ws.readyState !== WebSocket.OPEN || ttyFd === undefined) return;
@@ -476,24 +618,6 @@ async function interact(url: string): Promise<number> {
     } catch {
       // Racing a close is fine; the close is the news, not this.
     }
-  };
-
-  /**
-   * The guest's bytes, written one at a time and only as fast as they land.
-   *
-   * `write()` answers false when the terminal's buffer is full, and dropping
-   * that answer is how `cat` on a large file inside the guest turns into a
-   * process holding the whole file in the stream's queue: the socket cannot be
-   * paused, so nothing else pushes back. Chained through a promise rather than
-   * awaited at the call site because the frames arrive in an event listener,
-   * and the chain is what keeps them in order.
-   */
-  let queued: Promise<void> = Promise.resolve();
-  const write = (chunk: Uint8Array) => {
-    queued = queueTerminalWrite(queued, (done) => {
-      if (stdout.write(chunk)) done();
-      else stdout.once('drain', done);
-    });
   };
 
   const onStdin = (chunk: Buffer) => {
@@ -526,12 +650,12 @@ async function interact(url: string): Promise<number> {
     if (ws.readyState === WebSocket.OPEN) ws.send(new Uint8Array([0x04]));
   };
 
-  // Held so cleanup can take it off again. Assigned below, where resolve() is
-  // in scope; declared here because the socket outlives this function's own
-  // exit path and a listener left on it can still reach stdout.
-  let onMessage: ((ev: MessageEvent) => void) | undefined;
-
   const cleanup = () => {
+    if (exitTimer) clearTimeout(exitTimer);
+    if (output.pendingBytes > 0) {
+      outputFailure ??= new Error('terminal output timed out waiting for stdout to drain');
+    }
+    output.dispose();
     if (pump) {
       clearInterval(pump);
       pump = undefined;
@@ -541,9 +665,10 @@ async function interact(url: string): Promise<number> {
     // without this a frame arriving during the drain queued a write that ran
     // once the shell had raw mode back, printing the tail of a dead session
     // over the user's own prompt.
-    if (onMessage) {
-      ws.removeEventListener('message', onMessage);
-      onMessage = undefined;
+    stopReceiving();
+    if (endInteraction) {
+      ws.removeEventListener('close', endInteraction);
+      ws.removeEventListener('error', endInteraction);
     }
     stdin.off('data', onStdin);
     stdin.off('end', onStdinEnd);
@@ -579,12 +704,15 @@ async function interact(url: string): Promise<number> {
     }
 
     await new Promise<void>((resolve) => {
+      endInteraction = resolve;
+      if (outputFailure) {
+        resolve();
+        return;
+      }
       onMessage = (ev) => {
         const byteLength = terminalFrameByteLength(ev.data as string | ArrayBuffer);
         if (byteLength > MAX_FRAME) {
-          process.stderr.write(
-            `mandala: dropped a ${byteLength}-byte frame — not the terminal protocol\n`,
-          );
+          stderr.write(`mandala: dropped a ${byteLength}-byte frame — not the terminal protocol\n`);
           return;
         }
         if (typeof ev.data === 'string') {
@@ -617,12 +745,8 @@ async function interact(url: string): Promise<number> {
               // instead and let `close` resolve once the queue has drained;
               // the timer is what keeps a server that lingers indefinitely
               // after announcing the exit from holding the terminal with it.
-              try {
-                ws.close();
-              } catch {
-                // Already closing; `close` still fires.
-              }
-              setTimeout(resolve, EXIT_DRAIN_MS).unref();
+              close();
+              exitTimer ??= setTimeout(resolve, drainTimeoutMs);
             }
           } catch {
             // Not control we understand. The stream is the news, not this frame.
@@ -630,32 +754,28 @@ async function interact(url: string): Promise<number> {
           return;
         }
         const bytes = new Uint8Array(ev.data as ArrayBuffer);
-        write(bytes);
+        output.write(bytes);
       };
       ws.addEventListener('message', onMessage);
-      ws.addEventListener('close', () => resolve(), { once: true });
-      ws.addEventListener('error', () => resolve(), { once: true });
+      ws.addEventListener('close', endInteraction, { once: true });
+      ws.addEventListener('error', endInteraction, { once: true });
     });
   } finally {
     // The tail of the output goes out before the terminal is handed back, or
     // the last screenful of a session lands after the shell prompt returns.
-    await finishInteraction(
-      () => queued,
-      cleanup,
-      () => {
-        try {
-          ws.close();
-        } catch {
-          // Already closed; that is the ordinary way out of the loop above.
-        }
-      },
-    );
+    await finishInteraction(() => output.drained, cleanup, close, drainTimeoutMs);
   }
 
+  if (outputFailure) {
+    stderr.write(
+      `mandala: ${outputFailure.message} — detached; run the same command to reattach\n`,
+    );
+    return 1;
+  }
   if (exitCode === undefined) {
     // The link dropped without the shell ending: the session is still alive
     // server-side, and saying so is what makes that a feature.
-    process.stderr.write('mandala: detached — run the same command to reattach\n');
+    stderr.write('mandala: detached — run the same command to reattach\n');
     return 0;
   }
   return exitCode;
