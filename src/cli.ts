@@ -146,12 +146,17 @@ interface TerminalOutputEntry {
 /**
  * The CLI's output queue, exported only for lifecycle tests. Pending chunks
  * have explicit owners so detaching releases them even if stdout never drains.
- * The active blocked write counts against the limit until its drain event.
+ * Every active write counts until its callback completes, even when write()
+ * returns true. A false return also gates the next write on a drain event.
  */
 export class TerminalOutputQueue {
   #head: TerminalOutputEntry | undefined;
   #tail: TerminalOutputEntry | undefined;
   #activeBytes = 0;
+  #writePending = false;
+  #waitingDrain = false;
+  #pumping = false;
+  #awaitingError = false;
   #bytes = 0;
   #disposed = false;
   #settle: (() => void) | undefined;
@@ -193,38 +198,72 @@ export class TerminalOutputQueue {
   }
 
   #pump(): void {
-    if (this.#disposed || this.#activeBytes) return;
-    while (this.#head && !this.#disposed) {
-      const { chunk, next } = this.#head;
-      this.#head = next;
-      if (!next) this.#tail = undefined;
-      this.#activeBytes = chunk.byteLength;
-      try {
-        if (!this.stdout.write(chunk)) {
-          if (!this.#disposed) this.stdout.once('drain', this.#onDrain);
+    if (this.#disposed || this.#pumping) return;
+    this.#pumping = true;
+    try {
+      while (this.#head && !this.#disposed && !this.#writePending && !this.#waitingDrain) {
+        const { chunk, next } = this.#head;
+        this.#head = next;
+        if (!next) this.#tail = undefined;
+        this.#activeBytes = chunk.byteLength;
+        this.#writePending = true;
+        this.#waitingDrain = true;
+        // Register before write: callbacks and drain can be synchronous on an
+        // injected stream. #pumping prevents either from reentering this loop.
+        this.stdout.once('drain', this.#onDrain);
+        try {
+          if (this.stdout.write(chunk, this.#onComplete)) {
+            this.#waitingDrain = false;
+            this.stdout.off('drain', this.#onDrain);
+          }
+        } catch (error) {
+          this.#writePending = false;
+          this.#onError(error instanceof Error ? error : new Error(String(error)));
           return;
         }
-      } catch (error) {
-        this.#onError(error instanceof Error ? error : new Error(String(error)));
-        return;
       }
-      if (this.#disposed) return;
-      this.#bytes -= this.#activeBytes;
-      this.#activeBytes = 0;
+      if (!this.#head && !this.#writePending) {
+        this.#settle?.();
+        this.#settle = undefined;
+      }
+    } finally {
+      this.#pumping = false;
     }
-    this.#settle?.();
-    this.#settle = undefined;
   }
 
-  #onDrain = (): void => {
-    if (this.#disposed) return;
+  #onComplete = (error?: Error | null): void => {
+    this.#writePending = false;
+    if (error) {
+      // Node emits 'error' after the write callback. Keep the listener until
+      // that event, including when this write was abandoned during shutdown.
+      this.#awaitingError = true;
+      if (!this.#disposed) {
+        this.dispose();
+        this.fail(error);
+      }
+      return;
+    }
+    if (this.#disposed) {
+      this.stdout.off('error', this.#onError);
+      return;
+    }
     this.#bytes -= this.#activeBytes;
     this.#activeBytes = 0;
     this.#pump();
   };
 
-  #onError = (error: Error): void => {
+  #onDrain = (): void => {
     if (this.#disposed) return;
+    this.#waitingDrain = false;
+    this.#pump();
+  };
+
+  #onError = (error: Error): void => {
+    this.#awaitingError = false;
+    if (this.#disposed) {
+      if (!this.#writePending) this.stdout.off('error', this.#onError);
+      return;
+    }
     this.dispose();
     this.fail(error);
   };
@@ -232,7 +271,7 @@ export class TerminalOutputQueue {
   dispose(): void {
     this.#disposed = true;
     this.stdout.off('drain', this.#onDrain);
-    this.stdout.off('error', this.#onError);
+    if (!this.#writePending && !this.#awaitingError) this.stdout.off('error', this.#onError);
     this.#head = undefined;
     this.#tail = undefined;
     this.#bytes = 0;

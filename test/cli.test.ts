@@ -8,6 +8,7 @@ import { EventEmitter } from 'node:events';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { Writable } from 'node:stream';
 import { describe, expect, it, vi } from 'vitest';
 import {
   download,
@@ -213,6 +214,7 @@ describe('terminal receive/output pipeline', () => {
       result: Promise<number>;
       removed: ReturnType<typeof vi.spyOn>;
     }) => Promise<void>,
+    stream?: Writable,
   ) => {
     const savedWS = globalThis.WebSocket;
     let socket!: FakeSocket;
@@ -231,7 +233,14 @@ describe('terminal receive/output pipeline', () => {
       pause: vi.fn(),
       resume: vi.fn(),
     });
-    const stdout = Object.assign(new EventEmitter(), { write: vi.fn(() => false) });
+    const streamWrite = stream?.write.bind(stream);
+    const stdout = Object.assign(stream ?? new EventEmitter(), {
+      write: vi.fn((chunk: Uint8Array, complete: () => void) => {
+        if (streamWrite) return streamWrite(chunk, complete);
+        stdout.once('drain', complete);
+        return false;
+      }),
+    });
     const diagnostic: string[] = [];
     const result = interact('ws://terminal', {
       stdin: stdin as unknown as typeof process.stdin,
@@ -261,7 +270,10 @@ describe('terminal receive/output pipeline', () => {
 
   it('writes ordinary unblocked output in order without accumulating a backlog', async () => {
     await session(async ({ socket, stdout, diagnostic, result }) => {
-      stdout.write.mockReturnValue(true);
+      stdout.write.mockImplementation((_chunk: Uint8Array, complete: () => void) => {
+        complete();
+        return true;
+      });
       for (let i = 0; i < 20; i += 1) socket.sendRaw(frame(i));
       socket.send({ type: 'exit', code: 0 });
       socket.emitClose();
@@ -383,7 +395,13 @@ describe('terminal receive/output pipeline', () => {
   });
 
   it('releases queued buffers on failure and makes a captured drain callback inert', async () => {
-    const stdout = Object.assign(new EventEmitter(), { write: vi.fn(() => false) });
+    let complete!: () => void;
+    const stdout = Object.assign(new EventEmitter(), {
+      write: vi.fn((_chunk: Uint8Array, callback: () => void) => {
+        complete = callback;
+        return false;
+      }),
+    });
     const failed = vi.fn();
     const output = new TerminalOutputQueue(stdout as unknown as NodeJS.WritableStream, failed, 8);
     output.write(new Uint8Array(4));
@@ -397,11 +415,138 @@ describe('terminal receive/output pipeline', () => {
     expect(failed).toHaveBeenCalledTimes(1);
     await output.drained;
     lateDrain();
+    complete();
     output.write(new Uint8Array(1));
     expect(stdout.write).toHaveBeenCalledTimes(1);
     expect(stdout.listenerCount('drain')).toBe(0);
     expect(stdout.listenerCount('error')).toBe(0);
   });
+
+  const heldOutput = (highWaterMark = 65_536) => {
+    const completions: ((error?: Error | null) => void)[] = [];
+    const written: number[][] = [];
+    const stream = new Writable({
+      highWaterMark,
+      write(chunk: Buffer, _encoding, complete) {
+        written.push([...chunk]);
+        completions.push(complete);
+      },
+    });
+    return { stream, completions, written };
+  };
+
+  it('fails shutdown for an accepted real write that never completes, and ignores its late completion', async () => {
+    const { stream, completions, written } = heldOutput();
+    await session(async ({ socket, stdin, diagnostic, result }) => {
+      socket.sendRaw(frame(1, 2, 3, 4));
+      expect(stream.writableNeedDrain).toBe(false);
+      expect(stream.writableLength).toBe(4);
+      socket.sendRaw(frame(5, 6, 7, 8));
+      socket.send({ type: 'exit', code: 0 });
+      socket.emitClose();
+      await Promise.resolve();
+      expect(stdin.setRawMode).not.toHaveBeenCalledWith(false);
+      expect(await result).toBe(1);
+      expect(diagnostic.join('')).toMatch(/timed out.*detached/);
+      expect(stdin.setRawMode).toHaveBeenLastCalledWith(false);
+      expect(stream.listenerCount('error')).toBe(1);
+      completions.shift()!();
+      socket.sendRaw(frame(9));
+      expect(written).toEqual([[1, 2, 3, 4]]);
+      expect(stream.listenerCount('error')).toBe(0);
+    }, stream);
+  });
+
+  for (const highWaterMark of [1, 65_536]) {
+    it(`waits for real write completion and preserves FIFO with highWaterMark ${highWaterMark}`, async () => {
+      const { stream, completions, written } = heldOutput(highWaterMark);
+      await session(async ({ socket, stdin, diagnostic, result }) => {
+        socket.sendRaw(frame(1, 2, 3, 4));
+        socket.sendRaw(frame(5, 6, 7, 8));
+        socket.send({ type: 'exit', code: 0 });
+        socket.emitClose();
+        await Promise.resolve();
+        expect(stdin.setRawMode).not.toHaveBeenCalledWith(false);
+        expect(written).toEqual([[1, 2, 3, 4]]);
+        completions.shift()!();
+        expect(written).toEqual([
+          [1, 2, 3, 4],
+          [5, 6, 7, 8],
+        ]);
+        expect(stdin.setRawMode).not.toHaveBeenCalledWith(false);
+        completions.shift()!();
+        expect(await result).toBe(0);
+        expect(stream.writableLength).toBe(0);
+        expect(diagnostic).toEqual([]);
+        expect(stdin.setRawMode).toHaveBeenLastCalledWith(false);
+        expect(stream.listenerCount('error')).toBe(0);
+      }, stream);
+    });
+  }
+
+  it('counts accepted unfinished real writes against the aggregate limit', async () => {
+    const { stream, completions, written } = heldOutput();
+    await session(async ({ socket, diagnostic, result }) => {
+      socket.sendRaw(frame(1, 2, 3, 4));
+      socket.sendRaw(frame(5, 6, 7, 8));
+      socket.sendRaw(frame(9));
+      expect(await result).toBe(1);
+      expect(diagnostic.join('')).toMatch(/exceeded 8 buffered bytes.*detached/);
+      completions.shift()!();
+      expect(written).toEqual([[1, 2, 3, 4]]);
+    }, stream);
+  });
+
+  for (const afterDisposal of [false, true]) {
+    it(`handles a real asynchronous write error ${afterDisposal ? 'after disposal' : 'during shutdown'}`, async () => {
+      const { stream, completions, written } = heldOutput();
+      await session(async ({ socket, stdin, diagnostic, result }) => {
+        socket.sendRaw(frame(1, 2, 3, 4));
+        socket.sendRaw(frame(5, 6, 7, 8));
+        socket.send({ type: 'exit', code: 0 });
+        socket.emitClose();
+        if (afterDisposal) expect(await result).toBe(1);
+        // A real Writable invokes our callback before emitting 'error'. The
+        // listener must survive both ordinary and already-abandoned writes.
+        completions.shift()!(new Error('async EPIPE'));
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(await result).toBe(1);
+        expect(diagnostic.join('')).toMatch(afterDisposal ? /timed out/ : /async EPIPE/);
+        expect(stdin.setRawMode).toHaveBeenLastCalledWith(false);
+        expect(written).toEqual([[1, 2, 3, 4]]);
+        expect(stream.listenerCount('error')).toBe(0);
+      }, stream);
+    });
+  }
+
+  for (const first of ['callback', 'drain']) {
+    it(`requires completion and drain before the next write when ${first} happens first`, async () => {
+      const completions: (() => void)[] = [];
+      const stdout = Object.assign(new EventEmitter(), {
+        write: vi.fn((_chunk: Uint8Array, complete: () => void) => {
+          completions.push(complete);
+          return false;
+        }),
+      });
+      const failed = vi.fn();
+      const output = new TerminalOutputQueue(stdout as unknown as NodeJS.WritableStream, failed, 8);
+      output.write(new Uint8Array(4));
+      output.write(new Uint8Array(4));
+      if (first === 'callback') completions.shift()!();
+      else stdout.emit('drain');
+      expect(stdout.write).toHaveBeenCalledTimes(1);
+      expect(output.pendingBytes).toBe(first === 'callback' ? 4 : 8);
+      if (first === 'callback') stdout.emit('drain');
+      else completions.shift()!();
+      expect(stdout.write).toHaveBeenCalledTimes(2);
+      completions.shift()!();
+      stdout.emit('drain');
+      await output.drained;
+      expect(output.pendingBytes).toBe(0);
+      expect(failed).not.toHaveBeenCalled();
+      output.dispose();
+    });
+  }
 });
 
 describe('terminal geometry', () => {
