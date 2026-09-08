@@ -821,10 +821,10 @@ export class Transport {
       // "nothing" with a 204 exists on this platform, and refusing the response
       // would break it — but an empty ARRAY and an empty RESPONSE are not the
       // same claim, and only the first is the platform stating the account is
-      // empty. `web/lib/surface.ts` says what a caller does with the second
-      // read as the first: it "will diff the array it was given against its own
-      // idea of the world, and the obvious next thing it does with a computer
-      // that has 'disappeared' is tidy it up". That hazard does not care
+      // empty. The hazard in reading the second as the first is that a caller
+      // diffs the array it was given against its own idea of the world, and the
+      // obvious next thing it does with a computer that has "disappeared" is
+      // tidy it up. That hazard does not care
       // whether the rows went missing in a fan-out, in this decoder, or in a
       // proxy that answered 204 for a route that has no empty answer — no list
       // route here produces one — so it is reported through the one channel

@@ -15,7 +15,7 @@
  * opening frame's state, and the three frames that are not events.
  *
  * Everything here is written against the `events_url` entry in the platform's
- * `web/lib/apidoc.ts`, which is the reference this must not contradict.
+ * own API reference, which is the document this must not contradict.
  */
 
 import { ConnectionError, MandalaError, ValidationError } from './errors.js';
@@ -670,7 +670,7 @@ export function toComputerEvent(frame: unknown): ComputerEvent | undefined {
  * `undefined` — it says nothing, which is honest, where `[]` would be this
  * decoder claiming the desktop is empty — and the count is what separates that
  * silence from the host's own. The platform does not produce this shape:
- * `eventsocket.go` sends `[]` for an empty set and the watch frames only run
+ * the platform sends `[]` for an empty set and the watch frames only run
  * under a non-empty one, so this is a guard rather than a live hazard, and it
  * is here because a frame arriving through a proxy is not a frame this daemon
  * wrote. `null` counts as absent for the same reason — it is JSON's own way of

@@ -452,10 +452,10 @@ describe('filesQuery', () => {
   });
 
   it('refuses a control character, and a path past what the guest accepts', () => {
-    // `server/guestfile.go` refuses both before the path reaches the guest
-    // agent — the control characters because a path holding one is not the
-    // path it prints as in an audit log or on somebody's screen, and the
-    // length in BYTES, which is what Go counts. Both are knowable here, and a
+    // The platform refuses both before the path reaches the guest agent — the
+    // control characters because a path holding one is not the path it prints
+    // as in a log or on somebody's screen, and the length in BYTES rather than
+    // characters. Both are knowable here, and a
     // refusal here is a stack trace at the call site rather than a 400.
     expect(() => P.filesQuery('/tmp/a\nb')).toThrow(/cannot contain control characters/);
     expect(() => P.filesQuery('/tmp/a\u007f')).toThrow(/cannot contain control characters/);

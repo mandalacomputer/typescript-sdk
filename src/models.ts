@@ -352,9 +352,8 @@ const GO_ZERO_TIME = Date.parse('0001-01-01T00:00:00Z');
  * `if (build.finishedAt)` reports a running build as finished, and anything
  * ordering on it files that build two millennia ahead of every real one, where
  * an unreadable value would at least have sorted itself to one end. The control
- * plane strips it on the way out too (`whenever`, `web/lib/projection.ts`);
- * this is the tier whose types promise the field is optional, so it does not
- * take that on trust.
+ * plane strips it on the way out too; this is the tier whose types promise the
+ * field is optional, so it does not take that on trust.
  *
  * NOT a check that what survives is a time. A string that is neither empty nor
  * the zero instant is passed through as it came, on this file's standing rule
@@ -554,8 +553,8 @@ export function toVncConnect(d: unknown): VncConnect | undefined {
  * credentials {@link toVncConnect} requires.
  *
  * A safety net rather than a fix for an observed payload, and worth saying
- * plainly which it is. `web/lib/vncconnect.ts` returns the whole surface or
- * none of it unless the caller is a viewer, and the viewer shape carries
+ * plainly which it is. The platform returns the whole connect surface or none
+ * of it unless the caller is a viewer, and the viewer shape carries
  * `view_token` with no `token` and NO `events_url` at all — the stream URL is
  * built over the controlling credential, and a watch-only credential is not
  * given window titles. So the platform does not today send a surface that has
@@ -587,8 +586,8 @@ export type Template = {
    * looks: since OPL-3789 a template an account PUBLISHED is named by its ref
    * and by nothing else — the short `name` still resolves to the platform's own
    * catalogue — so a listing without this cannot tell a caller how to launch
-   * their own template. `publicTemplate` in the platform's lib/projection
-   * publishes it for exactly that reason, and this model was dropping it.
+   * their own template. The platform publishes it for exactly that reason, and
+   * this model was dropping it.
    */
   ref?: string;
   label: string;
@@ -606,7 +605,7 @@ export type Template = {
    * a window id is a compositor address rather than an X window id, and moving
    * or resizing a TILED window is refused rather than quietly ignored. A caller
    * who cannot see it cannot tell which of those two worlds they are driving.
-   * That is `publicTemplate`'s own argument for publishing it where it drops
+   * That is the platform's own argument for publishing it where it drops
    * `family` as internal (OPL-4223), and this model dropped it anyway until
    * OPL-4259 — the same miss as `ref` above, found the same way.
    *
@@ -732,9 +731,9 @@ export type TemplateCheck = {
   /**
    * What the build digest would need, for a document that names a parent.
    *
-   * REPLACES {@link buildDigest} rather than accompanying it. The daemon is an
-   * if/else on `spec.from` (`server/templateschema.go`): no parent gets a
-   * digest, a parent gets this instead. So the two are never both present, and
+   * REPLACES {@link buildDigest} rather than accompanying it. The platform
+   * decides on `spec.from`: no parent gets a digest, a parent gets this
+   * instead. So the two are never both present, and
    * a caller watching only for the digest sees a field missing and is told
    * nothing about why.
    *
@@ -773,7 +772,7 @@ export type TemplateCheck = {
    * answers a projected shape that does not. Decoding two different shapes
    * through one function is what that comment refused, and rightly.
    *
-   * OPL-4190 gave the route `publicTemplate` — the same projection the listing
+   * OPL-4190 gave the route the public projection — the same one the listing
    * and `GET /templates/{ns}/{name}` already went through — so there is one
    * `Template` shape on the surface again and nothing left for a second reading
    * to preserve. What the raw record cost in the meantime was silence: a caller
@@ -1010,8 +1009,8 @@ export type BuildProgress = {
 };
 
 /**
- * The statuses a build STOPS on — two of the three `server/buildjob.go`
- * declares, the third being `running`. There is no cancelled state on this
+ * The statuses a build STOPS on — two of the three the platform declares, the
+ * third being `running`. There is no cancelled state on this
  * wire, so a build that is not running is one of these.
  */
 const BUILD_TERMINAL = ['succeeded', 'failed'];
@@ -1722,7 +1721,7 @@ const snapshotId = (d: Record<string, unknown>): string => {
  * missing state and the opposite thing about a misspelt or renamed one:
  * `state: "capturin"` is every bit as unreadable as no state at all, and it read
  * as landed — which is the failure above reached through a typo instead of an
- * omission. The three names are the ones `web/lib/apidoc` documents beside
+ * omission. The three names are the ones the platform documents beside
  * `capturing`, and `deleting` is among them because a row in it is a row the
  * capture is over for, whatever else is true of it.
  *
@@ -2118,7 +2117,7 @@ export function toBackgroundExec(d: Record<string, unknown>): BackgroundExec {
     // ONE rule for a blank string, where there used to be two: an `=== ''` test
     // here read the empty string as absent while `'  '` — which `count`'s own
     // doc calls the same non-answer — fell through to -1. Neither shape can
-    // arrive, `server/execbg.go` declaring `ExitCode *int` with `omitempty` so
+    // arrive, the platform sending the exit code as an optional integer so
     // that "has not exited" is absent rather than 0, so the two readings never
     // disagreed about a real payload; they disagreed about what this file
     // believes, which is worth more than the branch that carried it.
@@ -2201,8 +2200,8 @@ export type GuestWindow = {
    *
    * `undefined` RATHER THAN `0` where the window does not say, which is why
    * this is not a `num(d.pid)` like every other number on this type. The
-   * daemon declares it `PID *int` with `json:"pid,omitempty"`
-   * (`server/windows.go`) so that absent and zero stay different things: a
+   * platform sends it as an optional integer, so that absent and zero stay
+   * different things: a
    * guest is free to advertise `_NET_WM_PID` 0, and reporting that as "no pid"
    * would be inventing an answer — as would reporting a window that said
    * nothing as owned by pid 0, which is what `num`'s fallback does.
@@ -2229,13 +2228,12 @@ export type GuestWindow = {
    * exactly this and says why in as many words ("that corner of the screen
    * again"); the window decoder went on inventing it until OPL-4200.
    *
-   * THE DAEMON ALREADY REFUSES THIS AT THE ORIGIN, which is what makes the
-   * fallback a divergence rather than a house rule. `applyWindowGeom`
-   * (`server/windows.go`) reports whether all four coordinates were present and
-   * parsed, and says why they are not optional: "a window whose position this
-   * cannot read is a window a caller cannot click, and reporting it at the
-   * origin with no size is the 'plausible but wrong' answer rather than a
-   * missing one." A row that fails it is skipped from the listing and the whole
+   * THE PLATFORM ALREADY REFUSES THIS AT THE ORIGIN, which is what makes the
+   * fallback a divergence rather than a house rule. All four coordinates have
+   * to be present and parsed, and they are not optional for a reason: a window
+   * whose position cannot be read is a window a caller cannot click, and
+   * reporting it at the origin with no size is the "plausible but wrong" answer
+   * rather than a missing one. A row that fails it is skipped from the listing and the whole
    * answer is then returned as an error, and the guest broker's own decoder
    * drops a window event the same way. So `num`'s zero was this client putting
    * back the exact answer the platform declines to give.
@@ -2257,11 +2255,10 @@ export type GuestWindow = {
   /**
    * Whether this window is on the screen rather than minimised.
    *
-   * The daemon's own name for the property and the one it puts on the wire
-   * (`server/windows.go`, OPL-3583): "Visible distinguishes a minimised window
-   * from one on screen. Minimised windows stay on the client list, and an agent
-   * that clicks at the coordinates of one is clicking at whatever is actually
-   * there."
+   * The platform's own name for the property and the one it puts on the wire
+   * (OPL-3583): visible distinguishes a minimised window from one on screen.
+   * Minimised windows stay on the client list, and an agent that clicks at the
+   * coordinates of one is clicking at whatever is actually there.
    *
    * This was `minimized` until OPL-4176, reading a key that has never existed
    * on this wire — so it was `false` for every window on every desktop,
@@ -2370,8 +2367,7 @@ export function toGuestWindow(d: Record<string, unknown>): GuestWindow {
  * takes on its own side of this route: a window it could not describe is left
  * out and the answer then carries an error — "a window on this desktop could
  * not be described, so this list is missing one that exists" — because a prefix
- * of a window list is a complete-looking answer that is wrong
- * (`server/windows.go`).
+ * of a window list is a complete-looking answer that is wrong.
  *
  * Every window the live route sends carries `id`; this fires only on one that
  * does not. The EVENT stream deliberately does not share it: a `window.opened`

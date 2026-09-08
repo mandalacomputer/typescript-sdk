@@ -114,12 +114,12 @@ export type WaitOptions = {
  *
  * 501 is inside the band deliberately, and it is the one that keeps being
  * queried, because "not implemented" reads like a permanent verdict on the
- * request. On this platform it is not that: `server/buildjob.go` answers 501
- * when no hypervisor in the fleet has libguestfs, kept apart from the 409 the
- * busy hosts answer "so that a fleet where every host answers 501 tells the
- * caller something true rather than 'everything is busy'" — and `web/lib/apidoc`
- * documents it as a status that "is neither a caller error nor a state of the
- * thing they named". A fleet gains a host with libguestfs the same way it gains
+ * request. On this platform it is not that: the build route answers 501 when no
+ * hypervisor in the fleet is equipped to build, kept apart from the 409 the busy
+ * hosts answer, so that a fleet where every host answers 501 tells the caller
+ * something true rather than "everything is busy" — and the platform documents
+ * it as a status that is neither a caller error nor a state of the thing the
+ * caller named. A fleet gains a host that can build the same way it gains
  * capacity, so it is no more permanent than the 409.
  *
  * It stays in the band for a plainer reason as well: it is emitted on

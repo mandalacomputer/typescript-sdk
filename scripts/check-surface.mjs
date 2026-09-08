@@ -427,13 +427,17 @@ function main() {
   if (!problems.length) {
     console.log(
       `check:surface — the mirror matches the platform (${mirrorRoutes.size} routes, ` +
-        `${counted} parameters, from ${platform}).`,
+        `${counted} parameters).`,
     );
     return;
   }
 
   for (const p of problems) console.error(`\ncheck:surface — ${p}`);
-  console.error(`\n  Platform: ${join(platform, 'web/lib')}`);
+  // The checkout location is deliberately NOT printed. This output gets pasted
+  // into pull requests on a public repository, and the absolute path of a
+  // developer's checkout of the private platform repo has no business there.
+  // Whoever runs this knows where they pointed it; set MANDALA_PLATFORM_REPO
+  // if it needs saying.
   // Set rather than exited on. stdout and stderr are asynchronous when they are
   // a pipe, which is what CI gives them, and `process.exit` abandons whatever is
   // still queued — on the one path whose whole output is the report that says
