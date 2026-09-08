@@ -1045,9 +1045,9 @@ class Frames {
   /** The next frame, or `undefined` when `stopped()` becomes true first. */
   async take(stopped: () => boolean): Promise<Frame | undefined> {
     for (;;) {
+      if (stopped()) return undefined;
       const next = this.#items.shift();
       if (next) return next;
-      if (stopped()) return undefined;
       await new Promise<void>((resolve) => {
         // Re-checked inside, because both conditions can become true between
         // the check above and this line — and a reader parked on a wake that
@@ -1091,6 +1091,7 @@ export class ComputerEvents implements AsyncIterable<ComputerEvent> {
   readonly #webSocket: EventSocketFactory;
   readonly #onConnect?: (hello: Hello) => void;
   readonly #signal?: AbortSignal;
+  readonly #stop = new AbortController();
 
   #iterated = false;
   #closed = false;
@@ -1261,6 +1262,7 @@ export class ComputerEvents implements AsyncIterable<ComputerEvent> {
   /** Stop the stream and release the socket. Safe to call more than once. */
   close(): void {
     this.#closed = true;
+    this.#stop.abort();
     this.#shutSocket();
     this.#frames?.interrupt();
   }
@@ -1347,7 +1349,7 @@ export class ComputerEvents implements AsyncIterable<ComputerEvent> {
         if (!this.#reconnect || isSettled(err)) throw err;
         failures += 1;
         if (this.#maxRetries > 0 && failures > this.#maxRetries) throw err;
-        await delay(backoff, this.#signal);
+        await delay(backoff, this.#stop.signal);
         backoff = Math.min(backoff * 2, this.#maxBackoffMs);
         continue;
       }
@@ -1355,7 +1357,7 @@ export class ComputerEvents implements AsyncIterable<ComputerEvent> {
       let fatal: Error | undefined;
       for (;;) {
         const item = await frames.take(() => this.#stopped());
-        if (item === undefined) return;
+        if (item === undefined || this.#stopped()) return;
         if (item.kind === 'end') break;
         if (item.kind === 'error') {
           fatal = item.err;
@@ -1408,7 +1410,7 @@ export class ComputerEvents implements AsyncIterable<ComputerEvent> {
       if (this.#maxRetries > 0 && failures > this.#maxRetries) {
         throw fatal ?? new ConnectionError('the event stream closed and could not be reopened');
       }
-      await delay(backoff, this.#signal);
+      await delay(backoff, this.#stop.signal);
       backoff = Math.min(backoff * 2, this.#maxBackoffMs);
     }
   }
@@ -1421,13 +1423,21 @@ export class ComputerEvents implements AsyncIterable<ComputerEvent> {
    * is true before the first event is yielded off the new connection.
    */
   async #connect(frames: Frames): Promise<void> {
-    const signal = this.#signal;
+    // Caller abort is forwarded to close() while iterating. Overflow only
+    // shuts the socket, so it never cancels the admitted queue or its replay.
+    const signal = this.#stop.signal;
     // Nominations first, cursor last. Both go on every connection: a reconnect
     // that dropped the `watch=` would come back to a socket that is healthy and
     // silent, which is the one failure a caller cannot tell from a quiet tree.
-    const url = withCursor(withWatches(await this.#url(signal), this.#watch), this.#cursor);
+    const baseUrl = await untilAbort(this.#url(signal), signal);
+    if (this.#stopped()) return;
+    const url = withCursor(withWatches(baseUrl, this.#watch), this.#cursor);
     const sock = this.#webSocket(url);
     this.#socket = sock;
+    if (this.#stopped()) {
+      this.#shutSocket();
+      return;
+    }
 
     let settleHello: ((h: Hello | undefined) => void) | undefined;
     const helloFrame = new Promise<Hello | undefined>((resolve) => {
@@ -1439,6 +1449,7 @@ export class ComputerEvents implements AsyncIterable<ComputerEvent> {
     // and this method would then wait out its whole connect timeout on a
     // perfectly healthy socket.
     const onMessage = (ev: { data: unknown }) => {
+      if (this.#stopped() || this.#socket !== sock) return;
       const frame = decode(ev.data);
       if (frame === undefined) return;
       if (settleHello) {
@@ -1477,8 +1488,14 @@ export class ComputerEvents implements AsyncIterable<ComputerEvent> {
       const done = (fn: () => void) => {
         if (handshake !== 'pending') return;
         clearTimeout(timer);
+        signal.removeEventListener('abort', onAbort);
         fn();
       };
+      const onAbort = () =>
+        done(() => {
+          handshake = 'failed';
+          reject(signal.reason);
+        });
       const timer = setTimeout(
         () =>
           done(() => {
@@ -1514,6 +1531,8 @@ export class ComputerEvents implements AsyncIterable<ComputerEvent> {
         });
       sock.addEventListener('error', refused);
       sock.addEventListener('close', refused);
+      signal.addEventListener('abort', onAbort, { once: true });
+      if (signal.aborted) onAbort();
     });
 
     sock.addEventListener('close', () => {
@@ -1528,9 +1547,12 @@ export class ComputerEvents implements AsyncIterable<ComputerEvent> {
     try {
       await opened;
     } catch (err) {
-      if (err === HANDSHAKE_REFUSED) throw await this.#refusal(signal);
+      this.#shutSocket();
+      if (this.#stopped()) return;
+      if (err === HANDSHAKE_REFUSED) throw await untilAbort(this.#refusal(signal), signal);
       throw err;
     }
+    if (this.#stopped()) return;
 
     let hello: Hello | undefined;
     try {
@@ -1539,6 +1561,7 @@ export class ComputerEvents implements AsyncIterable<ComputerEvent> {
         remaining(),
         () =>
           new ConnectionError(`the event stream said nothing within ${this.#connectTimeoutMs}ms`),
+        signal,
       );
     } catch (err) {
       // Closed here rather than inside the error factory, and the difference is
@@ -1550,6 +1573,7 @@ export class ComputerEvents implements AsyncIterable<ComputerEvent> {
       this.#shutSocket();
       throw err;
     }
+    if (this.#stopped()) return;
     if (!hello) {
       throw new ConnectionError('the event stream closed before it said what it was');
     }
@@ -2013,16 +2037,41 @@ function checkStreamNumbers(o: {
   whole('maxRetries', o.maxRetries);
 }
 
+/** Stop waiting even when an injected provider ignores its cancellation signal. */
+async function untilAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  let onAbort!: () => void;
+  try {
+    return await new Promise<T>((resolve, reject) => {
+      // Attach both handlers even when already aborted: a late rejection from
+      // abandoned discovery must remain handled, with no continuation effects.
+      promise.then(resolve, reject);
+      onAbort = () => reject(signal.reason);
+      signal.addEventListener('abort', onAbort, { once: true });
+      if (signal.aborted) onAbort();
+    });
+  } finally {
+    signal.removeEventListener('abort', onAbort);
+  }
+}
+
 /** A promise with a deadline on it, for a socket that opened and then said nothing. */
-async function withTimeout<T>(p: Promise<T>, ms: number, err: () => Error): Promise<T> {
+async function withTimeout<T>(
+  p: Promise<T>,
+  ms: number,
+  err: () => Error,
+  signal: AbortSignal,
+): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    return await Promise.race([
-      p,
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(err()), ms);
-      }),
-    ]);
+    return await untilAbort(
+      Promise.race([
+        p,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(err()), ms);
+        }),
+      ]),
+      signal,
+    );
   } finally {
     // Cleared on both paths. Left running, a 15-second timer holds the process
     // open past the end of a stream that finished in a millisecond.
