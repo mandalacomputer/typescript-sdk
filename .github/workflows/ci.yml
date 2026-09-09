@@ -23,6 +23,13 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run lint
+      # This repo is public and the platform it speaks to is not. Every batch of
+      # client fixes is written by reading that platform, and the reading leaves
+      # fingerprints — file names, internal function names — in doc comments
+      # that SHIP, since dist/*.d.ts carries them to npm. OPL-4613 scrubbed
+      # forty-one by hand and said the scan wanted to be a check; this is it
+      # (OPL-4636).
+      - run: npm run check:internals
       - run: npm run typecheck
       - run: npm run build
       # The surface diff is the second half of `npm test` and skips itself

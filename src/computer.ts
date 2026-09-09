@@ -777,10 +777,10 @@ export class Computer {
    *   arrives and where the way past it is written down.
    *
    * On the COMPUTER rather than only on {@link Template.desktop}, and the
-   * platform publishes it in both places for the reason it gives at
-   * `publicComputer`: a computer keeps the image it was cut from while a
-   * template's version can advance, so the template answers a question about
-   * the CATALOGUE and this one answers a question about the MACHINE.
+   * platform publishes it in both places for a reason worth keeping straight: a
+   * computer keeps the image it was cut from while a template's version can
+   * advance, so the template answers a question about the CATALOGUE and this
+   * one answers a question about the MACHINE.
    *
    * WHY THE ABSENCE IS NOT `'x11'` — the one place this getter parts company
    * with every other on this handle. A host deployed before OPL-4223 does not
