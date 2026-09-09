@@ -526,7 +526,7 @@ describe('stopQuery', () => {
   });
 
   it("spells force the one way the daemon reads: 'true'", () => {
-    // Compared as a string against "true" in api.go. Anything else — 1, yes,
+    // Compared as a string against "true" by the platform. Anything else — 1, yes,
     // TRUE — is a graceful stop reporting success, which is the failure the
     // caller reached for force to escape.
     expect(P.stopQuery(true)).toEqual({ force: 'true' });

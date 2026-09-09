@@ -859,8 +859,8 @@ export class Computer {
     // closes the case they were extended for once rather than again: a pixel
     // count is a whole number, and `"1280.5x800.2"` otherwise came back as a
     // display_width_px of 1280.5, which is a screen no screenshot can be.
-    // The platform will not send one — parseDisplay refuses anything Atoi
-    // rejects, and refuses odd numbers on top of that — so this is the guard
+    // The platform will not send one — it refuses anything that is not a whole
+    // number, and refuses odd numbers on top of that — so this is the guard
     // holding the line the API already holds, not a live hazard.
     if (
       w === undefined ||
