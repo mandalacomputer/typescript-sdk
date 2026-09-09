@@ -192,6 +192,31 @@ describe('waiting', () => {
     );
   });
 
+  it('retires a create failure once a reservation has superseded it', async () => {
+    // The sequence Codex named: an old start_error, then a reservation, then a
+    // read where the host does not report the pool at all. Holding the error
+    // for the life of the wait refused a computer that was coming up, on the
+    // strength of a failure that belonged to an earlier attempt.
+    let gets = 0;
+    const { client: c } = client((call) => {
+      if (call.method === 'POST' && call.path === '/computers') {
+        return json({
+          computer: { ...COMPUTER, status: 'stopped' },
+          start_error: 'no host had room',
+        });
+      }
+      gets += 1;
+      if (gets === 1)
+        return json({ ...COMPUTER, status: 'stopped', running_ram_mb: COMPUTER.ram_mb });
+      if (gets === 2) return json({ ...COMPUTER, status: 'stopped' }); // pool not reported
+      return json(COMPUTER);
+    });
+    const computer = await c.computers.create({ template: 'base' });
+    await expect(computer.waitUntilRunning({ timeoutMs: 60_000, pollMs: 1 })).resolves.toBe(
+      computer,
+    );
+  });
+
   it('waits for a start already in flight rather than refusing it', async () => {
     // OPL-4630. A cold boot that has been admitted holds its memory before its
     // process exists, and reads `stopped` for the whole of that load. Refusing
@@ -459,10 +484,34 @@ describe('waiting', () => {
     expect(err.message).toContain('was still "starting"');
   });
 
-  it('fails fast on a suspended machine even while every refresh is failing', async () => {
-    // The handle's data may be fresh from the get() one line before the wait,
-    // and suspended does not become "running" on its own — spinning out the
-    // full 120s to repeat what was already known helps nobody.
+  it('fails fast on a suspended machine once it has actually read one', async () => {
+    // Suspended does not become "running" on its own, so spinning out the full
+    // 120s to repeat what this wait has just READ helps nobody. One successful
+    // refresh is what makes it "just read" rather than "was told once"; the
+    // refreshes after it fail, and the refusal still stands on the one that
+    // landed.
+    let gets = 0;
+    const { client: c } = client((call) => {
+      if (call.method === 'GET' && call.path === '/computers/vm-1') {
+        gets += 1;
+        return gets <= 2
+          ? json({ ...COMPUTER, status: 'suspended', running_ram_mb: 0 })
+          : errorJson(503, 'host could not be reached');
+      }
+      return anyRoute(call);
+    });
+    const computer = await c.computers.get('vm-1'); // the handle's own read
+    await expect(computer.waitUntilRunning({ timeoutMs: 60_000, pollMs: 1 })).rejects.toThrow(
+      /call start\(\) to resume it/,
+    );
+  });
+
+  it('times out rather than refusing on a reading it never made', async () => {
+    // The bug the previous version of the test above was pinning in place
+    // (Codex review). A refusal is a claim about what the platform is doing
+    // now; a budget spent entirely on refreshes that failed has learned
+    // nothing, and the cached zero it would refuse on may predate a start
+    // another caller has since made. python-sdk #81 had the same shape.
     let gets = 0;
     const { client: c } = client((call) => {
       if (call.method === 'GET' && call.path === '/computers/vm-1') {
@@ -473,8 +522,21 @@ describe('waiting', () => {
       }
       return anyRoute(call);
     });
-    const computer = await c.computers.get('vm-1'); // fresh: suspended
-    await expect(computer.waitUntilRunning({ timeoutMs: 60_000, pollMs: 1 })).rejects.toThrow(
+    const computer = await c.computers.get('vm-1');
+    const err = await computer.waitUntilRunning({ timeoutMs: 40, pollMs: 1 }).catch((e) => e);
+    expect(err).toBeInstanceOf(TimeoutError);
+    expect(err.message).not.toMatch(/call start\(\) to resume it/);
+  });
+
+  it('still answers a zero budget from the handle it was given', async () => {
+    // The carve-out the gate must not take away: with no budget nothing COULD
+    // be read, so the caller's own snapshot is all there is and naming the
+    // state beats a bare timeout (OPL-4215).
+    const { client: c } = client(() =>
+      json({ ...COMPUTER, status: 'suspended', running_ram_mb: 0 }),
+    );
+    const computer = await c.computers.get('vm-1');
+    await expect(computer.waitUntilRunning({ timeoutMs: 0 })).rejects.toThrow(
       /call start\(\) to resume it/,
     );
   });
@@ -684,36 +746,47 @@ describe('waiting', () => {
   });
 
   it('acts on a stopped reading the probe-failure refresh discovers', async () => {
-    // A guard rather than a reproduction: the bug Codex found here is that the
-    // reading was only acted on at the top of the NEXT pass, which is after the
-    // deadline check, so it was thrown away on the last poll of a wait. Landing
-    // the deadline inside that window needs an injected clock; what this pins
-    // is that the reading is acted on at all, and with the right error type.
-    const { client: c } = client((call) => {
-      if (call.path.endsWith('/exec')) return errorJson(409, 'the agent is not up yet');
+    // The handle starts RUNNING and the platform only reports stopped on the
+    // refresh that follows the first failed probe, so this can only pass by
+    // going through that refresh — the previous version handed the wait a
+    // stopped handle and never reached it (Codex review).
+    let gets = 0;
+    let probes = 0;
+    const { rec, client: c } = client((call) => {
+      if (call.path.endsWith('/exec')) {
+        probes += 1;
+        return errorJson(409, 'the agent is not up yet');
+      }
       if (call.method === 'GET' && call.path === '/computers/vm-1') {
-        return json({ ...COMPUTER, status: 'stopped', running_ram_mb: 0 });
+        gets += 1;
+        return json(gets === 1 ? COMPUTER : { ...COMPUTER, status: 'stopped', running_ram_mb: 0 });
       }
       return anyRoute(call);
     });
-    const computer = await c.computers.get('vm-1');
-    const err = await computer.waitForGuest({ timeoutMs: 30, pollMs: 1 }).catch((e) => e);
+    const computer = await c.computers.get('vm-1'); // running
+    rec.calls.length = 0;
+    const err = await computer.waitForGuest({ timeoutMs: 60_000, pollMs: 1 }).catch((e) => e);
     expect(err).toBeInstanceOf(MandalaError);
     expect(err).not.toBeInstanceOf(TimeoutError);
     expect(err.message).toMatch(/is stopped and its guest cannot answer/);
+    // One probe, then the refresh that caught it — and the refusal came from
+    // that refresh rather than from anything the caller passed in.
+    expect(probes).toBe(1);
+    expect(gets).toBe(2);
   });
 
-  it("reports the caller's cancellation, not its own timeout, from inside the refresh", async () => {
-    // Also a guard. Before the fix, `sleep()` recovered the caller's reason on
-    // any pass that had time left, so only an abort arriving AT the deadline
-    // surfaced as a TimeoutError — again a clock-injection case. This pins the
-    // ordinary path: a cancelled wait reports the cancellation.
+  it("reports the caller's cancellation from inside the refresh, not its own timeout", async () => {
+    // Aborted during the REFRESH, which is the path with the missing check —
+    // the previous version aborted during the handle's own get(), before the
+    // wait began (Codex review).
     const control = new AbortController();
+    let gets = 0;
     const { client: c } = client((call) => {
       if (call.path.endsWith('/exec')) return errorJson(409, 'the agent is not up yet');
       if (call.method === 'GET' && call.path === '/computers/vm-1') {
-        control.abort(new Error('the caller stopped waiting'));
-        return json({ ...COMPUTER, status: 'running' });
+        gets += 1;
+        if (gets > 1) control.abort(new Error('the caller stopped waiting'));
+        return json(COMPUTER);
       }
       return anyRoute(call);
     });
@@ -722,6 +795,7 @@ describe('waiting', () => {
       .waitForGuest({ timeoutMs: 60_000, pollMs: 1, signal: control.signal })
       .catch((e) => e);
     expect(err).not.toBeInstanceOf(TimeoutError);
+    expect(gets).toBeGreaterThan(1);
   });
 
   it('probes a stopped computer whose start is in flight instead of refusing it', async () => {

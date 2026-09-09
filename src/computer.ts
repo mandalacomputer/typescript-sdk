@@ -815,16 +815,22 @@ export class Computer {
   }
 
   /**
-   * Guest RAM the platform is holding for this computer right now, or
-   * `undefined` where it did not say.
+   * Guest RAM the platform LAST REPORTED it was holding for this computer, or
+   * `undefined` where the payload this handle holds does not say.
    *
-   * `ramMb` is what this computer is configured with; this is what it is
-   * costing the account's running pool at this moment — `ramMb` while it is up,
-   * and 0 while it is not. The two waits read it to tell a machine on its way
-   * up from one nobody is starting, because `status` cannot: it is read from
-   * the guest process, and a start that has been admitted holds its memory
-   * before that process exists. So `status === 'stopped'` with a non-zero value
-   * here is a boot in progress, and `'suspended'` with one is a resume.
+   * `ramMb` is what this computer is configured with; this is what it was
+   * costing the account's running pool as of the last read — `ramMb` whenever a
+   * process is live OR a start has been admitted for it, and 0 otherwise. The
+   * two waits read it to tell a machine on its way up from one nobody is
+   * starting, because `status` cannot: it is read from the guest process, and
+   * an admitted start holds its memory before that process exists. So
+   * `status === 'stopped'` with a non-zero value here is a boot in progress,
+   * and `'suspended'` with one is a resume.
+   *
+   * A SNAPSHOT, not a live reading, and the distinction is the caller's to
+   * keep: this is whatever the last successful read put on the handle, and a
+   * refresh that failed leaves the previous value in place rather than turning
+   * it into `undefined`. {@link refresh} is what makes it current.
    *
    * `number | undefined` rather than `num()`'s zero, which is the whole point:
    * a host too old to report it, one that could not be reached, or a response
@@ -1789,7 +1795,11 @@ export class Computer {
     // A create may return a stopped computer and the reason its first start
     // failed. refresh() correctly clears that one-attempt field, so retain it
     // for the failure this wait is about before the first poll replaces it.
-    const initialStartError = this.startError;
+    // Retired the moment a reservation is seen: a create's failed attempt is
+    // history once somebody has started the machine since, and holding it for
+    // the life of the wait refused a computer that was coming up on the
+    // strength of an error about a different attempt (Codex review).
+    let initialStartError = this.startError;
     // Success is a verdict, and no verdict is reached on state observed before
     // this call: when every refresh fails transiently, the handle may be
     // holding data from an old list(), and "running" concluded from that —
@@ -1831,6 +1841,7 @@ export class Computer {
           await this.refresh({ signal: deadlineSignal(deadline - Date.now(), signal) });
           observed = true;
           fresh = true;
+          if (this.#startAdmitted()) initialStartError = '';
         } catch (err) {
           // A caller who cancelled leaves now, whatever their reason is named.
           if (signal?.aborted) throw err;
@@ -1876,8 +1887,22 @@ export class Computer {
       // budget, and for the same reason (OPL-4215).
       if ((observed || !attempted) && this.#statusIs('running')) return this;
       // A computer with no disk will never start on its own, and waiting out
-      // the full timeout to say so helps nobody.
+      // the full timeout to say so helps nobody. Unqualified, unlike the two
+      // POWER states below: nothing can be admitted for a machine with no disk,
+      // so no reading could change this answer.
       if (this.buildFailed) throw this.#buildFailure();
+      // The power refusals need a reading OF THEIR OWN, on the same terms the
+      // success above needs one (Codex review of #80; python-sdk #81 had the
+      // same shape). They are claims about what the platform is doing NOW, and
+      // a budget spent entirely on refreshes that failed has learned nothing: a
+      // handle cached at `running_ram_mb: 0`, a host answering 503 for the
+      // whole wait, and another caller starting the machine in between produced
+      // "it is stopped, call start()" about a computer on its way up.
+      //
+      // `!attempted` keeps the zero-budget case this file already carves out
+      // above: with no budget nothing COULD be read, so the handle the caller
+      // passed in is all there is and naming the state beats a bare timeout.
+      const mayRefuse = observed || !attempted;
       // Stopped is stable just like suspended: neither state progresses to
       // running without a start request. In particular, a create that returned
       // start_error used to lose that explanation on refresh and poll until the
@@ -1897,12 +1922,12 @@ export class Computer {
       // platform has already reported; only an actual reservation does, and
       // that is a start somebody made after it.
       const reason = this.startError || initialStartError;
-      if (this.#statusIs('stopped') && reason && !this.#startAdmitted()) {
+      if (mayRefuse && this.#statusIs('stopped') && reason && !this.#startAdmitted()) {
         throw new MandalaError(
           `${this.id} is stopped after it failed to start: ${reason}. Call start() to try again`,
         );
       }
-      if (this.#statusIs('stopped') && this.#nothingAdmitted()) {
+      if (mayRefuse && this.#statusIs('stopped') && this.#nothingAdmitted()) {
         throw new MandalaError(
           `${this.id} is stopped and will not start on its own: call start() to start it`,
         );
@@ -1912,7 +1937,7 @@ export class Computer {
       // record is spent only on the way out of a start that worked, so a resume
       // in flight reads `suspended` for its whole load. Refusing that told a
       // caller to call start() on a machine whose start was already running.
-      if (this.isSuspended && this.#nothingAdmitted()) {
+      if (mayRefuse && this.isSuspended && this.#nothingAdmitted()) {
         throw new MandalaError(
           `${this.id} is suspended and will not start on its own: call start() to resume it`,
         );
