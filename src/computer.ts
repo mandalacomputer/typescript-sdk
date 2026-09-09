@@ -777,10 +777,10 @@ export class Computer {
    *   arrives and where the way past it is written down.
    *
    * On the COMPUTER rather than only on {@link Template.desktop}, and the
-   * platform publishes it in both places for the reason it gives at
-   * `publicComputer`: a computer keeps the image it was cut from while a
-   * template's version can advance, so the template answers a question about
-   * the CATALOGUE and this one answers a question about the MACHINE.
+   * platform publishes it in both places for a reason worth keeping straight: a
+   * computer keeps the image it was cut from while a template's version can
+   * advance, so the template answers a question about the CATALOGUE and this
+   * one answers a question about the MACHINE.
    *
    * WHY THE ABSENCE IS NOT `'x11'` — the one place this getter parts company
    * with every other on this handle. A host deployed before OPL-4223 does not
@@ -812,6 +812,34 @@ export class Computer {
 
   get ramMb(): number {
     return num(this.#data.ram_mb);
+  }
+
+  /**
+   * Guest RAM the platform LAST REPORTED it was holding for this computer, or
+   * `undefined` where the payload this handle holds does not say.
+   *
+   * `ramMb` is what this computer is configured with; this is what it was
+   * costing the account's running pool as of the last read — `ramMb` whenever a
+   * process is live OR a start has been admitted for it, and 0 otherwise. The
+   * two waits read it to tell a machine on its way up from one nobody is
+   * starting, because `status` cannot: it is read from the guest process, and
+   * an admitted start holds its memory before that process exists. So
+   * `status === 'stopped'` with a non-zero value here is a boot in progress,
+   * and `'suspended'` with one is a resume.
+   *
+   * A SNAPSHOT, not a live reading, and the distinction is the caller's to
+   * keep: this is whatever the last successful read put on the handle, and a
+   * refresh that failed leaves the previous value in place rather than turning
+   * it into `undefined`. {@link refresh} is what makes it current.
+   *
+   * `number | undefined` rather than `num()`'s zero, which is the whole point:
+   * a host too old to report it, one that could not be reached, or a response
+   * the platform wrote before reading the computer back has said NOTHING, and
+   * that is not the same as saying zero.
+   */
+  get runningRamMb(): number | undefined {
+    const held = this.#data.running_ram_mb;
+    return typeof held === 'number' && Number.isFinite(held) ? held : undefined;
   }
 
   get diskGb(): number {
@@ -859,8 +887,8 @@ export class Computer {
     // closes the case they were extended for once rather than again: a pixel
     // count is a whole number, and `"1280.5x800.2"` otherwise came back as a
     // display_width_px of 1280.5, which is a screen no screenshot can be.
-    // The platform will not send one — parseDisplay refuses anything Atoi
-    // rejects, and refuses odd numbers on top of that — so this is the guard
+    // The platform will not send one — it refuses anything that is not a whole
+    // number, and refuses odd numbers on top of that — so this is the guard
     // holding the line the API already holds, not a live hazard.
     if (
       w === undefined ||
@@ -1554,6 +1582,77 @@ export class Computer {
   }
 
   /**
+   * A lifecycle state a guest probe cannot recover from, or `undefined`.
+   *
+   * The states are the ones that do not become "the guest answers" by being
+   * waited on: no disk, a boot that failed, and a machine that is not running.
+   * A *suspended* computer is deliberately absent — `exec` is use, and use
+   * resumes a suspended session, so the probe wakes it itself.
+   *
+   * OPL-4628 added the stopped case, which had been costing the full budget and
+   * then reporting "guest did not respond" about a machine that was never
+   * running. The Python SDK refuses the same state in the same place; these two
+   * SDKs answered it as opposites until now.
+   */
+  #guestWaitFailure(): MandalaError | undefined {
+    if (this.buildFailed) return this.#buildFailure();
+    if (this.startError) {
+      return new MandalaError(`${this.id} did not start: ${this.startError}`);
+    }
+    if (this.#statusIs('stopped') && this.#nothingAdmitted()) {
+      return new MandalaError(
+        `${this.id} is stopped and its guest cannot answer: call start() first`,
+      );
+    }
+    return undefined;
+  }
+
+  /**
+   * Whether the platform has said, in as many words, that nothing is on its way
+   * up (OPL-4630).
+   *
+   * `status` cannot answer this. It is read from the guest process, and a start
+   * that has been ADMITTED has no process yet: the platform has taken the
+   * memory, decided the plan allows it, and is loading. Through the whole of
+   * that window `status` reports what the computer was — `stopped` for a cold
+   * boot, `suspended` for a resume, whose session record is only spent once the
+   * load has worked. So the two waits below cannot read `stopped` as "nobody is
+   * starting this", which is what they used to do in one direction each: this
+   * SDK gave up on a boot in progress in waitUntilRunning, and Python's
+   * wait_for_guest did the same.
+   *
+   * `running_ram_mb` is what the platform charges the account's running pool
+   * for, and it is non-zero from admission rather than from boot — so a zero is
+   * the platform saying it has admitted nothing.
+   *
+   * Three states, not two. UNDEFINED is a host that did not say: one too old to
+   * report the field, one that could not be reached, or a response written
+   * before the computer was read back. That is not a zero, and treating it as
+   * one would refuse a wait on the strength of a sentence nobody uttered — so
+   * "cannot tell" waits, which is the direction that costs a timeout rather
+   * than a machine.
+   */
+  #nothingAdmitted(): boolean {
+    const held = this.#data.running_ram_mb;
+    return typeof held === 'number' && Number.isFinite(held) && held === 0;
+  }
+
+  /**
+   * The other end of the same reading: the platform is holding memory for this
+   * computer, so something IS on its way up.
+   *
+   * Not `!#nothingAdmitted()`, and the difference is the absent case. That one
+   * is false here and false there, because a host that did not answer has
+   * neither admitted a start nor said it will not — and the two questions want
+   * that silence answered in opposite directions. "May I refuse?" must say no.
+   * "Is a start under way?" must also say no.
+   */
+  #startAdmitted(): boolean {
+    const held = this.#data.running_ram_mb;
+    return typeof held === 'number' && Number.isFinite(held) && held > 0;
+  }
+
+  /**
    * Wait until a cloned computer's disk has been copied.
    *
    * Returns immediately for anything not being built, so it is safe to call on
@@ -1691,7 +1790,11 @@ export class Computer {
    *
    * Throws rather than waiting out the timeout for states that will not become
    * "running" on their own — a failed build, a stopped machine, and a suspended
-   * session nobody has resumed.
+   * session nobody has resumed. "Nobody has" is the platform's word rather than
+   * an inference from `status`: a start that has been admitted holds its memory
+   * before its process exists, and reads as stopped or suspended meanwhile, so
+   * this waits for one of those and refuses only a computer the platform says
+   * is holding nothing. A host that does not say is waited on.
    */
   async waitUntilRunning(opts: WaitOptions = {}): Promise<this> {
     const { timeoutMs = 120_000, pollMs = 2_000, signal } = opts;
@@ -1700,16 +1803,26 @@ export class Computer {
     // A create may return a stopped computer and the reason its first start
     // failed. refresh() correctly clears that one-attempt field, so retain it
     // for the failure this wait is about before the first poll replaces it.
-    const initialStartError = this.startError;
+    // Retired the moment a reservation is seen: a create's failed attempt is
+    // history once somebody has started the machine since, and holding it for
+    // the life of the wait refused a computer that was coming up on the
+    // strength of an error about a different attempt (Codex review).
+    let initialStartError = this.startError;
     // Success is a verdict, and no verdict is reached on state observed before
     // this call: when every refresh fails transiently, the handle may be
     // holding data from an old list(), and "running" concluded from that —
     // while the host answers 503 — is a claim about a machine nobody has
-    // actually looked at. The fail-fast throws below are NOT gated the same
-    // way: neither a failed build nor a suspended session becomes "running" on
-    // its own, so acting on the last data anyone has beats spinning out the
-    // full timeout to learn the same thing — and the data may be fresh from a
-    // get() one line before this call.
+    // actually looked at.
+    //
+    // A REFUSAL IS A VERDICT TOO, and this comment used to argue otherwise: the
+    // fail-fast throws were ungated on the grounds that a stopped or suspended
+    // reading cannot go stale in the caller's favour. It can. A start admitted
+    // by anybody reads as stopped or suspended until its guest process exists
+    // (OPL-4630), so the last data anyone has is exactly what may now be wrong,
+    // and the wait spends its whole budget failing to find out. The power
+    // refusals below are gated on `mayRefuse` for that reason. The failed build
+    // is not: nothing recovers that computer into a startable one, so no later
+    // reading could overturn it.
     let observed = false;
     // Whether the LATEST refresh answered — waitUntilBuilt's flag, for its
     // reason. `observed` cannot carry this second meaning as well: it is what
@@ -1742,6 +1855,7 @@ export class Computer {
           await this.refresh({ signal: deadlineSignal(deadline - Date.now(), signal) });
           observed = true;
           fresh = true;
+          if (this.#startAdmitted()) initialStartError = '';
         } catch (err) {
           // A caller who cancelled leaves now, whatever their reason is named.
           if (signal?.aborted) throw err;
@@ -1787,24 +1901,57 @@ export class Computer {
       // budget, and for the same reason (OPL-4215).
       if ((observed || !attempted) && this.#statusIs('running')) return this;
       // A computer with no disk will never start on its own, and waiting out
-      // the full timeout to say so helps nobody.
+      // the full timeout to say so helps nobody. Unqualified, unlike the two
+      // POWER states below: nothing can be admitted for a machine with no disk,
+      // so no reading could change this answer.
       if (this.buildFailed) throw this.#buildFailure();
+      // The power refusals need a reading OF THEIR OWN, on the same terms the
+      // success above needs one (Codex review of #80; python-sdk #81 had the
+      // same shape). They are claims about what the platform is doing NOW, and
+      // a budget spent entirely on refreshes that failed has learned nothing: a
+      // handle cached at `running_ram_mb: 0`, a host answering 503 for the
+      // whole wait, and another caller starting the machine in between produced
+      // "it is stopped, call start()" about a computer on its way up.
+      //
+      // `!attempted` keeps the zero-budget case this file already carves out
+      // above: with no budget nothing COULD be read, so the handle the caller
+      // passed in is all there is and naming the state beats a bare timeout.
+      const mayRefuse = observed || !attempted;
       // Stopped is stable just like suspended: neither state progresses to
       // running without a start request. In particular, a create that returned
       // start_error used to lose that explanation on refresh and poll until the
       // full timeout while repeatedly observing the same stopped state.
-      if (this.#statusIs('stopped')) {
-        const reason = this.startError || initialStartError;
+      //
+      // Unless a start has already been admitted, which is the whole of
+      // OPL-4630: a boot that is loading reads `stopped` until its process
+      // exists, and this throw abandoned it. Now it refuses only what the
+      // platform has actually called idle. See #nothingAdmitted.
+      //
+      // A KNOWN FAILED BOOT is refused on weaker evidence than an ordinary
+      // stopped machine, and has to be: `running_ram_mb` is absent from exactly
+      // the response that carries `start_error` — a create that could not boot
+      // its machine does not report the pool — so requiring an explicit zero
+      // here polled out the whole timeout and lost the one sentence that said
+      // why. Silence does not overturn a failure the platform has already
+      // reported; only an actual reservation does, and that is a start somebody
+      // made after it.
+      const reason = this.startError || initialStartError;
+      if (mayRefuse && this.#statusIs('stopped') && reason && !this.#startAdmitted()) {
         throw new MandalaError(
-          reason
-            ? `${this.id} is stopped after it failed to start: ${reason}. Call start() to try again`
-            : `${this.id} is stopped and will not start on its own: call start() to start it`,
+          `${this.id} is stopped after it failed to start: ${reason}. Call start() to try again`,
         );
       }
-      // Nor will a suspended one. Left to spin it reports a machine that is
-      // one call from running as a timeout — the least informative answer
-      // available about the one case the caller can fix in a line.
-      if (this.isSuspended) {
+      if (mayRefuse && this.#statusIs('stopped') && this.#nothingAdmitted()) {
+        throw new MandalaError(
+          `${this.id} is stopped and will not start on its own: call start() to start it`,
+        );
+      }
+      // Nor will a suspended one — with the same exception, and it bites harder
+      // here. A RESUME holds its memory from admission too, and the suspend
+      // record is spent only on the way out of a start that worked, so a resume
+      // in flight reads `suspended` for its whole load. Refusing that told a
+      // caller to call start() on a machine whose start was already running.
+      if (mayRefuse && this.isSuspended && this.#nothingAdmitted()) {
         throw new MandalaError(
           `${this.id} is suspended and will not start on its own: call start() to resume it`,
         );
@@ -1853,11 +2000,17 @@ export class Computer {
    * session 0 and replies well before anyone has logged in. When you need the
    * desktop rather than the machine, poll {@link screenshot}.
    *
-   * Throws rather than waiting out the timeout on a failed build, which nothing
-   * inside will ever answer from. A *suspended* computer is not refused here,
-   * unlike in {@link waitUntilRunning}: running a command resumes one, so the
-   * probe both wakes the machine and gets its answer — which is a side effect
-   * worth knowing about on a wait that reads as passive.
+   * Throws rather than waiting out the timeout on a failed build, a boot that
+   * failed, or a machine that is stopped — nothing inside any of those will
+   * ever answer, and `start()` is the fix for the last two. A *suspended*
+   * computer is not refused here, unlike in {@link waitUntilRunning}: running a
+   * command resumes one, so the probe both wakes the machine and gets its
+   * answer — which is a side effect worth knowing about on a wait that reads as
+   * passive.
+   *
+   * Not entirely passive in one more way since OPL-4628: a probe failure this
+   * wait is going to sit out is followed by a state re-read, so a computer that
+   * stops mid-wait is reported as stopped rather than as a quiet guest.
    */
   async waitForGuest(opts: WaitOptions = {}): Promise<this> {
     const { timeoutMs = 180_000, pollMs = 3_000, signal } = opts;
@@ -1886,10 +2039,19 @@ export class Computer {
       let delayMs = pollMs;
       // Nothing inside a computer with no disk is ever going to answer, and
       // spending three minutes to say so helps nobody — waitUntilRunning's
-      // rule, for its reason. Read off the handle rather than through a fresh
-      // GET, because this wait probes the guest and never refreshes: what it
-      // has is what the create, clone or get that produced this handle saw.
-      if (this.buildFailed) throw this.#buildFailure();
+      // rule, for its reason. Same rule for a stopped machine, which is what a
+      // resume-only start leaves behind when no saved session remained
+      // (OPL-3619): its guest cannot answer either, and "call start() first" is
+      // an answer the caller can act on where a three-minute silence is not.
+      //
+      // Read off the handle rather than through a fresh GET on the first pass.
+      // A handle that says stopped came from a create, clone, get or start one
+      // line before this call, and staleness is bounded by the refresh below:
+      // every probe failure this loop waits out re-reads the state, so a
+      // machine that stops mid-wait is noticed on the next pass rather than at
+      // the deadline.
+      const failure = this.#guestWaitFailure();
+      if (failure) throw failure;
       if (Date.now() < deadline) {
         try {
           probed = true;
@@ -1939,6 +2101,41 @@ export class Computer {
           // loop was the one still exposed to it.
           if (!isDeadlineAbort(err) && !isTransientForPoll(err)) throw err;
           delayMs = retryDelay(pollMs, err);
+          // A failed probe may also mean the cached lifecycle state is stale,
+          // and this is the read that turns "the guest is quiet" into "it is
+          // stopped; call start()" — the check at the top of the next pass has
+          // nothing else to work from. The Python SDK re-reads in the same
+          // place for the same reason.
+          //
+          // Bounded by what is left of the wait, and its own transient failure
+          // is no more final than the probe's: a host that cannot be reached
+          // leaves the cached state alone and the loop waits the interval out.
+          // A permanent one is the caller's to see, exactly as above.
+          const left = deadline - Date.now();
+          if (left > 0) {
+            try {
+              await this.refresh({ signal: deadlineSignal(left, signal) });
+              // Acted on HERE rather than at the top of the next pass, which is
+              // after the deadline check below: a refresh that read `stopped`
+              // on the last poll of a wait would otherwise be thrown away and
+              // the caller told the guest did not respond — about a machine
+              // this loop had just learned was not running (Codex review).
+              const found = this.#guestWaitFailure();
+              if (found) throw found;
+            } catch (inner) {
+              // The caller's cancellation first, and before any predicate: the
+              // outer catch has said so since OPL-3724 and this one did not, so
+              // an abort landing inside the refresh came back as this wait's
+              // own TimeoutError — the reason replaced by a symptom.
+              if (signal?.aborted) throw inner;
+              if (!isDeadlineAbort(inner) && !isTransientForPoll(inner)) throw inner;
+              // A rate limit answered on the refresh is the platform's own
+              // answer to "how long", and dropping it turned a 1s Retry-After
+              // into the probe's 1ms interval. The longer of the two wins: the
+              // probe's backoff is a floor this must not lower.
+              delayMs = Math.max(delayMs, retryDelay(pollMs, inner));
+            }
+          }
         }
       }
       if (Date.now() >= deadline) {

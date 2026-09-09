@@ -670,7 +670,7 @@ export type ExecArgs = {
 };
 
 /**
- * The platform's bounds on an exec environment, mirrored from execbg.go.
+ * The platform's bounds on an exec environment, mirrored.
  *
  * Mirrored rather than left to the server for this file's usual reason: they
  * are refusals knowable without a round trip. Neither is a limit anybody

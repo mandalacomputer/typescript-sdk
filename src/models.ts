@@ -1684,7 +1684,7 @@ const snapshotUnreachable = (d: Record<string, unknown>): boolean => {
  * A snapshot's id, refused when there is not one.
  *
  * Not a hazard to the unreachable placeholder rows this listing exists to
- * surface: `projection.ts` sets `id` on every row it emits, bare ones included
+ * surface: the platform sets `id` on every row it emits, bare ones included
  * — what a bare row drops is `computer_id`, `state`, `kind` and the rest, which
  * is exactly what {@link isUnreachableStub} recognises it by. A row short an
  * `id` is drift, not a placeholder.
