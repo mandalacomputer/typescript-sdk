@@ -994,9 +994,9 @@ describe('what a payload cannot be allowed to mean', () => {
    * only thing on the payload that separates them — and two things a caller
    * acts on change with it: a window id is a compositor address rather than an
    * X window id, and a move or resize of a tiled window is refused rather than
-   * quietly applied to nothing. `publicComputer` publishes it on the computer
-   * as well as on the template because a computer keeps the image it was cut
-   * from while a template's version can advance.
+   * quietly applied to nothing. The platform publishes it on the computer as
+   * well as on the template because a computer keeps the image it was cut from
+   * while a template's version can advance.
    */
   it('says which display protocol the desktop speaks', async () => {
     const { client: c } = client(() => json(WAYLAND_COMPUTER));
@@ -3581,7 +3581,7 @@ describe('a body the route did not send', () => {
 
   it('still admits the unreachable placeholder this listing exists to surface', async () => {
     // The row that fear about the refusal above lands on, and it is safe:
-    // `projection.ts` sets `id` on every row it emits, bare ones included. What
+    // the platform sets `id` on every row it emits, bare ones included. What
     // a placeholder drops is `computer_id`, `state` and the rest — which is
     // what it is recognised by.
     const { client: c } = client((call) =>
