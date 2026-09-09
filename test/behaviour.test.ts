@@ -3185,7 +3185,7 @@ describe('power', () => {
   ])('refreshes after a resume-only Ack from %s and reports %s', async (initialStatus, status) => {
     let started = false;
     const { rec, client: c } = client((call) => {
-      if (call.path.endsWith('/start')) {
+      if (call.method === 'POST' && call.path.endsWith('/start')) {
         started = true;
         return json({ ok: true });
       }
@@ -3202,6 +3202,8 @@ describe('power', () => {
     expect(await computer.start({ resumeOnly: true })).toBe(computer);
     expect(computer.id).toBe('vm-1');
     expect(computer.status).toBe(status);
+    // A successful no-op is not the failed initial start that startError describes.
+    expect(computer.startError).toBe('');
     expect(rec.routes()).toEqual([
       ['POST', 'computers/vm-1/start'],
       ['GET', 'computers/vm-1'],

@@ -501,6 +501,24 @@ describe('screenshotQuery', () => {
   });
 });
 
+describe('startQuery', () => {
+  it('sends nothing for an ordinary start, which is the default', () => {
+    expect(P.startQuery()).toEqual({});
+    expect(P.startQuery(false)).toEqual({});
+  });
+
+  it('spells resume_only as the documented literal true', () => {
+    expect(P.startQuery(true)).toEqual({ resume_only: 'true' });
+  });
+
+  it('refuses non-booleans rather than silently changing start behavior', () => {
+    for (const bad of ['false', 'true', 0, 1, null, new Boolean(false)]) {
+      expect(() => P.startQuery(bad as unknown as boolean)).toThrow(ValidationError);
+      expect(() => P.startQuery(bad as unknown as boolean)).toThrow(/resumeOnly/);
+    }
+  });
+});
+
 describe('stopQuery', () => {
   it('sends nothing for the graceful stop, which is the default', () => {
     expect(P.stopQuery()).toEqual({});
