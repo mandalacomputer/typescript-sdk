@@ -533,6 +533,63 @@ describe('waiting', () => {
     expect(attempts).toBe(2);
   });
 
+  it('refuses a stopped computer instead of probing a guest that cannot answer', async () => {
+    // What a resume-only start leaves behind when no saved session remained
+    // (OPL-3619). The platform answers a guest op on a stopped computer 409,
+    // which this loop reads as "the agent is not up yet", so before OPL-4628
+    // this cost the whole budget and then blamed the guest. The long timeout is
+    // the test: it must not be reached, and no probe should be sent at all.
+    const { rec, client: c } = client((call) =>
+      call.method === 'GET' && call.path === '/computers/vm-1'
+        ? json({ ...COMPUTER, status: 'stopped' })
+        : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    rec.calls.length = 0;
+    const started = Date.now();
+    await expect(computer.waitForGuest({ timeoutMs: 60_000, pollMs: 1_000 })).rejects.toThrow(
+      /is stopped and its guest cannot answer: call start\(\) first/,
+    );
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(rec.calls).toHaveLength(0);
+  });
+
+  it('still resumes a suspended computer with the probe itself', async () => {
+    // The deliberate exception the refusal above must not swallow: exec is use,
+    // and use resumes a suspended session, so this wait wakes the machine.
+    const { client: c } = client((call) =>
+      call.method === 'GET' && call.path === '/computers/vm-1'
+        ? json({ ...COMPUTER, status: 'suspended' })
+        : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    await expect(computer.waitForGuest({ timeoutMs: 5_000, pollMs: 1 })).resolves.toBe(computer);
+  });
+
+  it('re-reads the state a waited-out probe failure may have made stale', async () => {
+    // A computer that stops mid-wait: the probe answers 409, which is waited
+    // out, and only the refresh that follows can turn that into the sentence
+    // the caller can act on rather than three minutes of silence.
+    let stopped = false;
+    const { rec, client: c } = client((call) => {
+      if (call.path.endsWith('/exec')) {
+        stopped = true;
+        return errorJson(409, 'the agent is not up yet');
+      }
+      if (call.method === 'GET' && call.path === '/computers/vm-1') {
+        return json({ ...COMPUTER, status: stopped ? 'stopped' : 'running' });
+      }
+      return anyRoute(call);
+    });
+    const computer = await c.computers.get('vm-1');
+    rec.calls.length = 0;
+    await expect(computer.waitForGuest({ timeoutMs: 60_000, pollMs: 1 })).rejects.toThrow(
+      /is stopped and its guest cannot answer/,
+    );
+    // One probe, then the re-read that caught it — not a budget's worth.
+    expect(rec.routes().filter(([, p]) => p.endsWith('/exec'))).toHaveLength(1);
+  });
+
   it('does not turn a malformed guest request into a readiness timeout', async () => {
     const { rec, client: c } = client((call) =>
       call.path.endsWith('/exec') ? errorJson(400, 'bad probe') : anyRoute(call),

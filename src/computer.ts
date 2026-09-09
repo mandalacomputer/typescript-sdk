@@ -1546,6 +1546,32 @@ export class Computer {
   }
 
   /**
+   * A lifecycle state a guest probe cannot recover from, or `undefined`.
+   *
+   * The states are the ones that do not become "the guest answers" by being
+   * waited on: no disk, a boot that failed, and a machine that is not running.
+   * A *suspended* computer is deliberately absent — `exec` is use, and use
+   * resumes a suspended session, so the probe wakes it itself.
+   *
+   * OPL-4628 added the stopped case, which had been costing the full budget and
+   * then reporting "guest did not respond" about a machine that was never
+   * running. The Python SDK refuses the same state in the same place; these two
+   * SDKs answered it as opposites until now.
+   */
+  #guestWaitFailure(): MandalaError | undefined {
+    if (this.buildFailed) return this.#buildFailure();
+    if (this.startError) {
+      return new MandalaError(`${this.id} did not start: ${this.startError}`);
+    }
+    if (this.#statusIs('stopped')) {
+      return new MandalaError(
+        `${this.id} is stopped and its guest cannot answer: call start() first`,
+      );
+    }
+    return undefined;
+  }
+
+  /**
    * Wait until a cloned computer's disk has been copied.
    *
    * Returns immediately for anything not being built, so it is safe to call on
@@ -1845,11 +1871,17 @@ export class Computer {
    * session 0 and replies well before anyone has logged in. When you need the
    * desktop rather than the machine, poll {@link screenshot}.
    *
-   * Throws rather than waiting out the timeout on a failed build, which nothing
-   * inside will ever answer from. A *suspended* computer is not refused here,
-   * unlike in {@link waitUntilRunning}: running a command resumes one, so the
-   * probe both wakes the machine and gets its answer — which is a side effect
-   * worth knowing about on a wait that reads as passive.
+   * Throws rather than waiting out the timeout on a failed build, a boot that
+   * failed, or a machine that is stopped — nothing inside any of those will
+   * ever answer, and `start()` is the fix for the last two. A *suspended*
+   * computer is not refused here, unlike in {@link waitUntilRunning}: running a
+   * command resumes one, so the probe both wakes the machine and gets its
+   * answer — which is a side effect worth knowing about on a wait that reads as
+   * passive.
+   *
+   * Not entirely passive in one more way since OPL-4628: a probe failure this
+   * wait is going to sit out is followed by a state re-read, so a computer that
+   * stops mid-wait is reported as stopped rather than as a quiet guest.
    */
   async waitForGuest(opts: WaitOptions = {}): Promise<this> {
     const { timeoutMs = 180_000, pollMs = 3_000, signal } = opts;
@@ -1878,10 +1910,19 @@ export class Computer {
       let delayMs = pollMs;
       // Nothing inside a computer with no disk is ever going to answer, and
       // spending three minutes to say so helps nobody — waitUntilRunning's
-      // rule, for its reason. Read off the handle rather than through a fresh
-      // GET, because this wait probes the guest and never refreshes: what it
-      // has is what the create, clone or get that produced this handle saw.
-      if (this.buildFailed) throw this.#buildFailure();
+      // rule, for its reason. Same rule for a stopped machine, which is what a
+      // resume-only start leaves behind when no saved session remained
+      // (OPL-3619): its guest cannot answer either, and "call start() first" is
+      // an answer the caller can act on where a three-minute silence is not.
+      //
+      // Read off the handle rather than through a fresh GET on the first pass.
+      // A handle that says stopped came from a create, clone, get or start one
+      // line before this call, and staleness is bounded by the refresh below:
+      // every probe failure this loop waits out re-reads the state, so a
+      // machine that stops mid-wait is noticed on the next pass rather than at
+      // the deadline.
+      const failure = this.#guestWaitFailure();
+      if (failure) throw failure;
       if (Date.now() < deadline) {
         try {
           probed = true;
@@ -1931,6 +1972,24 @@ export class Computer {
           // loop was the one still exposed to it.
           if (!isDeadlineAbort(err) && !isTransientForPoll(err)) throw err;
           delayMs = retryDelay(pollMs, err);
+          // A failed probe may also mean the cached lifecycle state is stale,
+          // and this is the read that turns "the guest is quiet" into "it is
+          // stopped; call start()" — the check at the top of the next pass has
+          // nothing else to work from. The Python SDK re-reads in the same
+          // place for the same reason.
+          //
+          // Bounded by what is left of the wait, and its own transient failure
+          // is no more final than the probe's: a host that cannot be reached
+          // leaves the cached state alone and the loop waits the interval out.
+          // A permanent one is the caller's to see, exactly as above.
+          const left = deadline - Date.now();
+          if (left > 0) {
+            try {
+              await this.refresh({ signal: deadlineSignal(left, signal) });
+            } catch (inner) {
+              if (!isDeadlineAbort(inner) && !isTransientForPoll(inner)) throw inner;
+            }
+          }
         }
       }
       if (Date.now() >= deadline) {
