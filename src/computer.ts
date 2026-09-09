@@ -1921,12 +1921,12 @@ export class Computer {
       //
       // A KNOWN FAILED BOOT is refused on weaker evidence than an ordinary
       // stopped machine, and has to be: `running_ram_mb` is absent from exactly
-      // the response that carries `start_error` — a create answers from
-      // describeVM, which has never held the field — so requiring an explicit
-      // zero here polled out the whole timeout and lost the one sentence that
-      // said why (Codex review). Silence does not overturn a failure the
-      // platform has already reported; only an actual reservation does, and
-      // that is a start somebody made after it.
+      // the response that carries `start_error` — a create that could not boot
+      // its machine does not report the pool — so requiring an explicit zero
+      // here polled out the whole timeout and lost the one sentence that said
+      // why. Silence does not overturn a failure the platform has already
+      // reported; only an actual reservation does, and that is a start somebody
+      // made after it.
       const reason = this.startError || initialStartError;
       if (mayRefuse && this.#statusIs('stopped') && reason && !this.#startAdmitted()) {
         throw new MandalaError(

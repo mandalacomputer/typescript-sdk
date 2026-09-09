@@ -146,9 +146,9 @@ describe('waiting', () => {
   });
 
   it('keeps a failed boot fast even when the platform did not report its pool', async () => {
-    // The regression Codex found in the first cut of OPL-4628. `running_ram_mb`
-    // is absent from exactly the response that carries `start_error` — a create
-    // answers from describeVM, which has never held the field — so gating this
+    // The regression in the first cut of OPL-4628. `running_ram_mb` is absent
+    // from exactly the response that carries `start_error` — a create that
+    // could not boot its machine does not report the pool — so gating this
     // refusal on an explicit zero polled out the whole timeout and lost the
     // sentence that said why. The long timeout is the test.
     const { client: c } = client((call) => {
