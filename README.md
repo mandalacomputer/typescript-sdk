@@ -1093,14 +1093,15 @@ is refreshed when the API returns only an acknowledgement, so inspect `c.status`
 before treating it as running. Omitting `resumeOnly` or passing `false` keeps
 the normal start behavior.
 
-The two waits answer a stopped computer very differently, so which one you reach
-for after a no-op matters. `waitUntilRunning()` throws at once — a stopped
-machine is on its fail-fast list, and that is the answer you want. But
-`waitForGuest()` polls for its whole 180-second budget and then reports that the
-guest did not respond: the platform answers a guest operation on a stopped
-computer with 409, and that loop reads 409 as "the agent is not up yet". Neither
-is a substitute for checking `c.status`. When the intent was to boot the
-computer, call ordinary `start()`.
+What to do next depends on what the platform is holding for the computer, and
+both waits read the same field to decide. `waitUntilRunning()` and
+`waitForGuest()` each refuse a stopped computer the platform reports it is
+holding nothing for — which is the ordinary outcome of a no-op — and say to call
+`start()`. Where the platform does not report the figure at all, neither refuses:
+they wait, and spend the whole timeout. So a no-op followed by a wait costs you
+an error quickly or a timeout slowly, and neither is a substitute for reading
+`c.status` — or `c.runningRamMb`, which is the figure they are reading. When the
+intent was to boot the computer, call ordinary `start()`.
 
 A computer can arrive here without anyone asking: its host suspends anything
 nobody has used for the host's idle window — 30 minutes by default. Input, exec
