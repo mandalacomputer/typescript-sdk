@@ -145,6 +145,53 @@ describe('waiting', () => {
     );
   });
 
+  it('keeps a failed boot fast even when the platform did not report its pool', async () => {
+    // The regression Codex found in the first cut of OPL-4628. `running_ram_mb`
+    // is absent from exactly the response that carries `start_error` — a create
+    // answers from describeVM, which has never held the field — so gating this
+    // refusal on an explicit zero polled out the whole timeout and lost the
+    // sentence that said why. The long timeout is the test.
+    const { client: c } = client((call) => {
+      if (call.method === 'POST' && call.path === '/computers') {
+        return json({
+          computer: { ...COMPUTER, status: 'stopped' },
+          start_error: 'no host had room',
+        });
+      }
+      return json({ ...COMPUTER, status: 'stopped' });
+    });
+    const computer = await c.computers.create({ template: 'base' });
+    const started = Date.now();
+    const err = await computer.waitUntilRunning({ timeoutMs: 60_000, pollMs: 1 }).catch((e) => e);
+    expect(err).toBeInstanceOf(MandalaError);
+    expect(err).not.toBeInstanceOf(TimeoutError);
+    expect(err.message).toContain('no host had room');
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
+  it('lets an actual reservation overturn an earlier failed boot', async () => {
+    // The other side of it: somebody started the machine after that failure, so
+    // the create's explanation is history and this wait is for the start that
+    // is running now.
+    let polls = 0;
+    const { client: c } = client((call) => {
+      if (call.method === 'POST' && call.path === '/computers') {
+        return json({
+          computer: { ...COMPUTER, status: 'stopped' },
+          start_error: 'no host had room',
+        });
+      }
+      polls += 1;
+      return json(
+        polls < 3 ? { ...COMPUTER, status: 'stopped', running_ram_mb: COMPUTER.ram_mb } : COMPUTER,
+      );
+    });
+    const computer = await c.computers.create({ template: 'base' });
+    await expect(computer.waitUntilRunning({ timeoutMs: 60_000, pollMs: 1 })).resolves.toBe(
+      computer,
+    );
+  });
+
   it('waits for a start already in flight rather than refusing it', async () => {
     // OPL-4630. A cold boot that has been admitted holds its memory before its
     // process exists, and reads `stopped` for the whole of that load. Refusing
@@ -608,6 +655,73 @@ describe('waiting', () => {
     );
     expect(Date.now() - started).toBeLessThan(1_000);
     expect(rec.calls).toHaveLength(0);
+  });
+
+  it('waits out a rate limit the refresh asked for, not just the probe', async () => {
+    // The refresh's own Retry-After was dropped, so a platform asking for a
+    // second got the probe's 1ms interval instead. The longer of the two wins,
+    // and the probe's backoff stays a floor this must not lower.
+    let probes = 0;
+    let gets = 0;
+    const { client: c } = client((call) => {
+      if (call.path.endsWith('/exec')) {
+        probes += 1;
+        return probes === 1 ? errorJson(409, 'the agent is not up yet') : json(EXEC_OK);
+      }
+      if (call.method === 'GET' && call.path === '/computers/vm-1') {
+        // The handle's own get() first; the rate limit is what the WAIT's
+        // refresh meets, which is the error whose Retry-After was dropped.
+        gets += 1;
+        return gets === 1 ? json(COMPUTER) : errorJson(429, 'slow down', { 'Retry-After': '0.05' });
+      }
+      return anyRoute(call);
+    });
+    const computer = await c.computers.get('vm-1');
+    const started = Date.now();
+    await expect(computer.waitForGuest({ timeoutMs: 5_000, pollMs: 1 })).resolves.toBe(computer);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(45);
+    expect(probes).toBe(2);
+  });
+
+  it('acts on a stopped reading the probe-failure refresh discovers', async () => {
+    // A guard rather than a reproduction: the bug Codex found here is that the
+    // reading was only acted on at the top of the NEXT pass, which is after the
+    // deadline check, so it was thrown away on the last poll of a wait. Landing
+    // the deadline inside that window needs an injected clock; what this pins
+    // is that the reading is acted on at all, and with the right error type.
+    const { client: c } = client((call) => {
+      if (call.path.endsWith('/exec')) return errorJson(409, 'the agent is not up yet');
+      if (call.method === 'GET' && call.path === '/computers/vm-1') {
+        return json({ ...COMPUTER, status: 'stopped', running_ram_mb: 0 });
+      }
+      return anyRoute(call);
+    });
+    const computer = await c.computers.get('vm-1');
+    const err = await computer.waitForGuest({ timeoutMs: 30, pollMs: 1 }).catch((e) => e);
+    expect(err).toBeInstanceOf(MandalaError);
+    expect(err).not.toBeInstanceOf(TimeoutError);
+    expect(err.message).toMatch(/is stopped and its guest cannot answer/);
+  });
+
+  it("reports the caller's cancellation, not its own timeout, from inside the refresh", async () => {
+    // Also a guard. Before the fix, `sleep()` recovered the caller's reason on
+    // any pass that had time left, so only an abort arriving AT the deadline
+    // surfaced as a TimeoutError — again a clock-injection case. This pins the
+    // ordinary path: a cancelled wait reports the cancellation.
+    const control = new AbortController();
+    const { client: c } = client((call) => {
+      if (call.path.endsWith('/exec')) return errorJson(409, 'the agent is not up yet');
+      if (call.method === 'GET' && call.path === '/computers/vm-1') {
+        control.abort(new Error('the caller stopped waiting'));
+        return json({ ...COMPUTER, status: 'running' });
+      }
+      return anyRoute(call);
+    });
+    const computer = await c.computers.get('vm-1');
+    const err = await computer
+      .waitForGuest({ timeoutMs: 60_000, pollMs: 1, signal: control.signal })
+      .catch((e) => e);
+    expect(err).not.toBeInstanceOf(TimeoutError);
   });
 
   it('probes a stopped computer whose start is in flight instead of refusing it', async () => {
