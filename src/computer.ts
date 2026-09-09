@@ -1019,6 +1019,14 @@ export class Computer {
    * request succeeds without booting the stopped computer. Success does not
    * guarantee it is running; this handle reflects the state returned by the
    * API, refreshed when the action returns only an acknowledgement.
+   *
+   * Which wait comes next matters, because the two treat a stopped computer as
+   * opposites. {@link waitUntilRunning} throws immediately — a stopped machine
+   * is on its fail-fast list. {@link waitForGuest} does not: a guest operation
+   * on a stopped computer is answered 409, which its loop reads as an agent
+   * that is not up yet, so it polls out the full budget before reporting a
+   * guest that never had a chance to answer. Read `status` rather than either.
+   * Call plain `start()` when the intent was to boot the computer.
    */
   async start(opts: { resumeOnly?: boolean } & CallOptions = {}): Promise<this> {
     return this.#power('start', opts, P.startQuery(opts.resumeOnly));
