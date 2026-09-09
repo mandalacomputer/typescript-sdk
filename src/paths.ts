@@ -1413,6 +1413,10 @@ export function screenshotQuery(width?: number, fresh?: boolean): Query | undefi
 export const stopQuery = (force?: boolean): Query =>
   flag(force, 'force') ? { force: 'true' } : {};
 
+/** Only literal `true` is documented; false and omission use normal start behavior. */
+export const startQuery = (resumeOnly?: boolean): Query =>
+  flag(resumeOnly, 'resumeOnly') ? { resume_only: 'true' } : {};
+
 // --- usage ----------------------------------------------------------------
 
 /**

@@ -1086,6 +1086,13 @@ console.log(c.isSuspended, c.suspendedAt);
 await c.start();                              // same desktop, ~1s
 ```
 
+`await c.start({ resumeOnly: true })` resumes only if a saved session still
+exists. If the computer is stopped without one, the request succeeds without
+booting it. Success therefore does not guarantee a running computer. The handle
+is refreshed when the API returns only an acknowledgement, so inspect `c.status`
+before treating it as running. Omitting `resumeOnly` or passing `false` keeps
+the normal start behavior.
+
 A computer can arrive here without anyone asking: its host suspends anything
 nobody has used for the host's idle window — 30 minutes by default. Input, exec
 and file transfers resume it automatically. **Screenshots deliberately do not

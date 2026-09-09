@@ -199,7 +199,7 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
     ['body:name', 'body:cpu', 'body:ram_mb', 'body:disk_gb', 'body:idle_suspend_min'],
   ],
   ['DELETE computers/:id', ['query:snapshots', 'query:expect']],
-  ['POST computers/:id/start', []],
+  ['POST computers/:id/start', ['query:resume_only']],
   ['POST computers/:id/stop', ['query:force']],
   ['POST computers/:id/suspend', []],
   ['POST computers/:id/restart', []],
