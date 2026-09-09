@@ -1563,12 +1563,42 @@ export class Computer {
     if (this.startError) {
       return new MandalaError(`${this.id} did not start: ${this.startError}`);
     }
-    if (this.#statusIs('stopped')) {
+    if (this.#statusIs('stopped') && this.#nothingAdmitted()) {
       return new MandalaError(
         `${this.id} is stopped and its guest cannot answer: call start() first`,
       );
     }
     return undefined;
+  }
+
+  /**
+   * Whether the platform has said, in as many words, that nothing is on its way
+   * up (OPL-4630).
+   *
+   * `status` cannot answer this. It is read from the guest process, and a start
+   * that has been ADMITTED has no process yet: the platform has taken the
+   * memory, decided the plan allows it, and is loading. Through the whole of
+   * that window `status` reports what the computer was — `stopped` for a cold
+   * boot, `suspended` for a resume, whose session record is only spent once the
+   * load has worked. So the two waits below cannot read `stopped` as "nobody is
+   * starting this", which is what they used to do in one direction each: this
+   * SDK gave up on a boot in progress in waitUntilRunning, and Python's
+   * wait_for_guest did the same.
+   *
+   * `running_ram_mb` is what the platform charges the account's running pool
+   * for, and it is non-zero from admission rather than from boot — so a zero is
+   * the platform saying it has admitted nothing.
+   *
+   * Three states, not two. UNDEFINED is a host that did not say: one too old to
+   * report the field, one that could not be reached, or a response written
+   * before the computer was read back. That is not a zero, and treating it as
+   * one would refuse a wait on the strength of a sentence nobody uttered — so
+   * "cannot tell" waits, which is the direction that costs a timeout rather
+   * than a machine.
+   */
+  #nothingAdmitted(): boolean {
+    const held = this.#data.running_ram_mb;
+    return typeof held === 'number' && Number.isFinite(held) && held === 0;
   }
 
   /**
@@ -1709,7 +1739,11 @@ export class Computer {
    *
    * Throws rather than waiting out the timeout for states that will not become
    * "running" on their own — a failed build, a stopped machine, and a suspended
-   * session nobody has resumed.
+   * session nobody has resumed. "Nobody has" is the platform's word rather than
+   * an inference from `status`: a start that has been admitted holds its memory
+   * before its process exists, and reads as stopped or suspended meanwhile, so
+   * this waits for one of those and refuses only a computer the platform says
+   * is holding nothing. A host that does not say is waited on.
    */
   async waitUntilRunning(opts: WaitOptions = {}): Promise<this> {
     const { timeoutMs = 120_000, pollMs = 2_000, signal } = opts;
@@ -1811,7 +1845,12 @@ export class Computer {
       // running without a start request. In particular, a create that returned
       // start_error used to lose that explanation on refresh and poll until the
       // full timeout while repeatedly observing the same stopped state.
-      if (this.#statusIs('stopped')) {
+      //
+      // Unless a start has already been admitted, which is the whole of
+      // OPL-4630: a boot that is loading reads `stopped` until its process
+      // exists, and this throw abandoned it. Now it refuses only what the
+      // platform has actually called idle. See #nothingAdmitted.
+      if (this.#statusIs('stopped') && this.#nothingAdmitted()) {
         const reason = this.startError || initialStartError;
         throw new MandalaError(
           reason
@@ -1819,10 +1858,12 @@ export class Computer {
             : `${this.id} is stopped and will not start on its own: call start() to start it`,
         );
       }
-      // Nor will a suspended one. Left to spin it reports a machine that is
-      // one call from running as a timeout — the least informative answer
-      // available about the one case the caller can fix in a line.
-      if (this.isSuspended) {
+      // Nor will a suspended one — with the same exception, and it bites harder
+      // here. A RESUME holds its memory from admission too, and the suspend
+      // record is spent only on the way out of a start that worked, so a resume
+      // in flight reads `suspended` for its whole load. Refusing that told a
+      // caller to call start() on a machine whose start was already running.
+      if (this.isSuspended && this.#nothingAdmitted()) {
         throw new MandalaError(
           `${this.id} is suspended and will not start on its own: call start() to resume it`,
         );

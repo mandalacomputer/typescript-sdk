@@ -133,11 +133,67 @@ describe('waiting', () => {
     // Left to spin it reports a machine that is one call from running as a
     // timeout — the least informative answer about the one case a caller can
     // fix in a line.
-    const { client: c } = client(() => json({ ...COMPUTER, status: 'suspended' }));
+    // `running_ram_mb: 0` is the platform saying it has admitted nothing, which
+    // is what "nobody has resumed it" means since OPL-4630 — a resume in flight
+    // reads `suspended` too, and is waited for rather than refused.
+    const { client: c } = client(() =>
+      json({ ...COMPUTER, status: 'suspended', running_ram_mb: 0 }),
+    );
     const computer = await c.computers.get('vm-1');
     await expect(computer.waitUntilRunning({ timeoutMs: 60_000 })).rejects.toThrow(
       /call start\(\) to resume it/,
     );
+  });
+
+  it('waits for a start already in flight rather than refusing it', async () => {
+    // OPL-4630. A cold boot that has been admitted holds its memory before its
+    // process exists, and reads `stopped` for the whole of that load. Refusing
+    // there told a caller to start a computer that was already starting. The
+    // long timeout is the test: it must not be reached either, since the
+    // machine does come up.
+    let polls = 0;
+    const { client: c } = client(() => {
+      polls += 1;
+      return json(
+        polls < 3 ? { ...COMPUTER, status: 'stopped', running_ram_mb: COMPUTER.ram_mb } : COMPUTER,
+      );
+    });
+    const computer = await c.computers.get('vm-1');
+    await expect(computer.waitUntilRunning({ timeoutMs: 60_000, pollMs: 1 })).resolves.toBe(
+      computer,
+    );
+    expect(computer.status).toBe('running');
+  });
+
+  it('waits for a resume already in flight, which reads as suspended', async () => {
+    // The sharper half of the same case: a resume spends its session record
+    // only on the way out of a start that worked, so it reads `suspended` while
+    // it loads — and "call start() to resume it" was the answer given to a
+    // caller whose resume was already running.
+    let polls = 0;
+    const { client: c } = client(() => {
+      polls += 1;
+      return json(
+        polls < 3
+          ? { ...COMPUTER, status: 'suspended', running_ram_mb: COMPUTER.ram_mb }
+          : COMPUTER,
+      );
+    });
+    const computer = await c.computers.get('vm-1');
+    await expect(computer.waitUntilRunning({ timeoutMs: 60_000, pollMs: 1 })).resolves.toBe(
+      computer,
+    );
+  });
+
+  it('waits rather than refusing when the platform did not say', async () => {
+    // A host that could not be reached, or one too old to report the field, has
+    // not said "nothing is coming" — it has said nothing. Refusing on that
+    // would be inventing the sentence. It costs a timeout, which is the cheaper
+    // of the two wrong answers.
+    const { client: c } = client(() => json({ ...COMPUTER, status: 'stopped' }));
+    const computer = await c.computers.get('vm-1');
+    const err = await computer.waitUntilRunning({ timeoutMs: 30, pollMs: 1 }).catch((e) => e);
+    expect(err).toBeInstanceOf(TimeoutError);
   });
 
   it('does not spin on a failed build, which nothing will fix', async () => {
@@ -152,11 +208,11 @@ describe('waiting', () => {
     const { rec, client: c } = client((call) => {
       if (call.method === 'POST' && call.path === '/computers') {
         return json({
-          computer: { ...COMPUTER, status: 'stopped' },
+          computer: { ...COMPUTER, status: 'stopped', running_ram_mb: 0 },
           start_error: 'no host had room',
         });
       }
-      return json({ ...COMPUTER, status: 'stopped' });
+      return json({ ...COMPUTER, status: 'stopped', running_ram_mb: 0 });
     });
     const computer = await c.computers.create({ template: 'base' });
     const err = await computer.waitUntilRunning({ timeoutMs: 50, pollMs: 1 }).catch((e) => e);
@@ -365,7 +421,7 @@ describe('waiting', () => {
       if (call.method === 'GET' && call.path === '/computers/vm-1') {
         gets += 1;
         return gets === 1
-          ? json({ ...COMPUTER, status: 'suspended' })
+          ? json({ ...COMPUTER, status: 'suspended', running_ram_mb: 0 })
           : errorJson(503, 'host could not be reached');
       }
       return anyRoute(call);
@@ -541,7 +597,7 @@ describe('waiting', () => {
     // the test: it must not be reached, and no probe should be sent at all.
     const { rec, client: c } = client((call) =>
       call.method === 'GET' && call.path === '/computers/vm-1'
-        ? json({ ...COMPUTER, status: 'stopped' })
+        ? json({ ...COMPUTER, status: 'stopped', running_ram_mb: 0 })
         : anyRoute(call),
     );
     const computer = await c.computers.get('vm-1');
@@ -552,6 +608,25 @@ describe('waiting', () => {
     );
     expect(Date.now() - started).toBeLessThan(1_000);
     expect(rec.calls).toHaveLength(0);
+  });
+
+  it('probes a stopped computer whose start is in flight instead of refusing it', async () => {
+    // The guest of a machine that is coming up will answer shortly; the refusal
+    // above is only for one the platform says is holding nothing.
+    let probes = 0;
+    const { client: c } = client((call) => {
+      if (call.path.endsWith('/exec')) {
+        probes += 1;
+        return probes < 2 ? errorJson(409, 'the agent is not up yet') : json(EXEC_OK);
+      }
+      if (call.method === 'GET' && call.path === '/computers/vm-1') {
+        return json({ ...COMPUTER, status: 'stopped', running_ram_mb: COMPUTER.ram_mb });
+      }
+      return anyRoute(call);
+    });
+    const computer = await c.computers.get('vm-1');
+    await expect(computer.waitForGuest({ timeoutMs: 5_000, pollMs: 1 })).resolves.toBe(computer);
+    expect(probes).toBe(2);
   });
 
   it('still resumes a suspended computer with the probe itself', async () => {
@@ -577,7 +652,11 @@ describe('waiting', () => {
         return errorJson(409, 'the agent is not up yet');
       }
       if (call.method === 'GET' && call.path === '/computers/vm-1') {
-        return json({ ...COMPUTER, status: stopped ? 'stopped' : 'running' });
+        return json({
+          ...COMPUTER,
+          status: stopped ? 'stopped' : 'running',
+          running_ram_mb: stopped ? 0 : COMPUTER.ram_mb,
+        });
       }
       return anyRoute(call);
     });
