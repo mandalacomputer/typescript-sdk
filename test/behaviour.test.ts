@@ -3153,6 +3153,75 @@ describe('expired guest waits', () => {
 });
 
 describe('power', () => {
+  it.each([
+    [undefined, {}],
+    [false, {}],
+    [true, { resume_only: 'true' }],
+  ] as const)('sends the documented start query for resumeOnly=%s', async (resumeOnly, query) => {
+    const { rec, client: c } = client(anyRoute);
+    const computer = await c.computers.get('vm-1');
+    rec.calls.length = 0;
+    expect(await computer.start({ resumeOnly })).toBe(computer);
+    expect(rec.routes()).toEqual([['POST', 'computers/vm-1/start']]);
+    expect(rec.last().query).toEqual(query);
+    expect(rec.last().body).toBeUndefined();
+  });
+
+  it('refuses a non-boolean resumeOnly before sending a start request', async () => {
+    const { rec, client: c } = client(anyRoute);
+    const computer = await c.computers.get('vm-1');
+    rec.calls.length = 0;
+    for (const bad of ['false', 'true', 0, 1, null, new Boolean(false)]) {
+      await expect(computer.start({ resumeOnly: bad as unknown as boolean })).rejects.toThrow(
+        ValidationError,
+      );
+    }
+    expect(rec.calls).toHaveLength(0);
+  });
+
+  it.each([
+    ['stopped', 'stopped'],
+    ['suspended', 'running'],
+  ])('refreshes after a resume-only Ack from %s and reports %s', async (initialStatus, status) => {
+    let started = false;
+    const { rec, client: c } = client((call) => {
+      if (call.path.endsWith('/start')) {
+        started = true;
+        return json({ ok: true });
+      }
+      if (call.method === 'GET' && call.path === '/computers/vm-1') {
+        return json({
+          ...COMPUTER,
+          status: started ? status : initialStatus,
+        });
+      }
+      return anyRoute(call);
+    });
+    const computer = await c.computers.get('vm-1');
+    rec.calls.length = 0;
+    expect(await computer.start({ resumeOnly: true })).toBe(computer);
+    expect(computer.id).toBe('vm-1');
+    expect(computer.status).toBe(status);
+    expect(rec.routes()).toEqual([
+      ['POST', 'computers/vm-1/start'],
+      ['GET', 'computers/vm-1'],
+    ]);
+    expect(rec.calls[0]?.query).toEqual({ resume_only: 'true' });
+    expect(rec.calls[1]?.query).toEqual({});
+  });
+
+  it('honours cancellation on a resume-only start', async () => {
+    const { rec, client: c } = client(anyRoute);
+    const computer = await c.computers.get('vm-1');
+    rec.calls.length = 0;
+    const reason = new Error('cancel start');
+    await expect(
+      computer.start({ resumeOnly: true, signal: AbortSignal.abort(reason) }),
+    ).rejects.toThrow('cancel start');
+    // The recorder sees fetch before it checks the signal; no refresh follows.
+    expect(rec.routes()).toEqual([['POST', 'computers/vm-1/start']]);
+  });
+
   it('reads the computer off the action response rather than re-fetching it', async () => {
     const { rec, client: c } = client(anyRoute);
     const computer = await c.computers.get('vm-1');

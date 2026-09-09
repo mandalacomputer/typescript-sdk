@@ -116,6 +116,7 @@ async function exerciseEverything(client: Client): Promise<void> {
   await c.waitUntilRunning();
   await c.waitForGuest();
   await c.start();
+  await c.start({ resumeOnly: true });
   await c.stop();
   await c.stop({ force: true });
   await c.suspend();

@@ -1014,9 +1014,14 @@ export class Computer {
    *
    * A suspended computer does not boot: its saved RAM is read back and the same
    * processes and windows come up roughly a second later.
+   *
+   * `resumeOnly` resumes only if a saved session still exists. Without one, the
+   * request succeeds without booting the stopped computer. Success does not
+   * guarantee it is running; this handle reflects the state returned by the
+   * API, refreshed when the action returns only an acknowledgement.
    */
-  async start(opts: CallOptions = {}): Promise<this> {
-    return this.#power('start', opts);
+  async start(opts: { resumeOnly?: boolean } & CallOptions = {}): Promise<this> {
+    return this.#power('start', opts, P.startQuery(opts.resumeOnly));
   }
 
   /**
@@ -1085,10 +1090,9 @@ export class Computer {
     opts: CallOptions = {},
     query?: Query,
   ): Promise<this> {
-    // The platform answers a power action with the computer, so this is one
-    // round trip where the Python SDK spends two. Guarded anyway: a platform
-    // that answered 204 would otherwise leave a handle reporting the state the
-    // machine was in before the call.
+    // Use a computer response directly, and refresh after an acknowledgement
+    // or 204. In particular, a resume-only start can acknowledge success while
+    // leaving the computer stopped; only the returned state tells us otherwise.
     const data = P.computerPayload(
       await this.#t.json('POST', P.computerAction(this.id, action), {
         query,

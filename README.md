@@ -1069,6 +1069,13 @@ await c.stop({ force: true });                // pulls the power
 await c.restart();                            // the reset button, not a fresh boot
 ```
 
+`await c.start({ resumeOnly: true })` resumes only if a saved session still
+exists. If the computer is stopped without one, the request succeeds without
+booting it. Success therefore does not guarantee a running computer. The handle
+is refreshed when the API returns only an acknowledgement, so inspect `c.status`
+before treating it as running. Omitting `resumeOnly` or passing `false` keeps
+the normal start behavior.
+
 `stop()` asks the guest to shut down and gives it time. `force` skips the asking
 — the equivalent of holding the button in. It is what to reach for when a guest
 will not come down on its own, and it loses whatever had not been written to
