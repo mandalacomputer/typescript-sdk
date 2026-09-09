@@ -777,10 +777,10 @@ export class Computer {
    *   arrives and where the way past it is written down.
    *
    * On the COMPUTER rather than only on {@link Template.desktop}, and the
-   * platform publishes it in both places for the reason it gives at
-   * `publicComputer`: a computer keeps the image it was cut from while a
-   * template's version can advance, so the template answers a question about
-   * the CATALOGUE and this one answers a question about the MACHINE.
+   * platform publishes it in both places for a reason worth keeping straight: a
+   * computer keeps the image it was cut from while a template's version can
+   * advance, so the template answers a question about the CATALOGUE and this
+   * one answers a question about the MACHINE.
    *
    * WHY THE ABSENCE IS NOT `'x11'` — the one place this getter parts company
    * with every other on this handle. A host deployed before OPL-4223 does not
@@ -887,8 +887,8 @@ export class Computer {
     // closes the case they were extended for once rather than again: a pixel
     // count is a whole number, and `"1280.5x800.2"` otherwise came back as a
     // display_width_px of 1280.5, which is a screen no screenshot can be.
-    // The platform will not send one — parseDisplay refuses anything Atoi
-    // rejects, and refuses odd numbers on top of that — so this is the guard
+    // The platform will not send one — it refuses anything that is not a whole
+    // number, and refuses odd numbers on top of that — so this is the guard
     // holding the line the API already holds, not a live hazard.
     if (
       w === undefined ||
