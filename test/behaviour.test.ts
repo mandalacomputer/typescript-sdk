@@ -487,9 +487,12 @@ describe('waiting', () => {
   it('fails fast on a suspended machine once it has actually read one', async () => {
     // Suspended does not become "running" on its own, so spinning out the full
     // 120s to repeat what this wait has just READ helps nobody. One successful
-    // refresh is what makes it "just read" rather than "was told once"; the
-    // refreshes after it fail, and the refusal still stands on the one that
-    // landed.
+    // refresh is what makes it "just read" rather than "was told once".
+    //
+    // The third response is never reached, and saying so matters: the refusal
+    // fires on the reading that landed, so nothing after it is requested. An
+    // earlier version of this comment claimed the refusal "survives" later
+    // failed reads, which this cannot show — there are none (Codex review).
     let gets = 0;
     const { client: c } = client((call) => {
       if (call.method === 'GET' && call.path === '/computers/vm-1') {
@@ -748,8 +751,14 @@ describe('waiting', () => {
   it('acts on a stopped reading the probe-failure refresh discovers', async () => {
     // The handle starts RUNNING and the platform only reports stopped on the
     // refresh that follows the first failed probe, so this can only pass by
-    // going through that refresh — the previous version handed the wait a
-    // stopped handle and never reached it (Codex review).
+    // going through that refresh — an earlier version handed the wait a stopped
+    // handle and never reached it (Codex review).
+    //
+    // What it does NOT pin is the boundary the fix was for: acting on that
+    // reading inside the try rather than at the top of the next pass only
+    // changes the answer when the deadline falls between the two, and landing
+    // it there needs an injected clock this SDK has no seam for. With a
+    // generous budget both orders reach the same MandalaError, one poll apart.
     let gets = 0;
     let probes = 0;
     const { rec, client: c } = client((call) => {
@@ -775,27 +784,38 @@ describe('waiting', () => {
     expect(gets).toBe(2);
   });
 
-  it("reports the caller's cancellation from inside the refresh, not its own timeout", async () => {
-    // Aborted during the REFRESH, which is the path with the missing check —
-    // the previous version aborted during the handle's own get(), before the
-    // wait began (Codex review).
+  it("ends on the caller's cancellation rather than its own timeout", async () => {
+    // What this CAN reach, and what it cannot, stated rather than implied.
+    //
+    // The abort fires inside the probe response, so the OUTER catch handles it
+    // and rethrows there. The inner catch's `signal?.aborted` check — added
+    // because the outer one has had it since OPL-3724 — cannot be reached from
+    // this harness at all: the recorder calls its responder before installing
+    // an abort listener, so a signal fired during the refresh resolves that
+    // refresh normally (Codex review). The branch mirrors its sibling for the
+    // case a real socket produces and this fake cannot.
+    //
+    // So: a cancelled wait ends promptly, on the cancellation, and never
+    // reports this wait's own deadline for a deadline that never arrived.
     const control = new AbortController();
-    let gets = 0;
+    let probes = 0;
     const { client: c } = client((call) => {
-      if (call.path.endsWith('/exec')) return errorJson(409, 'the agent is not up yet');
-      if (call.method === 'GET' && call.path === '/computers/vm-1') {
-        gets += 1;
-        if (gets > 1) control.abort(new Error('the caller stopped waiting'));
-        return json(COMPUTER);
+      if (call.path.endsWith('/exec')) {
+        probes += 1;
+        control.abort(new Error('the caller stopped waiting'));
+        return errorJson(409, 'the agent is not up yet');
       }
+      if (call.method === 'GET' && call.path === '/computers/vm-1') return json(COMPUTER);
       return anyRoute(call);
     });
     const computer = await c.computers.get('vm-1');
+    const started = Date.now();
     const err = await computer
       .waitForGuest({ timeoutMs: 60_000, pollMs: 1, signal: control.signal })
       .catch((e) => e);
     expect(err).not.toBeInstanceOf(TimeoutError);
-    expect(gets).toBeGreaterThan(1);
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(probes).toBe(1);
   });
 
   it('probes a stopped computer whose start is in flight instead of refusing it', async () => {

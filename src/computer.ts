@@ -1804,11 +1804,17 @@ export class Computer {
     // this call: when every refresh fails transiently, the handle may be
     // holding data from an old list(), and "running" concluded from that —
     // while the host answers 503 — is a claim about a machine nobody has
-    // actually looked at. The fail-fast throws below are NOT gated the same
-    // way: neither a failed build nor a suspended session becomes "running" on
-    // its own, so acting on the last data anyone has beats spinning out the
-    // full timeout to learn the same thing — and the data may be fresh from a
-    // get() one line before this call.
+    // actually looked at.
+    //
+    // A REFUSAL IS A VERDICT TOO, and this comment used to argue otherwise: the
+    // fail-fast throws were ungated on the grounds that a stopped or suspended
+    // reading cannot go stale in the caller's favour. It can. A start admitted
+    // by anybody reads as stopped or suspended until its guest process exists
+    // (OPL-4630), so the last data anyone has is exactly what may now be wrong,
+    // and the wait spends its whole budget failing to find out. The power
+    // refusals below are gated on `mayRefuse` for that reason. The failed build
+    // is not: nothing recovers that computer into a startable one, so no later
+    // reading could overturn it.
     let observed = false;
     // Whether the LATEST refresh answered — waitUntilBuilt's flag, for its
     // reason. `observed` cannot carry this second meaning as well: it is what
