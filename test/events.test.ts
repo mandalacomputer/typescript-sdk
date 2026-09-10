@@ -1473,13 +1473,10 @@ describe('explicit event stream cancellation', () => {
 
 describe('a connection that fails after it was told hello', () => {
   it('does not spend a readiness the caller never received', async () => {
-    // The latch has to sit where the event reaches the caller, not where it was
-    // queued. A connection that fails between the two takes its whole queue
-    // with it, and a latch set at the push leaves the stream believing it
-    // delivered a readiness nobody got — so the next connection declines to
-    // synthesize and a wait on an already-ready desktop waits for an event that
-    // cannot happen twice.
+    // A resume omits windows: sending a fresh snapshot on every connection
+    // would hide a readiness discarded when the first hook throws.
     let connections = 0;
+    const urls: string[] = [];
     const { computer: c } = await computer();
     const got = await collect(
       c.events({
@@ -1490,16 +1487,127 @@ describe('a connection that fails after it was told hello', () => {
         onConnect: () => {
           if (connections++ === 0) throw new Error('the caller’s hook blew up');
         },
-        webSocket: socketFactory((s) => {
+        webSocket: socketFactory((s, n) => {
+          urls.push(s.url);
           s.emitOpen();
-          s.send(hello({ ready: true }));
+          s.send(hello({ ready: true, windows: s.url.includes('since=') ? undefined : [] }));
+          if (n === 2) s.send(event());
+          s.close();
         }),
       }),
-      1,
+      2,
     );
-    expect(got.map((e) => e.type)).toEqual(['computer.ready']);
+    expect(got.map((e) => e.type)).toEqual(['computer.ready', 'computer.idle']);
     expect(got[0]?.synthesized).toBe(true);
-    expect(connections).toBe(2);
+    expect(connections).toBe(3);
+    expect(urls[0]).not.toContain('since=');
+    expect(urls[1]).toContain('since=ep-1%3A0');
+    expect(urls[2]).toContain('since=ep-1%3A0');
+  });
+
+  it('preserves undelivered readiness after a gapped resume without rewinding the cursor', async () => {
+    const { computer: c } = await computer();
+    const urls: string[] = [];
+    let connections = 0;
+    const stream = c.events({
+      backoffMs: 1,
+      maxRetries: 3,
+      onConnect: () => {
+        if (connections++ === 1) throw new Error('retry this opening callback');
+      },
+      webSocket: socketFactory((s, n) => {
+        urls.push(s.url);
+        s.emitOpen();
+        s.send(
+          hello({
+            ready: n > 0,
+            cursor: n === 0 ? 'ep-1:0' : 'ep-2:0',
+            windows: n >= 2 ? undefined : [],
+          }),
+        );
+        if (n === 0) s.send(event({ cursor: 'ep-1:8' }));
+        s.close();
+      }),
+    });
+    const got = await collect(stream, 2);
+    expect(got.map((ev) => ev.type)).toEqual(['computer.idle', 'computer.ready']);
+    expect(got[1]?.synthesized).toBe(true);
+    expect(got[1]?.cursor).toBe('ep-1:8');
+    expect(urls.slice(1)).toEqual([
+      expect.stringContaining('since=ep-1%3A8'),
+      expect.stringContaining('since=ep-1%3A8'),
+    ]);
+  });
+
+  it.each([undefined, []])(
+    'does not replay stale readiness when the next opening frame is not ready (%j)',
+    async (windows) => {
+      const { computer: c } = await computer();
+      let connections = 0;
+      const got = await collect(
+        c.events({
+          backoffMs: 1,
+          maxRetries: 3,
+          onConnect: () => {
+            if (connections++ === 0) throw new Error('retry this opening callback');
+          },
+          webSocket: socketFactory((s, n) => {
+            s.emitOpen();
+            s.send(hello({ ready: n === 0, windows: n === 0 ? [] : windows }));
+            if (n > 0) s.send(event({ type: 'computer.ready' }));
+            s.close();
+          }),
+        }),
+        1,
+      );
+      expect(got.map((ev) => ev.type)).toEqual(['computer.ready']);
+      expect(got[0]?.synthesized).not.toBe(true);
+      expect(connections).toBe(2);
+    },
+  );
+
+  it.each(['close', 'abort'])(
+    'does not recover pending readiness after the retry callback triggers %s',
+    async (stop) => {
+      const { computer: c } = await computer();
+      const controller = new AbortController();
+      let connections = 0;
+      const stream = c.events({
+        backoffMs: 1,
+        signal: controller.signal,
+        onConnect: () => {
+          if (connections++ === 0) throw new Error('retry this opening callback');
+          if (stop === 'close') stream.close();
+          else controller.abort();
+        },
+        webSocket: socketFactory((s, n) => {
+          s.emitOpen();
+          s.send(hello({ ready: true, windows: n === 0 ? [] : undefined }));
+          s.close();
+        }),
+      });
+      expect(await collect(stream)).toEqual([]);
+      expect(connections).toBe(2);
+    },
+  );
+
+  it('does not count pending readiness as delivery for retry exhaustion', async () => {
+    const { computer: c } = await computer();
+    const onConnect = vi.fn(() => {
+      throw new Error('opening callback failed');
+    });
+    const stream = c.events({
+      backoffMs: 1,
+      maxRetries: 1,
+      onConnect,
+      webSocket: socketFactory((s, n) => {
+        s.emitOpen();
+        s.send(hello({ ready: true, windows: n === 0 ? [] : undefined }));
+        s.close();
+      }),
+    });
+    await expect(collect(stream)).rejects.toThrow('opening callback failed');
+    expect(onConnect).toHaveBeenCalledTimes(2);
   });
 
   it('treats a throwing onConnect as the failed connection its docs promise', async () => {
