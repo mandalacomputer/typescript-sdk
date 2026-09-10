@@ -29,6 +29,17 @@
  * suspend.
  */
 
+const args = process.argv.slice(2);
+const usage = 'usage: node scripts/smoke-events.mjs [--help]';
+if (args.includes('--help') || args.includes('-h')) {
+  console.log(`${usage}\nWithout arguments, creates a computer, runs live checks, and deletes it.`);
+  process.exit(0);
+}
+if (args.length > 0) {
+  console.error(`smoke-events — unrecognised argument(s): ${args.join(' ')}\n${usage}`);
+  process.exit(2);
+}
+
 const key = process.env.MANDALA_API_KEY?.trim();
 if (!key) {
   console.log('smoke-events — no MANDALA_API_KEY, so nothing to call. Skipped.');
@@ -130,10 +141,17 @@ try {
   // streams of their own. The close used to sit after those waits, so any throw
   // in between leaked it — a grok bug hunt found this, and it is the kind of
   // thing only a script that really connects can have wrong.
-  const stream = vm.events({ reconnect: false });
+  // The handshake deadline does not bound the wait for the first event. A
+  // connected but silent stream must still let us reach computer deletion.
+  const stopOpening = new AbortController();
+  const stream = vm.events({ reconnect: false, signal: stopOpening.signal });
+  const openingTimer = setTimeout(() => stopOpening.abort(), 30_000);
   let kept;
   try {
     const first = await stream[Symbol.asyncIterator]().next();
+    if (first.done || typeof stream.cursor !== 'string' || stream.cursor.length === 0) {
+      throw new Error('the opening stream ended without an event and a usable cursor');
+    }
     check('the opening frame lands before the first event', !first.done, String(first.value?.type));
     check(
       'it advertises the guest half of the vocabulary',
@@ -152,6 +170,7 @@ try {
     kept = typeof stream.cursor === 'string' ? stream.cursor : undefined;
     check('the stream kept a cursor to resume from', kept !== undefined, String(stream.cursor));
   } finally {
+    clearTimeout(openingTimer);
     stream.close();
   }
 
@@ -357,12 +376,18 @@ try {
   // that older exit, breaks on it, and passes without the job below ever
   // arriving — an assertion that reads far stronger than what it tests. The pid
   // is matched for the same reason a boot process made necessary above.
-  const marker = vm.events({ reconnect: false });
+  const stopMarker = new AbortController();
+  const marker = vm.events({ reconnect: false, signal: stopMarker.signal });
+  const markerTimer = setTimeout(() => stopMarker.abort(), 30_000);
   let mark;
   try {
-    await marker[Symbol.asyncIterator]().next();
+    const first = await marker[Symbol.asyncIterator]().next();
+    if (first.done || typeof marker.cursor !== 'string' || marker.cursor.length === 0) {
+      throw new Error('the resume marker stream ended without an event and a usable cursor');
+    }
     mark = typeof marker.cursor === 'string' ? marker.cursor : undefined;
   } finally {
+    clearTimeout(markerTimer);
     marker.close();
   }
   const restarted = await vm.execBackground('true');
