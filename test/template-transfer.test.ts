@@ -69,8 +69,21 @@ describe('template preparation create arguments', () => {
 describe('template preparation conflicts', () => {
   it.each([
     ['5', 5_000],
+    ['0', 0],
+    [' 5 ', 5_000],
+    ['10000000000', 2_147_483_647],
     ['Wed, 01 Jan 2031 00:00:08 GMT', 8_000],
+    ['Wednesday, 01-Jan-31 00:00:08 GMT', 8_000],
+    ['Wed Jan  1 00:00:08 2031', 8_000],
+    ['Tue, 31 Dec 2030 23:59:59 GMT', 0],
     ['not-a-delay', undefined],
+    ['', undefined],
+    [' \t ', undefined],
+    ['-1', undefined],
+    ['1.5', undefined],
+    ['1e3', undefined],
+    ['0x10', undefined],
+    ['2031-01-01T00:00:08Z', undefined],
     [undefined, undefined],
   ] as const)('exposes Retry-After %s without replaying the create', async (header, delay) => {
     const now = vi.spyOn(Date, 'now').mockReturnValue(Date.UTC(2031, 0, 1));
@@ -82,7 +95,10 @@ describe('template preparation conflicts', () => {
         preparation: { state: 'preparing', error: '' },
       };
       const rec = recorder(() =>
-        json(body, { status: 409, headers: header ? { 'Retry-After': header } : {} }),
+        json(body, {
+          status: 409,
+          headers: header === undefined ? {} : { 'Retry-After': header },
+        }),
       );
       const client = new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: rec.fetch });
       const err = await client.computers.create({ template: 'base' }).catch((err) => err);
