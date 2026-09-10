@@ -876,11 +876,10 @@ export type EventStreamOptions = {
   backoffMs?: number;
   maxBackoffMs?: number;
   /**
-   * Give up after this many CONSECUTIVE failures to reopen. `0` never gives up.
+   * Give up after this many CONSECUTIVE failures to deliver an event. `0` never gives up.
    *
    * Consecutive, so a stream that has been up for a week and drops twice has
-   * not failed twice: one connection that reaches its opening frame resets the
-   * count.
+   * not failed twice: a connection that delivers an event resets the count.
    */
   maxRetries?: number;
   /** Milliseconds to wait for the handshake and the opening frame. */
