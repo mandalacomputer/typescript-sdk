@@ -100,7 +100,13 @@ async function exerciseEverything(client: Client): Promise<void> {
     resolution: '1920x1080x24',
     start: false,
   });
-  await client.computers.create({ template: 'base', cpu: 2, ramMb: 4096, diskGb: 40 });
+  await client.computers.create({
+    template: 'base',
+    templateTransfer: 'prepare-token',
+    cpu: 2,
+    ramMb: 4096,
+    diskGb: 40,
+  });
   // The create/delete pair as one scope, in both its shapes: the block form,
   // and the handle form whose disposal a caller normally leaves to `await
   // using`. Every route either of them reaches is reached by its own method

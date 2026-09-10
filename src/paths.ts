@@ -455,6 +455,8 @@ export type CreateArgs = {
    */
   size?: string;
   template?: string;
+  /** Token from a template_image_preparing refusal; preserves the selected build on retry. Not an idempotency key. */
+  templateTransfer?: string;
   cpu?: number;
   ramMb?: number;
   diskGb?: number;
@@ -471,7 +473,7 @@ export type CreateArgs = {
  * the four it stands in for is refused here.
  */
 export function createBody(args: CreateArgs): Json {
-  const { size, template, cpu, ramMb, diskGb, name, resolution } = args;
+  const { size, template, cpu, ramMb, diskGb, name, resolution, templateTransfer } = args;
   // Defaulted after validation, not by destructuring: `start = true` fills in
   // only for `undefined`, so a `"false"` kept its own shape and went onto the
   // wire as a string where the platform expects a boolean.
@@ -499,6 +501,7 @@ export function createBody(args: CreateArgs): Json {
   // not knowingly send is a worse answer than a refusal naming the argument
   // they did (OPL-4215).
   if (size !== undefined) requireString(size, 'size');
+  if (templateTransfer !== undefined) requireString(templateTransfer, 'templateTransfer');
   if (template !== undefined) requireString(template, 'template');
   if (resolution !== undefined) requireString(resolution, 'resolution');
   return {
@@ -506,6 +509,7 @@ export function createBody(args: CreateArgs): Json {
       name,
       size,
       template,
+      template_transfer: templateTransfer,
       cpu,
       ram_mb: ramMb,
       disk_gb: diskGb,

@@ -63,6 +63,11 @@ describe('clipboardBody', () => {
 });
 
 describe('createBody', () => {
+  it('preserves the exact-image retry token', () => {
+    expect(
+      P.createBody({ template: 'acc-1/tool@1.0.0', templateTransfer: 'prepare-token' }),
+    ).toEqual({ template: 'acc-1/tool@1.0.0', template_transfer: 'prepare-token', start: true });
+  });
   it('omits what was not set, so template defaults survive', () => {
     expect(P.createBody({ template: 'base' })).toEqual({ template: 'base', start: true });
   });
