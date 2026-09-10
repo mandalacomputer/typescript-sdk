@@ -686,8 +686,8 @@ you missed is unrecoverable, and to reconcile against `windows()` or
 
 Reconnecting is on by default and is most of what `events()` is for. `backoffMs`
 doubles up to `maxBackoffMs` between attempts, `maxRetries` gives up after that
-many *consecutive* failures to reopen (`0`, the default, never does — one
-connection that reaches its opening frame resets the count), and
+many *consecutive* failures to deliver an event (`0`, the default, never does — a
+connection that delivers an event resets the count), and
 `connectTimeoutMs` bounds the handshake. `maxQueued` is how many frames may sit
 unread before the socket is closed and reopened from where you had got to —
 nothing dropped, nothing sent twice — because a websocket cannot be paused and

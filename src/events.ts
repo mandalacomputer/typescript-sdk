@@ -1099,6 +1099,8 @@ export class ComputerEvents implements AsyncIterable<ComputerEvent> {
   #frames?: Frames;
   /** The position to resume from: after the last event YIELDED, never received. */
   #cursor?: string;
+  /** Readiness inferred from an opening frame but not yet handed to the caller. */
+  #pendingReady = false;
   #detachMessage?: () => void;
   #hello?: Hello;
   #types?: string[];
@@ -1377,6 +1379,7 @@ export class ComputerEvents implements AsyncIterable<ComputerEvent> {
           // was never yielded, so the position never reached it and the
           // reconnect asks for it again.
           if (ev.cursor) this.#cursor = ev.cursor;
+          if (ev.type === 'computer.ready') this.#pendingReady = false;
           delivered += 1;
           yield ev;
           if (this.#stopped()) return;
@@ -1664,7 +1667,13 @@ export class ComputerEvents implements AsyncIterable<ComputerEvent> {
     // `GET /computers/{id}/windows` — so it costs one listing, against a wait
     // that never ends. Gaps are not routine: one means this host could not
     // replay what the client missed.
-    if (hello.ready && hello.windows !== undefined) {
+    // A failed onConnect discards this connection's queue, but its adopted
+    // cursor makes the retry a resume, whose hello may omit windows. Keep the
+    // undelivered inference until handover, and rebuild it from the newest
+    // hello rather than retaining an old desktop's frame. A new hello saying
+    // not ready clears it: that desktop must announce its own readiness.
+    this.#pendingReady = hello.ready && (hello.windows !== undefined || this.#pendingReady);
+    if (this.#pendingReady) {
       frames.push({ kind: 'event', value: this.#readyFromHello(hello) });
     }
   }
