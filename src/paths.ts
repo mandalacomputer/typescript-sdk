@@ -451,10 +451,19 @@ export type CreateArgs = {
   name?: string;
   /**
    * A named size from `client.sizes.list()` — a template and a CPU/RAM/disk
-   * shape together. Cannot be combined with the four it stands in for.
+   * shape together. Cannot be combined with the four it stands in for or
+   * `templateTransfer`.
    */
   size?: string;
   template?: string;
+  /**
+   * Opaque token from a `template_image_preparing` refusal. After the server's
+   * retry delay, repeat the original create body, including the same nonempty
+   * `template`, with this token added. Cannot be combined with `size`.
+   * This is not an idempotency key: stop after success and do not automatically
+   * replay a create after an ambiguous response. The SDK does not retry creates.
+   */
+  templateTransfer?: string;
   cpu?: number;
   ramMb?: number;
   diskGb?: number;
@@ -468,18 +477,21 @@ export type CreateArgs = {
  * Build a create payload, omitting anything unset.
  *
  * A `size` names a template and a shape together, so combining it with any of
- * the four it stands in for is refused here.
+ * the four it stands in for or a preparation token is refused here.
  */
 export function createBody(args: CreateArgs): Json {
-  const { size, template, cpu, ramMb, diskGb, name, resolution } = args;
+  const { size, template, cpu, ramMb, diskGb, name, resolution, templateTransfer } = args;
   // Defaulted after validation, not by destructuring: `start = true` fills in
   // only for `undefined`, so a `"false"` kept its own shape and went onto the
   // wire as a string where the platform expects a boolean.
   const start = flag(args.start, 'start') ?? true;
-  if (size !== undefined && [template, cpu, ramMb, diskGb].some((v) => v !== undefined)) {
+  if (
+    size !== undefined &&
+    [template, cpu, ramMb, diskGb, templateTransfer].some((v) => v !== undefined)
+  ) {
     throw new ValidationError(
       'size already names a template and a shape; send size alone, ' +
-        'or template/cpu/ramMb/diskGb without it',
+        'or template/cpu/ramMb/diskGb/templateTransfer without it',
     );
   }
   // A NaN here goes out as JSON `null`, which the platform reads as the field's
@@ -492,13 +504,17 @@ export function createBody(args: CreateArgs): Json {
   if (name !== undefined && !requireString(name, 'name').trim()) {
     throw new ValidationError('name must not be empty');
   }
-  // The other three strings on this body, checked for the reason `name` is.
-  // They are not trimmed, so a non-string does not throw here — it passes
-  // through `omitUndefined` into `JSON.stringify` and reaches the platform as
-  // a JSON object where a size was meant. A 400 naming a field the caller did
-  // not knowingly send is a worse answer than a refusal naming the argument
-  // they did (OPL-4215).
+  // Validate strings before JSON serialization can send an object in their
+  // place. Whitespace checks below do not alter the values sent on the wire.
   if (size !== undefined) requireString(size, 'size');
+  if (templateTransfer !== undefined) {
+    if (!requireString(templateTransfer, 'templateTransfer').trim()) {
+      throw new ValidationError('templateTransfer must not be empty');
+    }
+    if (template === undefined || !requireString(template, 'template').trim()) {
+      throw new ValidationError('templateTransfer requires the original nonempty template');
+    }
+  }
   if (template !== undefined) requireString(template, 'template');
   if (resolution !== undefined) requireString(resolution, 'resolution');
   return {
@@ -506,6 +522,7 @@ export function createBody(args: CreateArgs): Json {
       name,
       size,
       template,
+      template_transfer: templateTransfer,
       cpu,
       ram_mb: ramMb,
       disk_gb: diskGb,

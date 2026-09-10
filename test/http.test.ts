@@ -544,12 +544,12 @@ describe('status mapping', () => {
   });
 
   it('keeps the rate limit retry interval', async () => {
-    const rec = recorder(() => errorJson(429, 'slow down', { 'Retry-After': '1.5' }));
+    const rec = recorder(() => errorJson(429, 'slow down', { 'Retry-After': '2' }));
     const err = await client(rec)
       .computers.list()
       .catch((e) => e);
     expect(err).toBeInstanceOf(RateLimitError);
-    expect(err.retryAfterMs).toBe(1_500);
+    expect(err.retryAfterMs).toBe(2_000);
   });
 
   it('clamps a huge Retry-After rather than wrapping a Node timer', async () => {

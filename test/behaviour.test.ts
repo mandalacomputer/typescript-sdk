@@ -688,16 +688,14 @@ describe('waiting', () => {
     const { client: c } = client((call) => {
       if (call.path.endsWith('/exec')) {
         attempts += 1;
-        return attempts === 1
-          ? errorJson(429, 'slow down', { 'Retry-After': '0.02' })
-          : json(EXEC_OK);
+        return attempts === 1 ? errorJson(429, 'slow down', { 'Retry-After': '1' }) : json(EXEC_OK);
       }
       return anyRoute(call);
     });
     const computer = await c.computers.get('vm-1');
     const started = Date.now();
     await expect(computer.waitForGuest({ timeoutMs: 5_000, pollMs: 1 })).resolves.toBe(computer);
-    expect(Date.now() - started).toBeGreaterThanOrEqual(15);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(950);
     expect(attempts).toBe(2);
   });
 
@@ -737,14 +735,14 @@ describe('waiting', () => {
         // The handle's own get() first; the rate limit is what the WAIT's
         // refresh meets, which is the error whose Retry-After was dropped.
         gets += 1;
-        return gets === 1 ? json(COMPUTER) : errorJson(429, 'slow down', { 'Retry-After': '0.05' });
+        return gets === 1 ? json(COMPUTER) : errorJson(429, 'slow down', { 'Retry-After': '1' });
       }
       return anyRoute(call);
     });
     const computer = await c.computers.get('vm-1');
     const started = Date.now();
     await expect(computer.waitForGuest({ timeoutMs: 5_000, pollMs: 1 })).resolves.toBe(computer);
-    expect(Date.now() - started).toBeGreaterThanOrEqual(45);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(950);
     expect(probes).toBe(2);
   });
 

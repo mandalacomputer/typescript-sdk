@@ -367,12 +367,19 @@ export function unsatisfiedTotal(header: string | null): number | undefined {
 /** A Retry-After header, in milliseconds from now. */
 const retryAfterMs = (header: string | null): number | undefined => {
   if (!header) return undefined;
-  const seconds = Number(header);
+  const value = header.trim();
+  const seconds = /^\d+$/.test(value) ? Number(value) : Number.NaN;
   const delay =
     Number.isFinite(seconds) && seconds >= 0
       ? seconds * 1_000
       : (() => {
-          const at = Date.parse(header);
+          // HTTP dates have three supported formats. Date.parse alone also
+          // accepts unrelated strings, including negative numbers and ISO dates.
+          const httpDate =
+            /^(?:[A-Za-z]{3}, \d{2} [A-Za-z]{3} \d{4} \d{2}:\d{2}:\d{2} GMT|[A-Za-z]+, \d{2}-[A-Za-z]{3}-\d{2} \d{2}:\d{2}:\d{2} GMT|[A-Za-z]{3} [A-Za-z]{3} {1,2}\d{1,2} \d{2}:\d{2}:\d{2} \d{4})$/;
+          if (!httpDate.test(value)) return undefined;
+          // The asctime form omits the zone, but HTTP dates always mean GMT.
+          const at = Date.parse(value.endsWith(' GMT') ? value : `${value} GMT`);
           if (!Number.isFinite(at)) return undefined;
           return Math.max(at - Date.now(), 0);
         })();
