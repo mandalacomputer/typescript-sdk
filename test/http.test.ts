@@ -1222,6 +1222,77 @@ describe('server-sent events', () => {
     );
   });
 
+  describe.each(['custom', 'default'] as const)('after a %s caller abort', (reasonKind) => {
+    it.each([
+      ['step', 'event: step\ndata: {"n":2,"tool":"computer"}\n\n'],
+      ['done', 'event: done\ndata: {"stop":"end_turn"}\n\n'],
+      ['unterminated tail', 'event: done\ndata: {"stop":"end_turn"}\n'],
+    ])('does not deliver a buffered %s event', async (ending, frame) => {
+      const ac = new AbortController();
+      // An unsettled cancellation must not hold up the abort rejection, just
+      // as it must not hold up an early return from a cloned response.
+      const cancel = vi.fn(() => new Promise<void>(() => {}));
+      const response = new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(
+              new TextEncoder().encode(`event: step\ndata: {"n":1,"tool":"computer"}\n\n${frame}`),
+            );
+            if (ending === 'unterminated tail') controller.close();
+          },
+          cancel,
+        }),
+        { headers: { 'content-type': 'text/event-stream' } },
+      );
+      const rec = recorder((call) => (call.path.endsWith('/agent') ? response : anyRoute(call)));
+      const c = await client(rec).computers.get('vm-1');
+      const events = c.agentStream({ prompt: 'go', modelKey: 'sk', signal: ac.signal });
+      try {
+        expect((await events.next()).value).toMatchObject({ type: 'step', step: { n: 1 } });
+        ac.abort(reasonKind === 'custom' ? new Error('caller stopped consuming') : undefined);
+        await expect(events.next()).rejects.toBe(ac.signal.reason);
+        expect(await events.next()).toMatchObject({ done: true });
+        if (ending !== 'unterminated tail') expect(cancel).toHaveBeenCalledTimes(1);
+      } finally {
+        await events.return(undefined);
+      }
+    });
+  });
+
+  it.each(['event', 'EOF'] as const)(
+    'preserves an abort that arrives while a body read returns %s',
+    async (ending) => {
+      const ac = new AbortController();
+      const reason = new Error('caller cancelled during the read');
+      const response = new Response(
+        new ReadableStream<Uint8Array>(
+          {
+            pull(controller) {
+              ac.abort(reason);
+              if (ending === 'event') {
+                controller.enqueue(
+                  new TextEncoder().encode('event: done\ndata: {"stop":"end_turn"}\n\n'),
+                );
+              }
+              controller.close();
+            },
+          },
+          // Defer the pull until the SDK reads, after fetch has answered.
+          { highWaterMark: 0 },
+        ),
+        { headers: { 'content-type': 'text/event-stream' } },
+      );
+      const rec = recorder((call) => (call.path.endsWith('/agent') ? response : anyRoute(call)));
+      const c = await client(rec).computers.get('vm-1');
+      const events = c.agentStream({ prompt: 'go', modelKey: 'sk', signal: ac.signal });
+      try {
+        await expect(events.next()).rejects.toBe(reason);
+      } finally {
+        await events.return(undefined);
+      }
+    },
+  );
+
   it('holds an agentOnce request open past the ordinary deadline', async () => {
     // One held request for a run that is minutes of clicking — the same
     // exemption the streaming route gets, for the same reason.

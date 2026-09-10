@@ -911,7 +911,11 @@ export class Transport {
     let swallowLf = false;
     try {
       for (;;) {
+        opts.signal?.throwIfAborted();
         const { done, value } = await reader.read();
+        // A read may already have settled when the caller cancels. Check its
+        // result before decoding it, including an EOF that would emit a tail.
+        opts.signal?.throwIfAborted();
         if (done) break;
         // Normalised to LF before framing. The spec allows CRLF and lone CR as
         // line terminators, and a proxy that reframes the stream is entitled to
@@ -947,6 +951,9 @@ export class Transport {
         }
         buffer += add;
         for (;;) {
+          // One chunk can contain several events. Resuming after a yield must
+          // honor cancellation even when no further body read is needed.
+          opts.signal?.throwIfAborted();
           const sep = buffer.indexOf('\n\n');
           if (sep === -1) break;
           if (sep > MAX_SSE_EVENT_CHARS) {
