@@ -137,6 +137,20 @@ const t = await client.templates.publish(doc);
 const c = await client.computers.create({ template: t.ref });
 ```
 
+If create returns a `ConflictError` whose body has
+`code: "template_image_preparing"`, inspect `body.preparation.state` and
+`body.preparation.error` before deciding to continue. The server's valid
+`Retry-After` header is exposed as `err.retryAfterMs`; it is undefined when
+absent or malformed. After that delay, repeat the original create body,
+including the same nonempty `template`, and add `body.template_transfer` as
+`templateTransfer`. Preserve the token exactly; it must be a nonblank string
+and cannot be combined with `size`.
+
+The token preserves the selected image and is **not an idempotency key**. Stop
+after a successful create, and do not automatically replay after an ambiguous
+response. `isTransient` returns false for this preparation conflict because
+continuing requires the token, and the SDK never retries the create for you.
+
 A valid answer carries more than the verdict. `docDigest` identifies the whole
 document and changes with any edit at all; `buildDigest` covers only what decides
 the image, so comparing it against a previous run tells you whether an edit means

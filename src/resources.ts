@@ -177,7 +177,14 @@ export class Computers {
    * CPU/RAM/disk shape together, and the shapes the platform keeps pre-booted,
    * so naming one is the likeliest way to get a computer in about a second
    * rather than a cold boot. It cannot be combined with `template`, `cpu`,
-   * `ramMb` or `diskGb`; sending both throws before any request is made.
+   * `ramMb`, `diskGb` or `templateTransfer`; sending both throws before any request is made.
+   *
+   * On a `template_image_preparing` conflict, inspect the error body's
+   * `preparation.state` and `preparation.error`. To continue preparation, wait
+   * for `retryAfterMs`, then repeat the original create body with the same
+   * `template` and add its `template_transfer` as `templateTransfer`. The token
+   * is not an idempotency key: stop after success and do not automatically
+   * replay after an ambiguous response. This method never retries a create.
    *
    * `resolution` is `"WIDTHxHEIGHT"` or `"WIDTHxHEIGHTxDEPTH"` and defaults to
    * `"1280x800x24"`. It is a create-time choice and **only** a create-time

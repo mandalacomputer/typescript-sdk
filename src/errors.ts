@@ -116,6 +116,8 @@ export class ConnectionInterruptedError extends ConnectionError {
 /** The API returned an unsuccessful response. */
 export class APIError extends MandalaError {
   override name = 'APIError';
+  /** Server's valid `Retry-After` delay in milliseconds, when supplied. */
+  readonly retryAfterMs?: number;
   /**
    * The platform's own word for what KIND of refusal this is, where it sent one
    * (platform OPL-3898): `contention`, `starting`, `unavailable` or
@@ -138,9 +140,11 @@ export class APIError extends MandalaError {
     message: string,
     readonly status: number,
     readonly body?: unknown,
+    retryAfterMs?: number,
   ) {
     super(message);
     this.reason = refusalReason(body);
+    this.retryAfterMs = retryAfterMs;
   }
 }
 
@@ -290,8 +294,9 @@ export class MoveRequiredError extends ConflictError {
     body: unknown,
     /** Whether a host in this region could run the size that was asked for. */
     readonly movePossible: boolean,
+    retryAfterMs?: number,
   ) {
-    super(message, status, body);
+    super(message, status, body, retryAfterMs);
   }
 }
 
@@ -351,8 +356,9 @@ export class RangeNotSatisfiableError extends APIError {
     status: number,
     body?: unknown,
     readonly total?: number,
+    retryAfterMs?: number,
   ) {
-    super(message, status, body);
+    super(message, status, body, retryAfterMs);
   }
 }
 
@@ -364,14 +370,6 @@ export class RangeNotSatisfiableError extends APIError {
  */
 export class RateLimitError extends APIError {
   override name = 'RateLimitError';
-  constructor(
-    message: string,
-    status: number,
-    body?: unknown,
-    readonly retryAfterMs?: number,
-  ) {
-    super(message, status, body);
-  }
 }
 
 /**
@@ -654,8 +652,7 @@ function namedTheFailure(body: unknown): boolean {
 const said = (message: string, status: number) => `${message} (HTTP ${status})`;
 
 /**
- * What the response's own headers added to a failure, for the two classes that
- * carry one.
+ * What the response's own headers added to a failure.
  *
  * An options object rather than two more positional numbers: they are both
  * optional, both a bare `number`, and adjacent, so the one call site that
@@ -682,31 +679,53 @@ export function errorForStatus(
   // fit and what moving costs, written for whoever has to agree to it.
   if (Cls === ConflictError) {
     const offer = moveOffer(body);
-    if (offer) return new MoveRequiredError(message, status, body, offer.possible);
+    if (offer)
+      return new MoveRequiredError(message, status, body, offer.possible, headers.retryAfterMs);
   }
   if (Cls === RangeNotSatisfiableError) {
-    return new RangeNotSatisfiableError(message, status, body, headers.rangeTotal);
+    return new RangeNotSatisfiableError(
+      message,
+      status,
+      body,
+      headers.rangeTotal,
+      headers.retryAfterMs,
+    );
   }
   // Substituted for an empty body, which says nothing, and for a proxy's HTML
   // page, which says 500 characters of nothing. NOT for a structured message:
   // that is the one case where the response knows more than this file does.
   if (Cls === GatewayTimeoutError && !namedTheFailure(body)) {
-    return new GatewayTimeoutError(said(GATEWAY_TIMEOUT_MESSAGE, status), status, body);
+    return new GatewayTimeoutError(
+      said(GATEWAY_TIMEOUT_MESSAGE, status),
+      status,
+      body,
+      headers.retryAfterMs,
+    );
   }
   // Guarded, where the unreachable statuses below are not, and the difference is
   // which of them the platform could have spoken through. A 520 is its own
   // answer arriving mangled, so a body that parsed as this surface's JSON
   // plausibly IS its account. On 521-526 it provably cannot be.
   if (Cls === OriginResponseError && !namedTheFailure(body)) {
-    return new OriginResponseError(said(ORIGIN_RESPONSE_MESSAGE, status), status, body);
+    return new OriginResponseError(
+      said(ORIGIN_RESPONSE_MESSAGE, status),
+      status,
+      body,
+      headers.retryAfterMs,
+    );
   }
   if (Cls === OriginTLSError) {
-    return new OriginTLSError(said(ORIGIN_TLS_MESSAGE, status), status, body);
+    return new OriginTLSError(said(ORIGIN_TLS_MESSAGE, status), status, body, headers.retryAfterMs);
   }
   if (Cls === OriginUnreachableError) {
-    return new OriginUnreachableError(said(ORIGIN_UNREACHABLE_MESSAGE, status), status, body);
+    return new OriginUnreachableError(
+      said(ORIGIN_UNREACHABLE_MESSAGE, status),
+      status,
+      body,
+      headers.retryAfterMs,
+    );
   }
-  return new Cls(message, status, body);
+  return new Cls(message, status, body, headers.retryAfterMs);
 }
 
 /**
@@ -760,13 +779,9 @@ export function errorForEventStatus(status: number, message: string): APIError {
  * widening it had a right answer for one of them and a wrong answer for the
  * other.
  *
- * Unchanged in content, and now identical in all three clients: the MCP server
- * matched these classes plus a list of status numbers and has dropped the list;
- * the Python SDK had no public predicate at all and has grown this one.
- *
- * Note that a STATUS is not enough to answer this, which is why the first check
- * below is on a type. 409 is the case: most are a passing moment, and the move
- * offer is a decision no retry changes.
+ * A status alone is not enough to answer this. Most 409s are a passing moment,
+ * but a move offer needs a decision, and `template_image_preparing` requires
+ * the caller to continue explicitly with the returned token and original body.
  *
  * One 409 could be given no class and could not be seen from here at all: a
  * clipboard read or write against a computer that is STOPPED does not clear on
@@ -779,10 +794,20 @@ export function errorForEventStatus(status: number, message: string): APIError {
  * standing unchanged (platform OPL-3898).
  */
 export function isTransient(err: unknown): boolean {
+  // Preparation must be continued explicitly with the returned token and the
+  // original create body. Replaying an unchanged create is not that protocol.
+  if (
+    err instanceof APIError &&
+    err.status === 409 &&
+    err.body !== null &&
+    typeof err.body === 'object' &&
+    (err.body as { code?: unknown }).code === 'template_image_preparing'
+  )
+    return false;
   // A move offer is a 409 and is NOT worth retrying: it is a decision about the
   // size that was asked for, and the same request answers the same way for as
-  // long as the computer is on that host. First, because it is a subclass of the
-  // very branch below that would say yes (OPL-3773).
+  // long as the computer is on that host. Checked before the type branch below
+  // that would otherwise say yes.
   if (err instanceof MoveRequiredError) return false;
   // A lost RESPONSE is not a request that never left, and only one of the two
   // is safe to replay blind. Same shape as the line above and the same reason:
