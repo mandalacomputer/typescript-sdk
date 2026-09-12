@@ -51,6 +51,42 @@ export const WEBHOOK_SECRET_PREFIX = 'whsec_';
 export const WEBHOOK_TOLERANCE_S = 300;
 
 /**
+ * How long a receiver must remember an accepted `webhook-id`, measured from the
+ * moment it accepted it, to close the replay of a captured request.
+ *
+ * **Twice the tolerance, and inclusively**: keep the id while the elapsed time is
+ * less than or equal to this, and drop it only once it is past. The arithmetic is
+ * the whole point and it is easy to get wrong by one window, which is why this is
+ * a function rather than a sentence in a doc comment.
+ *
+ * A delivery stamped `t` is accepted anywhere in `[t - tolerance, t + tolerance]`,
+ * because the skew is allowed in either direction. So the earliest a receiver can
+ * first accept it is `t - tolerance`, and the latest {@link verify} will accept
+ * the very same bytes again is `t + tolerance`. The gap between those is two
+ * tolerances — and a receiver that remembered the id for ONE, which is what the
+ * obvious reading of the window suggests, has forgotten it while its signature is
+ * still good. Whoever captured the request replays it then.
+ *
+ * This bounds a captured SIGNATURE and nothing else. A genuine retry carries the
+ * same id with a fresh timestamp and a fresh signature, and verifies on its own
+ * merits however long later — so durable idempotency records across the full
+ * retry horizon are a separate obligation, and the one that stops a delivery
+ * being processed twice.
+ *
+ * @param toleranceS the window in use, if it is not {@link WEBHOOK_TOLERANCE_S}.
+ */
+export function replayRetentionS(toleranceS: number = WEBHOOK_TOLERANCE_S): number {
+  // Refused rather than returning a NaN or a negative retention that reads as
+  // "forget it immediately" — a receiver computing a cache TTL from this would
+  // build one that remembers nothing and says so nowhere. Same rule, and the
+  // same class of mistake, as the `toleranceS` verify() itself refuses.
+  if (!Number.isFinite(toleranceS) || toleranceS < 0) {
+    throw new ValidationError('toleranceS must be a finite, non-negative number of seconds');
+  }
+  return 2 * toleranceS;
+}
+
+/**
  * The request headers, in any of the shapes a receiver is likely to be holding.
  *
  * A `Headers` instance (fetch, Workers, Deno, Bun, Next), a Node
@@ -149,18 +185,14 @@ const SIGNATURE_CANDIDATES_MAX = 8;
  * answered once. Inside the 24 hours after a rotation either secret verifies
  * the delivery, so a receiver can switch from the old to the new at leisure.
  *
- * Record every accepted `webhook-id` before processing and refuse repeats.
- * To prevent a captured request from being replayed, keep its id through the
- * INCLUSIVE `webhook-timestamp + toleranceS` boundary. A timestamp can be one
- * tolerance ahead of your clock on first acceptance, so a fixed retention
- * longer than twice the tolerance after acceptance is conservative; one
- * tolerance is insufficient. With the default, that means longer than ten
- * minutes, not five.
- *
- * This expiry only bounds a captured signature. A retry can carry the same id
- * with a fresh timestamp and signature, so keep durable idempotency records
- * across the full delivery retry horizon, or longer if your application needs
- * it. Timestamp verification alone does not prevent processing retries twice.
+ * Record every accepted `webhook-id` before processing and refuse repeats. How
+ * long to keep it for is {@link replayRetentionS} — twice the tolerance from the
+ * moment of acceptance, inclusively — which is a function rather than a sentence
+ * here because the obvious reading of the window gives half the right answer and
+ * leaves a captured request replayable. That expiry bounds a captured SIGNATURE
+ * only: a retry carries the same id with a fresh timestamp and signature and
+ * verifies on its own merits, so durable idempotency records across the full
+ * retry horizon are a separate obligation.
  */
 export async function verify(
   secret: string,

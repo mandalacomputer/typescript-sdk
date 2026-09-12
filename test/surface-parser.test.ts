@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -846,5 +846,152 @@ export const V1_ROUTES: Route[] = [{ method: 'GET', pattern: 'two' }];
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+/**
+ * The MIRROR reader, over an allowlist it does not control.
+ *
+ * The other half of the same argument as the route table above, and the half that
+ * was still open. The platform's table is walked entry by entry and refuses what
+ * it cannot read; the mirror's two tables were found with `indexOf` on the raw
+ * source and read with regexes that only knew single quotes. An entry written —
+ * or reformatted — with double quotes matched nothing, and a skipped entry is not
+ * a complaint: it is a table short by however much it held, which is how a stale
+ * mirror entry the platform no longer serves goes unreported.
+ *
+ * The script resolves the mirror from its OWN directory, so the fixture is a
+ * whole little SDK: `scripts/` copied beside a `test/allowlist.ts` of the test's
+ * choosing. Nothing in the script is made configurable for this.
+ */
+describe('the mirror reader', () => {
+  const scriptDir = resolve(__dirname, '../scripts');
+
+  /** A mirror holding exactly the routes and parameters given. */
+  const allowlist = (routes: string, params: string) =>
+    `type Route = [string, string];
+export const ALLOWED: ReadonlySet<string> = new Set(
+  ([${routes}] as Route[]).map(([m, p]) => \`\${m} \${p}\`),
+);
+export const UNIMPLEMENTED: ReadonlySet<string> = new Set([]);
+export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([${params}]);
+export const UNIMPLEMENTED_PARAMETERS: ReadonlySet<string> = new Set([]);
+`;
+
+  /** A fixture SDK: the real scripts, a mirror of the test's choosing. */
+  const sdkWith = (mirror: string) => {
+    const dir = mkdtempSync(join(tmpdir(), 'surface-sdk-'));
+    mkdirSync(join(dir, 'scripts'), { recursive: true });
+    mkdirSync(join(dir, 'test'), { recursive: true });
+    for (const f of ['check-surface.mjs', 'surface-text.mjs']) {
+      writeFileSync(join(dir, 'scripts', f), readFileSync(join(scriptDir, f), 'utf8'));
+    }
+    writeFileSync(join(dir, 'test/allowlist.ts'), mirror);
+    return dir;
+  };
+
+  /** The fixture SDK's copy of the script, against a one-route platform. */
+  const runAgainst = async (mirror: string) => {
+    const sdk = sdkWith(mirror);
+    const platform = mkdtempSync(join(tmpdir(), 'surface-platform-'));
+    mkdirSync(join(platform, 'web/lib'), { recursive: true });
+    writeFileSync(
+      join(platform, 'web/lib/surface.ts'),
+      `export const V1_ROUTES: Route[] = [{ method: 'GET', pattern: 'sizes' }];\n`,
+    );
+    writeFileSync(
+      join(platform, 'web/lib/apidoc.ts'),
+      `export const DOCS: Record<string, Doc> = { 'GET sizes': { query: [{ name: 'fresh' }] } };\n`,
+    );
+    try {
+      return await new Promise<{ said: string; code: number | null }>((done, fail) => {
+        const child = spawn(process.execPath, [join(sdk, 'scripts/check-surface.mjs')], {
+          env: { ...process.env, MANDALA_PLATFORM_REPO: platform },
+        });
+        let said = '';
+        child.stdout.setEncoding('utf8');
+        child.stderr.setEncoding('utf8');
+        child.stdout.on('data', (c: string) => {
+          said += c;
+        });
+        child.stderr.on('data', (c: string) => {
+          said += c;
+        });
+        child.on('error', fail);
+        child.on('close', (code) => done({ said, code }));
+      });
+    } finally {
+      rmSync(sdk, { recursive: true, force: true });
+      rmSync(platform, { recursive: true, force: true });
+    }
+  };
+
+  it.each([
+    ['single quotes', "['GET', 'sizes']", "['GET sizes', ['query:fresh']]"],
+    ['double quotes', '["GET", "sizes"]', '["GET sizes", ["query:fresh"]]'],
+    ['both at once', `['GET', "sizes"]`, `["GET sizes", ['query:fresh']]`],
+  ])('reads a mirror written with %s', async (_style, route, params) => {
+    // All three describe the same surface, so all three must MATCH. Read with a
+    // single-quote regex the double-quoted forms vanished: the route reported as
+    // missing from the mirror and its parameter with it, so the fix for a green
+    // run was to add a line that was already there.
+    const { said, code } = await runAgainst(allowlist(route, params));
+    expect(said).toContain('the mirror matches the platform (1 routes, 1 parameters)');
+    expect(code).toBe(0);
+  });
+
+  it('refuses an ALLOWED entry it cannot read both halves of', async () => {
+    // Not skipped. An entry built from something this reader cannot see is a
+    // route the mirror may well list, and dropping it reports a route the
+    // platform serves as one nobody mirrors — or worse, says nothing at all
+    // about a mirror entry the platform has dropped.
+    const { said, code } = await runAgainst(
+      allowlist(`['GET', 'sizes'], [...OTHER]`, "['GET sizes', ['query:fresh']]"),
+    );
+    expect(said).toMatch(/is not a \[method, pattern\] pair/);
+    expect(code).not.toBe(0);
+  });
+
+  it('refuses a parameter name that is not a plain string', async () => {
+    const { said, code } = await runAgainst(
+      allowlist("['GET', 'sizes']", "['GET sizes', ['query:' + which]]"),
+    );
+    expect(said).toMatch(/not a plain quoted string/);
+    expect(code).not.toBe(0);
+  });
+
+  it('refuses a route the mirror lists twice rather than letting one win', async () => {
+    // Which copy won depended on the order they were read in, which is a coin
+    // toss over a route's parameters.
+    const { said, code } = await runAgainst(
+      allowlist("['GET', 'sizes']", "['GET sizes', ['query:fresh']], ['GET sizes', []]"),
+    );
+    expect(said).toMatch(/names a route the table already carries/);
+    expect(code).not.toBe(0);
+  });
+
+  it('is not fooled by a table name written in a comment or a string', async () => {
+    // `indexOf` found the first spelling anywhere, and the comment strip ran on
+    // the slice it had already taken — so prose above the real declaration won,
+    // and the section read from there held whatever happened to follow.
+    const decoy = `// export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([]);
+const NOTE = 'export const ALLOWED: ReadonlySet<string> = new Set([]);';
+export const USED = NOTE.length;
+`;
+    const { said, code } = await runAgainst(
+      decoy + allowlist("['GET', 'sizes']", "['GET sizes', ['query:fresh']]"),
+    );
+    expect(said).toContain('the mirror matches the platform (1 routes, 1 parameters)');
+    expect(code).toBe(0);
+  });
+
+  it('refuses a mirror that declares a table twice', async () => {
+    const { said, code } = await runAgainst(
+      `${allowlist("['GET', 'sizes']", "['GET sizes', ['query:fresh']]")}
+export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([]);
+`,
+    );
+    expect(said).toMatch(/declared more than once/);
+    expect(code).not.toBe(0);
   });
 });
