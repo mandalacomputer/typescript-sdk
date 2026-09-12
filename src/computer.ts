@@ -2485,10 +2485,16 @@ export class Computer {
    * whatever the first one revealed. A thumbnail can have the cached frame; a
    * decision cannot.
    *
-   * `fresh` and `width` cannot be combined, and asking for both is refused
-   * rather than half-honoured: the platform serves every downscaled screenshot
-   * from its cache, so a `fresh` alongside a width is a flag it would accept
-   * and ignore. Anything deciding on the image wants the full frame anyway.
+   * `fresh` composes with `width`: `screenshot(320, { fresh: true })` is a
+   * downscaled JPEG made from a capture taken after the request arrived, which
+   * is the cheap way to watch a desktop that is actually moving. It used to be
+   * refused here on the grounds that a width made the flag a no-op; the API
+   * honours both now, so it is sent. Leave `fresh` off — or pass `false` — to
+   * ask for the last frame the platform already holds.
+   *
+   * A suspended computer answers only that cached form. Asking a suspended
+   * computer for a fresh capture is refused with a 409 telling you to start it
+   * first, and a width does not change that.
    *
    * A screenshot is not *use* as far as the platform's idle sweep is concerned,
    * and does not resume a suspended computer. A loop that only polls the screen

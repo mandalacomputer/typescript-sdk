@@ -485,6 +485,17 @@ describe('screenshotQuery', () => {
     expect(() => P.screenshotQuery(-5)).toThrow(/positive/);
   });
 
+  it('refuses a width the API could only answer with a 400', () => {
+    // `w` is parsed as an integer on the other end, so a fractional width — what
+    // a miscomputed scale actually produces — and one large enough to serialise
+    // in exponent form are both round trips that can only fail. Refused with the
+    // argument that caused them instead.
+    expect(() => P.screenshotQuery(320.5)).toThrow(/whole number/);
+    expect(() => P.screenshotQuery(320.5, true)).toThrow(/whole number/);
+    expect(() => P.screenshotQuery(1e21)).toThrow(/whole number/);
+    expect(() => P.screenshotQuery(1e21, true)).toThrow(/whole number/);
+  });
+
   it('asks for an uncached frame only when told to', () => {
     // The bare call builds the URL it built before `fresh` existed — an empty
     // object here would put a '?' on every screenshot the SDK has ever taken.
@@ -493,16 +504,23 @@ describe('screenshotQuery', () => {
     expect(P.screenshotQuery(320, false)).toEqual({ w: 320 });
   });
 
-  it('refuses fresh alongside a width, which the platform would ignore', () => {
-    // The platform's handler branches on `w` and returns the thumbnail before
-    // it reads `fresh` — and builds that thumbnail off the cached frame. So
-    // this combination promised an uncached frame and delivered a doubly-cached
-    // one, silently, on the call the docs tell a drive loop to make.
-    expect(() => P.screenshotQuery(320, true)).toThrow(/cannot be combined with a width/);
+  it('sends a width together with fresh, which the API honours', () => {
+    // This pair used to be refused client-side, which left "a cheap thumbnail of
+    // what the screen looks like NOW" unaskable through this SDK at all. The API
+    // builds the downscaled image from a capture taken after the request
+    // arrived when both are present, so both go on the wire.
+    // Two widths, so reinstating the refusal for a band of them would still be
+    // caught: one throw restored below 320 would pass a single-width assertion.
+    expect(P.screenshotQuery(320, true)).toEqual({ w: 320, fresh: 1 });
+    expect(P.screenshotQuery(64, true)).toEqual({ w: 64, fresh: 1 });
+    expect(P.screenshotQuery(1920, true)).toEqual({ w: 1920, fresh: 1 });
   });
 
   it('checks the width even alongside fresh', () => {
+    // A width error, not a combination error: the width is validated before the
+    // flag is looked at, so a miscomputed scale still names itself.
     expect(() => P.screenshotQuery(0, true)).toThrow(/positive/);
+    expect(() => P.screenshotQuery(Number.NaN, true)).toThrow(/positive/);
   });
 });
 

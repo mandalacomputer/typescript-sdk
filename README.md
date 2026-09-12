@@ -365,6 +365,7 @@ refused if nothing has placed it yet.
 const png = await c.screenshot();                   // full-resolution PNG
 const thumb = await c.screenshot(320);              // downscaled JPEG
 const now = await c.screenshot(undefined, { fresh: true });
+const liveThumb = await c.screenshot(320, { fresh: true });   // both, and honoured
 ```
 
 **Pass `fresh` whenever the image is feeding a decision.** A bare screenshot may
@@ -374,9 +375,16 @@ screen as it was *before* its own last click. A model handed that frame conclude
 the click missed and clicks again, and the second click lands on whatever the
 first one revealed. A thumbnail can have the cached frame; a decision cannot.
 
-`fresh` and a width cannot be combined — `screenshot(320, { fresh: true })` is
-refused, not half-honoured. The platform serves every downscaled screenshot from
-its cache, so the flag alongside a width is one it would take and ignore.
+`fresh` composes with a width. `screenshot(320, { fresh: true })` is a downscaled
+JPEG built from a capture taken after the request arrived — the cheap way to watch
+a desktop that is actually moving. Earlier versions of this SDK refused that call
+on the grounds that a width made the flag a no-op; it is honoured now, so it is
+sent. Omit `fresh`, or pass `false`, to ask for the last frame already held.
+
+A suspended computer serves only that cached frame. Asking a suspended computer
+for a fresh capture is refused — **409**, telling you to start it first — with or
+without a width, so a poller that suspends its own machine should drop `fresh`
+rather than treat the 409 as the computer having vanished.
 
 ### Windows
 
