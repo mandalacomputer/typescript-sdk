@@ -1364,7 +1364,7 @@ export function waitBody(seconds: number): Json {
 export const cursorBody = (): Json => ({ action: 'cursor_position' });
 
 /**
- * `w` downscales, `fresh` skips the cache — and never both.
+ * `w` downscales, `fresh` skips the cache, and the two compose.
  *
  * A bare screenshot may be served from a cache up to 1.5 seconds old, which is
  * what makes N dashboard watchers cost one screendump — and what makes a drive
@@ -1373,9 +1373,18 @@ export const cursorBody = (): Json => ({ action: 'cursor_position' });
  * that is how a dialog gets dismissed twice. So `fresh` is the flag to pass
  * whenever the image is feeding a decision rather than filling a thumbnail.
  *
- * `1` rather than `true` because the platform's screenshot handler accepts both
- * spellings and its own documentation names this one; every other flag on this
- * surface is a literal wire value too.
+ * A width alongside `fresh` asks for a downscaled image built from a capture
+ * taken after the request arrived — a cheap thumbnail that is nonetheless
+ * current, which is what a caller passing both means. The API honours the pair,
+ * so this builder sends both: it used to refuse the combination, and refusing it
+ * left the only way to get a live thumbnail unreachable through this SDK.
+ * `fresh: false`, or omitting it, is how to ask for the last frame the API
+ * already holds — and it is the only form a suspended computer answers, since a
+ * fresh capture there is refused with a 409 whether or not a width came with it.
+ *
+ * `1` rather than `true` because the API accepts both spellings for this flag
+ * and its own documentation names this one; every other flag on this surface is
+ * a literal wire value too.
  */
 export function screenshotQuery(width?: number, fresh?: boolean): Query | undefined {
   const query: Query = {};
@@ -1389,25 +1398,11 @@ export function screenshotQuery(width?: number, fresh?: boolean): Query | undefi
     }
     query.w = width;
   }
-  if (flag(fresh, 'fresh')) {
-    // Refused rather than sent, because the platform takes it and ignores it.
-    // Its handler branches on `w` first and returns the thumbnail before it
-    // ever reads `fresh` — and that thumbnail is built off the *cached* frame
-    // and then cached a second time itself. So `{ w: 320, fresh: 1 }` is a
-    // request the wire carries happily and the platform cannot honour, which
-    // makes `screenshot(320, { fresh: true })` — the natural spelling, given
-    // the signature — the one call that promises an uncached frame in capitals
-    // and returns a doubly-cached one. That is exactly the shape this file
-    // exists to refuse, so it is refused here rather than documented away.
-    if (width !== undefined) {
-      throw new ValidationError(
-        'fresh cannot be combined with a width: the platform serves every downscaled ' +
-          'screenshot from its cache, so the flag would be silently ignored. Drop the ' +
-          'width to get an uncached frame.',
-      );
-    }
-    query.fresh = 1;
-  }
+  // Sent alongside a width rather than refused: the API builds the downscaled
+  // image from a post-arrival capture when both are present, so `{ w: 320,
+  // fresh: 1 }` is honoured and not a flag taken and ignored. The width is still
+  // validated above, so `screenshotQuery(0, true)` is a width error either way.
+  if (flag(fresh, 'fresh')) query.fresh = 1;
   // Undefined rather than an empty object for the bare call, so the URL this
   // builds is byte-for-byte the one it built before `fresh` existed.
   return Object.keys(query).length ? query : undefined;

@@ -493,16 +493,19 @@ describe('screenshotQuery', () => {
     expect(P.screenshotQuery(320, false)).toEqual({ w: 320 });
   });
 
-  it('refuses fresh alongside a width, which the platform would ignore', () => {
-    // The platform's handler branches on `w` and returns the thumbnail before
-    // it reads `fresh` — and builds that thumbnail off the cached frame. So
-    // this combination promised an uncached frame and delivered a doubly-cached
-    // one, silently, on the call the docs tell a drive loop to make.
-    expect(() => P.screenshotQuery(320, true)).toThrow(/cannot be combined with a width/);
+  it('sends a width together with fresh, which the API honours', () => {
+    // This pair used to be refused client-side, which left "a cheap thumbnail of
+    // what the screen looks like NOW" unaskable through this SDK at all. The API
+    // builds the downscaled image from a capture taken after the request
+    // arrived when both are present, so both go on the wire.
+    expect(P.screenshotQuery(320, true)).toEqual({ w: 320, fresh: 1 });
   });
 
   it('checks the width even alongside fresh', () => {
+    // A width error, not a combination error: the width is validated before the
+    // flag is looked at, so a miscomputed scale still names itself.
     expect(() => P.screenshotQuery(0, true)).toThrow(/positive/);
+    expect(() => P.screenshotQuery(Number.NaN, true)).toThrow(/positive/);
   });
 });
 

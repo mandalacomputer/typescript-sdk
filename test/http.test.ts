@@ -906,6 +906,17 @@ describe('bytes', () => {
     await c.screenshot(undefined, { fresh: true });
     expect(rec.last().query.fresh).toBe('1');
   });
+
+  it('carries a width and fresh on the same request', async () => {
+    // A live thumbnail: the API downscales a capture taken after the request
+    // arrived when both parameters are present. The SDK used to throw here
+    // instead of sending anything, so this call could not be made at all.
+    const rec = recorder(anyRoute);
+    const c = await client(rec).computers.get('vm-1');
+    await c.screenshot(320, { fresh: true });
+    expect(rec.last().query.w).toBe('320');
+    expect(rec.last().query.fresh).toBe('1');
+  });
 });
 
 describe('the parameters a drive loop needs', () => {
