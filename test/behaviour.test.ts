@@ -2928,6 +2928,39 @@ describe('paging a file bigger than one request', () => {
 });
 
 describe('snapshots', () => {
+  it.each(['', null, 0, false, {}, [], ['vm-1']].map((computerId) => ({ computerId })))(
+    'refuses an invalid ownership filter %j before requesting snapshots',
+    async ({ computerId }) => {
+      const { rec, client: c } = client(() =>
+        json([SNAPSHOT, { ...SNAPSHOT, id: 'snap-2', computer_id: 'vm-2' }]),
+      );
+      const opts = { computerId: computerId as unknown as string };
+      await expect(c.snapshots.list(opts)).rejects.toThrow(ValidationError);
+      await expect(c.snapshots.listWithStatus(opts)).rejects.toThrow(ValidationError);
+      expect(rec.calls).toHaveLength(0);
+    },
+  );
+
+  it('lists the whole account when the ownership filter is omitted or undefined', async () => {
+    const { client: c } = client(() =>
+      json([SNAPSHOT, { ...SNAPSHOT, id: 'snap-2', computer_id: 'vm-2' }]),
+    );
+    for (const opts of [{}, { computerId: undefined }]) {
+      const listed = await c.snapshots.listWithStatus(opts);
+      expect(listed.items.map((s) => s.id)).toEqual(['snap-1', 'snap-2']);
+      expect(listed.incomplete).toBe(null);
+    }
+  });
+
+  it('matches a supplied ownership filter exactly without trimming it', async () => {
+    const { client: c } = client(() =>
+      json([SNAPSHOT, { ...SNAPSHOT, id: 'snap-2', computer_id: ' vm-1 ' }]),
+    );
+    const listed = await c.snapshots.listWithStatus({ computerId: ' vm-1 ' });
+    expect(listed.items.map((s) => s.id)).toEqual(['snap-2']);
+    expect(listed.incomplete).toBe(null);
+  });
+
   it('keeps unreachable placeholders when filtering to one computer', async () => {
     // A partial listing APPENDS one stub per snapshot it could not reach, with
     // no computer_id on it. Filtering on equality deletes precisely the markers
@@ -3308,6 +3341,79 @@ describe('the agent loop', () => {
       (await c.computers.get('vm-1')).agent({ prompt: 'go', modelKey: 'sk' }),
     ).rejects.toThrow(MandalaError);
   });
+
+  it.each<[string, string[]]>([
+    ['', []],
+    ['event: step\ndata: {"n":1}\n\n', ['step']],
+    ['event: future_event\ndata: {}\n\n', []],
+  ])('refuses direct agentStream EOF without an outcome: %j', async (body, expected) => {
+    const { client: c } = client((call) =>
+      call.path.endsWith('/agent')
+        ? new Response(body, { headers: { 'content-type': 'text/event-stream' } })
+        : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    const seen: string[] = [];
+    const consume = async () => {
+      for await (const ev of computer.agentStream({ prompt: 'go', modelKey: 'sk' })) {
+        seen.push(ev.type);
+      }
+    };
+    await expect(consume()).rejects.toThrow('the agent stream ended without a result');
+    expect(seen).toEqual(expected);
+  });
+
+  it.each(['break', 'return'])('allows a direct agentStream consumer to %s early', async (exit) => {
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      start(ctrl) {
+        ctrl.enqueue(new TextEncoder().encode('event: step\ndata: {"n":1}\n\n'));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const { client: c } = client((call) =>
+      call.path.endsWith('/agent')
+        ? new Response(body, { headers: { 'content-type': 'text/event-stream' } })
+        : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    const stream = computer.agentStream({ prompt: 'go', modelKey: 'sk' });
+    if (exit === 'break') {
+      for await (const ev of stream) {
+        expect(ev.type).toBe('step');
+        break;
+      }
+    } else {
+      expect((await stream.next()).value).toMatchObject({ type: 'step' });
+      await expect(stream.return(undefined)).resolves.toEqual({ done: true, value: undefined });
+    }
+    expect(cancelled).toBe(true);
+  });
+
+  it.each([new Error('caller stopped'), 'caller stopped'])(
+    'preserves direct agentStream cancellation instead of reporting missing EOF: %j',
+    async (reason) => {
+      const { client: c } = client((call) =>
+        call.path.endsWith('/agent')
+          ? new Response('event: step\ndata: {"n":1}\n\n', {
+              headers: { 'content-type': 'text/event-stream' },
+            })
+          : anyRoute(call),
+      );
+      const computer = await c.computers.get('vm-1');
+      const controller = new AbortController();
+      const stream = computer.agentStream({
+        prompt: 'go',
+        modelKey: 'sk',
+        signal: controller.signal,
+      });
+      expect((await stream.next()).value).toMatchObject({ type: 'step' });
+      controller.abort(reason);
+      await expect(stream.next()).rejects.toBe(reason);
+    },
+  );
 
   it('stops consuming as soon as the stream reports an error', async () => {
     let cancelled = false;

@@ -1,7 +1,13 @@
 /** Resource collections hanging off the client. */
 
 import { Computer, EphemeralComputer, strandedText } from './computer.js';
-import { MandalaError, NotFoundError, suppressing, TimeoutError } from './errors.js';
+import {
+  MandalaError,
+  NotFoundError,
+  suppressing,
+  TimeoutError,
+  ValidationError,
+} from './errors.js';
 import type {
   BuildProgress,
   Move,
@@ -553,6 +559,12 @@ export class Snapshots {
   async listWithStatus(
     opts: ListOptions & { computerId?: string; includeUnfinished?: boolean } = {},
   ): Promise<Listing<Snapshot>> {
+    const id = opts.computerId;
+    if (id !== undefined && (typeof id !== 'string' || id.length === 0)) {
+      throw new ValidationError(
+        'computerId must be a non-empty string; omit it to list all snapshots',
+      );
+    }
     const { items, incomplete } = await this.#t.listing(P.SNAPSHOTS, {
       query: {
         include: P.flag(opts.includeUnfinished, 'includeUnfinished') ? 'unfinished' : undefined,
@@ -561,8 +573,7 @@ export class Snapshots {
       signal: opts.signal,
     });
     const all = items.map(toSnapshot);
-    const id = opts.computerId;
-    if (!id) return { items: all, incomplete };
+    if (id === undefined) return { items: all, incomplete };
     // THE ROW on both halves, not the decoded fields. `unreachable` is the
     // marker saying this listing is short, and filtering it out reports a
     // confident count over an incomplete answer — but a FULL row carrying the
