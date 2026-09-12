@@ -940,6 +940,28 @@ export const UNIMPLEMENTED_PARAMETERS: ReadonlySet<string> = new Set([]);
     expect(code).toBe(0);
   });
 
+  it('resolves an escape in a mirror entry rather than refusing it', async () => {
+    // `"\x73izes"` spells `sizes`. Read raw it is a route nobody serves; refused,
+    // it is a gate that a legal reformat takes down. The rest of this file reads
+    // literals through the same unescaper, and so does this.
+    const { said, code } = await runAgainst(
+      allowlist(`['GET', "\\x73izes"]`, "['GET sizes', ['query:fresh']]"),
+    );
+    expect(said).toContain('the mirror matches the platform (1 routes, 1 parameters)');
+    expect(code).toBe(0);
+  });
+
+  it('refuses a template entry whose value it cannot see', async () => {
+    // The `${` is assembled rather than written, so the fixture carries an
+    // interpolation without this file appearing to contain one.
+    const hole = `$\u007b`;
+    const { said, code } = await runAgainst(
+      allowlist(`[\`GET\`, \`${hole}prefix}sizes\`]`, "['GET sizes', ['query:fresh']]"),
+    );
+    expect(said).toMatch(/not a plain quoted string/);
+    expect(code).not.toBe(0);
+  });
+
   it('refuses an ALLOWED entry it cannot read both halves of', async () => {
     // Not skipped. An entry built from something this reader cannot see is a
     // route the mirror may well list, and dropping it reports a route the
@@ -981,6 +1003,82 @@ export const USED = NOTE.length;
     const { said, code } = await runAgainst(
       decoy + allowlist("['GET', 'sizes']", "['GET sizes', ['query:fresh']]"),
     );
+    expect(said).toContain('the mirror matches the platform (1 routes, 1 parameters)');
+    expect(code).toBe(0);
+  });
+
+  /**
+   * The two bypasses an adversarial review found in the first version of this
+   * reader, both of which type-check and both of which produced a green run.
+   */
+  it('refuses a table the initializer adds to after the array', async () => {
+    // `.concat` puts a route in the Set that is not in the leading array, so a
+    // reader that took the leading array compared a table missing it — and the
+    // extra route was one the mirror lists and the comparison never saw, which is
+    // the false all-clear this file exists to refuse. `.map` is safe to look
+    // through because it cannot change how many elements there are; `concat`,
+    // `filter`, `flatMap` and a spread can, so all of them are refused.
+    const mirror = `type Route = [string, string];
+export const ALLOWED: ReadonlySet<string> = new Set(
+  ([['GET', 'sizes']].concat([['GET', 'gone']]) as Route[]).map(([m, p]) => \`\${m} \${p}\`),
+);
+export const UNIMPLEMENTED: ReadonlySet<string> = new Set([]);
+export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
+  ['GET sizes', ['query:fresh']],
+]);
+export const UNIMPLEMENTED_PARAMETERS: ReadonlySet<string> = new Set([]);
+`;
+    const { said, code } = await runAgainst(mirror);
+    expect(said).toMatch(/holds more than one array literal expression/);
+    expect(code).not.toBe(0);
+  });
+
+  it('refuses an entry that is an expression starting with a pair', async () => {
+    // Same rule one level down: `['GET', 'sizes'].concat(more)[0]` starts with a
+    // readable pair and evaluates to something else.
+    const { said, code } = await runAgainst(
+      allowlist(`['GET', 'sizes'].concat(more)[0]`, "['GET sizes', ['query:fresh']]"),
+    );
+    expect(said).toMatch(/is not a \[method, pattern\] pair/);
+    expect(code).not.toBe(0);
+  });
+
+  it('is not fooled by a table written inside a type annotation', async () => {
+    // `export const NAME\s*:[^=]*=\s*new Map\(` reads a declaration and its
+    // initializer only until the annotation contains a STRING with an `=` and a
+    // `new Map(` in it: the regex ran through the quote and the mirror was
+    // compared against the decoy's table, which listed a parameter nobody serves.
+    const decoyType = `& { decoy?: "= new Map([['GET sizes', ['query:ghost']]])" }`;
+    const mirror = `type Route = [string, string];
+export const ALLOWED: ReadonlySet<string> = new Set(
+  ([['GET', 'sizes']] as Route[]).map(([m, p]) => \`\${m} \${p}\`),
+);
+export const UNIMPLEMENTED: ReadonlySet<string> = new Set([]);
+export const PARAMETERS: ReadonlyMap<string, readonly string[]> ${decoyType} = new Map([
+  ['GET sizes', ['query:fresh']],
+]);
+export const UNIMPLEMENTED_PARAMETERS: ReadonlySet<string> = new Set([]);
+`;
+    const { said, code } = await runAgainst(mirror);
+    expect(said).toContain('the mirror matches the platform (1 routes, 1 parameters)');
+    expect(said).not.toContain('query:ghost');
+    expect(code).toBe(0);
+  });
+
+  it('reads an annotation that legally contains an =', async () => {
+    // The mirror image of the same defect: `() => string` holds an `=`, so the
+    // old pattern stopped there and never found the initializer at all — a table
+    // reported as undeclared over an annotation that is perfectly legal.
+    const mirror = `type Route = [string, string];
+export const ALLOWED: ReadonlySet<string> = new Set(
+  ([['GET', 'sizes']] as Route[]).map(([m, p]) => \`\${m} \${p}\`),
+);
+export const UNIMPLEMENTED: ReadonlySet<string> = new Set([]);
+export const PARAMETERS: ReadonlyMap<string, readonly string[]> & { optional?: () => string } =
+  new Map([['GET sizes', ['query:fresh']]]);
+export const UNIMPLEMENTED_PARAMETERS: ReadonlySet<string> = new Set([]);
+`;
+    const { said, code } = await runAgainst(mirror);
     expect(said).toContain('the mirror matches the platform (1 routes, 1 parameters)');
     expect(code).toBe(0);
   });

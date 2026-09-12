@@ -67,6 +67,18 @@ export const WEBHOOK_TOLERANCE_S = 300;
  * obvious reading of the window suggests, has forgotten it while its signature is
  * still good. Whoever captured the request replays it then.
  *
+ * **The two clocks have to be the same clock.** This number is an interval on the
+ * clock you hand {@link verify} as `now` — the wall clock, when you let it
+ * default. Expire the id on a clock that can disagree with that one and the bound
+ * is only as good as the disagreement: measure the TTL on a monotonic clock, let
+ * the wall clock be set back a second, and 600.5 monotonic seconds after
+ * acceptance the id is gone while `verify` still sees the capture as 299.5 seconds
+ * old and takes it. No larger multiple of the tolerance fixes that, because a
+ * backward adjustment is unbounded — so either expire on the same clock `verify`
+ * reads, or add a margin for the largest step your platform can make. A store
+ * whose TTL is wall-clock-based (Redis `EXPIREAT`, a database `expires_at`) is
+ * already the same clock.
+ *
  * This bounds a captured SIGNATURE and nothing else. A genuine retry carries the
  * same id with a fresh timestamp and a fresh signature, and verifies on its own
  * merits however long later — so durable idempotency records across the full

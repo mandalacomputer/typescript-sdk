@@ -945,6 +945,12 @@ the gap a retention has to span is two tolerances. An id remembered for one is
 forgotten while its signature is still good, and whoever captured the request
 replays it then.
 
+**Expire the id on the same clock `verify` reads** — the wall clock, unless you
+pass `now`. A TTL measured on a monotonic clock while `verify` reads a wall clock
+that can be set backwards is only as good as the largest step: no multiple of the
+tolerance covers an unbounded adjustment. A wall-clock TTL (Redis `EXPIREAT`, a
+database `expires_at`) is already the same clock.
+
 That expiry bounds a captured signature. A retry can carry the same id with a
 fresh timestamp and signature, so retain **durable idempotency records across
 the full delivery retry horizon**, or longer if your application needs it.

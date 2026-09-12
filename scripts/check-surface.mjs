@@ -44,13 +44,14 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   balanced,
+  declarationAssignment,
   entries,
-  leadingArrayLiteral,
   listItems,
   moduleDeclarations,
   objectFields,
   stringLiteral,
   stripComments,
+  tableArrayLiteral,
   topLevelField,
   topLevelKeys,
   topLevelValueAt,
@@ -236,20 +237,35 @@ function main() {
    *
    * Bounded by the initializer's own parentheses instead, which cannot run past
    * the declaration however the file is reordered.
+   *
+   * In three steps rather than one pattern, which is the second review finding:
+   * the NAME is found in module code, the `=` is then walked to at depth zero, and
+   * only there is `new Set(` / `new Map(` required. A single regex cannot do that
+   * — `:[^=]*=` runs through a quote, so an annotation carrying a string with an
+   * `= new Map([...])` in it was read as the table, and the mirror was compared
+   * against a decoy. The same pattern refused a legal `{ optional?: () => string }`
+   * annotation, for the mirror image of the reason.
    */
   function mirrorTable(name) {
-    const declared = moduleDeclarations(
-      mirrorClean,
-      `export const ${name}\\s*:[^=]*=\\s*new (?:Set|Map)\\(`,
-    );
+    const where = `${name} in test/allowlist.ts`;
+    const declared = moduleDeclarations(mirrorClean, `export const ${name}\\b`);
     if (declared.length !== 1) {
       throw new Error(
         `${name} in test/allowlist.ts is ${declared.length ? 'declared more than once' : 'not declared'} ` +
           'where this reader can read it',
       );
     }
-    const initializer = balanced(mirrorClean, declared[0].index + declared[0].length - 1, '(', ')');
-    return leadingArrayLiteral(initializer, `${name} in test/allowlist.ts`);
+    const assigned = declarationAssignment(mirrorClean, declared[0].index + declared[0].length);
+    if (assigned === -1) throw new Error(`${where} has no initializer this reader can find`);
+    const opens = /^\s*new (?:Set|Map)\(/.exec(mirrorClean.slice(assigned));
+    if (!opens) {
+      throw new Error(
+        `${where} is not initialized with a new Set(...) or new Map(...): ` +
+          JSON.stringify(mirrorClean.slice(assigned, assigned + 60).trim()),
+      );
+    }
+    const initializer = balanced(mirrorClean, assigned + opens[0].length - 1, '(', ')');
+    return tableArrayLiteral(initializer, where);
   }
 
   /**
@@ -262,6 +278,23 @@ function main() {
    * platform has dropped went unreported, because the comparison never saw the
    * mirror's copy of it.
    */
+  /**
+   * The elements of an array literal that is the WHOLE of `element`.
+   *
+   * `startsWith('[')` is not enough and neither is `endsWith(']')`:
+   * `['GET', 'a'].concat(b)[0]` satisfies both, and reading the front of it as the
+   * element hands back a pair out of an expression that evaluates to something
+   * else. The array has to be the entire text — which is the same rule
+   * `tableArrayLiteral` applies one level up, for the same reason.
+   */
+  function soleList(element, refuse) {
+    const text = element.trim();
+    if (!text.startsWith('[')) refuse();
+    const body = balanced(text, 0, '[', ']');
+    if (`[${body}]` !== text) refuse();
+    return listItems(body);
+  }
+
   function mirrorString(element, what) {
     const value = stringLiteral(element);
     if (value === undefined) {
@@ -284,9 +317,7 @@ function main() {
             JSON.stringify(entry.trim().slice(0, 60)),
         );
       };
-      const text = entry.trim();
-      if (!text.startsWith('[') || !text.endsWith(']')) refuse();
-      const pair = listItems(balanced(text, 0, '[', ']'));
+      const pair = soleList(entry, refuse);
       if (pair.length !== 2) refuse();
       return `${mirrorString(pair[0], "an ALLOWED entry's method")} ${mirrorString(pair[1], "an ALLOWED entry's pattern")}`;
     }),
@@ -525,15 +556,11 @@ function main() {
             JSON.stringify(entry.trim().slice(0, 60)),
         );
       };
-      const text = entry.trim();
-      if (!text.startsWith('[') || !text.endsWith(']')) refuse('is not a [route, params] pair');
-      const pair = listItems(balanced(text, 0, '[', ']'));
+      const pair = soleList(entry, () => refuse('is not a [route, params] pair'));
       if (pair.length !== 2) refuse('is not a [route, params] pair');
       const route = mirrorString(pair[0], "a PARAMETERS entry's route");
-      const list = pair[1].trim();
-      if (!list.startsWith('[') || !list.endsWith(']')) refuse('has no literal parameter list');
       const params = new Set(
-        listItems(balanced(list, 0, '[', ']')).map((p) =>
+        soleList(pair[1], () => refuse('has no literal parameter list')).map((p) =>
           mirrorString(p, `a parameter of ${JSON.stringify(route)}`),
         ),
       );

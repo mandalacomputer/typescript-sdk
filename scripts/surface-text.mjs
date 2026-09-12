@@ -772,11 +772,11 @@ export function moduleDeclarations(source, pattern) {
  * decides what to do about an unreadable element; this only answers whether the
  * element IS a plain string.
  *
- * "Plain" excludes a template with a `${}` in it and any literal carrying a
- * backslash escape. Both are readable in principle and neither can appear in a
- * route or a parameter name, so evaluating them would be a small interpreter
- * written for no caller — and one that guessed wrong would put a name nobody
- * serves into the comparison.
+ * Escapes are RESOLVED rather than refused, through the same `unescaped` the rest
+ * of this file reads literals with: `"a\x2Fb"` is the four characters `a/b` and a
+ * reader that answered `a\x2Fb` would compare a route nobody serves. A template
+ * that interpolates is the one thing refused, because what it spells depends on
+ * values this reader cannot see.
  */
 export function stringLiteral(text) {
   const t = text.trim();
@@ -786,14 +786,13 @@ export function stringLiteral(text) {
   // both start with a readable literal and mean something else.
   if (quotedEnd(t, 0) !== t.length) return undefined;
   const inner = t.slice(1, -1);
-  if (inner.includes('\\')) return undefined;
-  if (quote === '`' && inner.includes('${')) return undefined;
-  return inner;
+  if (quote === '`' && hasHole(inner)) return undefined;
+  return unescaped(inner);
 }
 
 /**
- * The body of the array literal a declaration's initializer OPENS with, reading
- * through parentheses.
+ * The body of the array literal a table's initializer IS, and a throw for an
+ * initializer that is anything more than one.
  *
  * The tables read here are arrays, but not always the initializer itself: one is
  * `new Set((<array> as Route[]).map(...))` and another is `new Map(<array>)`.
@@ -802,20 +801,182 @@ export function stringLiteral(text) {
  * first — including one inside a nested literal, and including the `[m, p]` of
  * the `.map` destructuring that follows the real table.
  *
- * So the array has to be the LEADING one: everything before its bracket is
- * whitespace and open parentheses, nothing else. That is deterministic, it cannot
- * reach past the table into a callback, and it refuses — rather than guesses at —
- * a table built some other way, which is the property worth having. A reader that
- * guessed would compare part of a table and report the rest as drift.
+ * Taking the LEADING array is not enough either, which is the adversarial review
+ * finding this answers: `(<array>.concat([['GET', 'gone']]) as Route[]).map(...)`
+ * type-checks, puts a route in the Set, and leaves the leading array — the one a
+ * leading-array reader compares — without it. The extra route is then a route the
+ * mirror lists and the comparison never sees, which is the false all-clear this
+ * whole file exists to refuse.
+ *
+ * So the initializer must REDUCE to the array, and every piece of it is
+ * whitelisted:
+ *
+ * - wrapping parentheses, however many;
+ * - a trailing `as <type>`, the annotation being the point of the parentheses;
+ * - one trailing `.map(...)`, which cannot change how many elements there are —
+ *   that is what makes it safe to look through, and `concat`, `filter`, `flatMap`
+ *   and a spread are all refused because they can.
+ *
+ * Anything else is a table this reader would compare part of. It throws instead,
+ * naming what it could not reduce.
  */
-export function leadingArrayLiteral(text, what = 'this declaration') {
-  let i = 0;
-  while (i < text.length && /[\s(]/.test(text[i])) i++;
-  if (text[i] !== '[') {
-    throw new Error(
-      `${what} does not open with an array literal this reader can read: ` +
-        JSON.stringify(text.slice(0, 60)),
-    );
+export function tableArrayLiteral(text, what = 'this declaration') {
+  const refuse = (why, at) => {
+    throw new Error(`${what} ${why}: ${JSON.stringify(at.trim().slice(0, 60))}`);
+  };
+  let t = text.trim();
+  // Eight is past any nesting a formatter produces and stops a rule that fails
+  // to shorten `t` from spinning. Each pass below strips at least one construct.
+  for (let pass = 0; pass < 10; pass++) {
+    // The trailing comma a formatter leaves on a multi-line argument. Stripped
+    // first, because every rule below reads the last character.
+    if (t.endsWith(',')) {
+      t = t.slice(0, -1).trimEnd();
+      continue;
+    }
+    // One trailing `.map(...)`, stripped before the parentheses around it: the
+    // call's own `(` would otherwise read as a wrapper that never closes here.
+    const map = trailingCall(t, '.map');
+    if (map !== undefined) {
+      t = map.trim();
+      continue;
+    }
+    if (t.startsWith('(')) {
+      const inner = balanced(t, 0, '(', ')');
+      // Only when the `)` is the END of it. `(a) + (b)` opens with a parenthesis
+      // and is not a parenthesised expression.
+      if (`(${inner})` === t) {
+        t = inner.trim();
+        continue;
+      }
+    }
+    // `as <type>` — identifiers, dots, generics and `[]`, which is every
+    // annotation these tables carry and nothing that can call a method.
+    const as = /\sas\s+[A-Za-z_$][\w$.]*(?:<[\w$.,\s[\]]*>)?(?:\s*\[\s*\])*\s*$/.exec(t);
+    if (as) {
+      t = t.slice(0, as.index).trim();
+      continue;
+    }
+    break;
   }
-  return balanced(text, i, '[', ']');
+  if (!t.startsWith('[')) refuse('is not an array literal this reader can read', t);
+  const body = balanced(t, 0, '[', ']');
+  // The array has to BE the whole of what is left, not the front of it: the
+  // `.concat` above ends in a `)` and a `[0]` index ends in a `]`, and both would
+  // otherwise pass as "starts with an array".
+  if (`[${body}]` !== t) refuse('holds more than one array literal expression', t);
+  return body;
+}
+
+/**
+ * The argument text of a trailing `<name>(...)` call, or `undefined`.
+ *
+ * The receiver rather than the argument is what comes back: `X.map(f)` answers
+ * `X`. Literal-aware, so a `.map(` inside a string is not one, and the call's
+ * closing parenthesis has to be the last character — a call in the middle of an
+ * expression is not something to look through.
+ */
+function trailingCall(text, name) {
+  let i = 0;
+  while (i < text.length) {
+    const ch = text[i];
+    if (ch === "'" || ch === '"' || ch === '`') {
+      i = quotedEnd(text, i);
+      continue;
+    }
+    if (ch === '/' && text[i + 1] === '/') {
+      const end = text.indexOf('\n', i + 2);
+      i = end === -1 ? text.length : end;
+      continue;
+    }
+    if (ch === '/' && text[i + 1] === '*') {
+      const end = text.indexOf('*/', i + 2);
+      i = end === -1 ? text.length : end + 2;
+      continue;
+    }
+    if (ch === '/' && regexCanStart(text, i)) {
+      i = regexEnd(text, i);
+      continue;
+    }
+    if (ch === '(' || ch === '[' || ch === '{') {
+      const close = { '(': ')', '[': ']', '{': '}' }[ch];
+      const inner = balanced(text, i, ch, close);
+      const after = i + inner.length + 2;
+      const opensCall = text.slice(0, i).trimEnd().endsWith(name);
+      if (ch === '(' && opensCall && after === text.length) {
+        return text.slice(0, text.slice(0, i).trimEnd().length - name.length);
+      }
+      i = after;
+      continue;
+    }
+    i++;
+  }
+  return undefined;
+}
+
+/**
+ * The offset just past the `=` of a module-level declaration starting at `from`.
+ *
+ * Written because a regex could not do it. `export const NAME\s*:[^=]*=\s*new
+ * Map\(` looks like it reads a declaration and its initializer, and
+ * `moduleDeclarations` only guarantees where the match STARTS — so `[^=]*` is
+ * free to run through a quote and find its `new Map(` inside a STRING in the type
+ * annotation. An annotation carrying `& { decoy?: "= new Map([['GET x', []]])" }`
+ * type-checks, and the reader compared the mirror against the decoy's table.
+ *
+ * The same regex refuses a legal annotation for the mirror image of the reason:
+ * `{ optional?: () => string }` holds an `=`, so `[^=]*` stops at it and the
+ * `new Map(` never matches. A depth-aware walk answers both — that `=` is inside
+ * braces, and this only stops at depth zero.
+ *
+ * `=>`, `==`, `!=`, `<=` and `>=` are not assignments and are stepped over.
+ */
+export function declarationAssignment(source, from) {
+  let depth = 0;
+  let i = from;
+  while (i < source.length) {
+    const ch = source[i];
+    if (ch === "'" || ch === '"' || ch === '`') {
+      i = quotedEnd(source, i);
+      continue;
+    }
+    if (ch === '/' && source[i + 1] === '/') {
+      const end = source.indexOf('\n', i + 2);
+      i = end === -1 ? source.length : end;
+      continue;
+    }
+    if (ch === '/' && source[i + 1] === '*') {
+      const end = source.indexOf('*/', i + 2);
+      i = end === -1 ? source.length : end + 2;
+      continue;
+    }
+    if (ch === '/' && regexCanStart(source, i)) {
+      i = regexEnd(source, i);
+      continue;
+    }
+    if (ch === '(' || ch === '[' || ch === '{') depth++;
+    else if (ch === ')' || ch === ']' || ch === '}') {
+      // A closer at depth zero ends the declaration without an initializer, and
+      // reading on would find the NEXT one's.
+      if (depth-- === 0) return -1;
+    } else if (ch === ';' && depth === 0) return -1;
+    else if (ch === '=' && depth === 0) {
+      const next = source[i + 1];
+      const prev = source[i - 1];
+      if (
+        next === '=' ||
+        next === '>' ||
+        prev === '=' ||
+        prev === '!' ||
+        prev === '<' ||
+        prev === '>'
+      ) {
+        i += 2;
+        continue;
+      }
+      return i + 1;
+    }
+    i++;
+  }
+  return -1;
 }

@@ -212,13 +212,20 @@ describe('verify: the §3.2 vector', () => {
      */
     const receiverKeeping = (retentionS: number) => {
       const seen = new Map<string, number>();
-      return async (now: number): Promise<'processed' | 'refused' | 'rejected'> => {
+      // Two clock readings, not one: `now` is what `verify` judges the timestamp
+      // against, and `on` is the clock the retention is measured on. They are the
+      // same clock in every correct deployment, and passing them separately is how
+      // the test can say what goes wrong when they are not.
+      return async (
+        now: number,
+        on: number = now,
+      ): Promise<'processed' | 'refused' | 'rejected'> => {
         if (!(await verify(SECRET, headers(), BODY, { now }))) return 'rejected';
         // The vector's own id, so the harness keys on what the delivery carries.
         const id = ID;
         const acceptedAt = seen.get(id);
-        if (acceptedAt !== undefined && now - acceptedAt <= retentionS) return 'refused';
-        seen.set(id, now);
+        if (acceptedAt !== undefined && on - acceptedAt <= retentionS) return 'refused';
+        seen.set(id, on);
         return 'processed';
       };
     };
@@ -255,6 +262,26 @@ describe('verify: the §3.2 vector', () => {
       }
       // And past the window the delivery fails on its own, so the id may go.
       expect(await receiver(lastAcceptedAt + 0.001)).toBe('rejected');
+    });
+
+    it('holds only while the retention clock is the clock verify reads', async () => {
+      // The assumption the doc comment states, cited rather than asserted: expire
+      // the id on a clock that can disagree with the one `verify` judges the
+      // timestamp against and no multiple of the tolerance saves you, because a
+      // backward adjustment is unbounded. Here the retention clock has run 600.5
+      // seconds — past the 600 it keeps ids for — while the wall clock `verify`
+      // reads went back a second, so the capture is still inside the window.
+      const receiver = receiverKeeping(replayRetentionS());
+      const monotonic = 1_000_000;
+      expect(await receiver(firstAcceptedAt, monotonic)).toBe('processed');
+      expect(await receiver(lastAcceptedAt - 0.5, monotonic + replayRetentionS() + 0.5)).toBe(
+        'processed',
+      );
+      // On ONE clock, the same elapsed time puts the delivery outside the window
+      // and the second answer is a rejection rather than a replay.
+      const consistent = receiverKeeping(replayRetentionS());
+      expect(await consistent(firstAcceptedAt)).toBe('processed');
+      expect(await consistent(firstAcceptedAt + replayRetentionS() + 0.5)).toBe('rejected');
     });
 
     it('shows one tolerance is not enough, which is the mistake this closes', async () => {
