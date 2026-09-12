@@ -7,6 +7,7 @@ import {
   ConflictError,
   MandalaError,
   PlanLimitError,
+  replayRetentionS,
   ValidationError,
   verify,
   WEBHOOK_COMPUTERS_MAX,
@@ -190,16 +191,80 @@ describe('verify: the §3.2 vector', () => {
     expect(await verify(PREVIOUS_SECRET, headers(), BODY, { now: AT })).toBe(false);
   });
 
-  it('keeps an accepted signature valid beyond one retention window, through its inclusive expiry', async () => {
-    // First acceptance can be early because clock skew is allowed in either
-    // direction. Expiring a remembered id one tolerance later permits a replay.
+  /**
+   * The retention rule, as arithmetic a receiver can run rather than prose.
+   *
+   * The test this replaces asserted the timestamp window — that the vector
+   * verifies from `AT - tolerance` through `AT + tolerance` and not past it —
+   * which is true of `verify` with or without any retention advice, so it passed
+   * against the commit that introduced the advice and proved none of it. What
+   * matters is the receiver-side consequence, and the only way to have a test of
+   * that is for the number to be something the package computes.
+   */
+  describe('remembering an accepted id', () => {
+    /**
+     * A receiver that accepts a delivery once and refuses a repeat of the same
+     * id for `retentionS` after accepting it, inclusively.
+     *
+     * Deliberately the simplest thing that could work, because the subject is the
+     * NUMBER: what it means for a retention to be too short is that a second
+     * `verify` of the same captured bytes reaches the handler.
+     */
+    const receiverKeeping = (retentionS: number) => {
+      const seen = new Map<string, number>();
+      return async (now: number): Promise<'processed' | 'refused' | 'rejected'> => {
+        if (!(await verify(SECRET, headers(), BODY, { now }))) return 'rejected';
+        // The vector's own id, so the harness keys on what the delivery carries.
+        const id = ID;
+        const acceptedAt = seen.get(id);
+        if (acceptedAt !== undefined && now - acceptedAt <= retentionS) return 'refused';
+        seen.set(id, now);
+        return 'processed';
+      };
+    };
+
+    /** The earliest and latest instants `verify` accepts these exact bytes. */
     const firstAcceptedAt = AT - WEBHOOK_TOLERANCE_S;
-    const oneWindowLater = firstAcceptedAt + WEBHOOK_TOLERANCE_S + 1;
-    const expiresAt = AT + WEBHOOK_TOLERANCE_S;
-    for (const now of [firstAcceptedAt, oneWindowLater, expiresAt]) {
-      expect(await verify(SECRET, headers(), BODY, { now })).toBe(true);
-    }
-    expect(await verify(SECRET, headers(), BODY, { now: expiresAt + 0.001 })).toBe(false);
+    const lastAcceptedAt = AT + WEBHOOK_TOLERANCE_S;
+
+    it('is twice the tolerance, from the moment of acceptance', () => {
+      expect(replayRetentionS()).toBe(2 * WEBHOOK_TOLERANCE_S);
+      expect(replayRetentionS(60)).toBe(120);
+      expect(replayRetentionS(0)).toBe(0);
+      // Derived from the window rather than written down twice: this is the gap
+      // the retention has to span, and it is what makes the number 600 and not
+      // some constant that happens to equal it.
+      expect(replayRetentionS()).toBe(lastAcceptedAt - firstAcceptedAt);
+    });
+
+    it('refuses a receiver tolerance it cannot compute a retention from', () => {
+      // A NaN would come back a NaN, and `elapsed <= NaN` is false — a cache that
+      // remembers nothing, built out of a mistake that named itself nowhere.
+      expect(() => replayRetentionS(Number.NaN)).toThrow(ValidationError);
+      expect(() => replayRetentionS(Number.POSITIVE_INFINITY)).toThrow(/finite/);
+      expect(() => replayRetentionS(-1)).toThrow(/non-negative/);
+    });
+
+    it('closes the replay of a captured delivery for as long as it verifies', async () => {
+      // Accept at the earliest instant the skew allows, then replay the same
+      // bytes at every instant `verify` still takes them. Every one refused.
+      const receiver = receiverKeeping(replayRetentionS());
+      expect(await receiver(firstAcceptedAt)).toBe('processed');
+      for (const now of [firstAcceptedAt, AT, lastAcceptedAt - 1, lastAcceptedAt]) {
+        expect(`${now}: ${await receiver(now)}`).toBe(`${now}: refused`);
+      }
+      // And past the window the delivery fails on its own, so the id may go.
+      expect(await receiver(lastAcceptedAt + 0.001)).toBe('rejected');
+    });
+
+    it('shows one tolerance is not enough, which is the mistake this closes', async () => {
+      // The retention the window's obvious reading suggests. The capture replays
+      // while its signature is still good, which is the whole reason the number
+      // is twice the tolerance and not the tolerance.
+      const receiver = receiverKeeping(WEBHOOK_TOLERANCE_S);
+      expect(await receiver(firstAcceptedAt)).toBe('processed');
+      expect(await receiver(firstAcceptedAt + WEBHOOK_TOLERANCE_S + 1)).toBe('processed');
+    });
   });
 });
 

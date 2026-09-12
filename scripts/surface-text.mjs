@@ -760,3 +760,62 @@ export function moduleDeclarations(source, pattern) {
   if (stack.length) throw new Error('unbalanced module scope');
   return found;
 }
+
+/**
+ * The value of `text` when it is exactly one plain quoted literal, else
+ * `undefined`.
+ *
+ * Any of the three quote styles, which is the point of it. The mirror tables
+ * were read with `/'([^']+)'/g`, so an entry a formatter or an author wrote with
+ * double quotes matched nothing and was skipped — and a skipped entry is not a
+ * complaint, it is a table that is short by however much it held. The caller
+ * decides what to do about an unreadable element; this only answers whether the
+ * element IS a plain string.
+ *
+ * "Plain" excludes a template with a `${}` in it and any literal carrying a
+ * backslash escape. Both are readable in principle and neither can appear in a
+ * route or a parameter name, so evaluating them would be a small interpreter
+ * written for no caller — and one that guessed wrong would put a name nobody
+ * serves into the comparison.
+ */
+export function stringLiteral(text) {
+  const t = text.trim();
+  const quote = t[0];
+  if (quote !== "'" && quote !== '"' && quote !== '`') return undefined;
+  // The literal has to be the WHOLE of the element. `'a' + b` and `'a'.repeat(2)`
+  // both start with a readable literal and mean something else.
+  if (quotedEnd(t, 0) !== t.length) return undefined;
+  const inner = t.slice(1, -1);
+  if (inner.includes('\\')) return undefined;
+  if (quote === '`' && inner.includes('${')) return undefined;
+  return inner;
+}
+
+/**
+ * The body of the array literal a declaration's initializer OPENS with, reading
+ * through parentheses.
+ *
+ * The tables read here are arrays, but not always the initializer itself: one is
+ * `new Set((<array> as Route[]).map(...))` and another is `new Map(<array>)`.
+ * Finding the array with `indexOf('[')` reads the `[` of the `as Route[]`
+ * annotation, and a regex over the declaration reads whichever bracket comes
+ * first — including one inside a nested literal, and including the `[m, p]` of
+ * the `.map` destructuring that follows the real table.
+ *
+ * So the array has to be the LEADING one: everything before its bracket is
+ * whitespace and open parentheses, nothing else. That is deterministic, it cannot
+ * reach past the table into a callback, and it refuses — rather than guesses at —
+ * a table built some other way, which is the property worth having. A reader that
+ * guessed would compare part of a table and report the rest as drift.
+ */
+export function leadingArrayLiteral(text, what = 'this declaration') {
+  let i = 0;
+  while (i < text.length && /[\s(]/.test(text[i])) i++;
+  if (text[i] !== '[') {
+    throw new Error(
+      `${what} does not open with an array literal this reader can read: ` +
+        JSON.stringify(text.slice(0, 60)),
+    );
+  }
+  return balanced(text, i, '[', ']');
+}
