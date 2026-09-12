@@ -935,12 +935,35 @@ inside the rotation window — passes under either secret. And a secret pasted
 without its `whsec_` prefix throws rather than returning `false` forever, since
 that is a configuration error and not a bad delivery. What it cannot do is
 remember: **record every accepted `webhook-id` before processing and refuse
-repeats.** To prevent a captured request from being replayed, retain its id
-through the **inclusive `webhook-timestamp + toleranceS` boundary**. A timestamp
-can be up to five minutes ahead of your clock on first acceptance, so retaining
-an id for only five minutes after acceptance is insufficient. With the default
-tolerance, a fixed retention longer than ten minutes after acceptance is
-conservative; with a custom tolerance, use longer than twice that tolerance.
+repeats.** How long for is `replayRetentionS()` — **twice the tolerance from the
+moment of acceptance, inclusively**: keep the id while the elapsed time is less
+than or equal to it, and drop it only once past.
+
+```ts
+import { replayRetentionS } from 'mandala-computer';
+
+const keepFor = replayRetentionS();          // 600 seconds, with the default tolerance
+const custom = replayRetentionS(60);         // 120, if you overrode toleranceS
+```
+
+A function rather than a sentence because the obvious reading of the window gives
+half the right answer. A timestamp can be one tolerance *ahead* of your clock when
+you first accept it, and the same bytes still verify one tolerance *behind* it, so
+the gap a retention has to span is two tolerances. An id remembered for one is
+forgotten while its signature is still good, and whoever captured the request
+replays it then.
+
+**Expire the id on the same clock `verify` reads, and on one that never goes
+backwards.** That clock is the wall clock unless you pass `now`, so a TTL measured
+on a monotonic clock is a second clock and the bound is only as good as their
+disagreement. One clock is not enough by itself either: an eviction cannot be
+undone, so a clock stepped back after the record expired leaves the capture inside
+the window with nothing left to refuse it. No multiple of the tolerance covers an
+unbounded adjustment — use a nondecreasing clock. A margin is only a substitute if
+it covers the *total* backward displacement the clock can accumulate after an
+eviction: two one-second steps defeat a one-second margin exactly as a two-second
+step does. A wall-clock TTL (Redis `EXPIREAT`, a database
+`expires_at`) is already reading the same clock as the default.
 
 That expiry bounds a captured signature. A retry can carry the same id with a
 fresh timestamp and signature, so retain **durable idempotency records across

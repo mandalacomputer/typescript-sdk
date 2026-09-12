@@ -44,11 +44,14 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   balanced,
+  declarationAssignment,
   entries,
   listItems,
   moduleDeclarations,
   objectFields,
+  stringLiteral,
   stripComments,
+  tableArrayLiteral,
   topLevelField,
   topLevelKeys,
   topLevelValueAt,
@@ -211,20 +214,142 @@ function main() {
 
   const mirrorSource = readFileSync(join(repo, 'test/allowlist.ts'), 'utf8');
 
-  /** The text of one `export const NAME` declaration in the mirror. */
-  function mirrorSection(name, until) {
-    const from = mirrorSource.indexOf(`export const ${name}`);
-    if (from === -1) throw new Error(`${name} not found in test/allowlist.ts`);
-    const to = mirrorSource.indexOf(`export const ${until}`, from);
-    return stripComments(mirrorSource.slice(from, to === -1 ? undefined : to));
+  // Every scan of the mirror reads this, for the same reason the platform's side
+  // does: a declaration name quoted in a comment is source to `indexOf` and prose
+  // to a reader. Length-preserving, so offsets index either text alike.
+  const mirrorClean = stripComments(mirrorSource);
+
+  /**
+   * The array literal one of the mirror's tables is built from.
+   *
+   * Read the way the platform's table is read, and for the reasons OPL-4784
+   * established over there rather than as a matter of taste. What this replaced
+   * took `indexOf('export const ALLOWED')` on the RAW source and ended the
+   * section at `indexOf('export const UNIMPLEMENTED')`, which is three holes:
+   *
+   * - `indexOf` finds the first spelling anywhere, and anywhere includes inside a
+   *   string, a regex literal or a nested scope. The comment strip came after the
+   *   slice, so a name written in a comment beat the declaration under it.
+   * - The end of a section was another `indexOf` of another name, so a table
+   *   whose successor gets renamed silently swallows the rest of the file.
+   * - `stripComments` ran on the slice, so the offsets inside it agreed with
+   *   nothing else here.
+   *
+   * Bounded by the initializer's own parentheses instead, which cannot run past
+   * the declaration however the file is reordered.
+   *
+   * In three steps rather than one pattern, which is the second review finding:
+   * the NAME is found in module code, the `=` is then walked to at depth zero, and
+   * only there is `new Set(` / `new Map(` required. A single regex cannot do that
+   * — `:[^=]*=` runs through a quote, so an annotation carrying a string with an
+   * `= new Map([...])` in it was read as the table, and the mirror was compared
+   * against a decoy. The same pattern refused a legal `{ optional?: () => string }`
+   * annotation, for the mirror image of the reason.
+   */
+  function mirrorTable(name) {
+    const where = `${name} in test/allowlist.ts`;
+    const declared = moduleDeclarations(mirrorClean, `export const ${name}\\b`);
+    if (declared.length !== 1) {
+      throw new Error(
+        `${name} in test/allowlist.ts is ${declared.length ? 'declared more than once' : 'not declared'} ` +
+          'where this reader can read it',
+      );
+    }
+    const assigned = declarationAssignment(mirrorClean, declared[0].index + declared[0].length);
+    if (assigned === -1) throw new Error(`${where} has no initializer this reader can find`);
+    // The RIGHT constructor, not either of them. Accepting both left a hole the
+    // projection count could not see: `PARAMETERS = new Set([[...]]) as any`
+    // type-checks, is what a formatter leaves alone, and builds a Set — so
+    // `PARAMETERS.get(route)` is not a function and every consumer of it throws,
+    // while this reader read the entries out of the array and certified a match.
+    const wanted = name === 'ALLOWED' ? 'Set' : 'Map';
+    const opens = new RegExp(`^\\s*new ${wanted}\\(`).exec(mirrorClean.slice(assigned));
+    if (!opens) {
+      throw new Error(
+        `${where} is not initialized with a new ${wanted}(...): ` +
+          JSON.stringify(mirrorClean.slice(assigned, assigned + 60).trim()),
+      );
+    }
+    const open = assigned + opens[0].length - 1;
+    const initializer = balanced(mirrorClean, open, '(', ')');
+    // What follows the constructor call, up to the statement's semicolon, must be
+    // NOTHING. Validating only the arguments was the third round of one finding:
+    // `new Set([...]).add('GET gone')` type-checks, and the added route is in no
+    // array this reader looks at. `as const` and an `as <type>` are allowed
+    // because neither changes a value; a call, an index or an operator is refused.
+    const after = mirrorClean.slice(open + initializer.length + 2);
+    const tail = after.slice(0, after.indexOf(';') + 1);
+    if (
+      !after.includes(';') ||
+      !/^\s*(?:as\s+(?:const|[A-Za-z_$][\w$.]*(?:<[\w$.,\s[\]]*>)?(?:\s*\[\s*\])*)\s*)?;$/.test(
+        tail,
+      )
+    ) {
+      throw new Error(
+        `${where} does something to its table after building it, which this reader ` +
+          `cannot follow: ${JSON.stringify((after.includes(';') ? tail : after).trim().slice(0, 60))}`,
+      );
+    }
+    // ALLOWED is `[pair, ...]` projected into strings and PARAMETERS is already a
+    // list of entries, so the number of projections each is built with is part of
+    // its shape and not a detail. Zero on ALLOWED is a Set of arrays whose every
+    // `has()` is false; one on PARAMETERS is a Map this reader is not reading.
+    return tableArrayLiteral(initializer, where, name === 'ALLOWED' ? 1 : 0);
+  }
+
+  /**
+   * One quoted string out of a table element, or a throw naming the element.
+   *
+   * Refused rather than skipped, which is the whole of what fail-closed means
+   * here. The regexes this replaced matched single quotes only, so an entry
+   * written — or reformatted — with double quotes was not a complaint, it was a
+   * table shorter by however much it held: a route the mirror still lists and the
+   * platform has dropped went unreported, because the comparison never saw the
+   * mirror's copy of it.
+   */
+  /**
+   * The elements of an array literal that is the WHOLE of `element`.
+   *
+   * `startsWith('[')` is not enough and neither is `endsWith(']')`:
+   * `['GET', 'a'].concat(b)[0]` satisfies both, and reading the front of it as the
+   * element hands back a pair out of an expression that evaluates to something
+   * else. The array has to be the entire text — which is the same rule
+   * `tableArrayLiteral` applies one level up, for the same reason.
+   */
+  function soleList(element, refuse) {
+    const text = element.trim();
+    if (!text.startsWith('[')) refuse();
+    const body = balanced(text, 0, '[', ']');
+    if (`[${body}]` !== text) refuse();
+    return listItems(body);
+  }
+
+  function mirrorString(element, what) {
+    const value = stringLiteral(element);
+    if (value === undefined) {
+      throw new Error(
+        `${what} in test/allowlist.ts is not a plain quoted string this reader can read: ` +
+          JSON.stringify(element.slice(0, 60)),
+      );
+    }
+    return value;
   }
 
   const mirrorRoutes = new Set(
-    [
-      ...mirrorSection('ALLOWED', 'UNIMPLEMENTED').matchAll(
-        /\[\s*'([A-Z]+)'\s*,\s*'([^']+)'\s*\]/g,
-      ),
-    ].map((m) => `${m[1]} ${m[2]}`),
+    listItems(mirrorTable('ALLOWED')).map((entry) => {
+      // A `[method, pattern]` pair and nothing else. An element of another shape
+      // is a spelling this reader got wrong, and calling it a route with one half
+      // missing would put a line nobody serves into the comparison.
+      const refuse = () => {
+        throw new Error(
+          'an entry of ALLOWED in test/allowlist.ts is not a [method, pattern] pair: ' +
+            JSON.stringify(entry.trim().slice(0, 60)),
+        );
+      };
+      const pair = soleList(entry, refuse);
+      if (pair.length !== 2) refuse();
+      return `${mirrorString(pair[0], "an ALLOWED entry's method")} ${mirrorString(pair[1], "an ALLOWED entry's pattern")}`;
+    }),
   );
 
   // --- parameters -----------------------------------------------------------
@@ -440,14 +565,36 @@ function main() {
     return table;
   }
 
-  /** The same, read out of the mirror's PARAMETERS map. */
+  /**
+   * The same, read out of the mirror's PARAMETERS map.
+   *
+   * Every entry accounted for, and every parameter inside it. The regex pair this
+   * replaced skipped a route key it could not match and skipped a parameter name
+   * it could not match, in both cases without a word — and the guard downstream
+   * only notices a table that came back empty, which a table missing one entry is
+   * not. Two spellings of one route are refused too: which of them won depended
+   * on the order they were read in, which is a coin toss over a route's
+   * parameters.
+   */
   function mirrorParameters() {
-    const section = mirrorSection('PARAMETERS', 'UNIMPLEMENTED_PARAMETERS');
     const table = new Map();
-    const entry = /\[\s*'([A-Z]+ [^']+)'\s*,\s*\[/g;
-    for (let m = entry.exec(section); m; m = entry.exec(section)) {
-      const list = balanced(section, m.index + m[0].length - 1, '[', ']');
-      table.set(m[1], new Set([...list.matchAll(/'([^']+)'/g)].map((p) => p[1])));
+    for (const entry of listItems(mirrorTable('PARAMETERS'))) {
+      const refuse = (why) => {
+        throw new Error(
+          `an entry of PARAMETERS in test/allowlist.ts ${why}: ` +
+            JSON.stringify(entry.trim().slice(0, 60)),
+        );
+      };
+      const pair = soleList(entry, () => refuse('is not a [route, params] pair'));
+      if (pair.length !== 2) refuse('is not a [route, params] pair');
+      const route = mirrorString(pair[0], "a PARAMETERS entry's route");
+      const params = new Set(
+        soleList(pair[1], () => refuse('has no literal parameter list')).map((p) =>
+          mirrorString(p, `a parameter of ${JSON.stringify(route)}`),
+        ),
+      );
+      if (table.has(route)) refuse('names a route the table already carries');
+      table.set(route, params);
     }
     return table;
   }
