@@ -3345,6 +3345,7 @@ describe('the agent loop', () => {
   it.each<[string, string[]]>([
     ['', []],
     ['event: step\ndata: {"n":1}\n\n', ['step']],
+    ['event: step\ndata: {"n":1}', ['step']],
     ['event: future_event\ndata: {}\n\n', []],
   ])('refuses direct agentStream EOF without an outcome: %j', async (body, expected) => {
     const { client: c } = client((call) =>
@@ -3392,12 +3393,17 @@ describe('the agent loop', () => {
     expect(cancelled).toBe(true);
   });
 
-  it.each([new Error('caller stopped'), 'caller stopped'])(
-    'preserves direct agentStream cancellation instead of reporting missing EOF: %j',
-    async (reason) => {
+  it.each([
+    { reason: new Error('caller stopped'), ending: '\n\n' },
+    { reason: 'caller stopped', ending: '\n\n' },
+    { reason: new Error('caller stopped'), ending: '' },
+    { reason: 'caller stopped', ending: '' },
+  ])(
+    'preserves direct agentStream cancellation ($reason) with frame ending $ending',
+    async ({ reason, ending }) => {
       const { client: c } = client((call) =>
         call.path.endsWith('/agent')
-          ? new Response('event: step\ndata: {"n":1}\n\n', {
+          ? new Response(`event: step\ndata: {"n":1}${ending}`, {
               headers: { 'content-type': 'text/event-stream' },
             })
           : anyRoute(call),
