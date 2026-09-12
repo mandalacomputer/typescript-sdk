@@ -1266,6 +1266,12 @@ export class Builds {
    * same reason a stream that stops without one is: the value this yields last
    * is the outcome a caller reads, so it has to be an outcome.
    *
+   * An aborted `signal` is reported as itself, ahead of that missing-`done`
+   * refusal — a caller who cancelled already knows why the stream stopped, and
+   * a protocol error in its place reads as a defect in the build. Breaking out
+   * of the loop is different again: a consumer's own `break`, `return` or
+   * `throw` never resumes this generator, so neither check runs.
+   *
    * An account may hold eight of these open at once; the ninth is a
    * {@link RateLimitError}.
    */
@@ -1343,6 +1349,13 @@ export class Builds {
       }
       yield now;
     }
+    // Cancellation first, the way the agent stream reports it. An abort that
+    // lands after the last frame was read leaves this generator at an EOF with
+    // no `done`, which is indistinguishable HERE from a stream the platform cut
+    // short — and reporting a protocol failure for a stream the CALLER stopped
+    // sends a reader hunting a defect in the build. The abort is the reason they
+    // already have, so it wins.
+    opts.signal?.throwIfAborted();
     // The stream ended without saying so. A generator that simply returns here
     // is indistinguishable from one that finished, so a caller looping over
     // these would report a build it stopped watching as a build that ended.

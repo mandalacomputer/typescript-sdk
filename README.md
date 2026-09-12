@@ -1073,6 +1073,39 @@ raised as an error — the steps already taken are real and what they did to the
 desktop stands. They say the run did not finish, which is a different thing from
 the run having gone wrong.
 
+**A run can be refused part-way through, after billed steps.** Authorization is
+not settled once at the start of a call this long: the API rechecks the
+credential, the role, the account's standing and the plan before each model call
+and each tool, so a key revoked, a member demoted, an account suspended or a plan
+downgraded mid-run stops the loop with a **401**, **403** or **402**. The steps
+already taken stand — on your key, and on that desktop.
+
+The refusal reports what was already spent and already done, and this SDK hands
+that over rather than flattening it into a sentence:
+
+```ts
+for await (const ev of c.agentStream({ prompt, modelKey })) {
+  if (ev.type === 'error') {
+    console.warn(`stopped with ${ev.status}: ${ev.error}`);
+    console.warn(`${ev.steps.length} steps done, ${ev.usage.inputTokens} input tokens spent`);
+  }
+}
+```
+
+`agent()` and `agentOnce()` throw instead, and the same accounting is on the
+error's `body`. None of those three statuses is a transport failure: the
+credential is no longer valid for that account, so replaying the same request
+with the same key spends again and is refused again. `isTransient` answers false
+for a mid-run refusal, and cannot be talked out of it by the frame — a `reason`
+word arriving on a stream is retry advice about one request, which a run that has
+already clicked things is not, so it is withheld from the thrown error (the
+streaming `error` event's `raw` still has it).
+
+The long writes are refused the same way and at the same kind of point — `create`,
+`move`, a template publish, and the webhook create and update can all stop after
+the body has been read and the work prepared. For those the durable write has
+**not** happened; for an agent run the completed steps have.
+
 `agent()` is itself the stream, read to its `done`. `agentOnce()` is the same
 run as a single non-streaming request — simpler, and worse for anything long,
 since nothing is reported until the whole run is over and a proxy between you

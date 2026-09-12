@@ -651,6 +651,56 @@ describe('watching a build', () => {
     await expect(read()).rejects.toThrow(/ended without a final event/);
   });
 
+  /**
+   * A stream the CALLER stopped is an abort, not a protocol failure.
+   *
+   * The agent stream has always reported it that way; this one threw the
+   * missing-`done` error instead, which sends a reader looking for a defect in a
+   * build that is fine — and hides the fact that they cancelled.
+   *
+   * The narrow window is real rather than contrived. `sse` checks the signal
+   * before each read, after each read and between the events framed out of one
+   * chunk, so an abort during any ordinary iteration is already reported as
+   * itself. What it cannot check is the frame it emits from the decoder's tail at
+   * EOF — a stream cut without its closing blank line, which is exactly how a
+   * dropped connection ends. Abort while handling THAT event and the generator
+   * runs out with the signal already set, landing on the line under test.
+   *
+   * Both framings are asserted — with the closing blank line and without —
+   * because only one of them reaches this line today and a change to the framing
+   * must not quietly move which. Either way the answer is an abort, and that is
+   * the behaviour being pinned rather than which check produces it.
+   */
+  it.each([
+    ['cut without its closing blank line', ''],
+    ['framed normally', '\n\n'],
+  ])('reports a stream cancelled while %s as an abort', async (_shape, terminator) => {
+    const ctl = new AbortController();
+    const { client: c } = client((call) =>
+      call.path.endsWith('/events')
+        ? new Response(`event: progress\ndata: ${JSON.stringify(BUILD_PROGRESS)}${terminator}`, {
+            status: 200,
+            headers: { 'content-type': 'text/event-stream' },
+          })
+        : anyRoute(call),
+    );
+    // A reason of our own, so the assertion cannot pass on some other abort:
+    // this is the exact object the caller cancelled with.
+    const mine = new DOMException('the caller stopped watching', 'AbortError');
+    const read = async () => {
+      for await (const _ of c.builds.events('bld-1', { signal: ctl.signal })) {
+        ctl.abort(mine);
+      }
+    };
+    const err = await read().then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    expect(err).toBe(mine);
+    expect((err as Error | undefined)?.message).not.toMatch(/final event/);
+    expect(err).not.toBeInstanceOf(MandalaError);
+  });
+
   it('throws when the final event is malformed rather than waiting on the socket', async () => {
     const { client: c } = client((call) =>
       call.path.endsWith('/events')
