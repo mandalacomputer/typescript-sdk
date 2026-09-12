@@ -226,6 +226,12 @@ describe('terminal receive/output pipeline', () => {
         this.linger = true;
         queueMicrotask(() => this.emitOpen());
       }
+
+      override sendRaw(data: unknown): void {
+        // Native WebSocket stops dispatching messages as soon as close() puts
+        // it in CLOSING, even before the close handshake finishes.
+        if (!this.closing) super.sendRaw(data);
+      }
     } as unknown as typeof WebSocket;
     const stdin = Object.assign(new EventEmitter(), {
       isTTY: true,
@@ -283,6 +289,45 @@ describe('terminal receive/output pipeline', () => {
       );
       expect(diagnostic).toEqual([]);
     });
+  });
+
+  it.each([0, 7])('receives the output after exit %i before closing the socket', async (code) => {
+    await session(async ({ socket, stdout, diagnostic, result }) => {
+      stdout.write.mockImplementation((_chunk: Uint8Array, complete: () => void) => {
+        complete();
+        return true;
+      });
+      socket.sendRaw(frame(1));
+      socket.send({ type: 'exit', code });
+      socket.sendRaw(frame(2));
+      socket.emitClose();
+
+      expect(await result).toBe(code);
+      expect(stdout.write.mock.calls.map(([chunk]) => [...chunk])).toEqual([[1], [2]]);
+      expect(diagnostic).toEqual([]);
+    });
+  });
+
+  it('bounds the receptive exit wait when the peer never closes', async () => {
+    vi.useFakeTimers();
+    try {
+      await session(async ({ socket, stdout, stdin, diagnostic, result }) => {
+        socket.send({ type: 'exit', code: 0 });
+        await vi.advanceTimersByTimeAsync(9);
+        expect(socket.closing).toBe(false);
+        expect(stdin.setRawMode).not.toHaveBeenCalledWith(false);
+
+        await vi.advanceTimersByTimeAsync(1);
+        expect(await result).toBe(0);
+        expect(socket.closing).toBe(true);
+        expect(stdin.setRawMode).toHaveBeenLastCalledWith(false);
+        socket.sendRaw(frame(1));
+        expect(stdout.write).not.toHaveBeenCalled();
+        expect(diagnostic).toEqual([]);
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('accepts the exact aggregate boundary and drains frames in order', async () => {
@@ -877,7 +922,10 @@ describe('the exit code a session reports', () => {
           // A tick later than the open: the message listener is registered
           // only once waitForWebSocketOpen has resolved, so a frame sent in the
           // same turn would be delivered to nobody.
-          setTimeout(() => this.sendRaw(JSON.stringify(frame)), 0);
+          setTimeout(() => {
+            this.sendRaw(JSON.stringify(frame));
+            this.emitClose();
+          }, 0);
         });
       }
     } as unknown as typeof WebSocket;

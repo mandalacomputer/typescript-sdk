@@ -11,11 +11,12 @@
  * the hashed, platform-derived name list exists to replace.
  */
 
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 import { scanText } from '../scripts/check-internals.mjs';
@@ -36,6 +37,99 @@ const run = (...args: string[]) => {
     return { status: e.status, out: `${e.stdout}${e.stderr}` };
   }
 };
+
+const withCheckout = (name: string, check: (repo: string, script: string) => void) => {
+  const temporary = mkdtempSync(join(tmpdir(), 'privacy-check-'));
+  const repo = join(temporary, name);
+  const script = join(repo, 'scripts', 'check-internals.mjs');
+  try {
+    mkdirSync(join(repo, 'scripts'), { recursive: true });
+    copyFileSync(SCRIPT, script);
+    writeFileSync(join(repo, 'scripts', 'internal-names.sha256'), '# Empty test digest set\n');
+    check(repo, script);
+  } finally {
+    rmSync(temporary, { recursive: true, force: true });
+  }
+};
+
+describe.each(['checkout with spaces', 'checkout#%'])('check-internals in %s', (name) => {
+  it('validates command-line arguments', () => {
+    withCheckout(name, (_repo, script) => {
+      const result = spawnSync(process.execPath, [script, '--messages'], { encoding: 'utf8' });
+      expect(result.status).toBe(2);
+      expect(result.stderr).toContain('revision range');
+    });
+  });
+
+  it('also runs when invoked through a symlink', () => {
+    withCheckout(name, (repo, script) => {
+      const alias = join(repo, 'check-alias.mjs');
+      symlinkSync(script, alias);
+      const result = spawnSync(process.execPath, [alias, '--messages'], { encoding: 'utf8' });
+      expect(result.status).toBe(2);
+      expect(result.stderr).toContain('revision range');
+    });
+  });
+
+  it('runs a clean file scan and rejects an uncommitted finding', () => {
+    withCheckout(name, (repo, script) => {
+      const clean = spawnSync(process.execPath, [script], { encoding: 'utf8' });
+      expect(clean.status).toBe(0);
+      expect(clean.stdout).toContain('nothing of the platform');
+
+      mkdirSync(join(repo, 'src'));
+      writeFileSync(join(repo, 'src', 'example.ts'), '// see example.go\n');
+      const dirty = spawnSync(process.execPath, [script], { encoding: 'utf8' });
+      expect(dirty.status).toBe(1);
+      expect(dirty.stderr).toContain('src/example.ts:1: names a platform source file');
+    });
+  });
+
+  it('checks commit messages even when the files and latest message are clean', () => {
+    withCheckout(name, (repo, script) => {
+      const git = (...args: string[]) =>
+        execFileSync('git', ['-c', 'commit.gpgsign=false', ...args], {
+          cwd: repo,
+          stdio: 'pipe',
+        });
+      git('init', '-q');
+      git('config', 'user.email', 'test@example.com');
+      git('config', 'user.name', 'Test');
+      git('config', 'core.hooksPath', join(repo, 'no-hooks'));
+      git('commit', '--allow-empty', '-qm', 'Initial clean message');
+      git('commit', '--allow-empty', '-qm', 'See example.go');
+      git('commit', '--allow-empty', '-qm', 'Latest clean message');
+      const result = spawnSync(process.execPath, [script, '--messages', 'HEAD~2..HEAD'], {
+        encoding: 'utf8',
+      });
+      expect(result.status).toBe(1);
+      expect(result.stderr).toMatch(
+        /commit [a-f0-9]+:1: names a platform source file: example\.go/,
+      );
+    });
+  });
+
+  it('can be imported without executing the gate', () => {
+    withCheckout(name, (repo, script) => {
+      rmSync(join(repo, 'scripts', 'internal-names.sha256'));
+      for (const args of [[], ['not-an-existing-file', '--messages']]) {
+        const result = spawnSync(
+          process.execPath,
+          [
+            '--input-type=module',
+            '--eval',
+            `await import(${JSON.stringify(pathToFileURL(script).href)}); console.log('imported');`,
+            ...args,
+          ],
+          { encoding: 'utf8' },
+        );
+        expect(result.status).toBe(0);
+        expect(result.stdout).toBe('imported\n');
+        expect(result.stderr).toBe('');
+      }
+    });
+  });
+});
 
 describe('check-internals', () => {
   it('passes over this repository, which is the check the rest only stand in for', () => {

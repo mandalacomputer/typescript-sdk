@@ -926,11 +926,18 @@ the signature is checked. A header carrying two signatures — every delivery
 inside the rotation window — passes under either secret. And a secret pasted
 without its `whsec_` prefix throws rather than returning `false` forever, since
 that is a configuration error and not a bad delivery. What it cannot do is
-remember: **keep every `webhook-id` you accept for at least five minutes and
-refuse a repeat.** A retry carries the same id and a fresh signature, and
-verifies. The timestamp bounds how long a captured request can be replayed; the
-id is what stops a legitimate retry being processed twice; together they close
-every replay with a memory that is finite by construction.
+remember: **record every accepted `webhook-id` before processing and refuse
+repeats.** To prevent a captured request from being replayed, retain its id
+through the **inclusive `webhook-timestamp + toleranceS` boundary**. A timestamp
+can be up to five minutes ahead of your clock on first acceptance, so retaining
+an id for only five minutes after acceptance is insufficient. With the default
+tolerance, a fixed retention longer than ten minutes after acceptance is
+conservative; with a custom tolerance, use longer than twice that tolerance.
+
+That expiry bounds a captured signature. A retry can carry the same id with a
+fresh timestamp and signature, so retain **durable idempotency records across
+the full delivery retry horizon**, or longer if your application needs it.
+Timestamp verification alone does not prevent processing retries twice.
 
 **Acknowledge with a 2xx before doing the work.** An attempt is cut at ten
 seconds and counted as a failure. Anything else — a non-2xx, a timeout, a

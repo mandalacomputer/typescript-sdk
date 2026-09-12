@@ -54,7 +54,7 @@
 
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -205,7 +205,17 @@ function fail(message) {
   process.exit(2);
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+function isMain() {
+  if (!process.argv[1]) return false;
+  try {
+    return realpathSync(fileURLToPath(import.meta.url)) === realpathSync(process.argv[1]);
+  } catch {
+    // An importing process can have an argv entry that is not a file.
+    return false;
+  }
+}
+
+if (isMain()) {
   const range = parseRange(process.argv.slice(2));
   const digests = loadDigests();
   const problems = [...scanFiles(digests), ...(range ? scanMessages(range, digests) : [])];
