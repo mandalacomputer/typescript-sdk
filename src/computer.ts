@@ -3957,6 +3957,17 @@ export class Computer {
    * leave real work on the desktop, and discarding the result would discard the
    * only account of what was done to the machine. Check
    * {@link AgentResult.finished}.
+   *
+   * **A RUN CAN BE REFUSED PART-WAY THROUGH, AFTER BILLED STEPS.** Authorization
+   * is not settled once at the start of a call this long: the API rechecks it
+   * before each model call and each tool, so a key revoked, a member demoted, an
+   * account suspended or a plan downgraded mid-run stops the loop with a 401,
+   * 403 or 402 — and the steps already taken stand, on your key and on that
+   * desktop. None of those three is a transport failure and none is worth
+   * retrying unchanged; {@link APIError.body} carries the `usage` and the
+   * completed steps the refusal reported, so read those before deciding what to
+   * do next. {@link agentStream} surfaces the same facts as `usage` and `steps`
+   * on its `error` event.
    */
   async agent(args: AgentArgs): Promise<AgentResult> {
     // Named here as well, though agentStream checks the same argument a line
@@ -3975,8 +3986,16 @@ export class Computer {
         // server that reports an error and then stays open must not keep the
         // caller waiting forever. Returning from the generator also cancels
         // the response reader in Transport.sse's finally.
+        // The frame goes on as the error's body, so what the run had already
+        // spent and already done survives the throw. Without it a run refused
+        // between two of its steps raised a sentence and nothing else, and the
+        // caller could not tell it from a run that never started — on the one
+        // surface where the difference is money and a desktop in an unknown
+        // state. `agentStream` hands the same facts back as `usage` and `steps`.
         const message = `the agent run failed: ${ev.error}`;
-        throw ev.status ? errorForEventStatus(ev.status, message) : new MandalaError(message);
+        throw ev.status
+          ? errorForEventStatus(ev.status, message, ev.raw)
+          : new MandalaError(message);
       }
     }
     // UNREACHABLE, and it stays: the compiler cannot see that it is, and this
@@ -4006,6 +4025,14 @@ export class Computer {
    * Events this SDK does not model are skipped rather than thrown on — the
    * platform is free to add types, and falling over on the first unrecognised
    * one would turn a forward-compatible addition into an outage.
+   *
+   * An `error` event can be a mid-run refusal rather than a model or guest
+   * failure: authorization is rechecked before each model call and each tool, so
+   * a key revoked, a member demoted, an account suspended or a plan downgraded
+   * while the run is going stops it with a `status` of 401, 403 or 402. Its
+   * `usage` and `steps` say what had already been spent and done, which is the
+   * difference between a run that did nothing and one that did four things and
+   * was then refused. Do not retry those three unchanged.
    *
    * Throws `MandalaError` if the response ends without `done` or `error` —
    * the same refusal {@link agent} makes, made here because this is where it
@@ -4063,6 +4090,12 @@ export class Computer {
    * until the whole run is over, and a reverse proxy between you and the
    * platform may well close a request held open for minutes. Prefer
    * {@link agent} unless you specifically need a single non-streaming call.
+   *
+   * This form can be refused mid-run too, and here the refusal is the response:
+   * a 401, 403 or 402 raised from a call that authenticated when it was sent
+   * means the run was stopped between two of its steps, with the steps before it
+   * billed and done. {@link APIError.body} carries what the platform reported
+   * about them. Do not retry those three unchanged.
    */
   async agentOnce(args: AgentArgs): Promise<AgentResult> {
     const modelKey = requireModelKey(args.modelKey, 'agentOnce()');
