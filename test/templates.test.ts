@@ -665,28 +665,38 @@ describe('watching a build', () => {
    * EOF — a stream cut without its closing blank line, which is exactly how a
    * dropped connection ends. Abort while handling THAT event and the generator
    * runs out with the signal already set, landing on the line under test.
+   *
+   * Both framings are asserted — with the closing blank line and without —
+   * because only one of them reaches this line today and a change to the framing
+   * must not quietly move which. Either way the answer is an abort, and that is
+   * the behaviour being pinned rather than which check produces it.
    */
-  it('reports a cancelled stream as an abort, not as a missing final event', async () => {
+  it.each([
+    ['cut without its closing blank line', ''],
+    ['framed normally', '\n\n'],
+  ])('reports a stream cancelled while %s as an abort', async (_shape, terminator) => {
     const ctl = new AbortController();
     const { client: c } = client((call) =>
       call.path.endsWith('/events')
-        ? // No closing blank line: the event arrives as the decoder's tail.
-          new Response(`event: progress\ndata: ${JSON.stringify(BUILD_PROGRESS)}`, {
+        ? new Response(`event: progress\ndata: ${JSON.stringify(BUILD_PROGRESS)}${terminator}`, {
             status: 200,
             headers: { 'content-type': 'text/event-stream' },
           })
         : anyRoute(call),
     );
+    // A reason of our own, so the assertion cannot pass on some other abort:
+    // this is the exact object the caller cancelled with.
+    const mine = new DOMException('the caller stopped watching', 'AbortError');
     const read = async () => {
       for await (const _ of c.builds.events('bld-1', { signal: ctl.signal })) {
-        ctl.abort();
+        ctl.abort(mine);
       }
     };
     const err = await read().then(
       () => undefined,
       (e: unknown) => e,
     );
-    expect((err as Error | undefined)?.name).toBe('AbortError');
+    expect(err).toBe(mine);
     expect((err as Error | undefined)?.message).not.toMatch(/final event/);
     expect(err).not.toBeInstanceOf(MandalaError);
   });

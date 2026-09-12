@@ -752,7 +752,8 @@ export function errorForStatus(
  * motivated it: a run refused between two of its steps reports what it had
  * already spent and done alongside the sentence, and a throw that dropped that
  * read as a run which did nothing. It lands on {@link APIError.body}, the way a
- * refusal on a response does, so the two forms of the same stop read alike.
+ * refusal on a response does, so the two forms of the same stop read alike —
+ * with one field withheld, for the reason on {@link withoutRefusalReason}.
  */
 const DESCRIBES_THIS_CONNECTION: ReadonlySet<typeof APIError> = new Set([
   GatewayTimeoutError,
@@ -762,10 +763,38 @@ const DESCRIBES_THIS_CONNECTION: ReadonlySet<typeof APIError> = new Set([
 ]);
 
 export function errorForEventStatus(status: number, message: string, body?: unknown): APIError {
-  if (status === 429) return new RateLimitError(message, status, body);
+  const carried = withoutRefusalReason(body);
+  if (status === 429) return new RateLimitError(message, status, carried);
   const Cls = BY_STATUS[status] ?? APIError;
-  if (DESCRIBES_THIS_CONNECTION.has(Cls)) return new APIError(message, status, body);
-  return new Cls(message, status, body);
+  if (DESCRIBES_THIS_CONNECTION.has(Cls)) return new APIError(message, status, carried);
+  return new Cls(message, status, carried);
+}
+
+/**
+ * The body, minus anything {@link APIError.reason} would read as retry advice.
+ *
+ * `reason` is a word about ONE refused request — whether it clears on its own and
+ * whether the request is safe to send again — and {@link isTransient} consults it
+ * ahead of the classes. Neither half of that survives the move onto a stream.
+ *
+ * The same argument as the edge statuses above, one step further. What the event
+ * describes is a run that has already done things: clicks that landed, files that
+ * changed, tokens billed to somebody's key. A word meaning "this clears, send it
+ * again" cannot be true of replaying that, however true it is of a lone request —
+ * and a stream frame carrying one would flip a mid-run refusal from "stop and
+ * re-authorize" to "retry", which is the one answer that duplicates work already
+ * performed on a real desktop.
+ *
+ * So the word is dropped here rather than trusted, and the frame reaches a
+ * streaming caller whole as the `error` event's `raw` if they want to read it.
+ * Refusals delivered as a RESPONSE are untouched — that is the surface the
+ * vocabulary was defined for, and the request there did not half-happen.
+ */
+function withoutRefusalReason(body: unknown): unknown {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return body;
+  if (!('reason' in body)) return body;
+  const { reason: _dropped, ...rest } = body as Record<string, unknown>;
+  return rest;
 }
 
 /**

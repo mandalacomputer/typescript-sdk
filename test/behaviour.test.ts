@@ -3653,6 +3653,58 @@ describe('a status that arrived on a stream', () => {
     expect(isTransient(err)).toBe(false);
   });
 
+  /**
+   * Carrying the frame must not let it reclassify the failure.
+   *
+   * `reason` is retry advice about ONE refused request, and `isTransient` reads
+   * it ahead of the classes — so a frame carrying `contention` or `starting`
+   * would turn a mid-run refusal from "stop and re-authorize" into "send it
+   * again", on a run that has already clicked things. Every status is covered,
+   * including the edge range that falls back to a plain APIError and the 429 that
+   * is reached by a branch of its own: those were three separate routes into the
+   * same constructor, and one of them left open is the whole defect.
+   */
+  it.each([401, 403, 402, 504, 429])(
+    'does not let a %i refusal frame argue itself transient',
+    async (status) => {
+      for (const reason of ['contention', 'starting']) {
+        const { client: c } = client((call) =>
+          call.path.endsWith('/agent')
+            ? errorStream(JSON.stringify({ error: 'unauthorized', status, reason, steps: [{}] }))
+            : anyRoute(call),
+        );
+        const computer = await c.computers.get('vm-1');
+        const err = await computer.agent({ prompt: 'go', modelKey: 'sk' }).catch((e) => e);
+        expect(`${status}/${reason}: ${(err as APIError).reason}`).toBe(
+          `${status}/${reason}: undefined`,
+        );
+        // 429 is the one status here that IS transient, and by its class rather
+        // than by a word out of the frame — which is the distinction being kept.
+        expect(`${status}/${reason}: ${isTransient(err)}`).toBe(
+          `${status}/${reason}: ${status === 429}`,
+        );
+        // The accounting still survives; only the retry advice is withheld.
+        expect((err as APIError).body).toMatchObject({ steps: [{}] });
+      }
+    },
+  );
+
+  it('still hands the whole frame, reason and all, to a streaming caller', async () => {
+    // Withheld from the thrown error's body, not from the event: a caller
+    // reading the stream itself can see everything that arrived.
+    const { client: c } = client((call) =>
+      call.path.endsWith('/agent')
+        ? errorStream('{"error":"revoked","status":401,"reason":"contention"}')
+        : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    const seen: AgentEvent[] = [];
+    for await (const ev of computer.agentStream({ prompt: 'go', modelKey: 'sk' })) seen.push(ev);
+    const last = seen.at(-1);
+    if (last?.type !== 'error') throw new Error('expected an error event');
+    expect(last.raw.reason).toBe('contention');
+  });
+
   it('reports zeros and no steps when the refusal sent no accounting', async () => {
     // Absence has to read as absence rather than as a throw from inside the
     // caller's own loop, and a scalar `steps` must not be spread into one.

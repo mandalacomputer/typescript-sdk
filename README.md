@@ -1093,9 +1093,13 @@ for await (const ev of c.agentStream({ prompt, modelKey })) {
 ```
 
 `agent()` and `agentOnce()` throw instead, and the same accounting is on the
-error's `body`. None of those three statuses is a transport failure and
-`isTransient` says so: the credential is no longer valid for that account, so
-replaying the same request with the same key spends again and is refused again.
+error's `body`. None of those three statuses is a transport failure: the
+credential is no longer valid for that account, so replaying the same request
+with the same key spends again and is refused again. `isTransient` answers false
+for a mid-run refusal, and cannot be talked out of it by the frame — a `reason`
+word arriving on a stream is retry advice about one request, which a run that has
+already clicked things is not, so it is withheld from the thrown error (the
+streaming `error` event's `raw` still has it).
 
 The long writes are refused the same way and at the same kind of point — `create`,
 `move`, a template publish, and the webhook create and update can all stop after
