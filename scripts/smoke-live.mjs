@@ -359,10 +359,8 @@ async function build(label) {
 }
 
 // The first is `published` on an account that has never built this document and
-// `reused` on one that has, so it is not asserted either way — the run that
-// first proved this compiles at all took 14.2s and reported `published`, and
-// every run since has reused it in under a second. The SECOND is the assertion,
-// because it is the one that holds whichever of those happened.
+// `reused` on one that has, so either outcome is valid for the first build.
+// The second build uses the same document and must reuse the existing image.
 const first = await build('build 1 — compiles, or reuses if this document has been built before');
 const second = await build('build 2 — identical document, so it must reuse');
 
