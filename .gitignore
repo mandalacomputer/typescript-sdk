@@ -6,3 +6,10 @@ dist/
 
 # Reports written by the /grok-bug-hunt skill.
 .grok-bug-hunt/
+
+# Local operational artifacts: audit reports, per-batch plans, pipeline journals.
+# NOT a nicety. These are written by reading the platform and they quote it —
+# ticket numbers, internal reasoning, tracker URLs — and `check-internals` cannot
+# see them: it scans `src`, `test`, `scripts`, `.github` and three named files, so
+# one `git add -A` would publish the lot with the gate still reporting green.
+plans/

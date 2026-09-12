@@ -518,8 +518,17 @@ export class Snapshots {
   /**
    * Snapshots on this account.
    *
-   * `computerId` filters to one computer's. The filter **keeps unreachable
-   * placeholders**, and that is not a nicety: a partial listing does not merely
+   * `computerId` filters to one computer's, and is refused with a
+   * `ValidationError` before the request goes out unless it is a non-empty
+   * string. An empty one is the case worth naming: `computerId: ''` is a
+   * perfectly typed argument and it used to fall through to the account-wide
+   * listing, so a variable that arrived empty — an unset environment value, a
+   * `?id=` with nothing after it — silently widened a scoped read into every
+   * snapshot on the account, and the caller most likely to act on that is the
+   * one about to delete what it lists. Omit the field to mean the whole
+   * account; `undefined` means the same thing, because that is what an absent
+   * property already is. The filter **keeps unreachable placeholders**, and
+   * that is not a nicety: a partial listing does not merely
    * omit rows, it appends one `{ id, unreachable: true }` stub per snapshot the
    * platform could not reach, with no `computerId` on it because there was no
    * host to say what it belongs to. Filtering on equality would delete precisely
@@ -555,7 +564,12 @@ export class Snapshots {
     return (await this.listWithStatus(opts)).items;
   }
 
-  /** {@link list}, plus whether the platform could answer it in full. */
+  /**
+   * {@link list}, plus whether the platform could answer it in full.
+   *
+   * Refuses an empty or non-string `computerId` the same way and for the same
+   * reason — see {@link list}.
+   */
   async listWithStatus(
     opts: ListOptions & { computerId?: string; includeUnfinished?: boolean } = {},
   ): Promise<Listing<Snapshot>> {

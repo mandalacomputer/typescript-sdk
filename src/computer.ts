@@ -3979,6 +3979,14 @@ export class Computer {
         throw ev.status ? errorForEventStatus(ev.status, message) : new MandalaError(message);
       }
     }
+    // UNREACHABLE, and it stays: the compiler cannot see that it is, and this
+    // method is declared to answer an AgentResult. The only way the loop above
+    // ends is agentStream RETURNING, which it does on `done` and on `error` —
+    // both handled inside it. Every other way out of that generator is a throw,
+    // and the missing-outcome case is now one of them, raised where it is
+    // decided rather than inferred here from a loop that finished. Spelled with
+    // the same words, so a caller who catches this cannot tell which of the two
+    // spoke, and never has to.
     throw new MandalaError('the agent stream ended without a result');
   }
 
@@ -3998,6 +4006,16 @@ export class Computer {
    * Events this SDK does not model are skipped rather than thrown on — the
    * platform is free to add types, and falling over on the first unrecognised
    * one would turn a forward-compatible addition into an outage.
+   *
+   * Throws `MandalaError` if the response ends without `done` or `error` —
+   * the same refusal {@link agent} makes, made here because this is where it
+   * is decided. A run is minutes of paid clicking on a real desktop, and a
+   * stream that stops early has left work on that machine; ending the loop
+   * quietly would read to a caller as a run that finished with nothing to say.
+   * BREAKING OUT IS NOT THAT: a consumer's own `break`, `return` or `throw`
+   * never resumes this generator, so the check never runs. Neither does a
+   * cancellation — an aborted `signal` is reported as itself, ahead of the
+   * missing outcome, because the caller already knows why the stream stopped.
    */
   agentStream(args: AgentArgs): AsyncGenerator<AgentEvent> {
     // A plain method wrapping an inner generator, rather than `async *` with

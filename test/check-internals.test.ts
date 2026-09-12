@@ -61,7 +61,11 @@ describe.each(['checkout with spaces', 'checkout#%'])('check-internals in %s', (
     });
   });
 
-  it('also runs when invoked through a symlink', () => {
+  // Skipped rather than failed on a host that will not make one. Creating a
+  // symlink needs a privilege or developer mode on Windows, and a suite that
+  // reports a permission the runner does not have as a defect in this scanner
+  // teaches the reader to ignore it.
+  it.skipIf(process.platform === 'win32')('also runs when invoked through a symlink', () => {
     withCheckout(name, (repo, script) => {
       const alias = join(repo, 'check-alias.mjs');
       symlinkSync(script, alias);
@@ -134,6 +138,21 @@ describe.each(['checkout with spaces', 'checkout#%'])('check-internals in %s', (
 describe('check-internals', () => {
   it('passes over this repository, which is the check the rest only stand in for', () => {
     expect(run().status).toBe(0);
+  });
+
+  it('keeps local operational artifacts out of the tree the scanner never reads', () => {
+    // The other half of the gate, and the half a scan cannot be: `plans/` holds
+    // audit reports and pipeline journals, which quote the platform and carry
+    // tracker URLs — and SCANNED_DIRS does not include it, so `git add -A`
+    // would publish the lot with this scanner still reporting green. Ignoring
+    // the directory is what makes that impossible rather than merely unlikely,
+    // and a line in .gitignore is exactly the kind of thing a later edit drops
+    // without noticing. Asked of git rather than read out of the file, because
+    // what matters is the answer git gives, not the spelling that produced it.
+    const ignored = spawnSync('git', ['check-ignore', '-q', 'plans/anything.md'], {
+      cwd: join(__dirname, '..'),
+    });
+    expect(ignored.status).toBe(0);
   });
 
   it.each([
