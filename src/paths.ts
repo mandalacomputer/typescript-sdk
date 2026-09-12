@@ -1393,8 +1393,15 @@ export function screenshotQuery(width?: number, fresh?: boolean): Query | undefi
     // convert screenshot(0) — the natural result of a miscomputed thumbnail
     // scale — into a request for the full-resolution PNG, a different and more
     // expensive call, with nothing saying so.
-    if (!Number.isFinite(width) || width <= 0) {
-      throw new ValidationError(`width must be a positive number: ${width}`);
+    //
+    // A whole number, and a safe one, because the API parses `w` as an integer
+    // and answers 400 for anything else. `320.5` is what a miscomputed scale
+    // actually produces, and `1e21` serialises as `1e+21`, which is not a
+    // number to the parser at all; both used to be refused here only when
+    // `fresh` came with them, which is an accident of where the old
+    // mutual-exclusion throw sat rather than a rule anybody chose.
+    if (!Number.isSafeInteger(width) || width <= 0) {
+      throw new ValidationError(`width must be a positive whole number: ${width}`);
     }
     query.w = width;
   }
