@@ -4034,6 +4034,8 @@ export class Computer {
       // Returning also closes Transport.sse and cancels its response reader.
       if (ev.type === 'done' || ev.type === 'error') return;
     }
+    args.signal?.throwIfAborted();
+    throw new MandalaError('the agent stream ended without a result');
   }
 
   /**
