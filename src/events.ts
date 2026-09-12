@@ -1034,8 +1034,9 @@ class Frames {
     }
   }
 
-  /** Wake a waiting reader without queueing anything — how a stop is noticed. */
-  interrupt(): void {
+  /** Release unread payloads and wake a reader when the stream permanently stops. */
+  clear(): void {
+    this.#items = [];
     const wake = this.#wake;
     this.#wake = undefined;
     wake?.();
@@ -1265,7 +1266,10 @@ export class ComputerEvents implements AsyncIterable<ComputerEvent> {
     this.#closed = true;
     this.#stop.abort();
     this.#shutSocket();
-    this.#frames?.interrupt();
+    // Permanent shutdown discards unread frames. Overflow only shuts the
+    // socket, leaving its admitted queue to drain before resuming the cursor.
+    this.#frames?.clear();
+    this.#frames = undefined;
   }
 
   #stopped(): boolean {
