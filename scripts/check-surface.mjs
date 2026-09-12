@@ -284,7 +284,11 @@ function main() {
           `cannot follow: ${JSON.stringify((after.includes(';') ? tail : after).trim().slice(0, 60))}`,
       );
     }
-    return tableArrayLiteral(initializer, where);
+    // ALLOWED is `[pair, ...]` projected into strings and PARAMETERS is already a
+    // list of entries, so the number of projections each is built with is part of
+    // its shape and not a detail. Zero on ALLOWED is a Set of arrays whose every
+    // `has()` is false; one on PARAMETERS is a Map this reader is not reading.
+    return tableArrayLiteral(initializer, where, name === 'ALLOWED' ? 1 : 0);
   }
 
   /**

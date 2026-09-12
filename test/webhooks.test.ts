@@ -285,6 +285,20 @@ describe('verify: the §3.2 vector', () => {
       expect(await receiver(lastAcceptedAt - 0.5)).toBe('processed');
     });
 
+    it('is defeated by two small steps as surely as by one large one', async () => {
+      // Why the documented alternative to a nondecreasing clock has to bound the
+      // TOTAL displacement rather than one step. A retention with a second of
+      // margin survives a single one-second rollback and not two of them, and
+      // nothing in this package can bound how many a platform will make.
+      const withMargin = receiverKeeping(replayRetentionS() + 1);
+      expect(await withMargin(firstAcceptedAt)).toBe('processed');
+      expect(await withMargin(lastAcceptedAt + 1.5)).toBe('rejected');
+      // One step back: still outside the window, so still refused by the window.
+      expect(await withMargin(lastAcceptedAt + 0.5)).toBe('rejected');
+      // A second step of the same size, and the capture is inside it again.
+      expect(await withMargin(lastAcceptedAt - 0.5)).toBe('processed');
+    });
+
     it('holds only while the retention clock is the clock verify reads', async () => {
       // The assumption the doc comment states, cited rather than asserted: expire
       // the id on a clock that can disagree with the one `verify` judges the

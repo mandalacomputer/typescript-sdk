@@ -829,10 +829,46 @@ export function stringLiteral(text) {
  * Anything else is a table this reader would compare part of. It throws instead,
  * naming what it could not reduce.
  */
-const JOINS_THE_PAIR =
-  /^\(\s*\[\s*([A-Za-z_$][\w$]*)\s*,\s*([A-Za-z_$][\w$]*)\s*,?\s*\]\s*(?::[^)]*)?\)\s*=>\s*`\$\{\s*\1\s*\} \$\{\s*\2\s*\}`$/;
+/** The one destructured parameter the permitted projection takes. */
+const DESTRUCTURED_PAIR =
+  /^\[\s*([A-Za-z_$][\w$]*)\s*,\s*([A-Za-z_$][\w$]*)\s*,?\s*\](?:\s*:\s*[^=]*)?$/;
 
-export function tableArrayLiteral(text, what = 'this declaration') {
+/**
+ * Whether `text` is the one projection this reader can account for: the
+ * destructured pair joined by a space.
+ *
+ * Parsed rather than matched with one regex, which is what the third round of this
+ * finding cost. `(?::[^)]*)?` for the parameter's type annotation also swallowed
+ * ADDITIONAL parameters, and `.map` passes only three arguments — so a fourth
+ * parameter with a default ran that default:
+ * `([m, p]: Route, _i, _a, unused = p = 'gone') => ${'`${m} ${p}`'}` type-checks, returns
+ * `GET gone` at runtime, and matched. So the parameter list is split with
+ * `listItems` and there has to be exactly ONE of them, carrying no `=`.
+ *
+ * The call's arguments are split the same way, for the false refusal alongside it:
+ * a formatter wrapping the call leaves a trailing comma after the callback, and a
+ * regex anchored at the template's backtick refused a legal projection — a gate
+ * that a reformat takes down is a broken gate.
+ */
+function joinsThePair(argsText) {
+  const args = listItems(argsText);
+  if (args.length !== 1) return false;
+  const arrow = args[0].trim();
+  if (!arrow.startsWith('(')) return false;
+  const params = balanced(arrow, 0, '(', ')');
+  const body = arrow.slice(params.length + 2).trim();
+  // The arrow and its body trimmed apart, because a formatter puts the template on
+  // its own line when the parameter's annotation is long, and comparing the whole
+  // tail to one string refused exactly that.
+  if (!body.startsWith('=>')) return false;
+  const items = listItems(params);
+  if (items.length !== 1) return false;
+  const named = DESTRUCTURED_PAIR.exec(items[0].trim());
+  if (!named) return false;
+  return body.slice(2).trim() === `\`\${${named[1]}} \${${named[2]}}\``;
+}
+
+export function tableArrayLiteral(text, what = 'this declaration', projections = null) {
   const refuse = (why, at) => {
     throw new Error(`${what} ${why}: ${JSON.stringify(at.trim().slice(0, 60))}`);
   };
@@ -861,7 +897,7 @@ export function tableArrayLiteral(text, what = 'this declaration') {
     const map = trailingCall(t, '.map');
     if (map !== undefined) {
       if (maps++ > 0) refuse('chains more than one .map, which this reader cannot follow', t);
-      if (!JOINS_THE_PAIR.test(map.argument.trim())) {
+      if (!joinsThePair(map.argument)) {
         refuse('maps its entries with a callback this reader cannot account for', map.argument);
       }
       t = map.receiver.trim();
@@ -884,6 +920,15 @@ export function tableArrayLiteral(text, what = 'this declaration') {
       continue;
     }
     break;
+  }
+  // The projection is REQUIRED where the table has one, not merely permitted at
+  // most once. `new Set([['GET', 'sizes']] as unknown as Iterable<string>)` reduces
+  // to the array this reader compares and builds a Set of ARRAYS at runtime, so
+  // every `has()` on it is false — a mirror that matches and asserts nothing. The
+  // caller says how many projections its table is built with, and zero is as wrong
+  // as two when the answer is one.
+  if (projections !== null && maps !== projections) {
+    refuse(`is built with ${maps} projections where this reader expects ${projections}`, text);
   }
   if (!t.startsWith('[')) refuse('is not an array literal this reader can read', t);
   const body = balanced(t, 0, '[', ']');

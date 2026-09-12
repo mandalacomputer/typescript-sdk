@@ -951,8 +951,10 @@ on a monotonic clock is a second clock and the bound is only as good as their
 disagreement. One clock is not enough by itself either: an eviction cannot be
 undone, so a clock stepped back after the record expired leaves the capture inside
 the window with nothing left to refuse it. No multiple of the tolerance covers an
-unbounded adjustment — use a nondecreasing clock, or add a margin as large as the
-largest step yours can make. A wall-clock TTL (Redis `EXPIREAT`, a database
+unbounded adjustment — use a nondecreasing clock. A margin is only a substitute if
+it covers the *total* backward displacement the clock can accumulate after an
+eviction: two one-second steps defeat a one-second margin exactly as a two-second
+step does. A wall-clock TTL (Redis `EXPIREAT`, a database
 `expires_at`) is already reading the same clock as the default.
 
 That expiry bounds a captured signature. A retry can carry the same id with a

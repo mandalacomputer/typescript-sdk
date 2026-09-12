@@ -1173,6 +1173,65 @@ export const UNIMPLEMENTED_PARAMETERS: ReadonlySet<string> = new Set([]);
     expect(code).toBe(0);
   });
 
+  it('refuses a callback with a parameter this reader did not account for', async () => {
+    // `.map` passes three arguments, so a FOURTH parameter's default runs — and a
+    // default can assign. `unused = p = 'gone'` rewrites the pattern on its way
+    // through a callback that otherwise looks exactly like the permitted one.
+    const mirror = `type Route = [string, string];
+export const ALLOWED: ReadonlySet<string> = new Set(([['GET', 'sizes']] as Route[]).map(([m, p]: Route, _i, _a, unused = p = 'gone') => \`\${m} \${p}\`));
+export const UNIMPLEMENTED: ReadonlySet<string> = new Set([]);
+export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
+  ['GET sizes', ['query:fresh']],
+]);
+export const UNIMPLEMENTED_PARAMETERS: ReadonlySet<string> = new Set([]);
+`;
+    const { said, code } = await runAgainst(mirror);
+    expect(said).toMatch(/callback this reader cannot account for/);
+    expect(code).not.toBe(0);
+  });
+
+  it('refuses an ALLOWED built with no projection at all', async () => {
+    // A cast in place of the `.map` leaves the array this reader compares intact
+    // and builds a Set of ARRAYS, so every `has()` on it is false — a mirror that
+    // matches and asserts nothing. The count is required, not merely capped.
+    const mirror = `type Route = [string, string];
+export const ALLOWED: ReadonlySet<string> = new Set(
+  [['GET', 'sizes']] as unknown as Iterable<string>,
+);
+export const UNIMPLEMENTED: ReadonlySet<string> = new Set([]);
+export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
+  ['GET sizes', ['query:fresh']],
+]);
+export const UNIMPLEMENTED_PARAMETERS: ReadonlySet<string> = new Set([]);
+`;
+    const { said, code } = await runAgainst(mirror);
+    expect(said).toMatch(/is built with 0 projections where this reader expects 1/);
+    expect(code).not.toBe(0);
+  });
+
+  it('reads a projection the formatter has wrapped onto its own lines', async () => {
+    // The false refusal beside those two: wrapping the call leaves a trailing comma
+    // after the callback, and an annotation of any length on the parameter. Both
+    // are legal and both are what a formatter produces on a long signature, so a
+    // reader that refused them would be a gate a reformat takes down.
+    const mirror = `type Route = [string, string];
+export const ALLOWED: ReadonlySet<string> = new Set(
+  ([['GET', 'sizes']] as Route[]).map(
+    ([m, p]: [method: string, pattern: string] & { readonly description?: string }) =>
+      \`\${m} \${p}\`,
+  ),
+);
+export const UNIMPLEMENTED: ReadonlySet<string> = new Set([]);
+export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
+  ['GET sizes', ['query:fresh']],
+]);
+export const UNIMPLEMENTED_PARAMETERS: ReadonlySet<string> = new Set([]);
+`;
+    const { said, code } = await runAgainst(mirror);
+    expect(said).toContain('the mirror matches the platform (1 routes, 1 parameters)');
+    expect(code).toBe(0);
+  });
+
   it('refuses a mirror that declares a table twice', async () => {
     const { said, code } = await runAgainst(
       `${allowlist("['GET', 'sizes']", "['GET sizes', ['query:fresh']]")}

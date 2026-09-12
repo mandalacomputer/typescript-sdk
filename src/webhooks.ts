@@ -79,8 +79,10 @@ export const WEBHOOK_TOLERANCE_S = 300;
  * then let the clock be set BACK a second. The capture is 299.5 seconds old again,
  * `verify` takes it, and the record that would have refused it is gone. No larger
  * multiple of the tolerance closes that, because a backward adjustment is
- * unbounded. So: a nondecreasing clock — or, if yours can be stepped, a retention
- * margin at least as large as the largest step it can make.
+ * unbounded. So: a nondecreasing clock. If yours can be stepped, the margin has to
+ * cover the TOTAL backward displacement it can accumulate after an eviction and not
+ * one step of it — two one-second steps defeat a one-second margin as surely as a
+ * two-second step does, and nothing here can bound that for you.
  *
  * A store whose TTL is wall-clock-based (Redis `EXPIREAT`, a database
  * `expires_at`) is already reading the same clock as the default `verify` does.
