@@ -149,10 +149,18 @@ const SIGNATURE_CANDIDATES_MAX = 8;
  * answered once. Inside the 24 hours after a rotation either secret verifies
  * the delivery, so a receiver can switch from the old to the new at leisure.
  *
- * Remember every `webhook-id` you accept for at least the window: a retry of a
- * delivery you already acknowledged carries the same id and a fresh signature,
- * and verifies. Together the timestamp and the id close every replay, and the
- * memory is bounded by construction.
+ * Record every accepted `webhook-id` before processing and refuse repeats.
+ * To prevent a captured request from being replayed, keep its id through the
+ * INCLUSIVE `webhook-timestamp + toleranceS` boundary. A timestamp can be one
+ * tolerance ahead of your clock on first acceptance, so a fixed retention
+ * longer than twice the tolerance after acceptance is conservative; one
+ * tolerance is insufficient. With the default, that means longer than ten
+ * minutes, not five.
+ *
+ * This expiry only bounds a captured signature. A retry can carry the same id
+ * with a fresh timestamp and signature, so keep durable idempotency records
+ * across the full delivery retry horizon, or longer if your application needs
+ * it. Timestamp verification alone does not prevent processing retries twice.
  */
 export async function verify(
   secret: string,

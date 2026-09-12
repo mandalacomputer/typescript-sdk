@@ -780,11 +780,11 @@ export async function interact(
               // cannot faithfully pass on is not evidence of success.
               exitCode = Number.isInteger(code) && code >= 0 && code <= 255 ? code : 1;
               // The shell has ended, but the output's tail may still be in
-              // flight behind this frame — resolving now would drop it. Close
-              // instead and let `close` resolve once the queue has drained;
-              // the timer is what keeps a server that lingers indefinitely
-              // after announcing the exit from holding the terminal with it.
-              close();
+              // flight behind this frame. Keep receiving until the peer closes
+              // or the deadline expires: calling close() now puts a native
+              // WebSocket in CLOSING, which discards subsequent messages.
+              // finishInteraction drains the received bytes and closes the
+              // socket even when the peer never completes the session.
               exitTimer ??= setTimeout(resolve, drainTimeoutMs);
             }
           } catch {

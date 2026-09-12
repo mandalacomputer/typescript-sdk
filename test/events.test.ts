@@ -11,6 +11,12 @@
  * on this feature (OPL-3785, review 16).
  */
 
+import { execFile } from 'node:child_process';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { promisify } from 'node:util';
+import ts from 'typescript';
 import { describe, expect, it, vi } from 'vitest';
 // Not on the package's export list, which is a gap of its own — every local
 // refusal in this SDK is one of these and a caller cannot name the class.
@@ -1289,6 +1295,98 @@ describe('reconnecting', () => {
 });
 
 describe('explicit event stream cancellation', () => {
+  it('releases unread payloads while retaining a closed stream and its cursor', async () => {
+    // Force GC in a separate process, where keeping the stream reachable must
+    // not keep its discarded queue reachable. Compile the current source into
+    // a temporary fixture so this regression never depends on a prior build.
+    const dir = await mkdtemp(join(tmpdir(), 'mandala-event-retention-'));
+    try {
+      await writeFile(join(dir, 'package.json'), '{"type":"module"}');
+      for (const name of ['events', 'errors', 'models', 'paths', 'transport']) {
+        const source = await readFile(new URL(`../src/${name}.ts`, import.meta.url), 'utf8');
+        const { outputText } = ts.transpileModule(source, {
+          compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 },
+        });
+        await writeFile(join(dir, `${name}.js`), outputText);
+      }
+      const { stdout } = await promisify(execFile)(
+        process.execPath,
+        [
+          '--expose-gc',
+          '--input-type=module',
+          '--eval',
+          `
+            import { ComputerEvents } from './events.js';
+            const retained = [];
+            const results = [];
+            for (const ending of ['close', 'abort', 'return', 'onConnect']) {
+              const originalParse = JSON.parse;
+              let unread;
+              JSON.parse = (value, ...args) => {
+                const frame = originalParse(value, ...args);
+                if (frame.retentionMarker) unread = new WeakRef(frame);
+                return frame;
+              };
+              const ac = new AbortController();
+              class Socket extends EventTarget {
+                constructor() {
+                  super();
+                  queueMicrotask(() => {
+                    this.dispatchEvent(new Event('open'));
+                    for (const frame of [
+                      { type: 'hello', computer: 'vm-1', cursor: 'test:0',
+                        ready: false, events: ['computer.idle'] },
+                      { type: 'computer.idle', cursor: 'test:1', data: {} },
+                      { type: 'computer.idle', cursor: 'test:2', data: {},
+                        retentionMarker: true },
+                    ]) {
+                      this.dispatchEvent(new MessageEvent('message', {
+                        data: JSON.stringify(frame),
+                      }));
+                    }
+                  });
+                }
+                close() { this.dispatchEvent(new Event('close')); }
+              }
+              const stream = new ComputerEvents(
+                async () => 'wss://example.test/events',
+                async () => new Error('refused'),
+                { signal: ac.signal, webSocket: () => new Socket(),
+                  onConnect: () => { if (ending === 'onConnect') stream.close(); } },
+              );
+              let iterator = stream[Symbol.asyncIterator]();
+              await iterator.next();
+              if (ending === 'close') stream.close();
+              if (ending === 'abort') ac.abort();
+              await iterator.return();
+              iterator = undefined;
+              JSON.parse = originalParse;
+              retained.push(stream);
+              for (let n = 0; n < 5; n++) {
+                await new Promise(resolve => setImmediate(resolve));
+                global.gc();
+              }
+              results.push({ ending, released: unread.deref() === undefined,
+                cursor: stream.cursor, events: stream.eventTypes });
+            }
+            console.log(JSON.stringify(results));
+          `,
+        ],
+        { cwd: dir, timeout: 10_000 },
+      );
+      expect(JSON.parse(stdout)).toEqual(
+        ['close', 'abort', 'return', 'onConnect'].map((ending) => ({
+          ending,
+          released: true,
+          cursor: ending === 'onConnect' ? 'test:0' : 'test:1',
+          events: ['computer.idle'],
+        })),
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   const promptly = async <T>(promise: Promise<T>): Promise<T | 'still pending'> => {
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {

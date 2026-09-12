@@ -189,6 +189,18 @@ describe('verify: the §3.2 vector', () => {
   it('refuses the vector under another secret', async () => {
     expect(await verify(PREVIOUS_SECRET, headers(), BODY, { now: AT })).toBe(false);
   });
+
+  it('keeps an accepted signature valid beyond one retention window, through its inclusive expiry', async () => {
+    // First acceptance can be early because clock skew is allowed in either
+    // direction. Expiring a remembered id one tolerance later permits a replay.
+    const firstAcceptedAt = AT - WEBHOOK_TOLERANCE_S;
+    const oneWindowLater = firstAcceptedAt + WEBHOOK_TOLERANCE_S + 1;
+    const expiresAt = AT + WEBHOOK_TOLERANCE_S;
+    for (const now of [firstAcceptedAt, oneWindowLater, expiresAt]) {
+      expect(await verify(SECRET, headers(), BODY, { now })).toBe(true);
+    }
+    expect(await verify(SECRET, headers(), BODY, { now: expiresAt + 0.001 })).toBe(false);
+  });
 });
 
 describe('verify: the rotation vector', () => {

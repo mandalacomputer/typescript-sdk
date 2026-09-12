@@ -878,11 +878,12 @@ export class Transport {
    * place. A caller's own `signal` is the only thing that stops one early.
    */
   async *sse(method: string, path: string, opts: RequestOptions = {}): AsyncGenerator<SSEEvent> {
-    const { resp } = await this.#fetchRaw(method, path, {
+    const sent = await this.#fetchRaw(method, path, {
       ...opts,
       headers: { ...opts.headers, Accept: 'text/event-stream' },
       noTimeout: true,
     });
+    const { resp } = sent;
     if (!resp.body) throw new MandalaError(`${method} ${path} answered with no body`);
     // The captive-portal case #decode names, on the one route that had no such
     // check. An HTML page contains no `data:` lines, so it parses to a stream of
@@ -892,6 +893,9 @@ export class Transport {
     const contentType = resp.headers.get('content-type') ?? '';
     if (!contentType.toLowerCase().includes('text/event-stream')) {
       const text = await textUpTo(resp, MAX_ERROR_BODY_BYTES).catch(() => '');
+      // Cancellation wins even when the diagnostic read completed in the same
+      // turn. An unreadable body still falls back to the content-type message.
+      opts.signal?.throwIfAborted();
       throw new MandalaError(
         `expected an event stream from ${method} ${path}, got ` +
           `${contentType || 'no content type'}: ${text.slice(0, 200)}`,
@@ -912,7 +916,13 @@ export class Transport {
     try {
       for (;;) {
         opts.signal?.throwIfAborted();
-        const { done, value } = await reader.read();
+        const { done, value } = await this.#readBody(
+          () => reader.read(),
+          method,
+          path,
+          sent,
+          opts.signal,
+        );
         // A read may already have settled when the caller cancels. Check its
         // result before decoding it, including an EOF that would emit a tail.
         opts.signal?.throwIfAborted();
