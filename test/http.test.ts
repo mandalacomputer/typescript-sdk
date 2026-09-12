@@ -944,6 +944,134 @@ describe('the parameters a drive loop needs', () => {
 });
 
 describe('server-sent events', () => {
+  it.each(
+    ['default', 'error', 'non-Error'].flatMap((reasonKind) =>
+      ['rejected read', 'settled read'].map((ending) => ({ reasonKind, ending })),
+    ),
+  )(
+    'preserves $reasonKind cancellation during non-SSE diagnostics with a $ending',
+    async ({ reasonKind, ending }) => {
+      const ac = new AbortController();
+      const reason =
+        reasonKind === 'default'
+          ? undefined
+          : reasonKind === 'error'
+            ? new Error('caller cancelled the stream')
+            : { cancelled: true };
+      let reading!: () => void;
+      const started = new Promise<void>((resolve) => {
+        reading = resolve;
+      });
+      const response = new Response(
+        new ReadableStream<Uint8Array>(
+          {
+            pull(controller) {
+              if (ending === 'rejected read') {
+                ac.signal.addEventListener('abort', () => controller.error(ac.signal.reason), {
+                  once: true,
+                });
+              } else {
+                // The read succeeds in the same turn the caller cancels. Checking
+                // only a rejected read would still replace this cancellation.
+                ac.abort(reason);
+                controller.enqueue(new TextEncoder().encode('<html>not a stream</html>'));
+                controller.close();
+              }
+              reading();
+            },
+          },
+          { highWaterMark: 0 },
+        ),
+        { headers: { 'content-type': 'text/html' } },
+      );
+      const rec = recorder((call) => (call.path.endsWith('/agent') ? response : anyRoute(call)));
+      const c = await client(rec).computers.get('vm-1');
+      const iterator = c.agentStream({ prompt: 'go', modelKey: 'sk', signal: ac.signal });
+      const pending = iterator.next().catch((error: unknown) => error);
+      await started;
+      if (ending === 'rejected read') ac.abort(reason);
+      expect(await pending).toBe(ac.signal.reason);
+    },
+  );
+
+  it('keeps a non-SSE diagnostic when its body fails without caller cancellation', async () => {
+    const response = new Response(
+      new ReadableStream({
+        start(controller) {
+          controller.error(new Error('unreadable diagnostic body'));
+        },
+      }),
+      { headers: { 'content-type': 'text/html' } },
+    );
+    const rec = recorder((call) => (call.path.endsWith('/agent') ? response : anyRoute(call)));
+    const c = await client(rec).computers.get('vm-1');
+    await expect(c.agent({ prompt: 'go', modelKey: 'sk' })).rejects.toThrow(
+      /expected an event stream.*text\/html/,
+    );
+  });
+
+  it.each([false, true])('classifies an SSE body reset after progress=%s', async (progress) => {
+    const failure = Object.assign(new TypeError('terminated'), {
+      cause: Object.assign(new Error('other side closed'), { code: 'UND_ERR_SOCKET' }),
+    });
+    let first = true;
+    const response = new Response(
+      new ReadableStream<Uint8Array>(
+        {
+          pull(controller) {
+            if (progress && first) {
+              first = false;
+              controller.enqueue(
+                new TextEncoder().encode('event: step\ndata: {"n":1,"tool":"computer"}\n\n'),
+              );
+            } else controller.error(failure);
+          },
+        },
+        { highWaterMark: 0 },
+      ),
+      { headers: { 'content-type': 'text/event-stream' } },
+    );
+    const rec = recorder((call) => (call.path.endsWith('/agent') ? response : anyRoute(call)));
+    const c = await client(rec).computers.get('vm-1');
+    const iterator = c.agentStream({ prompt: 'go', modelKey: 'sk' });
+    if (progress) expect((await iterator.next()).value?.type).toBe('step');
+    const error = await iterator.next().catch((err: unknown) => err);
+    expect(error).toBeInstanceOf(ConnectionInterruptedError);
+    expect(error).toBeInstanceOf(ConnectionError);
+    expect((error as Error).cause).toBe(failure);
+    expect((error as Error).message).toContain('POST computers/vm-1/agent');
+    expect((error as Error).message).toContain('unknown rather than undone');
+    expect(isTransient(error)).toBe(false);
+  });
+
+  it.each([false, true])(
+    'preserves an SSE reader rejection with caller abort=%s',
+    async (abort) => {
+      const ac = new AbortController();
+      // A cancellation can itself resemble a transport failure. Its identity
+      // still belongs to the caller, while an unrelated producer error stays raw.
+      const reason = abort
+        ? { code: 'UND_ERR_SOCKET', cancelled: true }
+        : new Error('producer failed');
+      const response = new Response(
+        new ReadableStream<Uint8Array>(
+          {
+            pull(controller) {
+              if (abort) ac.abort(reason);
+              controller.error(reason);
+            },
+          },
+          { highWaterMark: 0 },
+        ),
+        { headers: { 'content-type': 'text/event-stream' } },
+      );
+      const rec = recorder((call) => (call.path.endsWith('/agent') ? response : anyRoute(call)));
+      const c = await client(rec).computers.get('vm-1');
+      const iterator = c.agentStream({ prompt: 'go', modelKey: 'sk', signal: ac.signal });
+      await expect(iterator.next()).rejects.toBe(reason);
+    },
+  );
+
   it('starts reader cancellation and handles its rejection on early return', async () => {
     const cancel = vi.fn(async () => {
       throw new Error('source cancellation failed');
