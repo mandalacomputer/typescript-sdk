@@ -220,11 +220,16 @@ describe('verify: the §3.2 vector', () => {
         now: number,
         on: number = now,
       ): Promise<'processed' | 'refused' | 'rejected'> => {
+        // Eviction FIRST, and independent of anything verifying — which is what a
+        // TTL actually does, and what this harness's first version got wrong by
+        // only ever expiring a record on the way past a successful verify. A
+        // deletion cannot be undone, and that is the whole of the clock-rollback
+        // hazard the test below demonstrates.
+        for (const [key, at] of seen) if (on - at > retentionS) seen.delete(key);
         if (!(await verify(SECRET, headers(), BODY, { now }))) return 'rejected';
         // The vector's own id, so the harness keys on what the delivery carries.
         const id = ID;
-        const acceptedAt = seen.get(id);
-        if (acceptedAt !== undefined && on - acceptedAt <= retentionS) return 'refused';
+        if (seen.has(id)) return 'refused';
         seen.set(id, on);
         return 'processed';
       };
@@ -262,6 +267,22 @@ describe('verify: the §3.2 vector', () => {
       }
       // And past the window the delivery fails on its own, so the id may go.
       expect(await receiver(lastAcceptedAt + 0.001)).toBe('rejected');
+    });
+
+    it('is defeated by a clock that goes backwards, whichever clock it is', async () => {
+      // The second half of the assumption, and the half that survives using a
+      // SINGLE clock: the record is evicted at 600.5 elapsed, and an eviction is
+      // not reversible. Step the clock back a second and the capture is inside the
+      // window again with nothing left to refuse it. No larger multiple of the
+      // tolerance helps, because a backward step is unbounded — which is why the
+      // documented requirement is a nondecreasing clock, or a margin as large as
+      // the largest step yours can make.
+      const receiver = receiverKeeping(replayRetentionS());
+      expect(await receiver(firstAcceptedAt)).toBe('processed');
+      // Time passes with nothing arriving; the record expires on its own.
+      expect(await receiver(lastAcceptedAt + 0.5)).toBe('rejected');
+      // And now the clock is stepped back one second.
+      expect(await receiver(lastAcceptedAt - 0.5)).toBe('processed');
     });
 
     it('holds only while the retention clock is the clock verify reads', async () => {

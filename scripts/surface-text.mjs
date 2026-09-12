@@ -259,6 +259,15 @@ function unescaped(text) {
     } else if (next === 'u') {
       out += String.fromCharCode(hexValue(text.slice(i + 1, i + 5), text));
       i += 4;
+    } else if (next === '\n' || next === '\u2028' || next === '\u2029') {
+      // A line continuation spells NOTHING. `'si\<newline>zes'` is `sizes` to the
+      // engine, and a reader that kept the newline compared a route with a line
+      // break in it — reporting the real one missing and inventing one nobody
+      // serves.
+    } else if (next === '\r') {
+      // CRLF is one terminator. Swallow the LF with it, or the value keeps a
+      // newline the engine never put there.
+      if (text[i + 1] === '\n') i++;
     } else {
       // Anything else stands for itself: `\'`, `\"`, `` \` ``, `\\`, `\$`.
       out += SHORT_ESCAPES[next] ?? next;
@@ -820,12 +829,16 @@ export function stringLiteral(text) {
  * Anything else is a table this reader would compare part of. It throws instead,
  * naming what it could not reduce.
  */
+const JOINS_THE_PAIR =
+  /^\(\s*\[\s*([A-Za-z_$][\w$]*)\s*,\s*([A-Za-z_$][\w$]*)\s*,?\s*\]\s*(?::[^)]*)?\)\s*=>\s*`\$\{\s*\1\s*\} \$\{\s*\2\s*\}`$/;
+
 export function tableArrayLiteral(text, what = 'this declaration') {
   const refuse = (why, at) => {
     throw new Error(`${what} ${why}: ${JSON.stringify(at.trim().slice(0, 60))}`);
   };
   let t = text.trim();
-  // Eight is past any nesting a formatter produces and stops a rule that fails
+  let maps = 0;
+  // Ten is past any nesting a formatter produces and stops a rule that fails
   // to shorten `t` from spinning. Each pass below strips at least one construct.
   for (let pass = 0; pass < 10; pass++) {
     // The trailing comma a formatter leaves on a multi-line argument. Stripped
@@ -836,9 +849,22 @@ export function tableArrayLiteral(text, what = 'this declaration') {
     }
     // One trailing `.map(...)`, stripped before the parentheses around it: the
     // call's own `(` would otherwise read as a wrapper that never closes here.
+    //
+    // And the CALLBACK is checked, not waved through, which is the second round
+    // of the same finding. `.map` preserving the element count is not enough:
+    // `([['GET', 'sizes']] as Route[]).map(() => 'GET gone')` type-checks and puts
+    // a route in the Set that is in no array this reader can see. The one
+    // projection it knows how to account for is the pair joined by a space, so
+    // that is the one it accepts — spelled any way, with any two parameter names,
+    // and anything else refused. Pinning the shape means a rewrite of the callback
+    // breaks this gate LOUDLY, which is the correct direction for a gate to fail.
     const map = trailingCall(t, '.map');
     if (map !== undefined) {
-      t = map.trim();
+      if (maps++ > 0) refuse('chains more than one .map, which this reader cannot follow', t);
+      if (!JOINS_THE_PAIR.test(map.argument.trim())) {
+        refuse('maps its entries with a callback this reader cannot account for', map.argument);
+      }
+      t = map.receiver.trim();
       continue;
     }
     if (t.startsWith('(')) {
@@ -871,10 +897,10 @@ export function tableArrayLiteral(text, what = 'this declaration') {
 /**
  * The argument text of a trailing `<name>(...)` call, or `undefined`.
  *
- * The receiver rather than the argument is what comes back: `X.map(f)` answers
- * `X`. Literal-aware, so a `.map(` inside a string is not one, and the call's
- * closing parenthesis has to be the last character — a call in the middle of an
- * expression is not something to look through.
+ * Both halves come back: `X.map(f)` answers `{ receiver: 'X', argument: 'f' }`.
+ * Literal-aware, so a `.map(` inside a string is not one, and the call's closing
+ * parenthesis has to be the last character — a call in the middle of an expression
+ * is not something to look through.
  */
 function trailingCall(text, name) {
   let i = 0;
@@ -904,7 +930,10 @@ function trailingCall(text, name) {
       const after = i + inner.length + 2;
       const opensCall = text.slice(0, i).trimEnd().endsWith(name);
       if (ch === '(' && opensCall && after === text.length) {
-        return text.slice(0, text.slice(0, i).trimEnd().length - name.length);
+        return {
+          receiver: text.slice(0, text.slice(0, i).trimEnd().length - name.length),
+          argument: inner,
+        };
       }
       i = after;
       continue;
@@ -963,14 +992,12 @@ export function declarationAssignment(source, from) {
     else if (ch === '=' && depth === 0) {
       const next = source[i + 1];
       const prev = source[i - 1];
-      if (
-        next === '=' ||
-        next === '>' ||
-        prev === '=' ||
-        prev === '!' ||
-        prev === '<' ||
-        prev === '>'
-      ) {
+      // `=>`, `==`, `===` and `!=` only. A `<` or `>` in FRONT is not a comparison
+      // here: in a type annotation it is a generic's bracket, and
+      // `ReadonlyMap<string, readonly string[]>=new Map(...)` — unformatted, but
+      // legal — was read as `>=`, so the real assignment was skipped and the table
+      // reported undeclared.
+      if (next === '=' || next === '>' || prev === '=' || prev === '!') {
         i += 2;
         continue;
       }

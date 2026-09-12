@@ -67,17 +67,23 @@ export const WEBHOOK_TOLERANCE_S = 300;
  * obvious reading of the window suggests, has forgotten it while its signature is
  * still good. Whoever captured the request replays it then.
  *
- * **The two clocks have to be the same clock.** This number is an interval on the
- * clock you hand {@link verify} as `now` — the wall clock, when you let it
- * default. Expire the id on a clock that can disagree with that one and the bound
- * is only as good as the disagreement: measure the TTL on a monotonic clock, let
- * the wall clock be set back a second, and 600.5 monotonic seconds after
- * acceptance the id is gone while `verify` still sees the capture as 299.5 seconds
- * old and takes it. No larger multiple of the tolerance fixes that, because a
- * backward adjustment is unbounded — so either expire on the same clock `verify`
- * reads, or add a margin for the largest step your platform can make. A store
- * whose TTL is wall-clock-based (Redis `EXPIREAT`, a database `expires_at`) is
- * already the same clock.
+ * **It assumes ONE clock, and a clock that never goes backwards.** This number is
+ * an interval on the clock you hand {@link verify} as `now` — the wall clock, when
+ * you let it default — so expire the id on that same clock: a TTL measured on a
+ * monotonic clock while `verify` reads a wall clock is two clocks, and the bound is
+ * only as good as their disagreement.
+ *
+ * One clock is not sufficient on its own either, which is the part that is easy to
+ * miss. An id is deleted once and a deletion cannot be undone: accept at
+ * `t - tolerance`, let the clock reach `t + tolerance + 0.5` so the record expires,
+ * then let the clock be set BACK a second. The capture is 299.5 seconds old again,
+ * `verify` takes it, and the record that would have refused it is gone. No larger
+ * multiple of the tolerance closes that, because a backward adjustment is
+ * unbounded. So: a nondecreasing clock — or, if yours can be stepped, a retention
+ * margin at least as large as the largest step it can make.
+ *
+ * A store whose TTL is wall-clock-based (Redis `EXPIREAT`, a database
+ * `expires_at`) is already reading the same clock as the default `verify` does.
  *
  * This bounds a captured SIGNATURE and nothing else. A genuine retry carries the
  * same id with a fresh timestamp and a fresh signature, and verifies on its own

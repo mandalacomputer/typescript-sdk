@@ -945,11 +945,15 @@ the gap a retention has to span is two tolerances. An id remembered for one is
 forgotten while its signature is still good, and whoever captured the request
 replays it then.
 
-**Expire the id on the same clock `verify` reads** — the wall clock, unless you
-pass `now`. A TTL measured on a monotonic clock while `verify` reads a wall clock
-that can be set backwards is only as good as the largest step: no multiple of the
-tolerance covers an unbounded adjustment. A wall-clock TTL (Redis `EXPIREAT`, a
-database `expires_at`) is already the same clock.
+**Expire the id on the same clock `verify` reads, and on one that never goes
+backwards.** That clock is the wall clock unless you pass `now`, so a TTL measured
+on a monotonic clock is a second clock and the bound is only as good as their
+disagreement. One clock is not enough by itself either: an eviction cannot be
+undone, so a clock stepped back after the record expired leaves the capture inside
+the window with nothing left to refuse it. No multiple of the tolerance covers an
+unbounded adjustment — use a nondecreasing clock, or add a margin as large as the
+largest step yours can make. A wall-clock TTL (Redis `EXPIREAT`, a database
+`expires_at`) is already reading the same clock as the default.
 
 That expiry bounds a captured signature. A retry can carry the same id with a
 fresh timestamp and signature, so retain **durable idempotency records across

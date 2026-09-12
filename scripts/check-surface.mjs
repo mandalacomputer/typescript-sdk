@@ -264,7 +264,26 @@ function main() {
           JSON.stringify(mirrorClean.slice(assigned, assigned + 60).trim()),
       );
     }
-    const initializer = balanced(mirrorClean, assigned + opens[0].length - 1, '(', ')');
+    const open = assigned + opens[0].length - 1;
+    const initializer = balanced(mirrorClean, open, '(', ')');
+    // What follows the constructor call, up to the statement's semicolon, must be
+    // NOTHING. Validating only the arguments was the third round of one finding:
+    // `new Set([...]).add('GET gone')` type-checks, and the added route is in no
+    // array this reader looks at. `as const` and an `as <type>` are allowed
+    // because neither changes a value; a call, an index or an operator is refused.
+    const after = mirrorClean.slice(open + initializer.length + 2);
+    const tail = after.slice(0, after.indexOf(';') + 1);
+    if (
+      !after.includes(';') ||
+      !/^\s*(?:as\s+(?:const|[A-Za-z_$][\w$.]*(?:<[\w$.,\s[\]]*>)?(?:\s*\[\s*\])*)\s*)?;$/.test(
+        tail,
+      )
+    ) {
+      throw new Error(
+        `${where} does something to its table after building it, which this reader ` +
+          `cannot follow: ${JSON.stringify((after.includes(';') ? tail : after).trim().slice(0, 60))}`,
+      );
+    }
     return tableArrayLiteral(initializer, where);
   }
 
