@@ -1232,6 +1232,47 @@ export const UNIMPLEMENTED_PARAMETERS: ReadonlySet<string> = new Set([]);
     expect(code).toBe(0);
   });
 
+  it('refuses the wrong constructor for a table', async () => {
+    // The projection count cannot see this one. `new Set` where a Map belongs
+    // type-checks behind a cast, is what a formatter leaves alone, and builds a
+    // collection with no `get` — so every consumer of PARAMETERS throws while this
+    // reader reads the entries out of the array and certifies a match.
+    const mirror = `type Route = [string, string];
+export const ALLOWED: ReadonlySet<string> = new Set(
+  ([['GET', 'sizes']] as Route[]).map(([m, p]) => \`\${m} \${p}\`),
+);
+export const UNIMPLEMENTED: ReadonlySet<string> = new Set([]);
+export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Set([
+  ['GET sizes', ['query:fresh']],
+]) as never;
+export const UNIMPLEMENTED_PARAMETERS: ReadonlySet<string> = new Set([]);
+`;
+    const { said, code } = await runAgainst(mirror);
+    expect(said).toMatch(/is not initialized with a new Map/);
+    expect(code).not.toBe(0);
+  });
+
+  it('reads a projection whose parameter annotation is generic', async () => {
+    // A comma inside `Route<string, string>` is not a second parameter, and a
+    // reader that split on it refused a mirror a formatter would produce. The
+    // parameter text is matched whole for exactly this reason.
+    const mirror = `type Route<M, P> = [M, P];
+export const ALLOWED: ReadonlySet<string> = new Set(
+  ([['GET', 'sizes']] as Route<string, string>[]).map(
+    ([m, p]: Route<string, string>) => \`\${m} \${p}\`,
+  ),
+);
+export const UNIMPLEMENTED: ReadonlySet<string> = new Set([]);
+export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
+  ['GET sizes', ['query:fresh']],
+]);
+export const UNIMPLEMENTED_PARAMETERS: ReadonlySet<string> = new Set([]);
+`;
+    const { said, code } = await runAgainst(mirror);
+    expect(said).toContain('the mirror matches the platform (1 routes, 1 parameters)');
+    expect(code).toBe(0);
+  });
+
   it('refuses a mirror that declares a table twice', async () => {
     const { said, code } = await runAgainst(
       `${allowlist("['GET', 'sizes']", "['GET sizes', ['query:fresh']]")}

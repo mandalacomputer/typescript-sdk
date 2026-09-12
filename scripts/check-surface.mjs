@@ -257,10 +257,16 @@ function main() {
     }
     const assigned = declarationAssignment(mirrorClean, declared[0].index + declared[0].length);
     if (assigned === -1) throw new Error(`${where} has no initializer this reader can find`);
-    const opens = /^\s*new (?:Set|Map)\(/.exec(mirrorClean.slice(assigned));
+    // The RIGHT constructor, not either of them. Accepting both left a hole the
+    // projection count could not see: `PARAMETERS = new Set([[...]]) as any`
+    // type-checks, is what a formatter leaves alone, and builds a Set — so
+    // `PARAMETERS.get(route)` is not a function and every consumer of it throws,
+    // while this reader read the entries out of the array and certified a match.
+    const wanted = name === 'ALLOWED' ? 'Set' : 'Map';
+    const opens = new RegExp(`^\\s*new ${wanted}\\(`).exec(mirrorClean.slice(assigned));
     if (!opens) {
       throw new Error(
-        `${where} is not initialized with a new Set(...) or new Map(...): ` +
+        `${where} is not initialized with a new ${wanted}(...): ` +
           JSON.stringify(mirrorClean.slice(assigned, assigned + 60).trim()),
       );
     }

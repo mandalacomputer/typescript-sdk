@@ -861,9 +861,15 @@ function joinsThePair(argsText) {
   // its own line when the parameter's annotation is long, and comparing the whole
   // tail to one string refused exactly that.
   if (!body.startsWith('=>')) return false;
-  const items = listItems(params);
-  if (items.length !== 1) return false;
-  const named = DESTRUCTURED_PAIR.exec(items[0].trim());
+  // The whole parameter text against one pattern rather than split into
+  // parameters first: `listItems` does not balance angle brackets, so a legal
+  // `([m, p]: Route<string, string>)` read as TWO parameters and a mirror a
+  // formatter would produce was refused. What actually has to be excluded is a
+  // DEFAULT — the only thing an extra parameter can do to a value, since `.map`
+  // passes three arguments and a default runs — and every default contains an
+  // `=`, which the annotation here may not. An extra parameter without one cannot
+  // change what the callback returns.
+  const named = DESTRUCTURED_PAIR.exec(params.trim());
   if (!named) return false;
   return body.slice(2).trim() === `\`\${${named[1]}} \${${named[2]}}\``;
 }
