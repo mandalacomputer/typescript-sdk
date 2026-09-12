@@ -747,6 +747,13 @@ export function errorForStatus(
  * way, 429 included: the platform relays a model provider's rate limit as one of
  * these events, and it is as much a {@link RateLimitError} there as on a
  * response. Without the header there is no `retryAfterMs` to pass on.
+ *
+ * `body` is the event's own payload, and carrying it matters on the case that
+ * motivated it: a run refused between two of its steps reports what it had
+ * already spent and done alongside the sentence, and a throw that dropped that
+ * read as a run which did nothing. It lands on {@link APIError.body}, the way a
+ * refusal on a response does, so the two forms of the same stop read alike —
+ * with one field withheld, for the reason on {@link withoutRefusalReason}.
  */
 const DESCRIBES_THIS_CONNECTION: ReadonlySet<typeof APIError> = new Set([
   GatewayTimeoutError,
@@ -755,11 +762,39 @@ const DESCRIBES_THIS_CONNECTION: ReadonlySet<typeof APIError> = new Set([
   OriginUnreachableError,
 ]);
 
-export function errorForEventStatus(status: number, message: string): APIError {
-  if (status === 429) return new RateLimitError(message, status);
+export function errorForEventStatus(status: number, message: string, body?: unknown): APIError {
+  const carried = withoutRefusalReason(body);
+  if (status === 429) return new RateLimitError(message, status, carried);
   const Cls = BY_STATUS[status] ?? APIError;
-  if (DESCRIBES_THIS_CONNECTION.has(Cls)) return new APIError(message, status);
-  return new Cls(message, status);
+  if (DESCRIBES_THIS_CONNECTION.has(Cls)) return new APIError(message, status, carried);
+  return new Cls(message, status, carried);
+}
+
+/**
+ * The body, minus anything {@link APIError.reason} would read as retry advice.
+ *
+ * `reason` is a word about ONE refused request — whether it clears on its own and
+ * whether the request is safe to send again — and {@link isTransient} consults it
+ * ahead of the classes. Neither half of that survives the move onto a stream.
+ *
+ * The same argument as the edge statuses above, one step further. What the event
+ * describes is a run that has already done things: clicks that landed, files that
+ * changed, tokens billed to somebody's key. A word meaning "this clears, send it
+ * again" cannot be true of replaying that, however true it is of a lone request —
+ * and a stream frame carrying one would flip a mid-run refusal from "stop and
+ * re-authorize" to "retry", which is the one answer that duplicates work already
+ * performed on a real desktop.
+ *
+ * So the word is dropped here rather than trusted, and the frame reaches a
+ * streaming caller whole as the `error` event's `raw` if they want to read it.
+ * Refusals delivered as a RESPONSE are untouched — that is the surface the
+ * vocabulary was defined for, and the request there did not half-happen.
+ */
+function withoutRefusalReason(body: unknown): unknown {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return body;
+  if (!('reason' in body)) return body;
+  const { reason: _dropped, ...rest } = body as Record<string, unknown>;
+  return rest;
 }
 
 /**
@@ -792,6 +827,25 @@ export function errorForEventStatus(status: number, message: string): APIError {
  * it is, so {@link APIError.reason} is consulted BEFORE the types below, and an
  * absent word — or one this version does not know — leaves the type answer
  * standing unchanged (platform OPL-3898).
+ *
+ * **AUTHORIZATION IS NOT SETTLED AT THE START OF A LONG CALL.** An
+ * {@link AuthenticationError}, a {@link PermissionDeniedError} or a {@link PlanLimitError}
+ * can arrive from a request that authenticated perfectly well when it was sent:
+ * the API rechecks the credential, the role, the account's standing and the plan
+ * before each step of work it is about to do, so a key revoked, a member
+ * demoted, an account suspended or a plan downgraded during the wait refuses the
+ * request part of the way through. `agent` and `agentStream` are where this is
+ * most visible — they can stop after billed steps, see
+ * {@link APIError.body} — and the long writes are where it matters most:
+ * `create`, `move`, a template publish and the webhook create and update can all
+ * be refused after the body has been read and the work prepared. The durable
+ * write has not happened in those cases; an agent run's completed steps HAVE.
+ *
+ * None of the three is transient, and this function says so. That is not a
+ * change — it never called them transient — but the reason is now a real one
+ * rather than an accident of where authorization happened: the credential is no
+ * longer valid for that account, so replaying the same request with the same key
+ * cannot do anything but fail again.
  */
 export function isTransient(err: unknown): boolean {
   // Preparation must be continued explicitly with the returned token and the

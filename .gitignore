@@ -13,3 +13,8 @@ dist/
 # see them: it scans `src`, `test`, `scripts`, `.github` and three named files, so
 # one `git add -A` would publish the lot with the gate still reporting green.
 plans/
+
+# Adversarial review transcripts written by the /fix-lanes skill. Same reason as
+# `plans/`: they are produced by reading the platform and they quote it, and
+# `check-internals` does not scan this path.
+.fix-lanes/

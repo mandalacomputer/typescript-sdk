@@ -76,7 +76,31 @@ export type AgentEvent =
   | { type: 'step'; step: AgentStep }
   | { type: 'text'; text: string }
   | { type: 'done'; result: AgentResult }
-  | { type: 'error'; error: string; status: number };
+  | {
+      type: 'error';
+      error: string;
+      status: number;
+      /**
+       * What the run had already spent on your key when it stopped.
+       *
+       * A run can be refused part-way through — the credential can be revoked,
+       * the member demoted, the account suspended or the plan downgraded between
+       * two of its steps — and the steps already taken are real, billed, and
+       * still on the desktop. Zeros here mean the platform sent no accounting,
+       * not that nothing was spent.
+       */
+      usage: AgentUsage;
+      /**
+       * The steps that completed before the stop, as the platform reported them.
+       *
+       * Empty when it sent none. This is the difference between "the run did
+       * nothing" and "the run did four things and then was refused", and a
+       * caller deciding whether to retry needs it.
+       */
+      steps: AgentStep[];
+      /** The error frame as it arrived, for anything above that this SDK does not model. */
+      raw: Record<string, unknown>;
+    };
 
 export type AgentArgs = {
   /** The task, in plain language. */
@@ -196,10 +220,24 @@ export function toAgentEvent(
       // failed: ", so either would end a run with a reason naming nothing. The
       // swap to `str` fixed the throw and dropped this fallback on the way.
       const said = e ? (e.error == null ? '' : str(e.error)) : str(data);
+      // The accounting travels with the refusal, and dropping it was the whole
+      // of the defect this decodes for: a run stopped between two steps sends
+      // what it spent and what it had already done, and a client that read only
+      // the sentence turned "four steps happened, then this" into a failure that
+      // looks like nothing happened — on the one surface where the difference is
+      // money and a desktop somebody has to look at.
+      //
+      // Decoded through the same helpers as the `done` frame, so a count that
+      // cannot be read is a zero rather than a throw inside the caller's loop,
+      // and `steps` is an array or it is empty — never a scalar spread into one.
+      const rawSteps = Array.isArray(e?.steps) ? e.steps : [];
       return {
         type: 'error',
         error: said || 'the run failed',
         status: num(e?.status),
+        usage: toAgentUsage(e?.usage),
+        steps: rawSteps.map((s, i) => toAgentStep(s, i + 1)),
+        raw: e ? { ...e } : {},
       };
     }
     default:
