@@ -12,7 +12,7 @@
  */
 
 import { execFile } from 'node:child_process';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -1302,12 +1302,21 @@ describe('explicit event stream cancellation', () => {
     const dir = await mkdtemp(join(tmpdir(), 'mandala-event-retention-'));
     try {
       await writeFile(join(dir, 'package.json'), '{"type":"module"}');
-      for (const name of ['events', 'errors', 'models', 'paths', 'transport']) {
-        const source = await readFile(new URL(`../src/${name}.ts`, import.meta.url), 'utf8');
+      // EVERY module, not the five `events.ts` happens to reach today. A hand-
+      // written list is a second copy of the import graph, and the copy is not
+      // checked by anything: the day a new import is added the fixture stops
+      // resolving and this regression fails with a module-not-found about a
+      // file nobody touched, which reads as a broken test rather than as the
+      // list being stale. Transpiling the directory costs milliseconds and has
+      // no list to go stale.
+      const src = new URL('../src/', import.meta.url);
+      for (const entry of await readdir(src)) {
+        if (!entry.endsWith('.ts')) continue;
+        const source = await readFile(new URL(entry, src), 'utf8');
         const { outputText } = ts.transpileModule(source, {
           compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 },
         });
-        await writeFile(join(dir, `${name}.js`), outputText);
+        await writeFile(join(dir, `${entry.slice(0, -3)}.js`), outputText);
       }
       const { stdout } = await promisify(execFile)(
         process.execPath,
