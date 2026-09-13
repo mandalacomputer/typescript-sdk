@@ -1,9 +1,9 @@
 /**
  * The platform's `/api/v1` route table, mirrored.
  *
- * Keep in step with `V1_ROUTES` in `web/lib/surface.ts` in the platform repo.
- * `scripts/check-surface.mjs` does that comparison whenever both repos are
- * checked out — a mirror nobody compares is just a comment, and the Python SDK
+ * Keep in step with the platform's own `/api/v1` route table, which is where
+ * these come from. `scripts/check-surface.mjs` does that comparison whenever both
+ * repos are checked out — a mirror nobody compares is just a comment, and the Python SDK
  * has no such script, which is how three routes reached the platform without it
  * ever noticing.
  *
@@ -147,8 +147,8 @@ export const UNIMPLEMENTED: ReadonlySet<string> = new Set([
  * up to 1.5 seconds before its own last click. Both routes were green in every
  * test in this directory.
  *
- * Mirrored from the DOCS table in `web/lib/apidoc.ts` in the platform repo,
- * compared by `scripts/check-surface.mjs` whenever both are checked out. That
+ * Mirrored from the platform's own documented-parameter table, compared by
+ * `scripts/check-surface.mjs` whenever both are checked out. That
  * table is the published contract — it is what generates the OpenAPI document
  * and the docs site — so a parameter absent from it is one no caller has been
  * told about, and a parameter here that is absent from it is one this SDK is
@@ -338,8 +338,8 @@ export const UNIMPLEMENTED_PARAMETERS: ReadonlySet<string> = new Set([
 /**
  * Reduce a concrete path to its route shape, as the platform's proxy does.
  *
- * `:pid` and `:window` rather than a second `:id`, because that is how
- * surface.ts spells them and this table is compared against that one.
+ * `:pid` and `:window` rather than a second `:id`, because that is how the
+ * platform's own route table spells them and this one is compared against it.
  */
 export function patternFor(path: string): string {
   const parts = path.split('/').filter(Boolean);
