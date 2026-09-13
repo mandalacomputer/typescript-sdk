@@ -54,6 +54,14 @@ const repo = resolve(here, '..');
 
 /** The platform's surface manifest, at the root of its checkout. */
 const MANIFEST = 'surface-manifest.json';
+/**
+ * Files that identify a platform checkout, named for identity only and never
+ * read. Deliberately NOT the manifest: a checkout recognized by the very file
+ * the comparison needs is one that "is not the platform" the moment that file
+ * is missing, and an export that predated or lost the manifest then skipped at
+ * exit 0 instead of failing (review of the Python client's adoption).
+ */
+const MARKERS = ['web/lib/surface.ts', 'web/lib/apidoc.ts'];
 /** The manifest format this reads. A version this has not heard of is refused. */
 const MANIFEST_VERSION = 1;
 const METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS']);
@@ -73,20 +81,21 @@ function platformRepo() {
     resolve(repo, '..', 'app'),
   ].filter(Boolean);
 
-  if (asked && !existsSync(join(asked, MANIFEST))) {
+  const isPlatform = (dir) => MARKERS.every((marker) => existsSync(join(dir, marker)));
+  if (asked && !isPlatform(asked)) {
     // The one machine where this gate is enforced is the one that sets this
     // variable, for three SDKs at once. A checkout path that moves, or a
     // variable that fails to expand, would otherwise be indistinguishable from
     // "no platform here" — three green no-ops over three mirrors nobody compared.
     console.error(
-      `check:surface — MANDALA_PLATFORM_REPO is set to ${asked}, which does not hold ${MANIFEST}.\n` +
+      `check:surface — MANDALA_PLATFORM_REPO is set to ${asked}, which does not hold ${MARKERS.join(' and ')}.\n` +
         '  Point it at a platform checkout, or unset it to skip the comparison.',
     );
     process.exitCode = 1;
     return null;
   }
 
-  const found = candidates.find((dir) => existsSync(join(dir, MANIFEST)));
+  const found = candidates.find(isPlatform);
   if (!found) {
     console.log(
       'check:surface — platform repo not found, skipping.\n' +
@@ -104,9 +113,15 @@ function platformRepo() {
  */
 function readManifest(platform) {
   const path = join(platform, MANIFEST);
+  if (!existsSync(path)) {
+    throw new Error(`${path} is not there — the checkout predates the manifest, or lost it`);
+  }
   let manifest;
   try {
-    manifest = JSON.parse(readFileSync(path, 'utf8'));
+    const text = readFileSync(path, 'utf8');
+    const twice = repeatedKey(text);
+    if (twice) throw new Error(`the key ${JSON.stringify(twice)} appears twice in one object`);
+    manifest = JSON.parse(text);
   } catch (error) {
     throw new Error(`${path} cannot be read: ${error.message}`);
   }
@@ -148,6 +163,68 @@ function readManifest(platform) {
     }
   }
   return { manifest, path };
+}
+
+/**
+ * The first key that appears twice in one JSON object, or undefined.
+ *
+ * `JSON.parse` keeps the LAST of two equal keys and says nothing, so a manifest
+ * carrying a route's parameters twice compared against whichever came second
+ * and silently ignored the other. Two answers to one question is a manifest
+ * this cannot read, and the parser has no hook for it — so the text is walked
+ * once, strings stepped over, keys recorded per object.
+ */
+function repeatedKey(text) {
+  const objects = [];
+  let expectKey = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === '"') {
+      const start = ++i;
+      while (i < text.length && text[i] !== '"') i += text[i] === '\\' ? 2 : 1;
+      if (expectKey && objects.length) {
+        const key = text.slice(start, i);
+        const keys = objects[objects.length - 1];
+        if (keys.has(key)) return key;
+        keys.add(key);
+        expectKey = false;
+      }
+    } else if (ch === '{') {
+      objects.push(new Set());
+      expectKey = true;
+    } else if (ch === '}') {
+      objects.pop();
+      expectKey = false;
+    } else if (ch === '[') {
+      // Inside an array, a string is a value; a nested object resets this.
+      expectKey = false;
+    } else if (ch === ',' && objects.length && !inArray(text, i, objects)) {
+      expectKey = true;
+    }
+  }
+  return undefined;
+}
+
+// A comma at object level separates members, and one inside an array that sits
+// inside an object separates values; the difference is which opened last.
+function inArray(text, at, objects) {
+  let depth = 0;
+  for (let i = at - 1; i >= 0; i--) {
+    const ch = text[i];
+    if (ch === '"') {
+      // Step back over a string, escapes and all.
+      let j = i - 1;
+      while (j >= 0 && !(text[j] === '"' && text[j - 1] !== '\\')) j--;
+      i = j;
+      continue;
+    }
+    if (ch === ']' || ch === '}') depth++;
+    else if (ch === '[' || ch === '{') {
+      if (depth === 0) return ch === '[';
+      depth--;
+    }
+  }
+  return !objects.length;
 }
 
 /** The mirror, imported as the suite imports it, or a failure that says why not. */

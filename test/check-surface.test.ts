@@ -52,11 +52,19 @@ describe('check:surface', () => {
   afterEach(() => {
     for (const dir of made.splice(0)) rmSync(dir, { recursive: true, force: true });
   });
-  /** A directory shaped like a platform checkout, holding `manifest` — or nothing. */
-  const fixture = (manifest: unknown | null, under = tmpdir()) => {
+  /**
+   * A directory shaped like a platform checkout — the identity files, never
+   * read — holding `manifest`, or no manifest at all.
+   */
+  const fixture = (manifest: unknown | null, under = tmpdir(), identity = true) => {
     mkdirSync(under, { recursive: true });
     const dir = mkdtempSync(join(under, 'surface-fixture-'));
     made.push(dir);
+    if (identity) {
+      mkdirSync(join(dir, 'web/lib'), { recursive: true });
+      writeFileSync(join(dir, 'web/lib/surface.ts'), '// synthesized\n');
+      writeFileSync(join(dir, 'web/lib/apidoc.ts'), '// synthesized\n');
+    }
     if (manifest !== null) {
       writeFileSync(
         join(dir, 'surface-manifest.json'),
@@ -142,10 +150,45 @@ describe('check:surface', () => {
     // The variable is an assertion, and the machine that sets it is the one
     // machine where this gate is enforced — for three SDKs at once. Read as a
     // guess, a checkout that moved is indistinguishable from no platform at all.
+    const { said, code } = await runCheck(fixture(null, tmpdir(), false));
+    expect(code).toBe(1);
+    expect(said).toContain('does not hold');
+    expect(said).not.toContain('skipping');
+  });
+
+  it('fails, naming the file, on a platform checkout that has no manifest', async () => {
+    // Identity is not the manifest: a copy that lost it, or predates it, is still
+    // the platform, and the comparison that cannot be made is a failure rather
+    // than a skip (review of the Python client's adoption).
     const { said, code } = await runCheck(fixture(null));
     expect(code).toBe(1);
-    expect(said).toContain('does not hold surface-manifest.json');
+    expect(said).toContain('surface-manifest.json is not there');
     expect(said).not.toContain('skipping');
+  });
+
+  it('refuses a key that appears twice rather than reading the last one', async () => {
+    // `JSON.parse` keeps the last of two equal keys and says nothing.
+    const manifest = JSON.stringify(inStep());
+    const twiceRoute = manifest.replace(
+      '"parameters":{',
+      '"parameters":{"DELETE computers/:id":["query:new_required"],',
+    );
+    const twiceLimit = manifest.replace('"limits":{', '"limits":{"agent.maxSteps":1,');
+    expect(twiceRoute).not.toBe(manifest);
+    expect(twiceLimit).not.toBe(manifest);
+    for (const text of [twiceRoute, twiceLimit]) {
+      const { said, code } = await runCheck(fixture(text));
+      expect(said).toContain('appears twice');
+      expect(said).not.toContain('matches');
+      expect(code).toBe(1);
+    }
+    // And a value that merely repeats a KEY'S spelling is not a repeated key: two
+    // routes with the same parameter name, a string holding a brace.
+    const fine = inStep();
+    fine.parameters['GET sizes'] = ['query:expect'];
+    fine.routes.push('GET brace/{x}');
+    const { said } = await runCheck(fixture(fine));
+    expect(said).not.toContain('appears twice');
   });
 
   it('resolves a relative MANDALA_PLATFORM_REPO against this repo', async () => {
