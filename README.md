@@ -1826,15 +1826,18 @@ acted on.
 
 `err.reason` is what says which kind you have, where the platform sent a word
 for it, and it is the part a program is allowed to depend on — `err.message` is
-prose and is rewritten. Four words: `contention` and `starting` clear on their
+prose and is rewritten. Five words: `contention` and `starting` clear on their
 own, `unavailable` means the computer is not running and only starting it helps,
-`unsupported` means this computer cannot do it at all. `isTransient` reads it
-before it looks at the type, which is how a clipboard call against a stopped
-computer stopped being told to retry.
+`unsupported` means this computer cannot do it at all, and `revoked` is about the
+caller rather than the computer — the authority the request arrived with no
+longer holds, so sending it again unchanged is refused the same way (a 401 means
+present a credential again; a 403 means the role changed and signing in again
+will not help). `isTransient` reads it before it looks at the type, which is how
+a clipboard call against a stopped computer stopped being told to retry.
 
 **Absent means no classification was given**, and so does a word you do not
 recognise — not every refusal has one, and the platform reserves the right to
-add a fifth. Treat both as "no answer" and fall back to whatever you did before,
+add a sixth. Treat both as "no answer" and fall back to whatever you did before,
 which is exactly what `isTransient` does.
 
 `MoveRequiredError` is the exception, and it is a subclass so that code matching
