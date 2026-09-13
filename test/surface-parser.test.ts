@@ -1489,6 +1489,49 @@ export const UNIMPLEMENTED_PARAMETERS: ReadonlySet<string> = new Set([]);
     expect(code).toBe(0);
   });
 
+  it('refuses an extra callback parameter that changes the pair without an =', async () => {
+    // A default is not the only thing an extra parameter can do to the value. A
+    // computed key in a destructured parameter RUNS and holds no `=` at all: this
+    // type-checks, survives the formatter, produces `GET NaN` at runtime, and the
+    // reader went on certifying the route it could see in the array — a false
+    // all-clear (review of OPL-4830, in the copy of this reader the mcp server
+    // carries). The parameter list is counted now, with the angle brackets
+    // balanced, rather than matched as one pattern whose annotation tail swallowed
+    // whatever followed it.
+    const mirror = `type Route = [string, string];
+export const ALLOWED: ReadonlySet<string> = new Set(
+  ([['GET', 'sizes']] as Route[]).map(([m, p]: Route, _i, { [++(p as any)]: unused }) => \`\${m} \${p}\`),
+);
+export const UNIMPLEMENTED: ReadonlySet<string> = new Set([]);
+export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
+  ['GET sizes', ['query:fresh']],
+]);
+export const UNIMPLEMENTED_PARAMETERS: ReadonlySet<string> = new Set([]);
+`;
+    const { said, code } = await runAgainst(mirror);
+    expect(said).toMatch(/callback this reader cannot account for/);
+    expect(code).not.toBe(0);
+  });
+
+  it('reads an annotation whose generic carries a type parameter default', async () => {
+    // `<U = string>` is a type parameter's DEFAULT, not the declaration's
+    // initializer, and stopping the assignment scan at its `=` reported a legal
+    // table as declared without one — the same shape of false refusal as the
+    // `() => string` case above (review of OPL-4830).
+    const mirror = `type Route = [string, string];
+type Box<T> = ReadonlyMap<string, readonly string[]> & { callback?: T };
+export const ALLOWED: ReadonlySet<string> = new Set(
+  ([['GET', 'sizes']] as Route[]).map(([m, p]) => \`\${m} \${p}\`),
+);
+export const UNIMPLEMENTED: ReadonlySet<string> = new Set([]);
+export const PARAMETERS: Box<<U = string>() => U> = new Map([['GET sizes', ['query:fresh']]]);
+export const UNIMPLEMENTED_PARAMETERS: ReadonlySet<string> = new Set([]);
+`;
+    const { said, code } = await runAgainst(mirror);
+    expect(said).toContain('the mirror matches the platform (1 routes, 1 parameters)');
+    expect(code).toBe(0);
+  });
+
   it('refuses a mirror that declares a table twice', async () => {
     const { said, code } = await runAgainst(
       `${allowlist("['GET', 'sizes']", "['GET sizes', ['query:fresh']]")}
