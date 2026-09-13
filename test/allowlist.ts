@@ -338,8 +338,8 @@ export const UNIMPLEMENTED_PARAMETERS: ReadonlySet<string> = new Set([
 /**
  * Reduce a concrete path to its route shape, as the platform's proxy does.
  *
- * `:pid` and `:window` rather than a second `:id`, because that is how
- * surface.ts spells them and this table is compared against that one.
+ * `:pid` and `:window` rather than a second `:id`, because that is how the
+ * platform's own route table spells them and this one is compared against it.
  */
 export function patternFor(path: string): string {
   const parts = path.split('/').filter(Boolean);
