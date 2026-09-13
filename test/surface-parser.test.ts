@@ -725,7 +725,9 @@ describe('the route table reader', () => {
       `object({ age: str('x') } as const)`,
       `object({ age: str('x') } satisfies Record<string, Schema>)`,
       `object(({ age: str('x') }))`,
+      `object(({ age: str('x') }) as const)`,
       `object({ age: str('x') } as const, { title: 'Sizes' })`,
+      `object(({ age: str('x') }), { title: 'Sizes' })`,
     ]) {
       expect(
         await scanParams(
@@ -751,6 +753,36 @@ describe('the route table reader', () => {
       expect(said, body).toContain(
         "'GET sizes' documents a body in a form this reader does not know",
       );
+    }
+  });
+
+  it('does not let a comma inside parentheses look like an argument separator', async () => {
+    // A comma separates arguments only while the reader is still looking AT the
+    // argument list. Past an unwrapped parenthesis it is the comma OPERATOR,
+    // which evaluates to its right side — so the first version of the unwrap read
+    // `age` out of the half that is thrown away and reported a mirror listing
+    // `age` as matching, while the route serves `name` (Codex review).
+    //
+    // The quoted generic is the same forgery in the type suffix: with `type T<X>
+    // = any` the `>,` inside the string closed the generic and ended the
+    // argument, so the conditional deciding the real fields went unread. A
+    // generic may hold only the characters a type is spelled with now.
+    for (const body of [
+      `object((({ age: str('x') } as const), { name: str('x') }))`,
+      `object(({ age: str('x') }, { name: str('x') }))`,
+      `object({ age: str('x') } as T<">,"> instanceof Object ? { name: str('x') } : {})`,
+      "object({ age: str('x') } as T<`>,`> instanceof Object ? { name: str('x') } : {})",
+    ]) {
+      const { said, code } = await refuseParams(
+        `export const DOCS: Record<string, Doc> = { 'GET sizes': { body: ${body} } };\n`,
+      );
+      expect(code, body).toBe(1);
+      expect(said, body).toContain(
+        "'GET sizes' documents a body in a form this reader does not know",
+      );
+      // And never the answer it used to give: the field of the discarded half,
+      // reported as the route's whole body.
+      expect(said, body).not.toContain('+ GET sizes  body:age');
     }
   });
 
