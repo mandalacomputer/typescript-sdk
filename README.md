@@ -1944,8 +1944,11 @@ than a failure in CI.
 **Pinned to the platform's surface.** The platform allowlists routes server-side
 and 404s everything else. `test/allowlist.ts` mirrors that table in full,
 `test/surface.test.ts` asserts every request this SDK can issue lands inside it,
-and `scripts/check-surface.mjs` diffs the mirror against the platform's own
-table whenever the platform repository is checked out beside this one. A mirror
+and `scripts/check-surface.mjs` diffs the mirror against the platform's
+published surface manifest — a file the platform generates from its own tables
+and commits like a lockfile — whenever the platform repository is checked out
+beside this one. A manifest it cannot read is a failure, never a comparison of
+nothing. A mirror
 nobody compares is just a comment: that is exactly how three routes reached the
 platform without the Python SDK's surface test noticing, because "every call
 lands on an allowlisted route" stays true when the allowlist is the stale one.

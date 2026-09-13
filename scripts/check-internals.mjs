@@ -77,7 +77,7 @@ const DIGESTS = join(HERE, 'internal-names.sha256');
 const ALLOWED = new Set([
   'scripts/check-surface.mjs',
   'scripts/check-internals.mjs',
-  'test/surface-parser.test.ts',
+  'test/check-surface.test.ts',
   'test/surface-inventory.test.ts',
   'test/check-internals.test.ts',
 ]);
