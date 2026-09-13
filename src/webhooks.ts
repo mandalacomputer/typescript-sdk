@@ -30,6 +30,7 @@
  */
 
 import { ValidationError } from './errors.js';
+import { LIMITS } from './limits.js';
 // The one strict base64 decoder, shared with the exec decoders rather than
 // written twice: a signature is not a place for leniency, and neither is a
 // command's output, so the strictness has to be the same rule in one place.
@@ -48,7 +49,7 @@ export const WEBHOOK_SECRET_PREFIX = 'whsec_';
  * than five minutes wrong refuses every delivery, which is loud, immediate and
  * its own fault — better than a window wide enough to hide it.
  */
-export const WEBHOOK_TOLERANCE_S = 300;
+export const WEBHOOK_TOLERANCE_S = LIMITS['webhook.replayWindowSeconds'];
 
 /**
  * How long a receiver must remember an accepted `webhook-id`, measured from the

@@ -15,6 +15,7 @@
  */
 
 import { ValidationError } from './errors.js';
+import { LIMITS } from './limits.js';
 import type { Query } from './transport.js';
 
 // --- paths ----------------------------------------------------------------
@@ -695,8 +696,8 @@ export type ExecArgs = {
  * other than what they think — `process.env` in full, most likely — and the
  * sooner it says so the better.
  */
-export const MAX_ENV_ENTRIES = 64;
-export const MAX_ENV_ENTRY_BYTES = 4096;
+export const MAX_ENV_ENTRIES = LIMITS['exec.maxEnvEntries'];
+export const MAX_ENV_ENTRY_BYTES = LIMITS['exec.maxEnvEntryBytes'];
 
 /** Bytes, not characters: the platform's limit is on the encoded entry. */
 const utf8Length = (s: string): number => new TextEncoder().encode(s).length;
@@ -1063,7 +1064,7 @@ export function rangeHeaders(offset?: number, length?: number): Record<string, s
  * is deliberately not mirrored: nothing here can meet it, since the text comes
  * from the guest.
  */
-export const MAX_CLIPBOARD_BYTES = 64 * 1024;
+export const MAX_CLIPBOARD_BYTES = LIMITS['clipboard.writeMaxBytes'];
 
 /**
  * Build a clipboard payload.
@@ -1760,12 +1761,12 @@ function idList(v: unknown, what: string): string[] {
 }
 
 /** The most characters a subscription's description may hold — the platform's DESCRIPTION_MAX. */
-export const WEBHOOK_DESCRIPTION_MAX = 200;
+export const WEBHOOK_DESCRIPTION_MAX = LIMITS['webhook.descriptionMaxChars'];
 /**
  * The most computer ids one subscription may name — the platform's
  * COMPUTERS_MAX. A bound, not a design number: past it, filter at the receiver.
  */
-export const WEBHOOK_COMPUTERS_MAX = 64;
+export const WEBHOOK_COMPUTERS_MAX = LIMITS['webhook.computersMax'];
 
 /**
  * The optional fields the create and the update share, validated once.
