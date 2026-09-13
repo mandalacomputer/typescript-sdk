@@ -62,11 +62,21 @@ const HERE = join(fileURLToPath(new URL('.', import.meta.url)));
 const ROOT = join(HERE, '..');
 const DIGESTS = join(HERE, 'internal-names.sha256');
 
-/** Files that may carry the platform's names because mirroring them is their job. */
+/**
+ * Files that may carry the platform's names because mirroring them is their job.
+ *
+ * `test/allowlist.ts` is deliberately NOT here (OPL-4825). It mirrors the route
+ * table, and the route names are the published HTTP surface — public by
+ * definition — so it only ever needed the exemption for two doc comments that
+ * named the platform MODULES the tables live in. Those say what the platform
+ * does instead, and the file now passes this check on its own: an exemption
+ * nothing relies on is a hole waiting for the next edit. The rest of this list
+ * has to stay, because finding the platform's files is literally what those
+ * scripts and their tests do.
+ */
 const ALLOWED = new Set([
   'scripts/check-surface.mjs',
   'scripts/check-internals.mjs',
-  'test/allowlist.ts',
   'test/surface-parser.test.ts',
   'test/surface-inventory.test.ts',
   'test/check-internals.test.ts',
