@@ -1513,6 +1513,67 @@ export const UNIMPLEMENTED_PARAMETERS: ReadonlySet<string> = new Set([]);
     expect(code).not.toBe(0);
   });
 
+  it('refuses callback parameters hidden behind a comment', async () => {
+    // A bracket inside a comment is not a bracket: `/* < */` left the angle depth
+    // positive for the rest of the parameter list, hid every comma after it, and
+    // the computed-key bypass read as one parameter again (second review round of
+    // the mcp copy, so it is fixed in both).
+    const mirror = `type Route = [string, string];
+export const ALLOWED: ReadonlySet<string> = new Set(
+  ([['GET', 'sizes']] as Route[]).map(([m, p]: Route /* < */, _i, { [++(p as any)]: u }) => \`\${m} \${p}\`),
+);
+export const UNIMPLEMENTED: ReadonlySet<string> = new Set([]);
+export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
+  ['GET sizes', ['query:fresh']],
+]);
+export const UNIMPLEMENTED_PARAMETERS: ReadonlySet<string> = new Set([]);
+`;
+    const { said, code } = await runAgainst(mirror);
+    expect(said).toMatch(/callback this reader cannot account for/);
+    expect(code).not.toBe(0);
+  });
+
+  it('reads the projection through a comma a formatter left after the parameter', async () => {
+    // A comma with nothing after it is punctuation, not another parameter, and
+    // refusing it made a supported projection fail over punctuation.
+    const mirror = `type Route = [string, string];
+export const ALLOWED: ReadonlySet<string> = new Set(
+  ([['GET', 'sizes']] as Route[]).map(([m, p]: Route,) => \`\${m} \${p}\`),
+);
+export const UNIMPLEMENTED: ReadonlySet<string> = new Set([]);
+export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
+  ['GET sizes', ['query:fresh']],
+]);
+export const UNIMPLEMENTED_PARAMETERS: ReadonlySet<string> = new Set([]);
+`;
+    const { said, code } = await runAgainst(mirror);
+    expect(said).toContain('the mirror matches the platform (1 routes, 1 parameters)');
+    expect(code).toBe(0);
+  });
+
+  it('refuses a table whose type assertion is not a type at all', async () => {
+    // `as any<X, Y>[]` matched the `as` pattern and is not a type: TypeScript ends
+    // the type at `any` and reads `< X, Y > []` as comparisons and a comma
+    // expression, so what reaches `new Set` is a boolean. It type-checks, and
+    // erasing the suffix as a type certified a route set the runtime never
+    // produces. The body reader in this same file refuses every `as` suffix for
+    // exactly this reason; here the generic is admitted only over keyword types,
+    // which cannot be read as an expression because `string` is not a value.
+    const mirror = `type Route = [string, string];
+export const ALLOWED: ReadonlySet<string> = new Set(
+  (([['GET', 'sizes']] as Route[]).map(([m, p]) => \`\${m} \${p}\`) as any<X, Y>[] as any),
+);
+export const UNIMPLEMENTED: ReadonlySet<string> = new Set([]);
+export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
+  ['GET sizes', ['query:fresh']],
+]);
+export const UNIMPLEMENTED_PARAMETERS: ReadonlySet<string> = new Set([]);
+`;
+    const { said, code } = await runAgainst(mirror);
+    expect(said).toMatch(/is built with 0 projections/);
+    expect(code).not.toBe(0);
+  });
+
   it('reads an annotation whose generic carries a type parameter default', async () => {
     // `<U = string>` is a type parameter's DEFAULT, not the declaration's
     // initializer, and stopping the assignment scan at its `=` reported a legal
