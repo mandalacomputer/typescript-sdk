@@ -696,6 +696,64 @@ describe('the route table reader', () => {
     ).toEqual(['body:name']);
   });
 
+  it('does not read an object() call that is only part of the body value', async () => {
+    // The rule above, one bracket further out: the CALL is only a prefix of the
+    // value too. `object({ age }) && object({ age, name })` serves the second
+    // schema and this read the first, so a mirror listing `age` alone came back
+    // as matching — the silent all-clear, arriving just outside the place the
+    // rule was applied (Codex review).
+    for (const body of [
+      `object({ age: str('x') }) && object({ age: str('x'), name: str('x') })`,
+      `object({ age: str('x') }).x`,
+    ]) {
+      const { said, code } = await refuseParams(
+        `export const DOCS: Record<string, Doc> = { 'GET sizes': { body: ${body} } };\n`,
+      );
+      expect(code, body).toBe(1);
+      expect(said, body).toContain(
+        "'GET sizes' documents a body this reader would read only part of",
+      );
+    }
+  });
+
+  it('reads a field literal through a type assertion and its parentheses', async () => {
+    // The boundary check above must not turn a legal value into a failed check:
+    // a gate an author takes down by annotating a literal is a broken gate, and
+    // `as`/`satisfies` cannot change the field map at all. Read through, where
+    // the first version of the boundary refused all three (Codex review).
+    for (const body of [
+      `object({ age: str('x') } as const)`,
+      `object({ age: str('x') } satisfies Record<string, Schema>)`,
+      `object(({ age: str('x') }))`,
+      `object({ age: str('x') } as const, { title: 'Sizes' })`,
+    ]) {
+      expect(
+        await scanParams(
+          `export const DOCS: Record<string, Doc> = { 'GET sizes': { body: ${body} } };\n`,
+        ),
+        body,
+      ).toEqual(['body:age']);
+    }
+    // And an operator after the assertion is not part of the assertion. `{ age }
+    // as T && other` is `({ age } as T) && other` at runtime, so the `,`-or-end
+    // boundary is what makes reading through an annotation safe rather than
+    // merely likely; a generic may hold no parenthesis either, so no call can
+    // hide inside one.
+    for (const body of [
+      `object({ age: str('x') } as T && { name: str('x') })`,
+      `object({ age: str('x') } as ReturnType<typeof f>['x'])`,
+      `object(({ fields: { age: str('x') } }).fields)`,
+    ]) {
+      const { said, code } = await refuseParams(
+        `export const DOCS: Record<string, Doc> = { 'GET sizes': { body: ${body} } };\n`,
+      );
+      expect(code, body).toBe(1);
+      expect(said, body).toContain(
+        "'GET sizes' documents a body in a form this reader does not know",
+      );
+    }
+  });
+
   it('reads a query list whose bracket the formatter wrapped', async () => {
     // The one space after the colon is a spelling, not a shape. Missed, the
     // route's query and header parameters go unread with nothing said: a full

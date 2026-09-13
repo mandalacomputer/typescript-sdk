@@ -60,6 +60,55 @@ import {
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = resolve(here, '..');
 
+/**
+ * A type-only suffix on the field literal: `as <type>`, `satisfies <type>`, and
+ * the end of the argument it has to be at.
+ *
+ * A type assertion cannot change a value, so reading through one is safe in a
+ * way that reading through an operator is not — and the boundary is what makes
+ * that true rather than merely likely. `{ age } as T && other` is `({ age } as
+ * T) && other` at runtime, so the `,`-or-end anchor is doing the work: nothing
+ * outside the generic's brackets may be an operator, and `(` and `)` are
+ * excluded from what a generic may hold so no call can hide in one.
+ */
+const TYPE_SUFFIX =
+  /^(?:as|satisfies)\s+(?:const|[A-Za-z_$][\w$.]*(?:<[^<>()]*>)?(?:\s*\[\s*\])*)\s*(?:,|$)/;
+
+/**
+ * The `{ … }` the first argument of an `object(...)` call IS, or `undefined` for
+ * an argument this reader cannot reduce to one.
+ *
+ * Whitelisted, not stripped-until-something-matches: the literal, wrapping
+ * parentheses around the whole of the argument, and one type-only suffix. A
+ * `undefined` is a refusal at the call site, never an empty field set — reading
+ * a body as having no fields is how a route with a body passes for a route with
+ * none, which is the whole failure this gate exists to remove.
+ */
+function bodyFieldLiteral(args) {
+  let t = args;
+  // Four is past any nesting a formatter produces, and each pass below strips at
+  // least one construct, so this cannot spin on a shape it fails to shorten.
+  for (let pass = 0; pass < 4; pass++) {
+    const s = t.trimStart();
+    if (s.startsWith('(')) {
+      const inner = balanced(s, 0, '(', ')');
+      const after = s.slice(inner.length + 2).trimStart();
+      // Parentheses around the WHOLE argument only. `({ age }).age` opens with
+      // one and hands over something else entirely.
+      if (after !== '' && !after.startsWith(',')) return undefined;
+      t = inner;
+      continue;
+    }
+    if (!s.startsWith('{')) return undefined;
+    const literal = balanced(s, 0, '{', '}');
+    const after = s.slice(literal.length + 2).trimStart();
+    if (after === '' || after.startsWith(',')) return literal;
+    if (TYPE_SUFFIX.test(after)) return literal;
+    return undefined;
+  }
+  return undefined;
+}
+
 // One marker identifies the checkout, and the rest of the layout is then
 // required of it rather than searched for. Asking for both at once conflates
 // two different answers: "this directory is not the platform, so there is
@@ -555,9 +604,11 @@ function main() {
         // conditional around the real fields — `object(Object.assign({}, X))`,
         // `object(flag ? {} : { name })` — handed over an empty literal nested
         // inside it, and the route reported no body fields with nothing said
-        // (Codex review). A -1 falls through to the refusal below, which is the
-        // same sentence `object(IDENTIFIER)` already gets: the shape is one this
-        // reader does not know, and the route is named.
+        // (Codex review). An argument that does not reduce to a literal falls
+        // through to the refusal below, which is the same sentence
+        // `object(IDENTIFIER)` already gets: the shape is one this reader does
+        // not know, and the route is named. `bodyFieldLiteral` says which
+        // wrappers it reads through and why each is safe.
         //
         // And a literal the call OPENS with is still only a prefix of the
         // argument: `object({ fields: { name } }.fields)` starts with one and
@@ -565,15 +616,28 @@ function main() {
         // and not the one the platform documents. So what follows the literal is
         // checked too — another argument or nothing — which is the rule the
         // parameter entries above are already read by (Codex review).
-        const leading = args === null ? '' : args.slice(0, args.length - args.trimStart().length);
-        let brace = args !== null && args.trimStart().startsWith('{') ? leading.length : -1;
-        let literal;
-        if (brace !== -1) {
-          literal = balanced(args, brace, '{', '}');
-          const after = args.slice(brace + literal.length + 2).trimStart();
-          if (after !== '' && !after.startsWith(',')) brace = -1;
+        //
+        // And the same rule applies to the CALL, one level further out: it is
+        // only a prefix of the body VALUE. `body: object({ age }) && object({
+        // age, name })` serves the second schema and this read the first, so a
+        // mirror listing `age` alone was reported as matching — the silent
+        // all-clear this guard exists to refuse, arriving one bracket outside
+        // the place the rule was applied (Codex review).
+        const callEnd = args === null ? -1 : bodyAt + object[0].length + args.length + 1;
+        const beyond = callEnd === -1 ? '' : body.slice(callEnd).trimStart();
+        if (callEnd !== -1 && beyond !== '' && !beyond.startsWith(',')) {
+          throw new Error(
+            `'${route}' documents a body this reader would read only part of: ` +
+              `${JSON.stringify(
+                body
+                  .slice(bodyAt, callEnd + 20)
+                  .trim()
+                  .slice(0, 60),
+              )}`,
+          );
         }
-        if (brace !== -1) {
+        const literal = args === null ? undefined : bodyFieldLiteral(args);
+        if (literal !== undefined) {
           // The field walk refuses a spread, a computed key and an interpolated
           // one: each is a field of THIS route that it cannot resolve, and
           // reading none of them is how a route with a body passes for a route
@@ -590,6 +654,10 @@ function main() {
           }
           for (const k of fields) params.add(`body:${k}`);
         } else if (body[bodyAt] !== '{') {
+          // Falls through to here for every first argument the helper cannot
+          // reduce to a literal, which is the sentence `object(IDENTIFIER)`
+          // already gets: the shape is one this reader does not know, and the
+          // route is named.
           throw new Error(
             `'${route}' documents a body in a form this reader does not know — ` +
               'neither object(...) nor a raw schema literal.',
