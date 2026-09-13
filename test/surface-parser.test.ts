@@ -716,18 +716,14 @@ describe('the route table reader', () => {
     }
   });
 
-  it('reads a field literal through a type assertion and its parentheses', async () => {
+  it('reads a field literal through the parentheses around it', async () => {
     // The boundary check above must not turn a legal value into a failed check:
-    // a gate an author takes down by annotating a literal is a broken gate, and
-    // `as`/`satisfies` cannot change the field map at all. Read through, where
-    // the first version of the boundary refused all three (Codex review).
+    // a gate a reformat takes down is a broken gate, and parentheses around the
+    // whole argument change nothing about the map inside them (Codex review).
     for (const body of [
-      `object({ age: str('x') } as const)`,
-      `object({ age: str('x') } satisfies Record<string, Schema>)`,
       `object(({ age: str('x') }))`,
-      `object(({ age: str('x') }) as const)`,
-      `object({ age: str('x') } as const, { title: 'Sizes' })`,
       `object(({ age: str('x') }), { title: 'Sizes' })`,
+      `object({ age: str('x') }, { title: 'Sizes' })`,
     ]) {
       expect(
         await scanParams(
@@ -736,14 +732,32 @@ describe('the route table reader', () => {
         body,
       ).toEqual(['body:age']);
     }
-    // And an operator after the assertion is not part of the assertion. `{ age }
-    // as T && other` is `({ age } as T) && other` at runtime, so the `,`-or-end
-    // boundary is what makes reading through an annotation safe rather than
-    // merely likely; a generic may hold no parenthesis either, so no call can
-    // hide inside one.
+  });
+
+  it('refuses a type-only suffix instead of reading through it', async () => {
+    // A deliberate reversal, and the most interesting thing in this ticket. A
+    // type assertion cannot change a value, so a version of this DID read
+    // through one — and three review rounds each found an expression that
+    // type-checks and reaches past the boundary meant to bound it. `as T<">,">`
+    // closes the generic inside a string. `as any<X, Y>[]` is not a generic at
+    // all: TypeScript ends that type at `any`, the rest is `< X, Y > []`, and
+    // the call receives `false` where the reader saw a field map — a mirror
+    // listing `age` reported as matching a route that documents nothing of the
+    // kind.
+    //
+    // Recognising a type expression is a type parser's job, and every narrowing
+    // of the regex standing in for one admitted the next spelling. So the whole
+    // suffix is refused. The first two lines here are legal values this now
+    // fails on, which is the price: a refusal that names the route and stops the
+    // check, in place of a silent all-clear.
     for (const body of [
+      `object(({ age: str('x') } as any<X, Y>[]) as any)`,
+      `object((({ age: str('x') } as any<X, Y>[])) as any, { title: 'x' })`,
+      `object({ age: str('x') } as const)`,
+      `object({ age: str('x') } satisfies Record<string, Schema>)`,
+      `object({ age: str('x') } as T<">,"> instanceof Object ? { name: str('x') } : {})`,
+      "object({ age: str('x') } as T<`>,`> instanceof Object ? { name: str('x') } : {})",
       `object({ age: str('x') } as T && { name: str('x') })`,
-      `object({ age: str('x') } as ReturnType<typeof f>['x'])`,
       `object(({ fields: { age: str('x') } }).fields)`,
     ]) {
       const { said, code } = await refuseParams(
@@ -753,6 +767,9 @@ describe('the route table reader', () => {
       expect(said, body).toContain(
         "'GET sizes' documents a body in a form this reader does not know",
       );
+      // And never the answer the reading version gave: a field out of the half
+      // of the expression that is thrown away, reported as the route's body.
+      expect(said, body).not.toContain('+ GET sizes  body:age');
     }
   });
 
@@ -762,16 +779,9 @@ describe('the route table reader', () => {
     // which evaluates to its right side — so the first version of the unwrap read
     // `age` out of the half that is thrown away and reported a mirror listing
     // `age` as matching, while the route serves `name` (Codex review).
-    //
-    // The quoted generic is the same forgery in the type suffix: with `type T<X>
-    // = any` the `>,` inside the string closed the generic and ended the
-    // argument, so the conditional deciding the real fields went unread. A
-    // generic may hold only the characters a type is spelled with now.
     for (const body of [
-      `object((({ age: str('x') } as const), { name: str('x') }))`,
+      `object((({ age: str('x') }), { name: str('x') }))`,
       `object(({ age: str('x') }, { name: str('x') }))`,
-      `object({ age: str('x') } as T<">,"> instanceof Object ? { name: str('x') } : {})`,
-      "object({ age: str('x') } as T<`>,`> instanceof Object ? { name: str('x') } : {})",
     ]) {
       const { said, code } = await refuseParams(
         `export const DOCS: Record<string, Doc> = { 'GET sizes': { body: ${body} } };\n`,
@@ -780,8 +790,6 @@ describe('the route table reader', () => {
       expect(said, body).toContain(
         "'GET sizes' documents a body in a form this reader does not know",
       );
-      // And never the answer it used to give: the field of the discarded half,
-      // reported as the route's whole body.
       expect(said, body).not.toContain('+ GET sizes  body:age');
     }
   });

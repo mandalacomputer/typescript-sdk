@@ -61,53 +61,41 @@ const here = dirname(fileURLToPath(import.meta.url));
 const repo = resolve(here, '..');
 
 /**
- * A type-only suffix on the field literal: `as <type>`, `satisfies <type>`, and
- * the end of the position it has to be at, captured so the caller can tell which
- * end it found.
- *
- * A type assertion cannot change a value, so reading through one is safe in a
- * way that reading through an operator is not — and the boundary is what makes
- * that true rather than merely likely. `{ age } as T && other` is `({ age } as
- * T) && other` at runtime, so the `,`-or-end anchor is doing the work.
- *
- * Which is why a generic may hold only the characters a type is spelled with,
- * and NOT a quote. `[^<>()]*` looked conservative and was not: with `type T<X> =
- * any`, `{ age } as T<">,"> instanceof Object ? { name } : {}` type-checks, and
- * the `>,` inside that string was read as the generic's close and the end of the
- * argument — so the conditional that decides the real fields was never looked at
- * and the route reported `age` (Codex review). A `(` is excluded for the same
- * reason it always was: no call may hide in a type.
- */
-const TYPE_SUFFIX =
-  /^(?:as|satisfies)\s+(?:const|[A-Za-z_$][\w$.]*(?:<[\w$.,\s[\]|&]*>)?(?:\s*\[\s*\])*)\s*(,|$)/;
-
-/**
  * The `{ … }` the first argument of an `object(...)` call IS, or `undefined` for
  * an argument this reader cannot reduce to one.
  *
- * Whitelisted, not stripped-until-something-matches: the literal, parentheses
- * around the whole of it, and one type-only suffix. A `undefined` is a refusal at
- * the call site, never an empty field set — reading a body as having no fields is
- * how a route with a body passes for a route with none, which is the whole
- * failure this gate exists to remove.
+ * Whitelisted, not stripped-until-something-matches: the literal, and
+ * parentheses around the whole of it. A `undefined` is a refusal at the call
+ * site, never an empty field set — reading a body as having no fields is how a
+ * route with a body passes for a route with none, which is the whole failure
+ * this gate exists to remove.
  *
  * A comma ends the first argument only while this is still looking AT the
- * argument list. Once a parenthesis has been unwrapped, a top-level comma is the
- * comma operator, which evaluates to its RIGHT side: `object((({ age } as const),
+ * argument list. Once a parenthesis has been unwrapped a top-level comma is the
+ * comma operator, which evaluates to its RIGHT side: `object((({ age }),
  * { name }))` is one argument serving `name`, and treating that comma as a
  * separator read `age` out of the half that is thrown away, then reported a
  * mirror listing `age` as matching (Codex review).
+ *
+ * A TYPE-ONLY suffix — `as const`, `satisfies T` — is NOT read through, and that
+ * is a deliberate reversal. A type assertion cannot change a value, so a version
+ * of this did read through one, and three review rounds each found a different
+ * expression that type-checks and reaches past the boundary meant to bound it:
+ * `as T<">,">` closed the generic inside a string, and `as any<X, Y>[]` is not a
+ * generic at all — TypeScript ends that type at `any` and the rest is `< X, Y >
+ * []`, so the call receives `false` where this read a field map. Recognising a
+ * type expression is the job of a type parser, and each narrowing of the regex
+ * that stood in for one admitted the next spelling. So the suffix is refused,
+ * loudly, naming the route. It costs a false refusal on a legal annotation no
+ * documented body uses; the alternative costs a silent all-clear, which is the
+ * one outcome this file exists to make impossible (OPL-4829).
  */
 function bodyFieldLiteral(args) {
   let t = args;
   let unwrapped = false;
   // A comma at this depth separates arguments; past an unwrapped parenthesis it
-  // does not, so the suffix and the literal must run to the very end instead.
+  // does not, so the literal has to run to the very end instead.
   const ends = (after) => after === '' || (after.startsWith(',') && !unwrapped);
-  const typeOnly = (after) => {
-    const suffix = TYPE_SUFFIX.exec(after);
-    return suffix !== null && !(suffix[1] === ',' && unwrapped);
-  };
   // Four is past any nesting a formatter produces, and each pass below strips at
   // least one construct, so this cannot spin on a shape it fails to shorten.
   for (let pass = 0; pass < 4; pass++) {
@@ -117,15 +105,14 @@ function bodyFieldLiteral(args) {
       const after = s.slice(inner.length + 2).trimStart();
       // Parentheses around the WHOLE argument only. `({ age }).age` opens with
       // one and hands over something else entirely.
-      if (!ends(after) && !typeOnly(after)) return undefined;
+      if (!ends(after)) return undefined;
       t = inner;
       unwrapped = true;
       continue;
     }
     if (!s.startsWith('{')) return undefined;
     const literal = balanced(s, 0, '{', '}');
-    const after = s.slice(literal.length + 2).trimStart();
-    if (ends(after) || typeOnly(after)) return literal;
+    if (ends(s.slice(literal.length + 2).trimStart())) return literal;
     return undefined;
   }
   return undefined;
