@@ -1524,6 +1524,29 @@ export const UNIMPLEMENTED_PARAMETERS: ReadonlySet<string> = new Set([]);
     }
   });
 
+  it('refuses callback parameters hidden by a comment inside a template type', async () => {
+    // The comment scanner is not reached when the walk is inside a template
+    // literal's `${...}`: that scan counted a brace and a backtick in a COMMENT as
+    // syntax, mispaired the interpolation, and from there had the wrong idea of
+    // where the template ended. An annotation carrying `${string // }` then hid the
+    // remaining parameters and the reader certified a route the runtime never
+    // produced — `GET NaN` at runtime (fourth review round, in the mcp copy).
+    const mirror = `type Route = [string, string];
+export const ALLOWED: ReadonlySet<string> = new Set(
+  ([['GET','sizes']] as Route[]).map(([m,p]: Route | \`\${string // }\`<{\r}\`, _i, { [++(p as any)]: u } // \` >
+) => \`\${m} \${p}\`),
+);
+export const UNIMPLEMENTED: ReadonlySet<string> = new Set([]);
+export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
+  ['GET sizes', ['query:fresh']],
+]);
+export const UNIMPLEMENTED_PARAMETERS: ReadonlySet<string> = new Set([]);
+`;
+    const { said, code } = await runAgainst(mirror);
+    expect(code).not.toBe(0);
+    expect(said).not.toContain('the mirror matches the platform');
+  });
+
   it.each([
     ['a carriage return', '\r'],
     ['U+2028', '\u2028'],
