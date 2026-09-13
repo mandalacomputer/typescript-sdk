@@ -3689,6 +3689,33 @@ describe('a status that arrived on a stream', () => {
     },
   );
 
+  it.each([401, 403, 409])(
+    'reads a %i revoked refusal as permanent, by the word and not by luck',
+    async (status) => {
+      // The platform's fifth word (OPL-4801): the authority this request arrived
+      // with no longer holds. A 401 and a 403 are not among the four transient
+      // classes, so an unrecognised word already answered false — which is exactly
+      // why naming it matters. Answering by accident means a future status for this
+      // refusal, or a new transient class, could make a permission failure look
+      // replayable. `revoked` in the permanent set says no on purpose.
+      //
+      // The 409 is the case that proves it is the WORD answering: a ConflictError is
+      // transient by class, so without `revoked` named this one says "send it
+      // again" — to a caller whose authority has gone. The platform sends 401 and
+      // 403 for it today, and the word is read ahead of the class precisely so that
+      // which status it picks tomorrow is not load-bearing.
+      const { client: c } = client((call) =>
+        call.path === '/computers/vm-1/exec'
+          ? json({ error: 'unauthorized', reason: 'revoked' }, { status })
+          : json(COMPUTER),
+      );
+      const computer = await c.computers.get('vm-1');
+      const err = await computer.open('https://example.com').catch((e) => e);
+      expect((err as APIError).reason).toBe('revoked');
+      expect(isTransient(err)).toBe(false);
+    },
+  );
+
   it('still hands the whole frame, reason and all, to a streaming caller', async () => {
     // Withheld from the thrown error's body, not from the event: a caller
     // reading the stream itself can see everything that arrived.

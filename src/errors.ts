@@ -162,7 +162,20 @@ export class APIError extends MandalaError {
  * and the same pair in mandala-computer-mcp.
  */
 const REASON_CLEARS: ReadonlySet<string> = new Set(['contention', 'starting']);
-const REASON_PERMANENT: ReadonlySet<string> = new Set(['unavailable', 'unsupported']);
+/**
+ * `revoked` is the first word here that is about the CALLER rather than about a
+ * computer: the authority the request arrived with no longer holds — suspended,
+ * demoted, removed, or a session the platform has retired. Permanent, and
+ * explicitly so rather than incidentally: an unrecognised word already answered
+ * false through the type branches below, because a 401 or 403 is none of the four
+ * transient classes, so nothing changes today. What changes is that a future
+ * status for this refusal cannot quietly make it transient.
+ *
+ * The status still carries what to DO about it, and a client surfacing this should
+ * keep the two apart: 401 means present a credential again, 403 means the role
+ * changed and signing in again will not help.
+ */
+const REASON_PERMANENT: ReadonlySet<string> = new Set(['unavailable', 'unsupported', 'revoked']);
 
 /**
  * The platform's one-word classification off a refusal body, or `undefined`.
