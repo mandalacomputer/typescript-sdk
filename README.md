@@ -1085,8 +1085,7 @@ direction. One reply may ask for several actions and spends a step on each,
 while a reply that asks for none — or a paused turn, resubmitted — costs tokens
 and no step. Nor does every step take a screenshot; a `bash` call or a cursor
 read does not. Omit it for the platform's default of 20; 100 is the ceiling,
-enforced by the platform rather than here, so a larger value costs a round trip
-to be refused.
+and a larger value is refused before the call.
 `system` carries standing instructions into the run and `model` overrides the
 one the platform would pick. The computer must already be running.
 

@@ -740,6 +740,23 @@ describe('finite numbers', () => {
     }
   });
 
+  it('refuses an agent step count past the ceiling, and takes the ceiling itself', () => {
+    // Mirrored from the platform (OPL-4862): the Python SDK and the MCP server
+    // already refuse this before the call, and this one sent it to be told 400.
+    expect(P.MAX_AGENT_STEPS).toBe(100);
+    expect(P.agentBody({ prompt: 'go', stream: true, maxSteps: P.MAX_AGENT_STEPS })).toEqual({
+      prompt: 'go',
+      max_steps: P.MAX_AGENT_STEPS,
+      stream: true,
+    });
+    expect(() =>
+      P.agentBody({ prompt: 'go', stream: true, maxSteps: P.MAX_AGENT_STEPS + 1 }),
+    ).toThrow(/at most 100/);
+    expect(() => P.agentBody({ prompt: 'go', stream: true, maxSteps: 500 })).toThrow(
+      /maxSteps is 500; the platform accepts at most 100/,
+    );
+  });
+
   it('still takes the zeros and the ordinary values', () => {
     expect(P.pointerBody('move', 0, 0)).toEqual({ action: 'move', x: 0, y: 0 });
     expect(P.waitBody(0.5)).toEqual({ action: 'wait', duration: 0.5 });

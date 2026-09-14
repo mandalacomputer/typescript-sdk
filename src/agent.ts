@@ -123,9 +123,7 @@ export type AgentArgs = {
    * read takes no screenshot. Bounds the work; budget the bill on your own key.
    *
    * Omitted sends nothing and takes the platform's default of 20; 100 is the
-   * ceiling. Unlike the other bounds this SDK mirrors, that ceiling is not one
-   * of them and is not checked before the call — a larger value costs a round
-   * trip and comes back refused.
+   * ceiling, refused before the call as it is in the other clients.
    */
   maxSteps?: number;
   /** Override the model the platform would pick. */
