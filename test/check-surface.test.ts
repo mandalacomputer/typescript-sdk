@@ -173,12 +173,19 @@ const MALFORMED: ReadonlyArray<readonly [string, (b: any) => void, string]> = [
   ],
   ['routes is empty', (b) => (b.routes = []), "'routes' is not a non-empty array"],
   ['a route is a number', (b) => b.routes.push(7), "'routes' holds a non-string entry"],
-  ['a route has no method', (b) => b.routes.push('widgets'), "is not 'METHOD pattern'"],
+  // A LEADING space, so the method is empty and the pattern is not. Spelled
+  // 'widgets' it trips the empty-method, empty-pattern and case predicates at
+  // once, so the case pins none of them.
+  ['a route has no method', (b) => b.routes.push(' widgets'), "is not 'METHOD pattern'"],
   ['a route method is lowercase', (b) => b.routes.push('get widgets'), "is not 'METHOD pattern'"],
   ['a route has no pattern', (b) => b.routes.push('GET '), "is not 'METHOD pattern'"],
   ['a route pattern has a space', (b) => b.routes.push('GET wid gets'), "is not 'METHOD pattern'"],
   ['a route is listed twice', (b) => b.routes.push(b.routes[0]), 'twice'],
   ['parameters is an array', (b) => (b.parameters = []), "'parameters' is not an object"],
+  // `null` and a scalar separate the three predicates of that one guard, each of
+  // which is otherwise answered by whichever sibling fires first.
+  ['parameters is null', (b) => (b.parameters = null), "'parameters' is not an object"],
+  ['parameters is a number', (b) => (b.parameters = 7), "'parameters' is not an object"],
   [
     'parameters documents an unknown route',
     (b) => (b.parameters['GET widgets'] = ['query:w']),
@@ -200,6 +207,8 @@ const MALFORMED: ReadonlyArray<readonly [string, (b: any) => void, string]> = [
     'names no query:, header: or body: field',
   ],
   ['limits is an array', (b) => (b.limits = []), "'limits' is not an object"],
+  ['limits is null', (b) => (b.limits = null), "'limits' is not an object"],
+  ['limits is a number', (b) => (b.limits = 7), "'limits' is not an object"],
   ['a limit is a string', (b) => (b.limits['agent.maxSteps'] = '100'), 'which is not an integer'],
   ['a limit is a float', (b) => (b.limits['agent.maxSteps'] = 1.5), 'which is not an integer'],
 ];
@@ -302,6 +311,26 @@ describe('a manifest that names a key twice', () => {
       '{"version": 1, "routes": ["GET sizes"], "parameters": {}, ' +
         '"limits": {"agent.maxSteps": 100, "agent.maxSteps": 999}}',
       'agent.maxSteps',
+    ],
+    [
+      // Reported as a HIGH bypass: `"routes"` and `"\u0072outes"` are two
+      // spellings of ONE key to JSON.parse, so the escaped table silently
+      // replaced the conflicting one and a raw comparison saw no duplicate.
+      // This manifest is otherwise complete, and printed the success line.
+      'a duplicate key spelled with a unicode escape',
+      `{"version": 1, "routes": ["POST hidden"], "\\u0072outes": ` +
+        `${JSON.stringify([...ALLOWED].sort())}, "parameters": {}, "limits": {}}`,
+      'routes',
+    ],
+    [
+      // The other HIGH bypass: a repeated EMPTY key made `duplicateKey` return
+      // `''`, which a truthiness test read as "no duplicate" — disabling the
+      // rest of the scan, so the conflicting `routes` table behind it went
+      // unnoticed.
+      'a repeated empty key ahead of a conflicting table',
+      `{"": 0, "": 1, "version": 1, "routes": ["POST hidden"], "routes": ` +
+        `${JSON.stringify([...ALLOWED].sort())}, "parameters": {}, "limits": {}}`,
+      '',
     ],
     [
       'a key hidden after a brace inside a string',

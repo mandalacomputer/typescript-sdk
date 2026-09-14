@@ -176,21 +176,20 @@ function duplicateKey(text) {
   for (let i = 0; i < text.length; i++) {
     const ch = text[i];
     if (ch === '"') {
-      let value = '';
-      i++;
-      for (; text[i] !== '"'; i++) {
-        if (text[i] === '\\') {
-          // Kept raw rather than unescaped. Two spellings of one key ("a" and
-          // "a") would slip past, which is a narrower hole than the one
-          // this closes and not one a generator can produce.
-          value += text[i] + text[i + 1];
-          i++;
-        } else value += text[i];
-      }
+      // The whole quoted token, quotes included, so it can be DECODED. Compared
+      // raw, `"routes"` and `"\u0072outes"` are two different spellings — and
+      // they are one key to `JSON.parse`, so the second silently replaces the
+      // first and this would have seen no duplicate at all. Every escape is the
+      // same hole: `\/`, `\"`, `\\`.
+      const start = i;
+      for (i++; text[i] !== '"'; i++) if (text[i] === '\\') i++;
       const top = stack[stack.length - 1];
       if (expectKey && top?.keys) {
-        if (top.keys.has(value)) return value;
-        top.keys.add(value);
+        // Safe: this only ever runs on text `JSON.parse` has already accepted,
+        // so the token between these quotes is a valid JSON string.
+        const key = JSON.parse(text.slice(start, i + 1));
+        if (top.keys.has(key)) return key;
+        top.keys.add(key);
         expectKey = false;
       }
       continue;
@@ -254,8 +253,11 @@ function readManifest(platform) {
   // the only construct that can hide a brace or a colon is a string literal,
   // which is four lines to skip correctly. A bug in it refuses a manifest that
   // was fine; a bug in the TypeScript reader accepted a platform it had not read.
+  // `!== null`, not truthiness. A repeated EMPTY key returns `''`, and a
+  // truthiness test reads that as "no duplicate" — so `{"":0,"":1,...}` ahead of
+  // a conflicting table disabled the rest of this scan entirely.
   const duplicate = duplicateKey(text);
-  if (duplicate) throw bad(`names ${JSON.stringify(duplicate)} twice in one object`);
+  if (duplicate !== null) throw bad(`names ${JSON.stringify(duplicate)} twice in one object`);
   if (data === null || typeof data !== 'object' || Array.isArray(data)) {
     throw bad('is not a JSON object');
   }

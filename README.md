@@ -1963,6 +1963,14 @@ npm run build
 and skips the diff, loudly, when it is not there — failing over its absence would
 make the check something people learn to ignore.
 
+**The published package runs on Node 22.** The development tooling wants **22.18
+or newer**, which is `devEngines` rather than `engines` for exactly that reason:
+`check:surface` reads `test/allowlist.ts` with a plain `import`, and Node enables
+TypeScript type stripping by default only from 22.18. On an older runtime the
+check says so and exits 1 rather than comparing nothing — but it cannot run, so
+the floor is worth knowing before you hit it. Nothing in `src/` depends on this;
+it is the checker and its tests.
+
 Two scripts talk to the real platform instead of a mock, both opt-in and both
 skipped without a key:
 
