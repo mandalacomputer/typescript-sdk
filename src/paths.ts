@@ -1640,6 +1640,17 @@ export function deleteQuery(opts: { deleteSnapshots?: boolean; expect?: string }
 
 // --- agent ----------------------------------------------------------------
 
+/**
+ * The platform's ceiling on an agent run's step count, mirrored.
+ *
+ * Not the usual reason for a mirror: `max_steps` is one small integer in a
+ * body that is going anyway, so refusing it here saves no bytes. It is here
+ * because the Python SDK and the MCP server both refuse it before the call,
+ * and a caller who learns the rule from one client should find the others
+ * keep it (OPL-4862).
+ */
+export const MAX_AGENT_STEPS = LIMITS['agent.maxSteps'];
+
 export function agentBody(args: {
   prompt: string;
   maxSteps?: number;
@@ -1660,6 +1671,11 @@ export function agentBody(args: {
   if (args.model !== undefined) requireString(args.model, 'model');
   if (args.maxSteps !== undefined && (!Number.isInteger(args.maxSteps) || args.maxSteps < 1)) {
     throw new ValidationError(`maxSteps must be a positive integer (got ${args.maxSteps})`);
+  }
+  if (args.maxSteps !== undefined && args.maxSteps > MAX_AGENT_STEPS) {
+    throw new ValidationError(
+      `maxSteps is ${args.maxSteps}; the platform accepts at most ${MAX_AGENT_STEPS}`,
+    );
   }
   return omitUndefined({
     prompt: args.prompt,
