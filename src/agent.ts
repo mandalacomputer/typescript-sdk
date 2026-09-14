@@ -7,9 +7,11 @@
  * that stream.
  *
  * It runs on **your** Anthropic key, which the platform never stores: pass it
- * as `modelKey` and it travels on the one request as `X-Model-Key`. Every step
- * is a model call plus a screenshot billed to that key, which is why
- * `maxSteps` is a spending cap as much as a loop bound.
+ * as `modelKey` and it travels on the one request as `X-Model-Key`. A step is
+ * one ACTION on the desktop rather than one exchange with the model — several
+ * can come out of a single reply, a paused turn costs tokens and no step, and a
+ * `bash` call takes no screenshot — so `maxSteps` bounds the loop and bounds
+ * what that key is billed only loosely.
  */
 
 import { MandalaError } from './errors.js';
@@ -113,8 +115,17 @@ export type AgentArgs = {
   /** Standing instructions carried into the run. */
   system?: string;
   /**
-   * Step cap. Each step is a model call plus a screenshot on your key, so this
-   * bounds spending as much as it bounds the loop. Defaults to the platform's.
+   * Step cap — how many ACTIONS the loop may take on the desktop.
+   *
+   * Not a count of model calls, and not a proxy for what your key is billed:
+   * one reply may ask for several actions and spends a step on each, a paused
+   * turn is resubmitted for tokens and no step, and a `bash` call or a cursor
+   * read takes no screenshot. Bounds the work; budget the bill on your own key.
+   *
+   * Omitted sends nothing and takes the platform's default of 20; 100 is the
+   * ceiling. Unlike the other bounds this SDK mirrors, that ceiling is not one
+   * of them and is not checked before the call — a larger value costs a round
+   * trip and comes back refused.
    */
   maxSteps?: number;
   /** Override the model the platform would pick. */
