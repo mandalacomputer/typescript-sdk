@@ -1078,11 +1078,17 @@ if (!result.finished) console.warn(`did not finish: ${result.stop}`);
 console.log(result.text, result.usage);
 ```
 
-Ten clicks stop being ten images in *your* context. Each step is a model call
-plus a screenshot billed to your key, so `maxSteps` is a spending cap as much as
-a loop bound. `system` carries standing instructions into the run and `model`
-overrides the one the platform would pick. The computer must already be
-running.
+Ten clicks stop being ten images in *your* context. `maxSteps` bounds the loop,
+and bounds what your key is billed only loosely: a step is one **action on the
+desktop**, not one exchange with the model, and the two do not line up in either
+direction. One reply may ask for several actions and spends a step on each,
+while a reply that asks for none — or a paused turn, resubmitted — costs tokens
+and no step. Nor does every step take a screenshot; a `bash` call or a cursor
+read does not. Omit it for the platform's default of 20; 100 is the ceiling,
+enforced by the platform rather than here, so a larger value costs a round trip
+to be refused.
+`system` carries standing instructions into the run and `model` overrides the
+one the platform would pick. The computer must already be running.
 
 Stream it when the run is long enough that silence looks like a hang:
 
