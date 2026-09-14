@@ -389,3 +389,38 @@ const PATH_PARAMETERS: ReadonlySet<string> = new Set([
   ':namespace',
   ':name',
 ]);
+
+/**
+ * The platform's numeric limits this SDK refuses against, by manifest key.
+ *
+ * The third table, and the one that was missing entirely until OPL-4850. A
+ * number copied out of the platform is a route by another name: `src/paths.ts`
+ * turns away a clipboard write over 64 KiB, an env list over 64 entries and a
+ * webhook description over 200 characters BEFORE the request is made, to save
+ * the caller a round trip. A ceiling that has drifted turns that favour into a
+ * refusal of a call the platform would have taken — and nothing anywhere says
+ * why, because the request that would have proved it is the one never sent.
+ *
+ * Six of the manifest's eight. `agent.maxSteps` and `exec.maxTimeoutSeconds`
+ * are absent because this SDK does not refuse against them: it forwards what
+ * the caller asked for and lets the platform answer. A table of numbers we do
+ * not hold would compare nothing to nothing.
+ *
+ * WRITTEN OUT, rather than imported from `src/paths.ts`. This module is read by
+ * `scripts/check-surface.mjs` through a plain `import` under Node's type
+ * stripping, which resolves no `./errors.js` specifier — so a mirror that
+ * imported the source could not be read by the checker at all. What keeps these
+ * honest against the source is `test/limits.test.ts`, which imports both and
+ * asserts they are the same number. Two mechanical links, no parser in either:
+ * the manifest is compared to this table, and this table to the constants.
+ */
+export const LIMITS: ReadonlyMap<string, number> = new Map([
+  ['clipboard.writeMaxBytes', 64 * 1024],
+  ['exec.maxEnvEntries', 64],
+  ['exec.maxEnvEntryBytes', 4096],
+  ['webhook.descriptionMaxChars', 200],
+  ['webhook.computersMax', 64],
+  // The replay window a RECEIVER codes against, which is the one of these that
+  // is not a refusal this SDK makes on the way out.
+  ['webhook.replayWindowSeconds', 300],
+]);
