@@ -62,6 +62,8 @@ export const ALLOWED: ReadonlySet<string> = new Set(
       ['POST', 'computers/:id/exec'],
       ['GET', 'computers/:id/exec/:pid'],
       ['DELETE', 'computers/:id/exec/:pid'],
+      ['GET', 'computers/:id/executions/:executionId'],
+      ['GET', 'computers/:id/executions/:executionId/output'],
       ['GET', 'computers/:id/windows'],
       ['POST', 'computers/:id/windows/:window'],
       // The desktop's clipboard (platform OPL-3743, OPL-3768). Session-only for
@@ -131,6 +133,9 @@ export const UNIMPLEMENTED: ReadonlySet<string> = new Set([
   'POST chat/completions',
   // The SDK can read and write files, but has no directory-listing method yet.
   'GET computers/:id/files/list',
+  // Stable execution reads have no client convenience methods yet.
+  'GET computers/:id/executions/:executionId',
+  'GET computers/:id/executions/:executionId/output',
 ]);
 
 /**
@@ -235,6 +240,11 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
   ],
   ['GET computers/:id/exec/:pid', []],
   ['DELETE computers/:id/exec/:pid', []],
+  ['GET computers/:id/executions/:executionId', []],
+  [
+    'GET computers/:id/executions/:executionId/output',
+    ['query:stdout_offset', 'query:stderr_offset', 'query:limit'],
+  ],
   ['GET computers/:id/windows', ['query:include']],
   [
     'POST computers/:id/windows/:window',
