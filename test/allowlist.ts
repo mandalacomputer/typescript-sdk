@@ -76,6 +76,7 @@ export const ALLOWED: ReadonlySet<string> = new Set(
       // Files in and out of the guest.
       ['PUT', 'computers/:id/files'],
       ['GET', 'computers/:id/files'],
+      ['GET', 'computers/:id/files/list'],
 
       // Snapshots.
       ['GET', 'snapshots'],
@@ -128,11 +129,8 @@ export const UNIMPLEMENTED: ReadonlySet<string> = new Set([
   // here, and a second, worse OpenAI client inside this SDK would be a
   // maintenance obligation with no user.
   'POST chat/completions',
-  // The two template document routes were pinned here, behind a comment saying
-  // they "become worth a method with publish and launch-by-ref". Publish shipped
-  // in platform OPL-3789 and launch-by-ref in OPL-3788, so the line became
-  // somebody's to delete and this is it (OPL-3835). Nothing has replaced them:
-  // every route this SDK can reach, it calls.
+  // The SDK can read and write files, but has no directory-listing method yet.
+  'GET computers/:id/files/list',
 ]);
 
 /**
@@ -269,8 +267,9 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
   ],
 
   // The file body is the file, raw — there are no named fields to mirror.
-  ['PUT computers/:id/files', ['query:path']],
-  ['GET computers/:id/files', ['query:path', 'header:Range']],
+  ['PUT computers/:id/files', ['query:path', 'query:no_wake']],
+  ['GET computers/:id/files', ['query:path', 'query:no_wake', 'header:Range']],
+  ['GET computers/:id/files/list', ['query:path']],
 
   ['GET snapshots', ['query:allow_partial', 'query:include']],
   ['GET computers/:id/snapshots', []],
@@ -308,22 +307,24 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
 ]);
 
 /**
- * Parameters the platform documents that this SDK deliberately never sends.
+ * Parameters the SDK does not yet send or deliberately omits.
  *
- * Every one is an alternate spelling of something it does send. The input route
- * accepts Anthropic's computer-use vocabulary alongside this API's own, so a
+ * The input parameters are alternate spellings of something it does send. The
+ * input route accepts Anthropic's computer-use vocabulary alongside this API's own, so a
  * model's `tool_use.input` block can be forwarded without translation — which
  * leaves several fields with two names apiece. Picking one and sending it
  * consistently is the point; sending both would be two ways for the same call
  * to mean different things.
  *
- * Not a gap, in other words, and the reason this set is separate from the
- * routes' UNIMPLEMENTED: that one is work to do, this one is a decision.
+ * File transfers also have an option this SDK does not expose yet.
  * Parameters of a route in UNIMPLEMENTED are not listed here — a route nobody
  * calls sends none of its parameters, and repeating all six of chat/completions'
  * would say nothing the route's own line does not.
  */
 export const UNIMPLEMENTED_PARAMETERS: ReadonlySet<string> = new Set([
+  // File transfers cannot yet opt out of waking a suspended computer.
+  'GET computers/:id/files  query:no_wake',
+  'PUT computers/:id/files  query:no_wake',
   // `keys: ['ctrl', 'c']` is sent instead. The chord-as-one-string form cannot
   // express a key whose own name contains the separator.
   'POST computers/:id/input  body:key',
