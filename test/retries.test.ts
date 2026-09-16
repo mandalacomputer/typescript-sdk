@@ -520,3 +520,47 @@ it('cancels a response that arrives after its fetch was abandoned', async () => 
   expect(cancelled).toHaveBeenCalledTimes(1);
   expect(fetch).toHaveBeenCalledTimes(1);
 });
+
+it('does not retry early when a digit-only Retry-After overflows Number', async () => {
+  const controller = new AbortController();
+  const fetch = vi
+    .fn<typeof globalThis.fetch>()
+    .mockImplementation(
+      async () => new Response(null, { status: 503, headers: { 'Retry-After': '9'.repeat(309) } }),
+    );
+  const failure = transport(fetch, { idempotent: 2 }, { timeoutMs: 0 })
+    .json('GET', '/computers', { signal: controller.signal })
+    .catch((error) => error);
+  await vi.advanceTimersByTimeAsync(1000);
+  const reason = new Error('stop enormous wait');
+  controller.abort(reason);
+  expect(await failure).toBe(reason);
+  expect(fetch).toHaveBeenCalledTimes(1);
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+it.each(['json', 'sse'] as const)(
+  'treats a malformed compressed %s body as terminal',
+  async (kind) => {
+    const fetch = vi.fn<typeof globalThis.fetch>().mockImplementation(async () => {
+      const encoded = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('not a gzip body'));
+          controller.close();
+        },
+      });
+      return new Response(encoded.pipeThrough(new DecompressionStream('gzip')), {
+        headers: {
+          'content-type': kind === 'sse' ? 'text/event-stream' : 'application/json',
+          'content-encoding': 'gzip',
+        },
+      });
+    });
+    const t = transport(fetch);
+    await expect(
+      kind === 'sse' ? t.sse('GET', '/builds/b/events').next() : t.json('GET', '/computers'),
+    ).rejects.toThrow();
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  },
+);

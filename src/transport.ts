@@ -455,7 +455,9 @@ const retryAfterMs = (header: string | null, cap = true): number | undefined => 
   const value = header.trim();
   const seconds = /^\d+$/.test(value) ? Number(value) : Number.NaN;
   const delay =
-    Number.isFinite(seconds) && seconds >= 0
+    // Keep digit-only overflow for the guarded, chunked retry wait. Public
+    // error metadata keeps its existing finite-value behavior.
+    (Number.isFinite(seconds) && seconds >= 0) || (!cap && seconds === Number.POSITIVE_INFINITY)
       ? seconds * 1_000
       : (() => {
           // HTTP dates have three supported formats. Date.parse alone also

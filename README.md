@@ -714,9 +714,10 @@ means EOF at this instant, not final completion. Decode text with a streaming
 bytes repeat in full on every read, may be truncated (`diagnosticTruncated`), and
 never advance either stream offset.
 
-These methods perform one request: no automatic execution, resume, wait, retry,
-output capture, or fallback. Output reads perform guest I/O and are unsuitable
-for passive history views. The files are mutable guest content, not retained
+These methods perform one request by default; opt-in safe GET retries reuse the
+same offsets. There is no automatic execution, resume, wait, output capture, or
+fallback. Output reads perform guest I/O and are unsuitable for passive history
+views. The files are mutable guest content, not retained
 artifacts. Handles disappear on platform/computer state loss, replacement or
 cleanup; observed exits expire after ten minutes. Unavailable reads throw the
 normal API error instead of returning an empty successful result.
@@ -785,9 +786,11 @@ const bytes = await c.downloadArtifact(info.artifactId, {
 await c.deleteArtifact(info.artifactId, { signal });
 ```
 
-`downloadArtifact` performs one metadata GET and, if its size is within the
-independent download cap, one whole-content GET. It returns a `Uint8Array` only
-after exact length and SHA-256 verification against that invocation's metadata.
+`downloadArtifact` reads metadata and, if its size is within the independent
+download cap, downloads the whole content. Each GET is one attempt by default;
+opt-in transport retries may repeat an interrupted GET from the beginning.
+It returns a `Uint8Array` only after exact length and SHA-256 verification
+against that invocation's metadata.
 The default download cap is 8 MiB; the maximum is 64 MiB. Publication's `maxBytes`
 is a separate capture cap with the same default and maximum. Empty artifacts
 still require the correct empty digest. Web Crypto SHA-256 support is required
@@ -1925,6 +1928,43 @@ for (const c of gone) console.log(c.id, c.deletedAt);
 The filter is the control plane's, not a host's: it is read where the record is,
 and never forwarded. A word outside the five is refused here rather than at the
 platform's 400.
+
+### Optional retries for reads
+
+Retries are off by default. Opt in when constructing the client:
+
+```ts
+const client = new Client({ retries: { idempotent: 2 } }); // up to two additional attempts per read
+```
+
+`idempotent` must be a nonnegative finite integer; zero keeps a single attempt.
+The client copies this setting at construction. Only GET and HEAD can retry,
+on connection failures or HTTP 502, 503 and 504. Legacy `execPoll` reads are
+excluded because reading them advances a shared output cursor. HTTP 429 is
+never retried, including when its error body is interrupted;
+`RateLimitError.retryAfterMs` still carries a usable server delay. Other
+statuses and local validation, decoding, size or integrity failures do not
+permit retries.
+
+Backoff starts at 250 ms, doubles after each failure, and caps at 30 seconds.
+A valid `Retry-After` is a lower bound on that delay, including HTTP dates and
+zero. Very large valid delays never fall back to a shorter wait. Finite requests
+retain one composed deadline across every attempt and backoff; retries do not
+restart it. The caller's `signal` remains active throughout. Cancellation and
+timeout failures end the operation without another attempt.
+
+Finite JSON, listings, files and retained downloads buffer each complete attempt
+before returning anything. An interrupted read discards its partial bytes and
+cancels its response before retrying from the beginning; retained size and hash
+checks still apply. An SSE GET can retry only before its first application event
+is exposed. After that event, failures end the stream without replay. Desktop
+websocket reconnection behavior is unchanged.
+
+POST, PUT, PATCH and DELETE are never retried, even on a connection failure.
+A lost answer does not prove a mutation did not happen: another create or exec
+can duplicate work. Creates, template preparation, retained publication and POST
+agent streams therefore remain single attempts. Check an uncertain mutation's
+outcome explicitly before deciding what to do next.
 
 ### Errors
 
