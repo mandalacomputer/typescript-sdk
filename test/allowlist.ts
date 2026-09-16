@@ -66,6 +66,7 @@ export const ALLOWED: ReadonlySet<string> = new Set(
       ['GET', 'computers/:id/executions/:executionId/output'],
       ['GET', 'computers/:id/activities'],
       ['GET', 'computers/:id/activities/:activity'],
+      ['GET', 'computers/:id/signals'],
       ['GET', 'computers/:id/windows'],
       ['POST', 'computers/:id/windows/:window'],
       // The desktop's clipboard (platform OPL-3743, OPL-3768). Session-only for
@@ -141,6 +142,8 @@ export const UNIMPLEMENTED: ReadonlySet<string> = new Set([
   // Retained API history has no SDK convenience methods yet.
   'GET computers/:id/activities',
   'GET computers/:id/activities/:activity',
+  // Passive platform signals have no client convenience method yet.
+  'GET computers/:id/signals',
 ]);
 
 /**
@@ -248,6 +251,7 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
   ['GET computers/:id/executions/:executionId', []],
   ['GET computers/:id/activities', ['query:cursor', 'query:changes']],
   ['GET computers/:id/activities/:activity', []],
+  ['GET computers/:id/signals', ['query:since', 'query:limit']],
   [
     'GET computers/:id/executions/:executionId/output',
     ['query:stdout_offset', 'query:stderr_offset', 'query:limit'],
