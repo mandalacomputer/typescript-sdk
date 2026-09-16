@@ -784,7 +784,7 @@ export type EventSocketFactory = (url: string) => EventSocket;
  * A dependency-free package is the whole reason this is not `ws`: a websocket
  * library would be this SDK's only runtime dependency, carried by every user of
  * it for the sake of one method. Node 22 is where the global landed, which is
- * what `engines` already says — and `mandala ssh` has required the same global
+ * what `engines` already says — and `mandala terminal` has required the same global
  * since it shipped.
  */
 export const globalEventSocket: EventSocketFactory = (url) => {

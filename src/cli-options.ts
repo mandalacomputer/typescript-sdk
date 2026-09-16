@@ -267,7 +267,7 @@ export const COMMANDS: readonly Command[] = [
     'ndjson',
   ),
   command(
-    'ssh',
+    'terminal',
     'Interactive shell; --json fails before connecting',
     ['computer'],
     [flag('session', 'Terminal session name (default main)', { alias: 's' })],
@@ -280,6 +280,13 @@ export const COMMANDS: readonly Command[] = [
     argumentChoices: { shell: ['bash', 'zsh', 'fish'] },
   },
 ];
+
+/**
+ * `mandala ssh` is refused while it is rebuilt as a real OpenSSH session; the
+ * websocket shell it used to open is `mandala terminal`. Printed verbatim.
+ */
+export const SSH_REFUSAL =
+  'mandala ssh is being rebuilt as a real OpenSSH session; use "mandala terminal" for a shell.';
 
 export class CliError extends Error {
   constructor(
@@ -360,6 +367,7 @@ export function parseArgs(argv: string[]): Parsed {
       continue;
     }
     if (!parsed.command) {
+      if (!parsed.path && arg === 'ssh') throw new CliError('invalid_arguments', SSH_REFUSAL);
       parsed.path = [parsed.path, arg].filter(Boolean).join(' ');
       parsed.command = COMMANDS.find((c) => c.path === parsed.path);
       if (!parsed.command && !COMMANDS.some((c) => c.path.startsWith(`${parsed.path} `)))
@@ -376,8 +384,8 @@ export function parseArgs(argv: string[]): Parsed {
   if (parsed.args.length !== c.args.length || parsed.args.some((a) => !a.trim()))
     throw new CliError(
       'invalid_arguments',
-      c.path === 'ssh' && parsed.args.length > 1
-        ? 'mandala ssh takes one computer and runs no command'
+      c.path === 'terminal' && parsed.args.length > 1
+        ? 'mandala terminal takes one computer and runs no command'
         : usage(c),
     );
   c.args.forEach((name, i) => {

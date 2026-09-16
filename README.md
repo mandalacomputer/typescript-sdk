@@ -2384,7 +2384,7 @@ credentials nor network access and never prompt for input.
 | `snapshots` | `list`, `create`, `restore`, `clone`, `delete`, `holdings`, `schedule get`, `schedule set`, `schedule clear`, `retention` |
 | `webhooks` | `list`, `create`, `get`, `update`, `delete`, `rotate`, `test`, `deliveries` |
 | `agent` | `run` |
-| Top-level commands | `login`, `account`, `usage`, `ssh`, `scp`, `manifest`, `completion` |
+| Top-level commands | `login`, `account`, `usage`, `terminal`, `scp`, `manifest`, `completion` |
 
 Command-specific flags follow the command name. Flags with values accept
 `--name value` or `--name=value`; boolean flags take no value. Repeat only flags
@@ -2397,8 +2397,8 @@ unknown flags, and conflicting arguments fail instead of being ignored.
 `arguments`, `flags` with types and constraints, and `jsonMode` (`finite`,
 `ndjson`, or `unsupported`). Flags with aliases, choices, repetition, or conflicts
 carry those properties. Conditional SDK requirements also appear in command help
-and the sections below. The manifest reports `ssh` as unsupported in JSON mode:
-`ssh --json` returns an error before resolving a computer or connecting.
+and the sections below. The manifest reports `terminal` as unsupported in JSON mode:
+`terminal --json` returns an error before resolving a computer or connecting.
 `mandala manifest --json` wraps the tree in the finite result envelope below.
 
 Shell completion scripts come from the same command inventory:
@@ -2585,7 +2585,7 @@ For noninteractive commands, Ctrl-C (`SIGINT`) or `SIGTERM` aborts pending SDK
 work and exits 130, restoring the CLI's signal listeners. Cancellation stops
 waiting and asks an active agent request to abort. It does not roll back actions,
 delete a created computer, or prove that an accepted remote mutation stopped.
-An interactive `ssh` session passes Ctrl-C to the guest terminal instead.
+An interactive `terminal` session passes Ctrl-C to the guest terminal instead.
 
 ### JSON results and exit status
 
@@ -2600,7 +2600,7 @@ has this version 1 envelope:
 A request or CLI error uses `error` instead of `data`:
 
 ```json
-{"schemaVersion":1,"command":"ssh","ok":false,"error":{"code":"unsupported_mode","message":"Interactive ssh does not support --json; use computers exec for machine-readable output"},"exitCode":1}
+{"schemaVersion":1,"command":"terminal","ok":false,"error":{"code":"unsupported_mode","message":"Interactive terminal does not support --json; use computers exec for machine-readable output"},"exitCode":1}
 ```
 
 `command` is the space-separated command path, without operands. It is empty
@@ -2640,7 +2640,7 @@ and check its exit status; progress alone is not success. Argument parsing error
 use the finite error envelope even for a requested streaming command. After
 successful parsing, streaming-command failures use an `error` frame.
 
-`ssh --json` is deliberately unsupported and fails before connecting, keeping
+`terminal --json` is deliberately unsupported and fails before connecting, keeping
 terminal traffic out of machine output. `scp --json` emits a finite copy result
 with `source`, `destination`, `bytes`, and `confirmed`. For downloads, `bytes`
 is the number written locally and `confirmed` is true. For uploads it is the
@@ -2660,13 +2660,13 @@ presentation and whether stdin can be read without prompting.
 ### Interactive terminals and file copies
 
 ```sh
-npx --package=mandala-computer mandala ssh my-computer          # an interactive shell
-npx --package=mandala-computer mandala ssh my-computer -s build # a named session
+npx --package=mandala-computer mandala terminal my-computer          # an interactive shell
+npx --package=mandala-computer mandala terminal my-computer -s build # a named session
 npx --package=mandala-computer mandala scp ./setup.sh my-computer:/tmp/setup.sh
 npx --package=mandala-computer mandala scp my-computer:/var/log/app.log ./app.log
 ```
 
-`ssh` rides the platform's terminal websocket — a PTY kept alive server-side.
+`terminal` rides the platform's terminal websocket — a PTY kept alive server-side.
 Disconnecting **detaches** rather than ending it; running the same command
 reattaches and replays recent output.
 
@@ -2680,7 +2680,7 @@ The guest's PTY is sized from the first of stdin, stdout and stderr that is a
 terminal — stdin first, since that is the one raw mode is set from — and the
 size travels on the upgrade URL, so the login prompt and any replayed scrollback
 are drawn at the real width rather than at the broker's 80x24 default. Resizing
-the window re-sends it. That holds for `mandala ssh my-computer | tee out.log`
+the window re-sends it. That holds for `mandala terminal my-computer | tee out.log`
 too: a piped stdout is still a session in a window somebody is watching.
 
 `scp` rides the files API, so it needs no shell in the guest at all. The side

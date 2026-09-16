@@ -1736,14 +1736,33 @@ describe('agent streams and cancellation', () => {
 });
 
 describe('legacy JSON modes', () => {
-  it('rejects ssh --json before even creating a client', async () => {
+  it('rejects terminal --json before even creating a client', async () => {
+    const h = harness();
+    h.io.createClient = () => {
+      throw new Error('must not connect');
+    };
+    const result = await h.run(['terminal', 'desktop']);
+    expect(result.frames[0]).toMatchObject({ ok: false, error: { code: 'unsupported_mode' } });
+    expect(h.rec.calls).toEqual([]);
+  });
+
+  it('refuses ssh --json with an error envelope before creating a client', async () => {
     const h = harness();
     h.io.createClient = () => {
       throw new Error('must not connect');
     };
     const result = await h.run(['ssh', 'desktop']);
-    expect(result.frames[0]).toMatchObject({ ok: false, error: { code: 'unsupported_mode' } });
-    expect(h.rec.calls).toEqual([]);
+    expect(result.code).toBe(1);
+    expect(result.frames).toEqual([
+      expect.objectContaining({
+        ok: false,
+        error: {
+          code: 'invalid_arguments',
+          message:
+            'mandala ssh is being rebuilt as a real OpenSSH session; use "mandala terminal" for a shell.',
+        },
+      }),
+    ]);
   });
 
   it('copies a binary download and reports one finite result', async () => {
@@ -1930,7 +1949,7 @@ describe('malformed arguments are offline failures', () => {
   });
 });
 
-// These checks use the real runtime factory, including the actual legacy SSH/SCP dispatch.
+// These checks use the real runtime factory, including the actual legacy terminal/SCP dispatch.
 describe('credential-free discovery and profile dispatch', () => {
   it('O01-offline: discovery ignores an unavailable home and malformed unused profile', async () => {
     const lookup = vi.spyOn(os, 'homedir').mockImplementation(() => {
@@ -1972,7 +1991,7 @@ describe('credential-free discovery and profile dispatch', () => {
         ['computers', 'list'],
         ['account'],
         ['usage'],
-        ['ssh', 'demo'],
+        ['terminal', 'demo'],
         ['scp', 'demo:/tmp/file', join(home, 'out')],
       ]) {
         let text = '';
