@@ -200,6 +200,7 @@ async function exerciseEverything(client: Client): Promise<void> {
   await client.computers.get('vm-1');
 
   const c = await client.computers.create({ template: 'base' });
+  await client.computers.launch({ template: 'base' });
   // A size names a template and a shape together, so the two spellings of a
   // create cannot be one call — see createBody.
   await client.computers.create({
