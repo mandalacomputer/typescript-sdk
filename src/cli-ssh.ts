@@ -33,7 +33,7 @@ import type { Output } from './cli-output.js';
 import type { CliIO } from './cli-runtime.js';
 import type { Computer } from './computer.js';
 import { ConflictError } from './errors.js';
-import type { Client, SshAccess, SshKey } from './index.js';
+import type { Client, Listing, SshAccess, SshKey } from './index.js';
 
 /** The public gateway. `MANDALA_SSH_GATEWAY` overrides it (`host:port`). */
 export const GATEWAY_HOST = 'ssh.mandala.computer';
@@ -584,7 +584,10 @@ export async function sshConnect(
   rt: SshRuntime,
   target: string,
   extra: readonly string[],
+  /** Cancels the lookups; `beforeRun` is called once they are done, just before ssh starts. */
+  lookup: { signal?: AbortSignal; beforeRun?: () => void } = {},
 ): Promise<number> {
+  const { signal } = lookup;
   const ssh = rt.which(io.env);
   if (!ssh)
     throw new CliError(
@@ -596,9 +599,9 @@ export async function sshConnect(
   const home = rt.home();
   const gw = gateway(io.env, home);
   const quoted = shellWord(target);
-  const computer = await resolveComputer(client, target);
+  const computer = await resolveComputer(client, target, signal);
   const label = computer.name || computer.id;
-  const access = await computer.sshAccess();
+  const access = await computer.sshAccess({ signal });
   if (access.available === false)
     throw new CliError('ssh_unavailable', `${predates(label)}, ${terminalHint(target)}`);
   if (!access.enabled)
@@ -606,13 +609,15 @@ export async function sshConnect(
       'ssh_disabled',
       `SSH is off for ${label}; run "mandala ssh --setup ${quoted}" to turn it on, ${terminalHint(target)}`,
     );
-  if (!(await client.sshKeys.list()).length)
+  if (!(await client.sshKeys.list({ signal })).length)
     throw new CliError(
       'ssh_no_keys',
       `you have no SSH keys registered; run "mandala ssh --setup ${quoted}" to add one, ${terminalHint(target)}`,
     );
   const knownHosts = knownHostsPath(home);
   ensureKnownHosts(gw, knownHosts);
+  signal?.throwIfAborted();
+  lookup.beforeRun?.();
   return rt.run(
     sshArgv({ ssh, computerId: computer.id, gateway: gw, knownHosts, extra, windows: rt.windows }),
   );
@@ -627,12 +632,14 @@ async function ensureKey(
   client: Client,
   line: string,
   print: string,
+  signal?: AbortSignal,
 ): Promise<{ key: SshKey; added: boolean }> {
-  const mine = async () => (await client.sshKeys.list()).find((k) => k.fingerprint === print);
+  const mine = async () =>
+    (await client.sshKeys.list({ signal })).find((k) => k.fingerprint === print);
   const existing = await mine();
   if (existing) return { key: existing, added: false };
   try {
-    return { key: await client.sshKeys.add({ publicKey: line }), added: true };
+    return { key: await client.sshKeys.add({ publicKey: line }, { signal }), added: true };
   } catch (error) {
     if (!(error instanceof ConflictError)) throw error;
     const raced = await mine();
@@ -649,16 +656,20 @@ export async function sshSetup(
   rt: SshRuntime,
   target: string,
   key: string | undefined,
+  signal?: AbortSignal,
 ): Promise<number> {
   const home = rt.home();
   const file = keyPath(home, key);
   const line = readPublicKey(file);
   const print = fingerprint(line);
   const gw = gateway(io.env, home);
-  const computer = await resolveComputer(client, target);
-  const { key: registered, added } = await ensureKey(client, line, print);
-  const access = await computer.setSshAccess(true);
+  const computer = await resolveComputer(client, target, signal);
   const label = computer.name || computer.id;
+  // A computer known not to run SSH gets neither a key upload nor a switch.
+  if ((await computer.sshAccess({ signal })).available === false)
+    throw new CliError('ssh_unavailable', predates(label));
+  const { key: registered, added } = await ensureKey(client, line, print, signal);
+  const access = await computer.setSshAccess(true, { signal });
   // Nothing that reads as success is printed when SSH cannot work here.
   if (access.available === false) throw new CliError('ssh_unavailable', predates(label));
   if (access.error)
@@ -776,7 +787,8 @@ export async function sshAccessCommand(
 /** `mandala ssh-config <computer> [--write]`. */
 export async function sshConfigCommand(
   computer: Computer,
-  listed: readonly Computer[],
+  /** The listing the lookup read; absent when it resolved the computer another way. */
+  listing: Listing<Computer> | undefined,
   io: CliIO,
   output: Output,
   rt: SshRuntime,
@@ -787,14 +799,18 @@ export async function sshConfigCommand(
   let host = hostAlias(computer.name, computer.id);
   // A name two computers share would send `ssh <name>` to whichever block
   // came first, so the id stands in for it.
-  if (
-    host !== computer.id &&
-    listed.some((c) => c.name === computer.name && c.id !== computer.id)
-  ) {
-    host = computer.id;
-    output.diagnostic(
-      `mandala: another computer is also named ${computer.name}; using Host ${computer.id} instead`,
-    );
+  // Without a complete listing a shared name cannot be ruled out.
+  if (host !== computer.id) {
+    const reason =
+      !listing || listing.incomplete !== null
+        ? "could not check other computers' names"
+        : listing.items.some((c) => c.name === computer.name && c.id !== computer.id)
+          ? `another computer is also named ${computer.name}`
+          : undefined;
+    if (reason) {
+      host = computer.id;
+      output.diagnostic(`mandala: ${reason}; using Host ${computer.id} instead`);
+    }
   }
   const knownHosts = knownHostsPath(home);
   ensureKnownHosts(gw, knownHosts);

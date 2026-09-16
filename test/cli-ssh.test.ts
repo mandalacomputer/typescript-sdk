@@ -622,6 +622,45 @@ describe('mandala ssh', () => {
     expect(human.clients).toBe(0);
   });
 
+  it('a Ctrl-C during the lookups cancels, and ssh never starts', async () => {
+    const before = process.listenerCount('SIGINT');
+    const r = await cli(['ssh', 'demo'], {
+      respond: (call) => {
+        if (call.path !== '/computers/vm-1/ssh') return anyRoute(call);
+        process.emit('SIGINT');
+        return new Promise<Response>(() => {});
+      },
+    });
+    expect(r.code).toBe(130);
+    expect(r.err).toBe('mandala: Cancelled\n');
+    expect(r.ran).toEqual([]);
+    expect(process.listenerCount('SIGINT')).toBe(before);
+  });
+
+  it('removes its own signal handlers before ssh runs', async () => {
+    const before = process.listenerCount('SIGINT');
+    let during = -1;
+    const home = await tempDir();
+    const rec = recorder(anyRoute);
+    const code = await main(['ssh', 'vm-1'], {
+      env: {},
+      stdout: { write: (() => true) as NodeJS.WritableStream['write'] },
+      stderr: { write: (() => true) as NodeJS.WritableStream['write'] },
+      createClient: () => new Client({ apiKey: 'k', baseUrl: BASE, fetch: rec.fetch }),
+      ssh: {
+        home: () => home,
+        windows: false,
+        which: () => '/usr/bin/ssh',
+        run: async () => {
+          during = process.listenerCount('SIGINT');
+          return 0;
+        },
+      },
+    });
+    expect(code).toBe(0);
+    expect(during).toBe(before);
+  });
+
   it('passes a --json after the computer on to ssh', async () => {
     const r = await cli(['ssh', 'vm-1', '--json']);
     expect(r.ran[0]!.slice(-2)).toEqual(['vm-1', '--json']);
@@ -646,12 +685,13 @@ describe('mandala ssh --setup', () => {
     expect(r.rec.routes()).toEqual([
       ['GET', 'computers'],
       ['GET', 'computers/demo'],
+      ['GET', 'computers/vm-1/ssh'],
       ['GET', 'ssh-keys'],
       ['POST', 'ssh-keys'],
       ['PUT', 'computers/vm-1/ssh'],
     ]);
-    expect(r.rec.calls[3]!.body).toEqual({ public_key: PUBLIC });
-    expect(r.rec.calls[4]!.body).toEqual({ enabled: true });
+    expect(r.rec.calls[4]!.body).toEqual({ public_key: PUBLIC });
+    expect(r.rec.calls[5]!.body).toEqual({ enabled: true });
     expect(r.out).toBe(
       'key SHA256:09QlEDFrF+XXV/2u4X/pBAufS+8iaKwRzW6+EvIPVkg (laptop) registered\nSSH is on for demo\nconnect with: mandala ssh demo\n',
     );
@@ -727,6 +767,28 @@ describe('mandala ssh --setup', () => {
       'mandala: That key is already registered. A key can belong to one person only.\n',
     );
     expect(writes(r)).toEqual([['POST', 'ssh-keys']]);
+  });
+
+  it('refuses a computer already known not to run SSH before uploading or switching anything', async () => {
+    const home = await homeWithKey();
+    for (const extra of [[], ['--json']]) {
+      const r = await cli(['ssh', '--setup', 'demo', ...extra], {
+        home,
+        respond: withSsh({ ...SSH_ACCESS, available: false, enabled: false }, []),
+      });
+      expect(r.code).toBe(1);
+      expect(writes(r)).toEqual([]);
+      expect(r.rec.routes().at(-1)).toEqual(['GET', 'computers/vm-1/ssh']);
+      const message =
+        'demo was made from a template that predates SSH; create a new computer to use SSH';
+      if (extra.length)
+        expect(JSON.parse(r.out).error).toEqual({ code: 'ssh_unavailable', message });
+      else {
+        expect(r.out).toBe('');
+        expect(r.err).toBe(`mandala: ${message}\n`);
+      }
+      expect(fs.existsSync(knownHostsPath(home))).toBe(false);
+    }
   });
 
   it('fails without a key, before any request', async () => {
@@ -907,6 +969,24 @@ describe('mandala ssh-key, ssh-access, ssh-config', () => {
     });
     expect(JSON.parse(written.out).data.host).toBe('vm-1');
     expect(fs.readFileSync(join(written.home, '.ssh', 'config'), 'utf8')).toContain('Host vm-1\n');
+  });
+});
+
+describe('ssh-config without a complete listing', () => {
+  it.each([
+    ['the listing failed', () => json({ error: 'boom' }, { status: 400 })],
+    ['the listing is partial', () => json([COMPUTER], { headers: { 'X-GC-Incomplete': '1' } })],
+  ])('uses the id when %s', async (_, listing) => {
+    const r = await cli(['ssh-config', 'vm-1', '--write'], {
+      respond: (call) => (call.path === '/computers' ? listing() : anyRoute(call)),
+    });
+    expect(r.code).toBe(0);
+    expect(r.err).toBe(
+      "mandala: could not check other computers' names; using Host vm-1 instead\n",
+    );
+    const file = join(r.home, '.ssh', 'config');
+    expect(r.out).toBe(`wrote Host vm-1 in ${file}\nconnect with: ssh vm-1\n`);
+    expect(fs.readFileSync(file, 'utf8')).toContain('\nHost vm-1\n  HostName vm-1\n');
   });
 });
 

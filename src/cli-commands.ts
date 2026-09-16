@@ -329,8 +329,16 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
           undefined,
           2,
         );
-      // Not cancellable from here on: once ssh runs, Ctrl-C is ssh's.
-      return await sshConnect(io.createClient(), io, ssh, args[0]!, parsed.rest);
+      // The lookups are cancellable; once ssh runs, Ctrl-C is ssh's.
+      process.on('SIGINT', cancel);
+      process.on('SIGTERM', cancel);
+      return await sshConnect(io.createClient(), io, ssh, args[0]!, parsed.rest, {
+        signal,
+        beforeRun: () => {
+          process.off('SIGINT', cancel);
+          process.off('SIGTERM', cancel);
+        },
+      });
     }
     process.on('SIGINT', cancel);
     process.on('SIGTERM', cancel);
@@ -643,7 +651,7 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
       case 'webhooks deliveries':
         return output.result((await client.webhooks.deliveries(target, call)).map(raw));
       case 'ssh':
-        return await sshSetup(client, io, output, ssh, target, s('key'));
+        return await sshSetup(client, io, output, ssh, target, s('key'), signal);
       case 'ssh-key list':
         return await sshKeyList(client, io, output);
       case 'ssh-key add':
@@ -656,8 +664,7 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
         // The listing the lookup read is also what tells a shared name apart.
         const seen: { listing?: Listing<Computer> } = {};
         const c = await resolveComputer(client, target, signal, seen);
-        const listed = seen.listing?.items ?? [];
-        return await sshConfigCommand(c, listed, io, output, ssh, b('write') ?? false);
+        return await sshConfigCommand(c, seen.listing, io, output, ssh, b('write') ?? false);
       }
       case 'agent run': {
         const c = await resolveComputer(client, s('computer')!, signal);
