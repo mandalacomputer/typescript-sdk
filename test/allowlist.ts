@@ -37,6 +37,7 @@ export const ALLOWED: ReadonlySet<string> = new Set(
       ['GET', 'builds/:id/progress'],
       ['GET', 'builds/:id/events'],
       ['GET', 'sizes'],
+      ['GET', 'account'],
 
       ['GET', 'computers'],
       ['POST', 'computers'],
@@ -138,6 +139,8 @@ export const ALLOWED: ReadonlySet<string> = new Set(
  * design is that it is enumerable.
  */
 export const UNIMPLEMENTED: ReadonlySet<string> = new Set([
+  // Account quota has no SDK convenience resource yet; the typed Account follow-up adds it.
+  'GET account',
   // The OpenAI-shaped door onto the agent loop. Deliberately not wrapped: a
   // caller who wants it already has an OpenAI client and points its baseURL
   // here, and a second, worse OpenAI client inside this SDK would be a
@@ -196,6 +199,7 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
   ['GET builds/:id/progress', []],
   ['GET builds/:id/events', []],
   ['GET sizes', []],
+  ['GET account', []],
 
   ['GET computers', ['query:allow_partial', 'query:state']],
   [
