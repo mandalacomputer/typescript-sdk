@@ -113,6 +113,21 @@ export class ConnectionInterruptedError extends ConnectionError {
   override name = 'ConnectionInterruptedError';
 }
 
+/** Optional diagnostics from the response headers. */
+export type ErrorMetadata = {
+  requestId?: string;
+  allow?: string;
+  wwwAuthenticate?: string;
+};
+
+const nonblank = (value: unknown): string | undefined =>
+  typeof value === 'string' && value.trim() ? value : undefined;
+
+const errorRecord = (value: unknown): Record<string, unknown> | undefined =>
+  value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+
 /** The API returned an unsuccessful response. */
 export class APIError extends MandalaError {
   override name = 'APIError';
@@ -136,15 +151,24 @@ export class APIError extends MandalaError {
    * the running check hears the same fact the caller a moment earlier heard.
    */
   readonly reason?: string;
+  /** Correlation for this response, when supplied; not an idempotency key. */
+  readonly requestId?: string;
+  /** The received Allow and WWW-Authenticate headers, when supplied. */
+  readonly allow?: string;
+  readonly wwwAuthenticate?: string;
   constructor(
     message: string,
     readonly status: number,
     readonly body?: unknown,
     retryAfterMs?: number,
+    metadata: ErrorMetadata = {},
   ) {
     super(message);
     this.reason = refusalReason(body);
     this.retryAfterMs = retryAfterMs;
+    this.requestId = nonblank(metadata.requestId) ?? nonblank(errorRecord(body)?.request_id);
+    this.allow = metadata.allow;
+    this.wwwAuthenticate = metadata.wwwAuthenticate;
   }
 }
 
@@ -187,12 +211,14 @@ const REASON_PERMANENT: ReadonlySet<string> = new Set(['unavailable', 'unsupport
  * contract, and the raw word belongs to whoever is embedding this.
  */
 function refusalReason(body: unknown): string | undefined {
-  if (!body || typeof body !== 'object') return undefined;
-  const reason = (body as { reason?: unknown }).reason;
-  return typeof reason === 'string' ? reason : undefined;
+  const record = errorRecord(body);
+  const reason = record?.reason;
+  if (typeof reason === 'string') return reason;
+  const nested = errorRecord(record?.error)?.reason;
+  return typeof nested === 'string' ? nested : undefined;
 }
 
-/** 401 — the API key is missing, malformed, or revoked. */
+/** 401 — a credential was refused; reason/challenge may identify the classification. */
 export class AuthenticationError extends APIError {
   override name = 'AuthenticationError';
 }
@@ -215,13 +241,18 @@ export class PermissionDeniedError extends APIError {
 }
 
 /**
- * 404 — no such computer, snapshot, or route.
+ * 404 — no such computer, snapshot, guest file, or route.
  *
  * Tenant scoping is enforced server-side, so another account's resource is
  * reported as missing rather than forbidden — existence is not leaked.
  */
 export class NotFoundError extends APIError {
   override name = 'NotFoundError';
+}
+
+/** 405 — the path does not accept this method. See the received Allow header. */
+export class MethodNotAllowedError extends APIError {
+  override name = 'MethodNotAllowedError';
 }
 
 /**
@@ -308,8 +339,9 @@ export class MoveRequiredError extends ConflictError {
     /** Whether a host in this region could run the size that was asked for. */
     readonly movePossible: boolean,
     retryAfterMs?: number,
+    metadata: ErrorMetadata = {},
   ) {
-    super(message, status, body, retryAfterMs);
+    super(message, status, body, retryAfterMs, metadata);
   }
 }
 
@@ -370,8 +402,9 @@ export class RangeNotSatisfiableError extends APIError {
     body?: unknown,
     readonly total?: number,
     retryAfterMs?: number,
+    metadata: ErrorMetadata = {},
   ) {
-    super(message, status, body, retryAfterMs);
+    super(message, status, body, retryAfterMs, metadata);
   }
 }
 
@@ -528,13 +561,16 @@ export class TimeoutError extends MandalaError {
  * to check the literal against, and `satisfies` checks the literal where it is
  * written so a wrong entry is named at the entry rather than at the call.
  */
-const BY_STATUS: Record<number, typeof APIError> = Object.assign(
-  Object.create(null) as Record<number, typeof APIError>,
+type StatusError = typeof APIError | typeof RangeNotSatisfiableError;
+
+const BY_STATUS: Record<number, StatusError> = Object.assign(
+  Object.create(null) as Record<number, StatusError>,
   {
     401: AuthenticationError,
     402: PlanLimitError,
     403: PermissionDeniedError,
     404: NotFoundError,
+    405: MethodNotAllowedError,
     409: ConflictError,
     413: TooLargeError,
     416: RangeNotSatisfiableError,
@@ -551,7 +587,7 @@ const BY_STATUS: Record<number, typeof APIError> = Object.assign(
     // a passing outage and these are a deployment somebody has to fix.
     525: OriginTLSError,
     526: OriginTLSError,
-  } satisfies Record<number, typeof APIError>,
+  } satisfies Record<number, StatusError>,
 );
 
 /**
@@ -648,7 +684,9 @@ const ORIGIN_TLS_MESSAGE =
 function namedTheFailure(body: unknown): boolean {
   if (!body || typeof body !== 'object') return false;
   const err = (body as { error?: unknown }).error;
-  return typeof err === 'string' && err.length > 0;
+  return (
+    (typeof err === 'string' && err.length > 0) || nonblank(errorRecord(err)?.message) !== undefined
+  );
 }
 
 /**
@@ -671,7 +709,7 @@ const said = (message: string, status: number) => `${message} (HTTP ${status})`;
  * optional, both a bare `number`, and adjacent, so the one call site that
  * passes them would be free to swap them and nothing would say so.
  */
-export type ErrorHeaders = {
+export type ErrorHeaders = ErrorMetadata & {
   /** From `Retry-After`, in milliseconds from now. */
   retryAfterMs?: number;
   /** The file's real length, from a 416's `Content-Range`. */
@@ -685,7 +723,8 @@ export function errorForStatus(
   body?: unknown,
   headers: ErrorHeaders = {},
 ): APIError {
-  if (status === 429) return new RateLimitError(message, status, body, headers.retryAfterMs);
+  if (status === 429)
+    return new RateLimitError(message, status, body, headers.retryAfterMs, headers);
   const Cls = BY_STATUS[status] ?? APIError;
   // The 409 that is an offer, told apart by its body. Never given a substitute
   // message: the platform's sentence here is the whole account of what will not
@@ -693,7 +732,14 @@ export function errorForStatus(
   if (Cls === ConflictError) {
     const offer = moveOffer(body);
     if (offer)
-      return new MoveRequiredError(message, status, body, offer.possible, headers.retryAfterMs);
+      return new MoveRequiredError(
+        message,
+        status,
+        body,
+        offer.possible,
+        headers.retryAfterMs,
+        headers,
+      );
   }
   if (Cls === RangeNotSatisfiableError) {
     return new RangeNotSatisfiableError(
@@ -702,6 +748,7 @@ export function errorForStatus(
       body,
       headers.rangeTotal,
       headers.retryAfterMs,
+      headers,
     );
   }
   // Substituted for an empty body, which says nothing, and for a proxy's HTML
@@ -713,6 +760,7 @@ export function errorForStatus(
       status,
       body,
       headers.retryAfterMs,
+      headers,
     );
   }
   // Guarded, where the unreachable statuses below are not, and the difference is
@@ -725,10 +773,17 @@ export function errorForStatus(
       status,
       body,
       headers.retryAfterMs,
+      headers,
     );
   }
   if (Cls === OriginTLSError) {
-    return new OriginTLSError(said(ORIGIN_TLS_MESSAGE, status), status, body, headers.retryAfterMs);
+    return new OriginTLSError(
+      said(ORIGIN_TLS_MESSAGE, status),
+      status,
+      body,
+      headers.retryAfterMs,
+      headers,
+    );
   }
   if (Cls === OriginUnreachableError) {
     return new OriginUnreachableError(
@@ -736,9 +791,12 @@ export function errorForStatus(
       status,
       body,
       headers.retryAfterMs,
+      headers,
     );
   }
-  return new Cls(message, status, body, headers.retryAfterMs);
+  // The range constructor, whose positional arguments differ, returned above.
+  const Ordinary = Cls as typeof APIError;
+  return new Ordinary(message, status, body, headers.retryAfterMs, headers);
 }
 
 /**
@@ -768,7 +826,7 @@ export function errorForStatus(
  * refusal on a response does, so the two forms of the same stop read alike —
  * with one field withheld, for the reason on {@link withoutRefusalReason}.
  */
-const DESCRIBES_THIS_CONNECTION: ReadonlySet<typeof APIError> = new Set([
+const DESCRIBES_THIS_CONNECTION: ReadonlySet<StatusError> = new Set([
   GatewayTimeoutError,
   OriginResponseError,
   OriginTLSError,
@@ -804,9 +862,14 @@ export function errorForEventStatus(status: number, message: string, body?: unkn
  * vocabulary was defined for, and the request there did not half-happen.
  */
 function withoutRefusalReason(body: unknown): unknown {
-  if (!body || typeof body !== 'object' || Array.isArray(body)) return body;
-  if (!('reason' in body)) return body;
-  const { reason: _dropped, ...rest } = body as Record<string, unknown>;
+  const record = errorRecord(body);
+  if (!record) return body;
+  const { reason: _dropped, ...rest } = record;
+  const nested = errorRecord(rest.error);
+  if (nested) {
+    const { reason: _nestedDropped, ...error } = nested;
+    rest.error = error;
+  }
   return rest;
 }
 
@@ -887,8 +950,14 @@ export function isTransient(err: unknown): boolean {
   // the two that do (platform OPL-3898). Only an APIError carries a
   // shape-checked one: an arbitrary exception may happen to have a `reason`
   // property, and that is neither this protocol nor retry advice.
+  if (err instanceof APIError && [401, 402, 403, 404, 405].includes(err.status)) return false;
   if (err instanceof APIError && err.reason !== undefined) {
-    if (REASON_CLEARS.has(err.reason)) return true;
+    // A nested run error can describe completed work. Its reason is diagnostic,
+    // and cannot grant replay permission, even if its status is 400 or 409.
+    if (REASON_CLEARS.has(err.reason)) {
+      if (typeof errorRecord(err.body)?.reason !== 'string') return false;
+      if (err.status === 400 || err.status === 409) return true;
+    }
     if (REASON_PERMANENT.has(err.reason)) return false;
   }
   // {@link OriginUnreachableError} is deliberately not here, and 502 and 504

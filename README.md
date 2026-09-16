@@ -838,6 +838,10 @@ promoted onto the event: `window`, `windowId`, `pid`, `exitCode`, `lost`,
 `selection`, `watch`, `path`, `kind`, `dir`, `armed`, `lostReason`, `status`,
 `previous`, `idleSeconds`, `oldestCursor`, `detail`.
 
+When connecting your own WebSocket client, use the exact returned `events_url`,
+including its desktop capability. A REST Bearer key alone is insufficient; a
+REST call to the events path returns guidance to use `events_url`.
+
 **It keeps your place.** Every event carries an opaque cursor, and the position
 after the last event you actually *consumed* is what a reconnect resumes from —
 so a socket that drops mid-loop does not lose the `process.exited` you were
@@ -1972,10 +1976,11 @@ outcome explicitly before deciding what to do next.
 import {
   MandalaError,        // base of everything this SDK throws
   APIError,            //   any unsuccessful response
-  AuthenticationError, //     401 — key missing, malformed, revoked
+  AuthenticationError, //     401 — a credential was refused
   PlanLimitError,      //     402 — your plan will not allow this. Not a retry.
   PermissionDeniedError,//    403 — the key's role is too low
-  NotFoundError,       //     404 — no such computer, snapshot, or route
+  NotFoundError,       //     404 — no such computer, snapshot, guest file, or route
+  MethodNotAllowedError,//    405 — method unsupported; see err.allow
   ConflictError,       //     409 — right request, wrong moment. `err.reason` says
                        //           whether retrying it helps
   MoveRequiredError,   //       409 — …except this one: the size needs a new host
@@ -2007,6 +2012,48 @@ try {
 }
 ```
 
+Every `APIError` exposes optional `requestId`, `allow` and `wwwAuthenticate`
+properties. `requestId` uses a nonblank `X-Request-ID` response header first,
+then a nonblank top-level `request_id` in the body. It is an opaque diagnostic,
+not an idempotency key. HEAD errors and unreadable error bodies can still carry
+header metadata; older servers and connection failures may supply none. `allow`
+and `wwwAuthenticate` preserve the received headers and are never inferred from
+the body. A 405 does not trigger an automatic method change or retry.
+
+```ts
+try {
+  await c.readFile('/tmp/report.txt');
+} catch (err) {
+  if (err instanceof APIError) {
+    console.error(err.status, err.message, {
+      requestId: err.requestId,
+      reason: err.reason,
+      allow: err.allow,
+      wwwAuthenticate: err.wwwAuthenticate,
+      retryAfterMs: err.retryAfterMs,
+    });
+  }
+  throw err;
+}
+```
+
+A missing guest file uses the existing `NotFoundError`, just like a missing
+computer or route, with the response's own message. Permission failures retain
+the status the server sent.
+
+For 401, `reason` may say `missing`, `invalid` or `revoked`; unknown string values
+are retained too. A nested finite chat error exposes its string message and
+reason while `body` keeps the entire envelope, including usage, steps and native
+agent evidence. A valid top-level reason takes precedence over a nested one.
+An unclassified 401, including a model-provider refusal, does not by itself
+identify which credential failed. Check the supplied classification and challenge
+before changing credentials, and inspect recorded work before starting another
+run. No 401, 402, 403, 404 or 405 is transient, even with a contradictory reason.
+Nested run reasons never grant replay permission. Stream error frames keep their
+full evidence in `raw`; thrown stream errors expose their request ID without
+turning frame reasons or the successful stream's headers into retry advice.
+The CLI JSON error envelope remains `{code, message, status}`.
+
 **Read `isTransient` rather than the comments above when it matters.** Three
 entries in that list are things a caller must not replay blind, and two of them
 look retryable from their names: `OriginUnreachableError` is a proxy failing to
@@ -2027,7 +2074,7 @@ acted on.
 
 `err.reason` is what says which kind you have, where the platform sent a word
 for it, and it is the part a program is allowed to depend on — `err.message` is
-prose and is rewritten. Five words: `contention` and `starting` clear on their
+prose and is rewritten. For ordinary request refusals, `contention` and `starting` clear on their
 own, `unavailable` means the computer is not running and only starting it helps,
 `unsupported` means this computer cannot do it at all, and `revoked` is about the
 caller rather than the computer — the authority the request arrived with no
@@ -2038,7 +2085,7 @@ a clipboard call against a stopped computer stopped being told to retry.
 
 **Absent means no classification was given**, and so does a word you do not
 recognise — not every refusal has one, and the platform reserves the right to
-add a sixth. Treat both as "no answer" and fall back to whatever you did before,
+add classifications. Treat both as "no answer" and fall back to whatever you did before,
 which is exactly what `isTransient` does.
 
 `MoveRequiredError` is the exception, and it is a subclass so that code matching

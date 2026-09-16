@@ -96,6 +96,7 @@ export {
   SCREEN_HEIGHT,
   SCREEN_WIDTH,
 } from './computer.js';
+export type { ErrorMetadata } from './errors.js';
 export {
   APIError,
   AuthenticationError,
@@ -105,6 +106,7 @@ export {
   GatewayTimeoutError,
   isTransient,
   MandalaError,
+  MethodNotAllowedError,
   MoveRequiredError,
   NotFoundError,
   OriginResponseError,
