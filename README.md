@@ -2060,6 +2060,258 @@ cannot safely recommend replaying for an arbitrary operation.
 
 ## The `mandala` CLI
 
+The same package provides commands for computers, templates, snapshots, webhooks,
+and agent runs. The CLI requires Node 22+; importing the SDK does not import the
+CLI or its terminal dependencies. Use `npx mandala` from a project with the package
+installed, or prefix the commands below with `npx --package=mandala-computer`.
+
+```sh
+npx --package=mandala-computer mandala --help
+npx --package=mandala-computer mandala manifest
+npx --package=mandala-computer mandala computers list --json
+```
+
+Requests use `MANDALA_API_KEY`, with `MANDALA_BASE_URL` as an optional server
+override. Agent runs also require `MANDALA_MODEL_KEY`, your model-provider key.
+There is no CLI login, credentials file, profile selection, account command, or
+usage command in this release; those commands are deferred. The SDK's
+[`client.usage.read()`](#usage) remains available.
+
+### Discover commands and flags
+
+`mandala --help`, `mandala computers --help`, and
+`mandala computers exec --help` show progressively narrower help. Every command
+accepts `--help` (`-h`) and `--json`. Help, manifest, and completion need neither
+credentials nor network access and never prompt for input.
+
+| Command group | Available commands |
+| --- | --- |
+| `computers` | `list`, `create`, `get`, `start`, `stop`, `suspend`, `restart`, `delete`, `clone`, `screenshot`, `exec`, `wait` |
+| `templates` | `list`, `get`, `validate`, `publish`, `build`, `watch`, `retire` |
+| `snapshots` | `list`, `create`, `restore`, `clone`, `delete`, `holdings`, `schedule get`, `schedule set`, `schedule clear`, `retention` |
+| `webhooks` | `list`, `create`, `get`, `update`, `delete`, `rotate`, `test`, `deliveries` |
+| `agent` | `run` |
+| Top-level commands | `ssh`, `scp`, `manifest`, `completion` |
+
+Command-specific flags follow the command name. Flags with values accept
+`--name value` or `--name=value`; boolean flags take no value. Repeat only flags
+marked repeatable, such as `--env`, `--event`, and webhook `--computer` filters.
+Use `--` before a positional argument beginning with a dash. Unknown commands,
+unknown flags, and conflicting arguments fail instead of being ignored.
+
+`mandala manifest` prints a JSON command tree by default. Its `schemaVersion` is
+`1`; each entry in `commands` describes the command's `path` array, required
+`arguments`, `flags` with types and constraints, and `jsonMode` (`finite`,
+`ndjson`, or `unsupported`). Flags with aliases, choices, repetition, or conflicts
+carry those properties. Conditional SDK requirements also appear in command help
+and the sections below. The manifest reports `ssh` as unsupported in JSON mode:
+`ssh --json` returns an error before resolving a computer or connecting.
+`mandala manifest --json` wraps the tree in the finite result envelope below.
+
+Shell completion scripts come from the same command inventory:
+
+```sh
+mandala completion bash
+mandala completion zsh
+mandala completion fish
+```
+
+Each command prints a script to stdout. Save or source it according to your shell's
+completion setup; the CLI does not edit shell files or install completions.
+`--json` returns the script as `data.script` alongside `data.shell`.
+
+### Computers and remote commands
+
+Computer operands accept an ID or a unique name. An exact ID takes precedence;
+ambiguous names fail with the matching IDs so you can select one explicitly.
+Listing filters and webhook filters that say `--computer` take IDs.
+
+```sh
+mandala computers list --json
+mandala computers create --name workbench --template base --cpu 2 --ram-mb 4096 --disk-gb 40
+mandala computers wait workbench --until guest --timeout-ms 180000 --poll-ms 2000
+mandala computers get workbench
+mandala computers screenshot workbench -o screen.png --fresh
+mandala computers exec workbench -c 'uname -a' --timeout 60
+printf 'pwd\nls -la\n' | mandala computers exec workbench
+mandala computers exec workbench -c 'make build' --cwd /home/user/project --background --json
+```
+
+Create starts the computer by default; `--no-start` leaves it stopped. It returns
+after provisioning responds. Use `computers wait` for readiness: `built` waits
+for the disk copy, `running` waits for the VM, and `guest` waits for the guest
+agent. The default is `running`. `--timeout-ms` bounds the readiness wait and
+`--poll-ms` controls its polling interval; neither changes the initial computer
+lookup's request budget. The SDK also provides [`computers.launch()`](#use) for
+creating and waiting in one call.
+
+`--size` selects a named size and cannot be combined with `--template`, `--cpu`,
+`--ram-mb`, `--disk-gb`, or `--template-transfer`. A preparation token is accepted
+only with the original nonempty `--template`; see [Your own templates](#your-own-templates)
+for how to handle a preparation refusal.
+
+Exec accepts either `-c`/`--command` text or piped stdin. It preserves that command
+text, rejects empty input, and rejects a command combined with nonempty stdin.
+It does not prompt on a terminal. `--timeout` is a foreground execution limit in
+**seconds**, defaults to 30, and accepts integers from 1 through 600. It cannot
+be combined with `--background`. `--cwd`, repeatable `--env NAME=VALUE`, and
+`--desktop` apply to either execution mode.
+
+Without `--json`, foreground exec writes the guest's stdout and stderr bytes to
+the corresponding local streams. With `--json`, both are inside the result:
+`stdoutBase64` and `stderrBase64` preserve bytes; `stdoutText` and `stderrText`
+provide UTF-8 decoding. Foreground results also include `exitCode`, `timedOut`,
+`outTruncated`, `errTruncated`, `truncated`, and `ok`. Truncation is reported even
+when the remote command exits zero; success does not mean all output was captured.
+Background exec returns a handle including `pid`, `running`, output, and available
+execution metadata. Starting it successfully does not mean the command has
+finished. Use the SDK's [background execution methods](#long-running-commands)
+to poll or stop it.
+
+Screenshot always writes the image bytes to the required `-o`/`--output` file.
+Its JSON result reports `{ "path": "screen.png", "bytes": 12345 }`; it never
+embeds or JSON-encodes the image. `--width` scales the requested image, and
+`--fresh` requests a new capture.
+
+Lifecycle commands act on the specified computer. `computers stop --force`
+forces power off. `computers delete` keeps snapshots unless you pass both
+`--delete-snapshots` and `--expect FINGERPRINT`. Obtain and inspect the fingerprint
+with `snapshots holdings`; the CLI never selects a purge fingerprint for you.
+
+### Templates, snapshots, and webhooks
+
+```sh
+mandala templates list
+mandala templates validate ./devbox.yaml
+mandala templates publish ./devbox.yaml --json
+mandala templates get system base --version 1.0.0
+mandala templates build ./devbox.yaml --no-reuse --json
+mandala templates watch bld-example --json
+mandala snapshots list --computer vm-example --include-unfinished --json
+mandala snapshots create workbench --name before-upgrade
+mandala snapshots schedule set workbench --hour 4 --minute 30 --tz UTC
+mandala webhooks create https://hooks.example.com/mandala --event computer.ready --json
+mandala webhooks deliveries whk-example --json
+```
+
+Template validate, publish, and build read a file, or `-` for piped stdin. Build
+returns a job immediately; pass the returned `id` to `templates watch` to stream
+its progress. Invalid validation results and failed builds exit nonzero. Get and
+retire take separate namespace and name operands; `--version` selects a specific
+version. Retire without `--version` retires every version of that template name.
+
+Snapshot create and delete wait for completion by default. Both accept
+`--timeout-ms`, `--poll-ms`, and `--no-wait`. With `--no-wait`, capture may return
+`state: "capturing"`; deletion reports `accepted: true, waited: false`. Acceptance
+is not proof of completion. `snapshots restore` restores the specified snapshot;
+`snapshots clone SNAPSHOT --name NAME` creates a new computer from one. Schedule set uses
+04:00 UTC when time flags are omitted; `--disabled` disables the specified window.
+`schedule clear` removes it. Retention is read-only.
+
+Webhook create accepts repeatable `--event` and `--computer` filters,
+`--description`, and `--disabled`. Update replaces supplied filters; use
+`--all-events` or `--all-computers` to clear one, and `--enable` or `--disable`
+to change delivery state. Create and rotate print the newly returned signing
+secret **once** in the result, with a reminder on stderr. Save that result: get
+and list do not return the secret. `webhooks test` queues a delivery; inspect
+`webhooks deliveries` to learn whether it was delivered.
+
+### Agent runs and cancellation
+
+```sh
+mandala agent run 'Open the browser and find the documentation' --computer workbench --max-steps 20
+mandala agent run 'Summarize the visible page' --computer workbench --json
+```
+
+Set `MANDALA_MODEL_KEY` before running these commands. `--computer` is required;
+the CLI never guesses which desktop to use. `--max-steps` bounds desktop actions
+from 1 through 100; `--model` selects a model and `--system` supplies standing
+instructions. Human output includes timestamped action/text lines and a final
+summary with `steps`, `stop`, `finished`, and token `usage`.
+
+Only `finished: true` (`stop: "end_turn"`) exits zero. A step limit, refusal, rate
+limit, error frame, or stream ending without a final result exits nonzero. An
+agent error frame preserves the server's reported completed steps and token
+usage under `data.error.details`; those actions may already have happened.
+
+For noninteractive commands, Ctrl-C (`SIGINT`) or `SIGTERM` aborts pending SDK
+work and exits 130, restoring the CLI's signal listeners. Cancellation stops
+waiting and asks an active agent request to abort. It does not roll back actions,
+delete a created computer, or prove that an accepted remote mutation stopped.
+An interactive `ssh` session passes Ctrl-C to the guest terminal instead.
+
+### JSON results and exit status
+
+`--json` puts machine output on stdout and diagnostics on stderr. Finite commands
+emit one newline-terminated JSON object. A successful screenshot, for example,
+has this version 1 envelope:
+
+```json
+{"schemaVersion":1,"command":"computers screenshot","ok":true,"data":{"path":"screen.png","bytes":12345},"exitCode":0}
+```
+
+A request or CLI error uses `error` instead of `data`:
+
+```json
+{"schemaVersion":1,"command":"ssh","ok":false,"error":{"code":"unsupported_mode","message":"Interactive ssh does not support --json; use computers exec for machine-readable output"},"exitCode":1}
+```
+
+`command` is the space-separated command path, without operands. It is empty
+when argument parsing fails before an invocation is established. `error` always
+has string `code` and `message` fields, and may include numeric HTTP `status` or
+command-specific `details`. CLI codes include `invalid_arguments`,
+`ambiguous_computer`, `missing_credentials`, `unsupported_mode`, and `cancelled`;
+SDK failures use their error-class names, such as `AuthenticationError`.
+
+`ok` reflects the process exit status. A remote nonzero exec result or invalid
+template document keeps its `data` with `ok: false` and a nonzero `exitCode`.
+Consumers should distinguish an unsuccessful result from a request that raised
+an `error` and tolerate additional fields within version 1. Resource payloads
+retain their API field names. Exec and agent summaries use the SDK's camelCase
+fields described above. Computer results omit desktop credentials.
+
+Computer, template, and snapshot listings return `data.items` and
+`data.incomplete`. `null` means complete; any number, **including zero**, means
+incomplete. Computer and snapshot lists accept `--allow-partial` to opt into a
+partial server response; the CLI preserves the shortfall instead of presenting
+it as a complete inventory.
+
+`agent run --json` and `templates watch --json` emit **NDJSON**: one JSON frame
+per line. Every frame has `schemaVersion`, `command`, `type`, an ISO-8601 UTC
+`timestamp` recorded by the CLI, and `data`. Agent frame types are `step`, `text`,
+`done`, and `error`; build frame types are `progress`, `done`, and `error`.
+For example:
+
+```jsonl
+{"schemaVersion":1,"command":"agent run","type":"step","timestamp":"2026-09-16T12:00:00.000Z","data":{"n":1,"tool":"computer","action":"left_click","detail":"clicked"}}
+{"schemaVersion":1,"command":"agent run","type":"done","timestamp":"2026-09-16T12:00:01.000Z","data":{"steps":1,"stop":"end_turn","finished":true,"text":"Done","usage":{"inputTokens":100,"outputTokens":20,"cacheReadTokens":0,"cacheWriteTokens":0},"exitCode":0}}
+```
+
+A terminal `done` frame includes `data.exitCode` and the final result. A terminal
+`error` frame contains `data.error` and `data.exitCode`. Require a terminal frame
+and check its exit status; progress alone is not success. Argument parsing errors
+use the finite error envelope even for a requested streaming command. After
+successful parsing, streaming-command failures use an `error` frame.
+
+`ssh --json` is deliberately unsupported and fails before connecting, keeping
+terminal traffic out of machine output. `scp --json` emits a finite copy result
+with `source`, `destination`, `bytes`, and `confirmed`. For downloads, `bytes`
+is the number written locally and `confirmed` is true. For uploads it is the
+number sent; `confirmed` says whether the server acknowledged that byte count,
+and `accounting` labels an unacknowledged count as `"N bytes sent"`. A short
+acknowledged write is an error.
+
+The process exits zero on success and 1 on ordinary errors, invalid template
+validation, failed builds, or unfinished agent runs. Foreground exec preserves
+remote exit codes from 0 through 255, uses 124 for a timeout, and 1 when the
+reported code cannot be represented or is unknown. Cancellation exits 130.
+Running `mandala` without arguments prints help and exits 2. CLI-generated output uses no
+color escapes, including with `NO_COLOR` or piped output. Guest terminal and
+foreground exec output passes through unchanged. TTY detection affects terminal
+presentation and whether stdin can be read without prompting.
+
+### Interactive terminals and file copies
+
 ```sh
 npx --package=mandala-computer mandala ssh my-computer          # an interactive shell
 npx --package=mandala-computer mandala ssh my-computer -s build # a named session
