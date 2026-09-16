@@ -74,6 +74,7 @@ export const ALLOWED: ReadonlySet<string> = new Set(
       ['DELETE', 'computers/:id/artifacts/:artifactId'],
       ['GET', 'computers/:id/activities'],
       ['GET', 'computers/:id/activities/:activity'],
+      ['GET', 'computers/:id/activities/:activity/results'],
       ['GET', 'computers/:id/signals'],
       ['GET', 'computers/:id/windows'],
       ['POST', 'computers/:id/windows/:window'],
@@ -157,6 +158,7 @@ export const UNIMPLEMENTED: ReadonlySet<string> = new Set([
   // Retained API history has no SDK convenience methods yet.
   'GET computers/:id/activities',
   'GET computers/:id/activities/:activity',
+  'GET computers/:id/activities/:activity/results',
   // Passive platform signals have no client convenience method yet.
   'GET computers/:id/signals',
 ]);
@@ -259,13 +261,22 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
   ],
   [
     'POST computers/:id/exec',
-    ['body:command', 'body:session', 'body:timeout_s', 'body:background', 'body:cwd', 'body:env'],
+    [
+      'body:command',
+      'body:session',
+      'body:timeout_s',
+      'body:background',
+      'body:cwd',
+      'body:env',
+      'body:retain_output',
+    ],
   ],
   ['GET computers/:id/exec/:pid', []],
   ['DELETE computers/:id/exec/:pid', []],
   ['GET computers/:id/executions/:executionId', []],
   ['GET computers/:id/activities', ['query:cursor', 'query:changes']],
   ['GET computers/:id/activities/:activity', []],
+  ['GET computers/:id/activities/:activity/results', []],
   ['GET computers/:id/signals', ['query:since', 'query:limit']],
   [
     'GET computers/:id/executions/:executionId/output',
@@ -379,6 +390,8 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
  * would say nothing the route's own line does not.
  */
 export const UNIMPLEMENTED_PARAMETERS: ReadonlySet<string> = new Set([
+  // Synchronous output retention is tracked until runtime support is available.
+  'POST computers/:id/exec  body:retain_output',
   // File transfers cannot yet opt out of waking a suspended computer.
   'GET computers/:id/files  query:no_wake',
   'PUT computers/:id/files  query:no_wake',
