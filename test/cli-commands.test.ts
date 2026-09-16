@@ -386,6 +386,102 @@ describe('account and historical usage commands', () => {
     },
   );
 
+  it.each([true, false])(
+    'preserves named and unnamed live and deleted usage rows (JSON=%s)',
+    async (jsonMode) => {
+      const report = {
+        ...USAGE,
+        usage: {
+          ...USAGE.usage,
+          computers: [
+            { id: 'named-live', name: 'desktop', run_hours: 1, vcpu_hours: 2, ram_gb_hours: 4 },
+            { id: 'unnamed-live', run_hours: 2, vcpu_hours: 4, ram_gb_hours: 8 },
+            {
+              id: 'named-deleted',
+              name: 'former',
+              gone: true,
+              run_hours: 3,
+              vcpu_hours: 6,
+              ram_gb_hours: 12,
+            },
+            {
+              id: 'unnamed-deleted',
+              gone: true,
+              run_hours: 6.5,
+              vcpu_hours: 13,
+              ram_gb_hours: 26,
+            },
+          ],
+        },
+      };
+      const h = harness(() => json(report));
+      const result = await h.run(['usage'], jsonMode);
+      expect(result.code).toBe(0);
+      expect(result.err).toBe('');
+      expect(h.rec.routes()).toEqual([['GET', 'usage']]);
+      if (jsonMode) {
+        expect(result.frames).toHaveLength(1);
+        expect(result.frames[0]).toMatchObject({
+          schemaVersion: 1,
+          command: 'usage',
+          ok: true,
+          exitCode: 0,
+          data: { breakdown: true },
+        });
+        expect(result.frames[0].data.usage).toEqual({
+          runHours: 12.5,
+          vcpuHours: 25,
+          ramGbHours: 50,
+          diskGbHours: 480,
+          diskGbMonths: 0.66,
+          snapshotGbHours: 96,
+          snapshotGbMonths: 0.13,
+          computers: [
+            {
+              id: 'named-live',
+              name: 'desktop',
+              runHours: 1,
+              vcpuHours: 2,
+              ramGbHours: 4,
+              gone: false,
+            },
+            { id: 'unnamed-live', name: '', runHours: 2, vcpuHours: 4, ramGbHours: 8, gone: false },
+            {
+              id: 'named-deleted',
+              name: 'former',
+              runHours: 3,
+              vcpuHours: 6,
+              ramGbHours: 12,
+              gone: true,
+            },
+            {
+              id: 'unnamed-deleted',
+              name: '',
+              runHours: 6.5,
+              vcpuHours: 13,
+              ramGbHours: 26,
+              gone: true,
+            },
+          ],
+        });
+      } else {
+        for (const line of [
+          'Run hours: 12.5',
+          'vCPU-hours: 25',
+          'RAM GB-hours: 50',
+          'Disk GB-hours: 480; GB-months: 0.66',
+          'Snapshot GB-hours: 96; GB-months: 0.13',
+          'desktop (named-live): 1 run hours; 2 vCPU-hours; 4 RAM GB-hours',
+          'unnamed-live (unnamed-live): 2 run hours; 4 vCPU-hours; 8 RAM GB-hours',
+          'former (named-deleted) [deleted]: 3 run hours; 6 vCPU-hours; 12 RAM GB-hours',
+          'unnamed-deleted (unnamed-deleted) [deleted]: 6.5 run hours; 13 vCPU-hours; 26 RAM GB-hours',
+        ]) {
+          expect(result.out).toContain(line);
+        }
+      }
+    },
+  );
+
   it('accepts open period sources, empty names and future fields at every level', async () => {
     const report = {
       ...USAGE,
@@ -541,16 +637,19 @@ describe('account and historical usage commands', () => {
         }
       });
 
-      it.each(['id', 'name'])('rejects missing or malformed row %s', async (field) => {
-        for (const value of [undefined, null, 0, {}, []]) {
+      it('rejects missing or malformed row IDs', async () => {
+        for (const value of [undefined, null, 0, {}, [], '']) {
           await expectUsageFailure(
-            () => json(withUsageField(`usage.computers.0.${field}`, value)),
+            () => json(withUsageField('usage.computers.0.id', value)),
             jsonMode,
           );
         }
-        if (field === 'id') {
+      });
+
+      it('rejects malformed present row names', async () => {
+        for (const value of [null, 0, false, {}, []]) {
           await expectUsageFailure(
-            () => json(withUsageField('usage.computers.0.id', '')),
+            () => json(withUsageField('usage.computers.0.name', value)),
             jsonMode,
           );
         }

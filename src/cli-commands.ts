@@ -187,7 +187,7 @@ function checkUsageReport(d: Record<string, unknown>): void {
       const field = `usage.computers[${index}]`;
       const row = object(value, field);
       text(row.id, `${field}.id`);
-      text(row.name, `${field}.name`, true);
+      if (Object.hasOwn(row, 'name')) text(row.name, `${field}.name`, true);
       for (const key of hours) number(row[key], `${field}.${key}`);
       if (Object.hasOwn(row, 'gone') && typeof row.gone !== 'boolean')
         refuse(`${field}.gone`, 'a boolean when present');
