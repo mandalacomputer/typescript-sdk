@@ -64,6 +64,10 @@ export const ALLOWED: ReadonlySet<string> = new Set(
       ['DELETE', 'computers/:id/exec/:pid'],
       ['GET', 'computers/:id/executions/:executionId'],
       ['GET', 'computers/:id/executions/:executionId/output'],
+      ['POST', 'computers/:id/executions/:executionId/retained-output'],
+      ['GET', 'computers/:id/results/:resultId'],
+      ['GET', 'computers/:id/results/:resultId/output'],
+      ['DELETE', 'computers/:id/results/:resultId'],
       ['GET', 'computers/:id/activities'],
       ['GET', 'computers/:id/activities/:activity'],
       ['GET', 'computers/:id/signals'],
@@ -129,6 +133,11 @@ export const ALLOWED: ReadonlySet<string> = new Set(
  * design is that it is enumerable.
  */
 export const UNIMPLEMENTED: ReadonlySet<string> = new Set([
+  // Explicit retained output is tracked here until client helpers are available.
+  'POST computers/:id/executions/:executionId/retained-output',
+  'GET computers/:id/results/:resultId',
+  'GET computers/:id/results/:resultId/output',
+  'DELETE computers/:id/results/:resultId',
   // The OpenAI-shaped door onto the agent loop. Deliberately not wrapped: a
   // caller who wants it already has an OpenAI client and points its baseURL
   // here, and a second, worse OpenAI client inside this SDK would be a
@@ -254,6 +263,13 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
     ['query:stdout_offset', 'query:stderr_offset', 'query:limit'],
   ],
   ['GET computers/:id/windows', ['query:include']],
+  [
+    'POST computers/:id/executions/:executionId/retained-output',
+    ['body:max_bytes_per_stream', 'body:retention_seconds'],
+  ],
+  ['GET computers/:id/results/:resultId', []],
+  ['GET computers/:id/results/:resultId/output', ['query:stream', 'query:offset', 'query:limit']],
+  ['DELETE computers/:id/results/:resultId', []],
   [
     'POST computers/:id/windows/:window',
     ['body:action', 'body:x', 'body:y', 'body:width', 'body:height'],
