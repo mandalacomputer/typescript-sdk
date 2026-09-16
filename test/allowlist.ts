@@ -439,7 +439,8 @@ export function patternFor(path: string): string {
       prev === 'computers' ||
       prev === 'snapshots' ||
       prev === 'builds' ||
-      prev === 'webhooks'
+      prev === 'webhooks' ||
+      prev === 'ssh-keys'
     )
       out.push(':id');
     else if (prev === 'exec') out.push(':pid');

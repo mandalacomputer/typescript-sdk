@@ -674,6 +674,12 @@ describe('surface', () => {
     expect(patternFor('computers/exec/start')).toBe('computers/:id/start');
     expect(patternFor('computers/windows/exec/42')).toBe('computers/:id/exec/:pid');
     expect(patternFor('snapshots/snapshots/restore')).toBe('snapshots/:id/restore');
+    // Every collection whose next segment is an id, including the ones with no
+    // client method yet: a mirrored route that cannot be matched is a route the
+    // first call to it would report as off the table.
+    expect(patternFor('builds/bld-1/events')).toBe('builds/:id/events');
+    expect(patternFor('webhooks/whk-1/deliveries')).toBe('webhooks/:id/deliveries');
+    expect(patternFor('ssh-keys/key-1')).toBe('ssh-keys/:id');
   });
 
   it('exports a VERSION that matches the package', async () => {
