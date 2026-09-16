@@ -121,6 +121,80 @@ function accountText(q: AccountQuota): string {
   ].join('\n');
 }
 
+function checkUsageReport(d: Record<string, unknown>): void {
+  // The SDK decoder accepts older sparse reports. The CLI must not present
+  // its defaults as measured totals, complete metadata or a withheld breakdown.
+  function refuse(field: string, expected: string): never {
+    throw new MandalaError(`Invalid usage report: ${field} must be ${expected}`);
+  }
+  const object = (value: unknown, field: string): Record<string, unknown> =>
+    P.isRecord(value) ? value : refuse(field, 'an object');
+  const text = (value: unknown, field: string, allowEmpty = false): void => {
+    if (typeof value !== 'string' || (!allowEmpty && !value.trim()))
+      refuse(field, allowEmpty ? 'a string' : 'a nonempty string');
+  };
+  const number = (value: unknown, field: string): void => {
+    if (typeof value !== 'number' || !Number.isFinite(value) || value < 0)
+      refuse(field, 'a finite nonnegative number');
+  };
+  const utcDay = (value: unknown): value is string =>
+    typeof value === 'string' &&
+    /^\d{4}-\d{2}-\d{2}$/.test(value) &&
+    Number.isFinite(Date.parse(value)) &&
+    new Date(value).toISOString().slice(0, 10) === value;
+  const timestamp = (value: unknown, field: string): void => {
+    if (
+      typeof value !== 'string' ||
+      !Number.isFinite(Date.parse(value)) ||
+      !utcDay(value.slice(0, 10)) ||
+      Number(value.slice(11, 13)) > 23
+    )
+      refuse(field, 'an RFC 3339 timestamp with a time zone');
+    try {
+      P.usageQuery(value);
+    } catch {
+      refuse(field, 'an RFC 3339 timestamp with a time zone');
+    }
+  };
+  const totals = object(d.usage, 'usage');
+  const hours = ['run_hours', 'vcpu_hours', 'ram_gb_hours'];
+  for (const key of [
+    ...hours,
+    'disk_gb_hours',
+    'disk_gb_months',
+    'snapshot_gb_hours',
+    'snapshot_gb_months',
+  ]) {
+    number(totals[key], `usage.${key}`);
+  }
+  const period = object(d.period, 'period');
+  timestamp(period.start, 'period.start');
+  timestamp(period.end, 'period.end');
+  text(period.source, 'period.source');
+  timestamp(d.from, 'from');
+  timestamp(d.to, 'to');
+  for (const key of ['degraded', 'unmetered']) {
+    if (typeof d[key] !== 'boolean') refuse(key, 'a boolean');
+  }
+  const through = d.reported_through;
+  if (through !== null && !utcDay(through)) {
+    refuse('reported_through', 'null or a UTC day (YYYY-MM-DD)');
+  }
+  if (Object.hasOwn(totals, 'computers')) {
+    const computers = totals.computers;
+    if (!Array.isArray(computers)) refuse('usage.computers', 'an array when present');
+    for (const [index, value] of computers.entries()) {
+      const field = `usage.computers[${index}]`;
+      const row = object(value, field);
+      text(row.id, `${field}.id`);
+      text(row.name, `${field}.name`, true);
+      for (const key of hours) number(row[key], `${field}.${key}`);
+      if (Object.hasOwn(row, 'gone') && typeof row.gone !== 'boolean')
+        refuse(`${field}.gone`, 'a boolean when present');
+    }
+  }
+}
+
 function usageText(u: UsageReport): string {
   return [
     'Historical metered usage (account-wide)',
@@ -322,6 +396,7 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
       }
       case 'usage': {
         const report = await client.usage.read(usageWindow);
+        checkUsageReport(report.raw);
         const { raw: _raw, ...data } = report;
         if (json)
           return output.result({ ...data, reportedThrough: report.reportedThrough ?? null });

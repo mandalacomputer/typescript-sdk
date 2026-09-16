@@ -331,6 +331,8 @@ describe('account and historical usage commands', () => {
   it('keeps a complete zero historical window distinct from withheld or incomplete usage', async () => {
     const report = {
       ...USAGE,
+      to: USAGE.from,
+      reported_through: null,
       usage: {
         run_hours: 0,
         vcpu_hours: 0,
@@ -383,6 +385,187 @@ describe('account and historical usage commands', () => {
         );
     },
   );
+
+  it('accepts open period sources, empty names and future fields at every level', async () => {
+    const report = {
+      ...USAGE,
+      period: { ...USAGE.period, source: 'future-period-basis', future_field: null },
+      future_field: { extra: true },
+      usage: {
+        ...USAGE.usage,
+        future_field: 'new total',
+        computers: [
+          { ...USAGE.usage.computers[0], name: '', gone: false, future_field: ['new detail'] },
+        ],
+      },
+    };
+    const machine = await harness(() => json(report)).run(['usage']);
+    expect(machine.code).toBe(0);
+    expect(machine.frames[0].data).toMatchObject({
+      period: { source: 'future-period-basis' },
+      usage: { computers: [{ id: 'vm-1', name: '', gone: false }] },
+    });
+    expect(machine.out).not.toContain('future_field');
+    const human = await harness(() => json(report)).run(['usage'], false);
+    expect(human.code).toBe(0);
+    expect(human.out).toContain('(future-period-basis)');
+    expect(human.out).toContain('vm-1 (vm-1): 12.5 run hours');
+    expect(human.err).toBe('');
+  });
+
+  function withUsageField(field: string, value: unknown) {
+    const report: Record<string, unknown> = structuredClone(USAGE);
+    const keys = field.split('.');
+    const last = keys.pop()!;
+    let parent = report;
+    for (const key of keys) parent = parent[key] as Record<string, unknown>;
+    if (value === undefined) delete parent[last];
+    else parent[last] = value;
+    return report;
+  }
+
+  async function expectUsageFailure(respond: Responder, jsonMode: boolean) {
+    const h = harness(respond);
+    const result = await h.run(['usage'], jsonMode);
+    expect(result.code).toBe(1);
+    expect(h.rec.routes()).toEqual([['GET', 'usage']]);
+    if (jsonMode) {
+      expect(result.frames).toHaveLength(1);
+      expect(result.frames[0]).toMatchObject({
+        schemaVersion: 1,
+        command: 'usage',
+        ok: false,
+        exitCode: 1,
+        error: { code: 'MandalaError', message: expect.stringContaining('Invalid usage report:') },
+      });
+      expect(result.frames[0]).not.toHaveProperty('data');
+      expect(result.err).toBe('');
+    } else {
+      expect(result.out).toBe('');
+      expect(result.err).toContain('mandala: Invalid usage report:');
+    }
+  }
+
+  for (const jsonMode of [true, false]) {
+    describe(`${jsonMode ? 'JSON' : 'human'} usage validation`, () => {
+      it('rejects an empty totals object before displaying defaulted metadata or zeros', async () => {
+        await expectUsageFailure(() => json({ usage: {} }), jsonMode);
+        await expectUsageFailure(() => json({ ...USAGE, usage: {} }), jsonMode);
+      });
+
+      it.each([
+        'usage.run_hours',
+        'usage.vcpu_hours',
+        'usage.ram_gb_hours',
+        'usage.disk_gb_hours',
+        'usage.disk_gb_months',
+        'usage.snapshot_gb_hours',
+        'usage.snapshot_gb_months',
+        'usage.computers.0.run_hours',
+        'usage.computers.0.vcpu_hours',
+        'usage.computers.0.ram_gb_hours',
+      ])('rejects missing, null or malformed numeric field %s', async (field) => {
+        for (const value of [undefined, null, '0', false, -1, {}, []]) {
+          await expectUsageFailure(() => json(withUsageField(field, value)), jsonMode);
+        }
+      });
+
+      it('rejects nonfinite numbers parsed from valid JSON', async () => {
+        for (const field of ['usage.vcpu_hours', 'usage.computers.0.run_hours']) {
+          const body = JSON.stringify(withUsageField(field, 'overflow')).replace(
+            '"overflow"',
+            '1e400',
+          );
+          await expectUsageFailure(() => new Response(body), jsonMode);
+        }
+      });
+
+      it('rejects missing or malformed period objects', async () => {
+        for (const value of [undefined, null, [], 'broken', {}]) {
+          await expectUsageFailure(() => json(withUsageField('period', value)), jsonMode);
+        }
+      });
+
+      it.each(['from', 'to', 'period.start', 'period.end'])(
+        'rejects missing or malformed timestamp %s',
+        async (field) => {
+          for (const value of [
+            undefined,
+            null,
+            0,
+            '',
+            'broken',
+            '2026-08-01',
+            '2026-08-01T00:00:00',
+            '2026-13-01T00:00:00Z',
+            '2026-02-30T00:00:00Z',
+            '2026-08-01T24:00:00Z',
+          ]) {
+            await expectUsageFailure(() => json(withUsageField(field, value)), jsonMode);
+          }
+        },
+      );
+
+      it('rejects a missing or malformed period source', async () => {
+        for (const value of [undefined, null, 0, '', ' ']) {
+          await expectUsageFailure(() => json(withUsageField('period.source', value)), jsonMode);
+        }
+      });
+
+      it.each(['degraded', 'unmetered'])(
+        'rejects a missing or malformed %s caveat',
+        async (field) => {
+          for (const value of [undefined, null, 0, 1, 'false', {}, []]) {
+            await expectUsageFailure(() => json(withUsageField(field, value)), jsonMode);
+          }
+        },
+      );
+
+      it('requires an explicit null or valid settlement day', async () => {
+        for (const value of [
+          undefined,
+          false,
+          0,
+          '',
+          'broken',
+          '2026-02-30',
+          '2026-08-20T00:00:00Z',
+        ]) {
+          await expectUsageFailure(() => json(withUsageField('reported_through', value)), jsonMode);
+        }
+      });
+
+      it('rejects malformed breakdown containers and rows without dropping them', async () => {
+        for (const value of [null, 'broken', {}, [null], [true], [[]], [{}]]) {
+          await expectUsageFailure(() => json(withUsageField('usage.computers', value)), jsonMode);
+        }
+      });
+
+      it.each(['id', 'name'])('rejects missing or malformed row %s', async (field) => {
+        for (const value of [undefined, null, 0, {}, []]) {
+          await expectUsageFailure(
+            () => json(withUsageField(`usage.computers.0.${field}`, value)),
+            jsonMode,
+          );
+        }
+        if (field === 'id') {
+          await expectUsageFailure(
+            () => json(withUsageField('usage.computers.0.id', '')),
+            jsonMode,
+          );
+        }
+      });
+
+      it('rejects a malformed optional deletion flag', async () => {
+        for (const value of [null, 0, 'true', {}, []]) {
+          await expectUsageFailure(
+            () => json(withUsageField('usage.computers.0.gone', value)),
+            jsonMode,
+          );
+        }
+      });
+    });
+  }
 
   it.each(['account', 'usage'])(
     'retains %s redaction and excludes untyped extra payload fields',
