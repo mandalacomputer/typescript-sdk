@@ -9,6 +9,7 @@ import {
   ValidationError,
 } from './errors.js';
 import type {
+  AccountQuota,
   BuildProgress,
   Move,
   PublishedTemplate,
@@ -31,6 +32,7 @@ import {
   isBuildTerminal,
   isUnreachableStub,
   str,
+  toAccountQuota,
   toBuildProgress,
   toMove,
   toPublishedTemplate,
@@ -1633,6 +1635,25 @@ export class Sizes {
   async list(opts: CallOptions = {}): Promise<Size[]> {
     const data = await this.#t.jsonArray('GET', P.SIZES, { signal: opts.signal });
     return data.filter(P.isRecord).map(toSize);
+  }
+}
+
+/** Instantaneous account-wide quota. Historical metering is on {@link Usage}. */
+export class Account {
+  #t: Transport;
+
+  /** @internal */
+  constructor(transport: Transport) {
+    this.#t = transport;
+  }
+
+  /**
+   * Read current plan ceilings and observed consumption. Check each
+   * `complete` group before using its remaining headroom; unknowns stay null.
+   * This advisory observation reserves nothing and can become stale immediately.
+   */
+  async read(opts: CallOptions = {}): Promise<AccountQuota> {
+    return toAccountQuota(await this.#t.json('GET', P.ACCOUNT, { signal: opts.signal }));
   }
 }
 

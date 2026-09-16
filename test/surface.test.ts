@@ -52,6 +52,39 @@ const SURFACE = inventory();
 
 /** The new stable reads use their finite response contracts. */
 const executionRoutes = (call: Call): Response | Promise<Response> => {
+  if (call.path === '/account')
+    return json({
+      scope: 'account',
+      advisory: true,
+      observed_at: '2026-09-16T12:00:00Z',
+      plan: { id: 'none', label: 'No plan' },
+      limits: {
+        max_computers: 0,
+        vcpu_pool: 0,
+        ram_pool_mb: 0,
+        disk_pool_gb: 0,
+        snapshot_storage_bytes: 0,
+      },
+      per_computer: { max_vcpu: 0, max_ram_mb: 0, max_disk_gb: 0 },
+      capabilities: { windows: false },
+      complete: { computers: true, snapshots: true },
+      usage: {
+        kept_computers: 0,
+        configured_vcpu: 0,
+        configured_disk_gb: 0,
+        running_or_reserved_computers: 0,
+        running_or_reserved_vcpu: 0,
+        running_or_reserved_ram_mb: 0,
+        snapshot_storage_bytes: 0,
+      },
+      remaining: {
+        kept_computers: 0,
+        configured_vcpu: 0,
+        configured_disk_gb: 0,
+        running_or_reserved_ram_mb: 0,
+        snapshot_storage_bytes: 0,
+      },
+    });
   const executionId = 'exec_0123456789abcdef0123456789abcdef';
   const resultId = 'res_0123456789abcdef0123456789abcdef';
   const artifactId = 'art_0123456789abcdef0123456789abcdef';
@@ -364,6 +397,7 @@ async function exerciseEverything(client: Client): Promise<void> {
     modelKey: 'sk-test',
   });
 
+  await client.account.read();
   // Both bounds, because a call that names neither cannot show the parameter
   // sweep that this SDK can send either.
   await client.usage.read();

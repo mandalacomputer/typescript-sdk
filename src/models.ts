@@ -1134,6 +1134,174 @@ export function toSize(d: Record<string, unknown>): Size {
   };
 }
 
+/** Effective plan catalogue identity, without account or billing identifiers. */
+export type AccountPlan = { id: string; label: string };
+
+/** Account pool ceilings. Zero is a real ceiling, never unlimited. */
+export type AccountLimits = {
+  maxComputers: number;
+  vcpuPool: number;
+  ramPoolMb: number;
+  diskPoolGb: number;
+  snapshotStorageBytes: number;
+};
+
+export type AccountPerComputer = { maxVcpu: number; maxRamMb: number; maxDiskGb: number };
+export type AccountCapabilities = { windows: boolean };
+/** Independent inventory observations; false means that group's figures are null. */
+export type AccountCompleteness = { computers: boolean; snapshots: boolean };
+
+export type AccountUsage = {
+  keptComputers: number | null;
+  /** Configured CPU and disk include stopped computers. Disk is provisioned GB. */
+  configuredVcpu: number | null;
+  configuredDiskGb: number | null;
+  runningOrReservedComputers: number | null;
+  runningOrReservedVcpu: number | null;
+  /** Running guest RAM plus pending reservations, in MB. */
+  runningOrReservedRamMb: number | null;
+  /** Indexed stored bytes, excluding in-flight capture reservations. */
+  snapshotStorageBytes: number | null;
+};
+
+/** Headroom clamped at zero; usage remains visible even above plan ceilings. */
+export type AccountRemaining = {
+  keptComputers: number | null;
+  configuredVcpu: number | null;
+  configuredDiskGb: number | null;
+  runningOrReservedRamMb: number | null;
+  /** Indexed-byte headroom does not predict snapshot capture admission. */
+  snapshotStorageBytes: number | null;
+};
+
+/**
+ * Instantaneous quota for the whole account, including for workspace-scoped keys.
+ * Read `complete` before using numbers. This observation is advisory, reserves
+ * nothing, and is separate from the historical metering in {@link UsageReport}.
+ * Unknown future fields remain in `raw`, using the same shallow copy as Usage.
+ */
+export type AccountQuota = {
+  scope: 'account';
+  advisory: true;
+  /** UTC collection completion time, not a consistency token. */
+  observedAt: string;
+  plan: AccountPlan;
+  limits: AccountLimits;
+  perComputer: AccountPerComputer;
+  capabilities: AccountCapabilities;
+  complete: AccountCompleteness;
+  usage: AccountUsage;
+  remaining: AccountRemaining;
+  raw: Record<string, unknown>;
+};
+
+/** Decode required fields without coercing unknown consumption into zero. */
+export function toAccountQuota(value: unknown): AccountQuota {
+  const refuse = (field: string, expected: string): never => {
+    throw new MandalaError(`expected an account quota report: ${field} must be ${expected}`);
+  };
+  const record = (v: unknown, field: string): Record<string, unknown> =>
+    isRecord(v) ? v : refuse(field, 'an object');
+  const text = (v: unknown, field: string): string =>
+    typeof v === 'string' && v.length > 0 ? v : refuse(field, 'a nonempty string');
+  const flag = (v: unknown, field: string): boolean =>
+    typeof v === 'boolean' ? v : refuse(field, 'a boolean');
+  const quantity = (v: unknown, field: string): number =>
+    typeof v === 'number' && Number.isSafeInteger(v) && v >= 0
+      ? v
+      : refuse(field, 'a nonnegative safe integer');
+  const observed = (v: unknown, field: string, complete: boolean): number | null =>
+    complete ? quantity(v, field) : v === null ? null : refuse(field, 'null when incomplete');
+  const d = record(value, 'response');
+  if (d.scope !== 'account') refuse('scope', 'account');
+  if (d.advisory !== true) refuse('advisory', 'true');
+  const observedAt = text(d.observed_at, 'observed_at');
+  const instant = new Date(observedAt);
+  if (
+    !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z$/.test(observedAt) ||
+    !Number.isFinite(instant.getTime()) ||
+    instant.toISOString().slice(0, 19) !== observedAt.slice(0, 19)
+  )
+    refuse('observed_at', 'a UTC timestamp');
+  const plan = record(d.plan, 'plan');
+  const limits = record(d.limits, 'limits');
+  const per = record(d.per_computer, 'per_computer');
+  const caps = record(d.capabilities, 'capabilities');
+  const complete = record(d.complete, 'complete');
+  const usage = record(d.usage, 'usage');
+  const remaining = record(d.remaining, 'remaining');
+  const computers = flag(complete.computers, 'complete.computers');
+  const snapshots = flag(complete.snapshots, 'complete.snapshots');
+  return {
+    scope: 'account',
+    advisory: true,
+    observedAt,
+    plan: { id: text(plan.id, 'plan.id'), label: text(plan.label, 'plan.label') },
+    limits: {
+      maxComputers: quantity(limits.max_computers, 'limits.max_computers'),
+      vcpuPool: quantity(limits.vcpu_pool, 'limits.vcpu_pool'),
+      ramPoolMb: quantity(limits.ram_pool_mb, 'limits.ram_pool_mb'),
+      diskPoolGb: quantity(limits.disk_pool_gb, 'limits.disk_pool_gb'),
+      snapshotStorageBytes: quantity(
+        limits.snapshot_storage_bytes,
+        'limits.snapshot_storage_bytes',
+      ),
+    },
+    perComputer: {
+      maxVcpu: quantity(per.max_vcpu, 'per_computer.max_vcpu'),
+      maxRamMb: quantity(per.max_ram_mb, 'per_computer.max_ram_mb'),
+      maxDiskGb: quantity(per.max_disk_gb, 'per_computer.max_disk_gb'),
+    },
+    capabilities: { windows: flag(caps.windows, 'capabilities.windows') },
+    complete: { computers, snapshots },
+    usage: {
+      keptComputers: observed(usage.kept_computers, 'usage.kept_computers', computers),
+      configuredVcpu: observed(usage.configured_vcpu, 'usage.configured_vcpu', computers),
+      configuredDiskGb: observed(usage.configured_disk_gb, 'usage.configured_disk_gb', computers),
+      runningOrReservedComputers: observed(
+        usage.running_or_reserved_computers,
+        'usage.running_or_reserved_computers',
+        computers,
+      ),
+      runningOrReservedVcpu: observed(
+        usage.running_or_reserved_vcpu,
+        'usage.running_or_reserved_vcpu',
+        computers,
+      ),
+      runningOrReservedRamMb: observed(
+        usage.running_or_reserved_ram_mb,
+        'usage.running_or_reserved_ram_mb',
+        computers,
+      ),
+      snapshotStorageBytes: observed(
+        usage.snapshot_storage_bytes,
+        'usage.snapshot_storage_bytes',
+        snapshots,
+      ),
+    },
+    remaining: {
+      keptComputers: observed(remaining.kept_computers, 'remaining.kept_computers', computers),
+      configuredVcpu: observed(remaining.configured_vcpu, 'remaining.configured_vcpu', computers),
+      configuredDiskGb: observed(
+        remaining.configured_disk_gb,
+        'remaining.configured_disk_gb',
+        computers,
+      ),
+      runningOrReservedRamMb: observed(
+        remaining.running_or_reserved_ram_mb,
+        'remaining.running_or_reserved_ram_mb',
+        computers,
+      ),
+      snapshotStorageBytes: observed(
+        remaining.snapshot_storage_bytes,
+        'remaining.snapshot_storage_bytes',
+        snapshots,
+      ),
+    },
+    raw: { ...d },
+  };
+}
+
 /** The period an account is billed on. */
 export type UsagePeriod = {
   start: string;

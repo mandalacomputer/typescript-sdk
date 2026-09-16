@@ -47,6 +47,8 @@ export const SNAPSHOTS = 'snapshots';
 export const MOVES = 'moves';
 /** What the account has used, over a window. Account-scoped, like {@link MOVES}. */
 export const USAGE = 'usage';
+/** Instantaneous account-wide quota, including for workspace-scoped keys. */
+export const ACCOUNT = 'account';
 /**
  * How long automatic snapshots are kept — the plan's retention window.
  *
