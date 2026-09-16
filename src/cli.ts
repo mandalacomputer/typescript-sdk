@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 
 /**
- * The `mandala` command — a computer's shell and files from your own terminal.
+ * The `mandala` command, including interactive terminal and file-copy support.
  *
- * Two subcommands, both addressing a computer by name or id:
+ * These two subcommands retain their terminal and file-transfer lifecycles:
  *
  * `mandala ssh <computer>`
  *   An interactive shell in the guest, over the platform's terminal websocket —
@@ -31,9 +31,10 @@ import process from 'node:process';
 import { Readable } from 'node:stream';
 import { isatty, WriteStream } from 'node:tty';
 import { pathToFileURL } from 'node:url';
-
+import { type LegacyCommands, resolveComputer, runCli } from './cli-commands.js';
+import { CliError } from './cli-options.js';
+import { type CliIO, runtime } from './cli-runtime.js';
 import type { Computer } from './computer.js';
-import { MandalaError, ValidationError } from './errors.js';
 import { Client } from './index.js';
 
 /**
@@ -70,21 +71,14 @@ const SCP_TRANSFER_TIMEOUT_MS = 0;
 const DEFAULT_COLS = 80;
 const DEFAULT_ROWS = 24;
 
-const USAGE = `mandala — your own terminal, against a Mandala computer.
-
-  mandala ssh <computer> [--session NAME]   an interactive shell in the guest
-  mandala scp <src> <dst>                   copy one file in or out
-
-<computer> is a name or an id. One side of scp is spelled <computer>:/abs/path.
-
-  MANDALA_API_KEY    required
-  MANDALA_BASE_URL   optional, for a self-hosted platform
-`;
-
-class Died extends Error {}
+class Died extends CliError {
+  constructor(message: string) {
+    super('terminal_error', message);
+  }
+}
 
 function die(message: string): never {
-  throw new Died(message);
+  throw new CliError('invalid_arguments', message);
 }
 
 /**
@@ -534,39 +528,10 @@ export async function finishInteraction(
   }
 }
 
-/** The computer `target` names — an exact id, or a unique name. */
-async function resolve(client: Client, target: string): Promise<Computer> {
-  let computers: Computer[];
-  try {
-    computers = await client.computers.list();
-  } catch (err) {
-    // A listing fans out across every host on the account, so one unreachable
-    // hypervisor answers 503 for the whole thing — and takes down a command
-    // that named an id the computer's own route would have answered. Tried
-    // second rather than first: a get() on a name is a 404, and paying for one
-    // on the spelling people actually use is the wrong way round.
-    const byId = await client.computers.get(target).catch(() => undefined);
-    if (byId) return byId;
-    throw err;
-  }
-  const byId = computers.find((c) => c.id === target);
-  if (byId) return byId;
-  const named = computers.filter((c) => c.name === target);
-  if (named.length === 1) return named[0]!;
-  if (named.length) {
-    die(
-      `${target} names ${named.length} computers — use an id: ${named.map((c) => c.id).join(', ')}`,
-    );
-  }
-  if (!computers.length) die(`no computer named ${target}; the account has no computers`);
-  const have = computers.map((c) => `  ${c.id}  ${c.name}  ${c.status}`).join('\n');
-  die(`no computer named ${target}. You have:\n${have}`);
-}
-
 // --- ssh -------------------------------------------------------------------
 
 async function cmdSsh(target: string, session: string): Promise<number> {
-  const c = await (await resolve(new Client(), target)).refresh();
+  const c = await (await resolveComputer(new Client(), target)).refresh();
   const vnc = c.vnc;
   if (!vnc?.terminalUrl) {
     if (c.os === 'windows') {
@@ -904,12 +869,14 @@ export async function download(
   computer: Pick<Computer, 'readFileChunks'>,
   remotePath: string,
   local: string,
+  signal?: AbortSignal,
 ): Promise<number> {
   let out: Awaited<ReturnType<typeof open>> | undefined;
   let written = 0;
   try {
     for await (const chunk of computer.readFileChunks(remotePath, {
       timeoutMs: SCP_TRANSFER_TIMEOUT_MS,
+      signal,
     })) {
       // Do not truncate an existing destination until the remote read has
       // actually produced data. A source-side failure before the first chunk
@@ -931,18 +898,18 @@ export async function download(
   return written;
 }
 
-async function cmdScp(srcArg: string, dstArg: string): Promise<number> {
+const cmdScp: LegacyCommands['scp'] = async (srcArg, dstArg, io, signal) => {
   const src = remoteSide(srcArg);
   const dst = remoteSide(dstArg);
   if ((src === undefined) === (dst === undefined)) {
     die('exactly one side must be a computer, spelled <computer>:/path');
   }
 
-  const client = new Client();
+  const client = io.createClient();
 
   if (src) {
     if (!src.path) die(`say which file: ${src.target}:/absolute/path`);
-    const computer = await resolve(client, src.target);
+    const computer = await resolveComputer(client, src.target, signal);
     let local = dstArg;
     // A directory destination takes the source's own basename, like scp.
     const info = await stat(local).catch(() => undefined);
@@ -951,9 +918,8 @@ async function cmdScp(srcArg: string, dstArg: string): Promise<number> {
       if (!name) die(`say which file: ${src.target}:${src.path}`);
       local = join(local, name);
     }
-    const size = await download(computer, src.path, local);
-    process.stderr.write(`${src.target}:${src.path} -> ${local} (${size} bytes)\n`);
-    return 0;
+    const size = await download(computer, src.path, local, signal);
+    return { source: srcArg, destination: local, bytes: size, confirmed: true };
   }
 
   const remote = dst!;
@@ -964,7 +930,7 @@ async function cmdScp(srcArg: string, dstArg: string): Promise<number> {
   // stream first — and fs.ReadStream takes its descriptor in _construct whether
   // or not anything reads it — so a target that does not resolve threw straight
   // past the only reference to it and left the fd to the garbage collector.
-  const computer = await resolve(client, remote.target);
+  const computer = await resolveComputer(client, remote.target, signal);
   // Opened once, and measured through the OPEN handle. A `stat(path)` taken
   // before the stream exists describes whatever was at that name a moment ago:
   // a log rotated or a build rewritten in between makes contentLength disagree
@@ -974,6 +940,8 @@ async function cmdScp(srcArg: string, dstArg: string): Promise<number> {
   // bytes" — so the number has to come from the same file the stream is reading.
   const fh = await open(srcArg, 'r');
   let size: string;
+  let sent = 0;
+  let confirmed = false;
   try {
     const info = await fh.stat();
     // Streamed rather than `readFile`'d: a guest-bound copy of a large file is
@@ -982,11 +950,14 @@ async function cmdScp(srcArg: string, dstArg: string): Promise<number> {
     const written = await computer.writeFile(path, body, {
       timeoutMs: SCP_TRANSFER_TIMEOUT_MS,
       contentLength: info.size,
+      signal,
     });
     // What the platform said, or what was sent — labelled as which, since a
     // platform that does not report a count is not evidence that everything
     // landed.
     size = uploadSize(info.size, written);
+    sent = info.size;
+    confirmed = written !== undefined;
   } finally {
     // For the paths where the stream is never consumed. A ReadStream built from
     // a FileHandle closes that handle when it ends or is destroyed, so on the
@@ -996,77 +967,22 @@ async function cmdScp(srcArg: string, dstArg: string): Promise<number> {
     // descriptor would be left to the garbage collector.
     await fh.close().catch(() => {});
   }
-  process.stderr.write(`${srcArg} -> ${remote.target}:${path} (${size})\n`);
-  return 0;
-}
+  return {
+    source: srcArg,
+    destination: `${remote.target}:${path}`,
+    bytes: sent,
+    confirmed,
+    accounting: size,
+  };
+};
 
 // --- entry -----------------------------------------------------------------
 
-export async function main(argv: string[] = process.argv.slice(2)): Promise<number> {
-  const [command, ...rest] = argv;
-  try {
-    if (!command || command === '-h' || command === '--help' || command === 'help') {
-      process.stdout.write(USAGE);
-      return command ? 0 : 2;
-    }
-    if (command === 'ssh') {
-      if (rest.some((arg) => arg === '-h' || arg === '--help')) {
-        process.stdout.write(USAGE);
-        return 0;
-      }
-      let session = 'main';
-      const positional: string[] = [];
-      for (let i = 0; i < rest.length; i++) {
-        const arg = rest[i]!;
-        if (arg === '-s' || arg === '--session')
-          session = rest[++i] ?? die('--session needs a name');
-        else if (arg.startsWith('--session=')) session = arg.slice('--session='.length);
-        else positional.push(arg);
-      }
-      if (!session.trim()) die('--session needs a name');
-      const target = positional[0] ?? die('mandala ssh <computer>');
-      if (positional.length > 1) {
-        // `mandala ssh vm ls -la` is the ubiquitous ssh idiom, and this command
-        // does not have it. Ignoring the tail would open an interactive shell
-        // instead and look like it worked.
-        die(`mandala ssh takes one computer and runs no command (got ${positional.length} args)`);
-      }
-      return await cmdSsh(target, session);
-    }
-    if (command === 'scp') {
-      if (rest.some((arg) => arg === '-h' || arg === '--help')) {
-        process.stdout.write(USAGE);
-        return 0;
-      }
-      const [src, dst] = rest;
-      if (!src || !dst || rest.length !== 2) die('mandala scp <src> <dst>');
-      return await cmdScp(src, dst);
-    }
-    die(`unknown command ${command}\n\n${USAGE}`);
-  } catch (err) {
-    // ValidationError and not TypeError: an SDK refusal is a sentence written
-    // to be read by whoever typed the command, and printing it without a stack
-    // is right. Every *other* TypeError is a bug in this file — reading a
-    // property off an undefined — and printing that one the same way disguises
-    // a crash as bad input, with the stack that would locate it thrown away.
-    if (err instanceof Died || err instanceof MandalaError || err instanceof ValidationError) {
-      process.stderr.write(`mandala: ${err.message}\n`);
-      return 1;
-    }
-    // A Node SystemError — ENOENT, EACCES, ECONNREFUSED — whose message is
-    // already the whole of what a user can act on. Tested on the type of
-    // `code` rather than its presence, which is what the transport's own two
-    // readers of the field do: every DOMException carries a NUMERIC legacy
-    // `code` on its prototype, so `'code' in err` also caught the internal
-    // faults the comment above says deserve their stack. A malformed terminal
-    // URL is one — `new WebSocket(url)` throws code 12 — and it printed as the
-    // unlocatable one-liner `mandala: hash`.
-    if (err instanceof Error && typeof (err as { code?: unknown }).code === 'string') {
-      process.stderr.write(`mandala: ${err.message}\n`);
-      return 1;
-    }
-    throw err;
-  }
+export async function main(
+  argv: string[] = process.argv.slice(2),
+  overrides: Partial<CliIO> = {},
+): Promise<number> {
+  return runCli(argv, runtime(overrides), { ssh: cmdSsh, scp: cmdScp });
 }
 
 // Guarded so importing this module — which the tests do, for remoteSide — does
