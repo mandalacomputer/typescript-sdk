@@ -17,6 +17,8 @@ import {
 } from '../src/cli-options.js';
 
 const expectedCommands = [
+  'account',
+  'usage',
   'computers list',
   'computers create',
   'computers get',
@@ -107,6 +109,19 @@ describe('one command inventory', () => {
     });
   });
 
+  it('advertises finite account and usage reads without resource selectors', () => {
+    const entries = manifest().commands.filter((c) => ['account', 'usage'].includes(c.path[0]!));
+    expect(
+      entries.map((c) => ({ path: c.path, arguments: c.arguments, jsonMode: c.jsonMode })),
+    ).toEqual([
+      { path: ['account'], arguments: [], jsonMode: 'finite' },
+      { path: ['usage'], arguments: [], jsonMode: 'finite' },
+    ]);
+    expect(entries[0]!.flags.map((f) => f.name)).toEqual(['json', 'help']);
+    expect(entries[1]!.flags.map((f) => f.name)).toEqual(['json', 'help', 'from', 'to']);
+    expect(help('usage')).toContain('RFC 3339 timestamp with a time zone');
+  });
+
   for (const command of COMMANDS) {
     it(`parses and advertises every flag of ${command.path}`, () => {
       const entry = manifest().commands.find((c) => c.path.join(' ') === command.path)!;
@@ -161,6 +176,9 @@ describe('offline discovery', () => {
     ['snapshots', 'schedule', '--help'],
     ['ssh', '--help'],
     ['scp', '--help'],
+    ['account', '--help'],
+    ['usage', '--help'],
+    ['usage', '--from', 'invalid', '--help'],
   ])('%j needs no credentials', async (...args) => {
     const result = await offline(args);
     expect(result.code).toBe(0);
@@ -207,6 +225,10 @@ describe('offline discovery', () => {
     );
     const values = `${completion('bash')}\nCOMP_WORDS=(mandala computers list --state lo); COMP_CWORD=4; _mandala_complete; printf '%s\\n' "\${COMPREPLY[@]}"`;
     expect(execFileSync('/bin/bash', ['-c', values], { encoding: 'utf8' })).toBe('lost\n');
+    const reads = `${completion('bash')}\nCOMP_WORDS=(mandala acc); COMP_CWORD=1; _mandala_complete; printf '%s\\n' "\${COMPREPLY[@]}"\nCOMP_WORDS=(mandala usa); COMP_CWORD=1; _mandala_complete; printf '%s\\n' "\${COMPREPLY[@]}"\nCOMP_WORDS=(mandala usage --fr); COMP_CWORD=2; _mandala_complete; printf '%s\\n' "\${COMPREPLY[@]}"\nCOMP_WORDS=(mandala usage --to); COMP_CWORD=2; _mandala_complete; printf '%s\\n' "\${COMPREPLY[@]}"`;
+    expect(execFileSync('/bin/bash', ['-c', reads], { encoding: 'utf8' })).toBe(
+      'account\nusage\n--from\n--to\n',
+    );
   });
 
   const fishAvailable = spawnSync('fish', ['--version'], { encoding: 'utf8' }).status === 0;
@@ -220,6 +242,10 @@ describe('offline discovery', () => {
     ['mandala computers --json exec desktop --ti', '--timeout'],
     ['mandala --json snapshots schedule cl', 'clear'],
     ['mandala --json computers list --state lo', 'lost'],
+    ['mandala acc', 'account'],
+    ['mandala usa', 'usage'],
+    ['mandala usage --fr', '--from'],
+    ['mandala --json usage --to', '--to'],
   ])('fish completes %s from the actual command context', async (line, expected) => {
     expect(fishAvailable, 'CI requires fish for shell completion probes').toBe(true);
     const directory = await mkdtemp(join(tmpdir(), 'mandala-fish-'));

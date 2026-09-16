@@ -3,11 +3,11 @@ import process from 'node:process';
 import { completion } from './cli-completion.js';
 import { manifest } from './cli-manifest.js';
 import { CliError, help, type Parsed, parseArgs } from './cli-options.js';
-import { errorInfo, Output } from './cli-output.js';
+import { errorInfo, Output, redact } from './cli-output.js';
 import { type CliIO, documentInput, readInput } from './cli-runtime.js';
 import type { Computer } from './computer.js';
 import { MandalaError, NotFoundError, ValidationError } from './errors.js';
-import type { BuildProgress, Client, Listing } from './index.js';
+import type { AccountQuota, BuildProgress, Client, Listing, UsageReport } from './index.js';
 import * as P from './paths.js';
 import { checkWait } from './wait.js';
 
@@ -82,6 +82,92 @@ const publicWebhook = (value: { raw: Record<string, unknown> }, secret?: string)
   return secret === undefined ? data : { ...data, secret };
 };
 
+function accountText(q: AccountQuota): string {
+  const amount = (value: number | null) => (value === null ? 'unknown' : String(value));
+  const pool = (label: string, used: number | null, limit: number, remaining: number | null) =>
+    `${label}: used ${amount(used)}; limit ${limit}; remaining ${amount(remaining)}`;
+  return [
+    'Account quota (instantaneous, account-wide)',
+    `Observed: ${q.observedAt}`,
+    `Plan: ${q.plan.label} (${q.plan.id})`,
+    'Advisory: headroom is not a reservation or host-capacity guarantee and can change immediately.',
+    `Computer inventory: ${q.complete.computers ? 'complete' : 'unknown; consumption and remaining headroom are unknown'}`,
+    `Snapshot inventory: ${q.complete.snapshots ? 'complete' : 'unknown; consumption and remaining headroom are unknown'}`,
+    pool('Kept computers', q.usage.keptComputers, q.limits.maxComputers, q.remaining.keptComputers),
+    pool('Configured vCPU', q.usage.configuredVcpu, q.limits.vcpuPool, q.remaining.configuredVcpu),
+    pool(
+      'Configured disk (GiB)',
+      q.usage.configuredDiskGb,
+      q.limits.diskPoolGb,
+      q.remaining.configuredDiskGb,
+    ),
+    `Running/reserved computers: ${amount(q.usage.runningOrReservedComputers)}`,
+    `Running/reserved vCPU: ${amount(q.usage.runningOrReservedVcpu)}`,
+    pool(
+      'Running/reserved RAM (MiB)',
+      q.usage.runningOrReservedRamMb,
+      q.limits.ramPoolMb,
+      q.remaining.runningOrReservedRamMb,
+    ),
+    pool(
+      'Indexed snapshot storage (bytes)',
+      q.usage.snapshotStorageBytes,
+      q.limits.snapshotStorageBytes,
+      q.remaining.snapshotStorageBytes,
+    ),
+    'Snapshot storage excludes in-flight capture reservations; its headroom does not predict capture admission.',
+    `Per-computer maxima: ${q.perComputer.maxVcpu} vCPU; ${q.perComputer.maxRamMb} MiB RAM; ${q.perComputer.maxDiskGb} GiB disk`,
+    `Windows capability: ${q.capabilities.windows ? 'yes' : 'no'}`,
+  ].join('\n');
+}
+
+function usageText(u: UsageReport): string {
+  return [
+    'Historical metered usage (account-wide)',
+    `Completeness: degraded=${u.degraded}; unmetered=${u.unmetered}`,
+    ...(u.degraded
+      ? ['Incomplete: some usage could not be read; totals may be too small. Retry later.']
+      : []),
+    ...(u.unmetered
+      ? ['Incomplete: some usage was not metered; retrying alone will not recover it.']
+      : []),
+    `Measured window: ${u.from} to ${u.to}`,
+    `Billing period: ${u.period.start} to ${u.period.end} (${u.period.source})`,
+    `Settled for billing through: ${u.reportedThrough ?? 'none of this window'}`,
+    `Run hours: ${u.usage.runHours}`,
+    `vCPU-hours: ${u.usage.vcpuHours}`,
+    `RAM GB-hours: ${u.usage.ramGbHours}`,
+    `Disk GB-hours: ${u.usage.diskGbHours}; GB-months: ${u.usage.diskGbMonths}`,
+    `Snapshot GB-hours: ${u.usage.snapshotGbHours}; GB-months: ${u.usage.snapshotGbMonths}`,
+    ...(!u.breakdown
+      ? ['Computer breakdown: withheld for this credential; account totals still apply']
+      : [
+          `Computer breakdown: ${u.usage.computers.length ? 'available' : 'empty'}`,
+          ...u.usage.computers.map(
+            (c) =>
+              `  ${c.name || c.id} (${c.id})${c.gone ? ' [deleted]' : ''}: ${c.runHours} run hours; ${c.vcpuHours} vCPU-hours; ${c.ramGbHours} RAM GB-hours`,
+          ),
+        ]),
+  ].join('\n');
+}
+
+function checkUsageWindow(from?: string, to?: string): void {
+  P.usageQuery(from, to);
+  for (const [name, value] of [
+    ['from', from],
+    ['to', to],
+  ] as const) {
+    if (value !== undefined && !Number.isFinite(Date.parse(value)))
+      throw new CliError(
+        'invalid_arguments',
+        `--${name} must be a valid RFC 3339 timestamp with a time zone`,
+      );
+  }
+  if (from !== undefined && to !== undefined && Date.parse(from) >= Date.parse(to))
+    throw new CliError('invalid_arguments', '--from must be before --to');
+  // Default bounds, retention and future-end clamping depend on the API's clock and billing period.
+}
+
 export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands): Promise<number> {
   // Used only if parsing fails before it can return its explicit output mode.
   let output = new Output(io, '', argv.includes('--json'));
@@ -130,6 +216,8 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
     if (wait.timeoutMs !== undefined || wait.pollMs !== undefined)
       checkWait(wait.timeoutMs ?? 60_000, wait.pollMs ?? 1_000);
     const call = { signal };
+    const usageWindow = { from: s('from'), to: s('to'), signal };
+    if (path === 'usage') checkUsageWindow(usageWindow.from, usageWindow.to);
     // Preparation and pure SDK validation happen before name resolution or any request.
     const create = {
       name: s('name'),
@@ -225,6 +313,21 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
     const client = io.createClient();
     const computer = () => resolveComputer(client, target, signal);
     switch (path) {
+      case 'account': {
+        const quota = await client.account.read(call);
+        const { raw: _raw, ...data } = quota;
+        if (json) return output.result(data);
+        io.stdout.write(`${redact(accountText(quota), io.env)}\n`);
+        return 0;
+      }
+      case 'usage': {
+        const report = await client.usage.read(usageWindow);
+        const { raw: _raw, ...data } = report;
+        if (json)
+          return output.result({ ...data, reportedThrough: report.reportedThrough ?? null });
+        io.stdout.write(`${redact(usageText(report), io.env)}\n`);
+        return 0;
+      }
       case 'computers list': {
         const listing = await client.computers.listWithStatus({
           allowPartial: b('allow-partial'),

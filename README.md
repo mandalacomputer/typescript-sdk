@@ -2198,8 +2198,9 @@ cannot safely recommend replaying for an arbitrary operation.
 ## The `mandala` CLI
 
 The same package provides commands for computers, templates, snapshots, webhooks,
-and agent runs. The CLI requires Node 22+; importing the SDK does not import the
-CLI or its terminal dependencies. Use `npx mandala` from a project with the package
+account quota, historical usage, and agent runs. The CLI requires Node 22+;
+importing the SDK does not import the CLI or its terminal dependencies.
+Use `npx mandala` from a project with the package
 installed, or prefix the commands below with `npx --package=mandala-computer`.
 
 ```sh
@@ -2210,9 +2211,8 @@ npx --package=mandala-computer mandala computers list --json
 
 Requests use `MANDALA_API_KEY`, with `MANDALA_BASE_URL` as an optional server
 override. Agent runs also require `MANDALA_MODEL_KEY`, your model-provider key.
-There is no CLI login, credentials file, profile selection, account command, or
-usage command in this release; those commands are deferred. The SDK's
-[`client.usage.read()`](#usage) remains available.
+There is no CLI login, credentials file, or profile selection in this release.
+Account and usage reads use the account bound to `MANDALA_API_KEY` and need no model key.
 
 ### Discover commands and flags
 
@@ -2228,7 +2228,7 @@ credentials nor network access and never prompt for input.
 | `snapshots` | `list`, `create`, `restore`, `clone`, `delete`, `holdings`, `schedule get`, `schedule set`, `schedule clear`, `retention` |
 | `webhooks` | `list`, `create`, `get`, `update`, `delete`, `rotate`, `test`, `deliveries` |
 | `agent` | `run` |
-| Top-level commands | `ssh`, `scp`, `manifest`, `completion` |
+| Top-level commands | `account`, `usage`, `ssh`, `scp`, `manifest`, `completion` |
 
 Command-specific flags follow the command name. Flags with values accept
 `--name value` or `--name=value`; boolean flags take no value. Repeat only flags
@@ -2256,6 +2256,56 @@ mandala completion fish
 Each command prints a script to stdout. Save or source it according to your shell's
 completion setup; the CLI does not edit shell files or install completions.
 `--json` returns the script as `data.script` alongside `data.shell`.
+
+### Account quota and historical usage
+
+```sh
+mandala account
+mandala account --json
+mandala usage
+mandala usage --from 2026-08-01T00:00:00Z --to 2026-09-01T00:00:00Z --json
+```
+
+`account` reads instantaneous account-wide quota through `client.account.read()`.
+It takes no arguments or account/computer selectors. The report includes the
+plan, pool ceilings, per-computer maxima, Windows capability, observed consumption,
+and remaining headroom. Configured vCPU and disk include stopped computers;
+running/reserved RAM is a separate pool. Disk is in GiB, RAM in MiB, and indexed
+snapshot storage in exact bytes. Snapshot storage excludes in-flight capture
+reservations, so its remaining headroom does not predict capture admission.
+
+Check `complete.computers` and `complete.snapshots` independently. An incomplete
+group has explicit `null` consumption and remaining fields, and human output
+labels them `unknown`. A complete empty inventory has numeric zeros; a zero plan
+ceiling is a real limit. Usage above a ceiling stays visible even when remaining
+headroom is zero. `observedAt` is the observation time, and `advisory: true` means
+headroom is not a reservation or host-capacity guarantee and can change immediately.
+This read performs no lifecycle actions.
+
+`usage` reads historical metering through `client.usage.read()`. Omit both bounds
+to use the API's current billing-period window. `--from` and `--to` independently
+accept RFC 3339 timestamps with a time zone, including offsets and fractional
+seconds; valid strings are sent unchanged. Invalid timestamps and equal or
+reversed explicit bounds fail before a request. Send both bounds for a closed
+period, since an omitted `from` defaults to the current billing period's start.
+The API enforces retention and window limits and caps future end times; the
+returned `from` and `to` identify the window actually measured. `period` still
+describes the account's current billing period.
+
+Historical totals retain run hours, vCPU-hours, RAM GB-hours, disk GB-hours and
+GB-months, snapshot GB-hours and GB-months, and the per-computer breakdown.
+Check `degraded` and `unmetered` before using the numbers: both mean totals may be
+too small. A degraded read can recover on retry; retrying alone does not recover
+unmetered usage. `breakdown: false` means computer details were withheld for the
+credential, even though account totals are present. It differs from a complete
+empty breakdown. `reportedThrough` identifies the last UTC day settled for billing;
+the CLI emits `null` when none of the window has settled.
+
+Both commands return one finite JSON envelope with the typed SDK's camelCase
+fields in `data`, excluding the SDK's duplicate `raw` payload. Partial reports
+remain successful reads with their completeness fields intact. Failed or malformed
+reads return an error and exit nonzero. Human output explains the same caveats
+before the figures. These reads support the usual cancellation and redaction rules.
 
 ### Computers and remote commands
 
@@ -2408,8 +2458,8 @@ SDK failures use their error-class names, such as `AuthenticationError`.
 template document keeps its `data` with `ok: false` and a nonzero `exitCode`.
 Consumers should distinguish an unsuccessful result from a request that raised
 an `error` and tolerate additional fields within version 1. Resource payloads
-retain their API field names. Exec and agent summaries use the SDK's camelCase
-fields described above. Computer results omit desktop credentials.
+retain their API field names. Account, usage, exec, and agent results use the SDK's
+camelCase fields described above. Computer results omit desktop credentials.
 
 Computer, template, and snapshot listings return `data.items` and
 `data.incomplete`. `null` means complete; any number, **including zero**, means

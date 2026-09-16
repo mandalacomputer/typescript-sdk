@@ -4,11 +4,13 @@
  * Pure helpers and the socket/stream boundaries of the interactive ssh loop.
  */
 
+import { execFileSync, spawnSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Writable } from 'node:stream';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 import {
   download,
@@ -32,7 +34,84 @@ import {
   writeFully,
 } from '../src/cli.js';
 import type { FileChunk } from '../src/index.js';
-import { BASE, COMPUTER, FakeSocket, json, recorder } from './harness.js';
+import { BASE, COMPUTER, FakeSocket, json, recorder, USAGE } from './harness.js';
+
+it('runs built account and usage commands with finite output and process exits', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'mandala-cli-reads-'));
+  try {
+    execFileSync(
+      process.execPath,
+      [
+        fileURLToPath(new URL('../node_modules/typescript/bin/tsc', import.meta.url)),
+        '-p',
+        'tsconfig.build.json',
+        '--outDir',
+        directory,
+      ],
+      { cwd: fileURLToPath(new URL('..', import.meta.url)), timeout: 30_000 },
+    );
+    await writeFile(join(directory, 'package.json'), '{"type":"module"}');
+    const preload = join(directory, 'fetch.mjs');
+    await writeFile(
+      preload,
+      `
+const report = ${JSON.stringify(USAGE)};
+globalThis.fetch = async (input, init) => {
+  const url = new URL(String(input));
+  if (init.method !== 'GET' || init.body || !['/api/v1/account', '/api/v1/usage'].includes(url.pathname))
+    throw new Error('unexpected request');
+  if (url.pathname.endsWith('/account')) return Response.json({});
+  if (url.searchParams.get('from') !== '2026-08-01T00:00:00+01:00') throw new Error('changed bound');
+  return Response.json(report);
+};`,
+    );
+    const run = (args: string[]) =>
+      spawnSync(process.execPath, ['--import', preload, join(directory, 'cli.js'), ...args], {
+        cwd: directory,
+        env: {
+          ...process.env,
+          MANDALA_API_KEY: 'com_executable_test',
+          MANDALA_MODEL_KEY: '',
+          MANDALA_BASE_URL: BASE,
+        },
+        encoding: 'utf8',
+        timeout: 10_000,
+      });
+    const historical = run(['usage', '--from', '2026-08-01T00:00:00+01:00', '--json']);
+    expect(historical.error).toBeUndefined();
+    expect(historical.status).toBe(0);
+    expect(historical.stderr).toBe('');
+    expect(historical.stdout.trim().split('\n')).toHaveLength(1);
+    expect(JSON.parse(historical.stdout)).toMatchObject({
+      schemaVersion: 1,
+      command: 'usage',
+      ok: true,
+      exitCode: 0,
+      data: { usage: { vcpuHours: 25 } },
+    });
+    const malformed = run(['account', '--json']);
+    expect(malformed.status).toBe(1);
+    expect(malformed.stderr).toBe('');
+    expect(JSON.parse(malformed.stdout)).toMatchObject({
+      schemaVersion: 1,
+      command: 'account',
+      ok: false,
+      exitCode: 1,
+      error: { code: 'MandalaError' },
+    });
+    const invalid = run(['usage', '--to', '2026-08-01', '--json']);
+    expect(invalid.status).toBe(1);
+    expect(JSON.parse(invalid.stdout).error.code).toBe('invalid_arguments');
+    for (const command of ['account', 'usage']) {
+      const help = run([command, '--help']);
+      expect(help.status).toBe(0);
+      expect(help.stdout).toContain(`mandala ${command}`);
+      expect(help.stderr).toBe('');
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+}, 40_000);
 
 describe('terminal lifecycle', () => {
   it('rejects a websocket that closes before its handshake opens', async () => {
