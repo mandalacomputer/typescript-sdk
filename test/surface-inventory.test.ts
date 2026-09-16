@@ -274,6 +274,8 @@ describe('the inventory of this SDK', () => {
     // Named individually rather than left to a count: every one of these shares
     // a route with a method that WAS exercised, which is how they went missing.
     for (const method of [
+      'Computer.execution',
+      'Computer.executionOutput',
       'Computer.agent',
       'Computer.agentStream',
       'Computer.open',

@@ -144,6 +144,7 @@ export {
   STREAM_FRAME_TYPES,
   unarmedTrees,
 } from './events.js';
+export type { ExecutionMetadata, ExecutionOutput, ExecutionOutputOptions } from './executions.js';
 export type {
   BackgroundExec,
   BuildProgress,

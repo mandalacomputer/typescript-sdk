@@ -10,7 +10,7 @@
  */
 
 import { MandalaError, ValidationError } from './errors.js';
-import { isRecord, MOVES } from './paths.js';
+import { isExecutionId, isRecord, MOVES } from './paths.js';
 
 /**
  * A string from a payload, with a fallback for an absent one.
@@ -2026,6 +2026,8 @@ export function toExecResult(d: Record<string, unknown>): ExecResult {
  */
 export type BackgroundExec = {
   pid: number;
+  /** Stable identity when supported; PID routes remain shared, consuming reads. */
+  executionId?: string;
   running: boolean;
   /** Set once it has exited. `undefined` while it is still running. */
   exitCode?: number;
@@ -2084,6 +2086,9 @@ const stillRunning = (d: Record<string, unknown>): boolean => {
 };
 
 export function toBackgroundExec(d: Record<string, unknown>): BackgroundExec {
+  if ('execution_id' in d && !isExecutionId(d.execution_id)) {
+    throw new MandalaError('invalid background execution_id');
+  }
   const pid = num(d.pid);
   // The pid is the handle: every poll and every kill is aimed at it, and 0 is
   // not a job on either guest OS. Defaulted to 0 the way every other number
@@ -2106,6 +2111,7 @@ export function toBackgroundExec(d: Record<string, unknown>): BackgroundExec {
   const errText = lazyText(stderr);
   return {
     pid,
+    ...(isExecutionId(d.execution_id) ? { executionId: d.execution_id } : {}),
     running: stillRunning(d),
     // Absent and null are "did not send one" and read `undefined`; anything
     // else that `count` cannot read as a number — `"killed"`, `"signal:9"`, an

@@ -33,7 +33,15 @@ import {
   UNIMPLEMENTED,
   UNIMPLEMENTED_PARAMETERS,
 } from './allowlist.js';
-import { anyRoute, BASE, type Call, EVENTS_HELLO, recorder, socketFactory } from './harness.js';
+import {
+  anyRoute,
+  BASE,
+  type Call,
+  EVENTS_HELLO,
+  json,
+  recorder,
+  socketFactory,
+} from './harness.js';
 import { inventory, names, recordNamedCalls } from './surface-inventory.js';
 
 /**
@@ -41,6 +49,33 @@ import { inventory, names, recordNamedCalls } from './surface-inventory.js';
  * class that declares it — read out of `src` rather than listed here.
  */
 const SURFACE = inventory();
+
+/** The new stable reads use their finite response contracts. */
+const executionRoutes = (call: Call): Response | Promise<Response> => {
+  const executionId = 'exec_0123456789abcdef0123456789abcdef';
+  if (call.path.endsWith(`/executions/${executionId}/output`))
+    return json({
+      execution_id: executionId,
+      stdout_b64: '',
+      stderr_b64: '',
+      stdout_offset: 0,
+      stderr_offset: 0,
+      stdout_more: false,
+      stderr_more: false,
+      diagnostic_b64: '',
+      diagnostic_truncated: false,
+    });
+  if (call.path.endsWith(`/executions/${executionId}`))
+    return json({
+      execution_id: executionId,
+      computer_id: 'vm-1',
+      pid: 42,
+      status: 'running',
+      started_at: '2026-09-15T12:00:00Z',
+      output_source: 'volatile_guest_files',
+    });
+  return anyRoute(call);
+};
 
 /**
  * Call every method the SDK exposes that performs a request.
@@ -179,6 +214,12 @@ async function exerciseEverything(client: Client): Promise<void> {
   await c.execBackground('make', { desktop: true, cwd: '/src', env: { CI: '1' } });
   await c.execPoll(42);
   await c.execKill(42);
+  await c.execution('exec_0123456789abcdef0123456789abcdef');
+  await c.executionOutput('exec_0123456789abcdef0123456789abcdef', {
+    stdoutOffset: 0,
+    stderrOffset: 0,
+    limit: 1024,
+  });
   await c.open('https://example.com');
 
   await c.readFile('/home/user/out.txt');
@@ -283,7 +324,7 @@ async function exerciseEverything(client: Client): Promise<void> {
 
 /** Every call the SDK made, with its route reduced to a pattern. */
 const record = async (): Promise<Call[]> => {
-  const rec = recorder(anyRoute);
+  const rec = recorder(executionRoutes);
   await exerciseEverything(new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: rec.fetch }));
   return rec.calls;
 };
@@ -358,7 +399,7 @@ describe('surface', () => {
     // The inventory is derived from the source, so closing this is adding the
     // call rather than editing a list, and a method added tomorrow is in the
     // inventory before anybody thinks about coverage.
-    const rec = recorder(anyRoute);
+    const rec = recorder(executionRoutes);
     const client = new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: rec.fetch });
     const named = await recordNamedCalls(SURFACE, [exerciseEverything], () =>
       exerciseEverything(client),
@@ -380,7 +421,7 @@ describe('surface', () => {
     // them apart, and without this the new assertion would be as unfalsifiable
     // as the one it was written to shore up.
     const run = async (exercise: (c: Computer) => Promise<void>) => {
-      const rec = recorder(anyRoute);
+      const rec = recorder(executionRoutes);
       const client = new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: rec.fetch });
       const computer = await client.computers.get('vm-1');
       const named = await recordNamedCalls(SURFACE, [exercise], () => exercise(computer));

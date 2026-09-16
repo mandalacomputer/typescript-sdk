@@ -38,6 +38,13 @@ import {
   unarmedTrees,
   watchList,
 } from './events.js';
+import {
+  type ExecutionMetadata,
+  type ExecutionOutput,
+  type ExecutionOutputOptions,
+  toExecutionMetadata,
+  toExecutionOutput,
+} from './executions.js';
 import type {
   BackgroundExec,
   ExecResult,
@@ -3157,6 +3164,36 @@ export class Computer {
       throw new MandalaError(`expected a background command from DELETE ${path}`);
     }
     return toBackgroundExec(data);
+  }
+
+  /** Last observed state by stable identity. Does not resume, wait, or read guest output. */
+  async execution(executionId: string, opts: CallOptions = {}): Promise<ExecutionMetadata> {
+    const computerId = this.id;
+    const path = P.execution(computerId, executionId);
+    const signal = opts.signal;
+    signal?.throwIfAborted();
+    const data = await this.#t.json('GET', path, { signal });
+    signal?.throwIfAborted();
+    return toExecutionMetadata(data, computerId, executionId);
+  }
+
+  /**
+   * One independent byte read from volatile guest files. Both positions are required.
+   * A false more flag is current EOF, not completion. Diagnostics repeat separately.
+   * No retry, resume, PID fallback, or command replay occurs, including on unavailable output.
+   * Guest I/O makes this unsuitable for passive history views; output is not retained.
+   */
+  async executionOutput(
+    executionId: string,
+    opts: ExecutionOutputOptions,
+  ): Promise<ExecutionOutput> {
+    const path = P.executionOutput(this.id, executionId);
+    const query = P.executionOutputQuery(opts);
+    const signal = opts.signal;
+    signal?.throwIfAborted();
+    const data = await this.#t.json('GET', path, { query, signal });
+    signal?.throwIfAborted();
+    return toExecutionOutput(data, executionId, query);
   }
 
   /**

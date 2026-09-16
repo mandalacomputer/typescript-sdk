@@ -188,6 +188,53 @@ export const execHandle = (id: string, pid: number): string => {
   return `${computer(id)}/exec/${pid}`;
 };
 
+/** Stable execution IDs are independent of reusable guest PIDs. */
+export const isExecutionId = (id: unknown): id is string =>
+  typeof id === 'string' && id.length === 37 && /^exec_[0-9a-f]{32}$/.test(id);
+
+export const execution = (id: string, executionId: string): string => {
+  if (!isExecutionId(executionId)) {
+    throw new ValidationError(
+      'executionId must be exec_ followed by 32 lowercase hexadecimal digits',
+    );
+  }
+  return `${computer(id)}/executions/${executionId}`;
+};
+
+export const executionOutput = (id: string, executionId: string): string =>
+  `${execution(id, executionId)}/output`;
+
+/** Each independent reader must supply both byte positions, even on its first read. */
+export function executionOutputQuery(opts: {
+  stdoutOffset: number;
+  stderrOffset: number;
+  limit?: number;
+}): { stdout_offset: number; stderr_offset: number; limit?: number } {
+  if (!isRecord(opts)) throw new ValidationError('execution output requires explicit offsets');
+  const { stdoutOffset, stderrOffset, limit } = opts;
+  const effectiveLimit = limit === undefined ? 65536 : limit;
+  if (!Number.isSafeInteger(effectiveLimit) || effectiveLimit < 1 || effectiveLimit > 1048576) {
+    throw new ValidationError('limit must be an integer from 1 to 1048576');
+  }
+  for (const [field, value] of [
+    ['stdoutOffset', stdoutOffset],
+    ['stderrOffset', stderrOffset],
+  ] as const) {
+    if (
+      !Number.isSafeInteger(value) ||
+      value < 0 ||
+      value > Number.MAX_SAFE_INTEGER - effectiveLimit
+    ) {
+      throw new ValidationError(`${field} must be a safe nonnegative integer with room for limit`);
+    }
+  }
+  return {
+    stdout_offset: stdoutOffset,
+    stderr_offset: stderrOffset,
+    ...(limit === undefined ? {} : { limit }),
+  };
+}
+
 /** One window on the desktop (OPL-3583). The id is `0x2600003`-shaped. */
 export const windowPath = (id: string, windowId: string): string =>
   `${computer(id)}/windows/${pathId(windowId, 'window id')}`;
