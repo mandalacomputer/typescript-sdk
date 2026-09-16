@@ -13,10 +13,16 @@ export type Flag = {
 export type Command = {
   path: string;
   description: string;
+  /** Positional names; a trailing `?` marks an optional one (shown as `[name]`). */
   args: readonly string[];
   argumentChoices?: Readonly<Record<string, readonly string[]>>;
   flags: readonly Flag[];
   jsonMode?: 'unsupported' | 'ndjson';
+  /**
+   * Everything after the positionals is handed on verbatim (`mandala ssh`),
+   * unless one of these flags was given before them.
+   */
+  passthrough?: { unless: readonly string[] };
 };
 
 const flag = (name: string, description: string, opts: Partial<Flag> = {}): Flag => ({
@@ -266,6 +272,43 @@ export const COMMANDS: readonly Command[] = [
     ],
     'ndjson',
   ),
+  {
+    ...command(
+      'ssh',
+      'OpenSSH session through the Mandala gateway; arguments after the computer go to ssh',
+      ['computer'],
+      [
+        bool('setup', 'Register your public key if needed, turn SSH on, print the connect command'),
+        flag(
+          'key',
+          'Public key for --setup (default: ~/.ssh/id_ed25519.pub, id_ecdsa.pub, id_rsa.pub)',
+        ),
+      ],
+      'unsupported',
+    ),
+    passthrough: { unless: ['setup'] },
+  },
+  command('ssh-key list', 'List your registered SSH public keys'),
+  command(
+    'ssh-key add',
+    'Register an SSH public key (default: ~/.ssh/id_ed25519.pub, id_ecdsa.pub, id_rsa.pub)',
+    ['path?'],
+    [flag('name', 'Label for the key (default: the key comment)')],
+  ),
+  command('ssh-key rm', 'Remove a registered SSH public key', ['id']),
+  {
+    ...command('ssh-access', 'Show SSH status for a computer, or turn it on or off', [
+      'computer',
+      'state?',
+    ]),
+    argumentChoices: { state: ['on', 'off'] },
+  },
+  command(
+    'ssh-config',
+    'Print a ~/.ssh/config block for ssh, scp, sftp and VS Code Remote-SSH',
+    ['computer'],
+    [bool('write', 'Add or replace the block in ~/.ssh/config')],
+  ),
   command(
     'terminal',
     'Interactive shell; --json fails before connecting',
@@ -281,18 +324,13 @@ export const COMMANDS: readonly Command[] = [
   },
 ];
 
-/**
- * `mandala ssh` is refused while it is rebuilt as a real OpenSSH session; the
- * websocket shell it used to open is `mandala terminal`. Printed verbatim.
- */
-export const SSH_REFUSAL =
-  'mandala ssh is being rebuilt as a real OpenSSH session; use "mandala terminal" for a shell.';
-
 export class CliError extends Error {
   constructor(
     public readonly code: string,
     message: string,
     public readonly details?: unknown,
+    /** The process exit status, when it is not 1. */
+    public readonly exitCode?: number,
   ) {
     super(message);
     this.name = 'CliError';
@@ -306,17 +344,28 @@ export type Parsed = {
   flags: Record<string, string | number | boolean | string[]>;
   help: boolean;
   json: boolean;
+  /** Arguments handed on verbatim, for a command with {@link Command.passthrough}. */
+  rest: string[];
 };
 
 export function usage(c: Command): string {
-  return `mandala ${c.path}${c.args.map((a) => ` <${a}>`).join('')}`;
+  return `mandala ${c.path}${c.args.map((a) => (a.endsWith('?') ? ` [${a.slice(0, -1)}]` : ` <${a}>`)).join('')}${c.passthrough ? ' [ssh-args...]' : ''}`;
 }
 
 export function parseArgs(argv: string[]): Parsed {
-  const parsed: Parsed = { path: '', args: [], flags: {}, help: false, json: false };
+  const parsed: Parsed = { path: '', args: [], flags: {}, help: false, json: false, rest: [] };
   let positional = false;
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!;
+    const through = parsed.command?.passthrough;
+    if (
+      through &&
+      parsed.args.length === parsed.command!.args.length &&
+      !through.unless.some((name) => parsed.flags[name] !== undefined)
+    ) {
+      parsed.rest = argv.slice(i);
+      break;
+    }
     if (!positional && arg === '--') {
       positional = true;
       continue;
@@ -367,7 +416,6 @@ export function parseArgs(argv: string[]): Parsed {
       continue;
     }
     if (!parsed.command) {
-      if (!parsed.path && arg === 'ssh') throw new CliError('invalid_arguments', SSH_REFUSAL);
       parsed.path = [parsed.path, arg].filter(Boolean).join(' ');
       parsed.command = COMMANDS.find((c) => c.path === parsed.path);
       if (!parsed.command && !COMMANDS.some((c) => c.path.startsWith(`${parsed.path} `)))
@@ -381,7 +429,12 @@ export function parseArgs(argv: string[]): Parsed {
       'invalid_arguments',
       `choose a command${parsed.path ? ` under ${parsed.path}` : ''}; use --help`,
     );
-  if (parsed.args.length !== c.args.length || parsed.args.some((a) => !a.trim()))
+  const required = c.args.filter((a) => !a.endsWith('?')).length;
+  if (
+    parsed.args.length < required ||
+    parsed.args.length > c.args.length ||
+    parsed.args.some((a) => !a.trim())
+  )
     throw new CliError(
       'invalid_arguments',
       c.path === 'terminal' && parsed.args.length > 1
@@ -389,9 +442,10 @@ export function parseArgs(argv: string[]): Parsed {
         : usage(c),
     );
   c.args.forEach((name, i) => {
-    const choices = c.argumentChoices?.[name];
-    if (choices && !choices.includes(parsed.args[i]!))
-      throw new CliError('invalid_arguments', `${name} must be one of: ${choices.join(', ')}`);
+    const bare = name.replace(/\?$/, '');
+    const choices = c.argumentChoices?.[bare];
+    if (choices && i < parsed.args.length && !choices.includes(parsed.args[i]!))
+      throw new CliError('invalid_arguments', `${bare} must be one of: ${choices.join(', ')}`);
   });
   for (const f of c.flags) {
     if (f.required && parsed.flags[f.name] === undefined)
@@ -408,5 +462,5 @@ export function parseArgs(argv: string[]): Parsed {
 export function help(path = ''): string {
   const matches = COMMANDS.filter((c) => !path || c.path === path || c.path.startsWith(`${path} `));
   const exact = matches.length === 1 ? matches[0] : undefined;
-  return `mandala — cloud computers from your terminal\n\n${matches.map((c) => `  ${usage(c)}\n    ${c.description}`).join('\n')}\n\n${[...GLOBAL_FLAGS, ...(exact?.flags ?? [])].map((f) => `  --${f.name}${f.alias ? `, -${f.alias}` : ''}${f.type === 'boolean' ? '' : ` <${f.type}>`}${f.required ? ' (required)' : ''}  ${f.description}`).join('\n')}\n\nMANDALA_API_KEY authenticates requests; MANDALA_BASE_URL optionally selects a server.\nMANDALA_MODEL_KEY is required for agent run. No credentials are needed for help, manifest or completion.\n`;
+  return `mandala — cloud computers from your terminal\n\n${matches.map((c) => `  ${usage(c)}\n    ${c.description}`).join('\n')}\n\n${[...GLOBAL_FLAGS, ...(exact?.flags ?? [])].map((f) => `  --${f.name}${f.alias ? `, -${f.alias}` : ''}${f.type === 'boolean' ? '' : ` <${f.type}>`}${f.required ? ' (required)' : ''}  ${f.description}`).join('\n')}\n\nMANDALA_API_KEY authenticates requests; MANDALA_BASE_URL optionally selects a server.\nMANDALA_MODEL_KEY is required for agent run. No credentials are needed for help, manifest or completion.\n${path.startsWith('ssh') ? `\nmandala ssh: our options go before <computer> (with --setup, --key and --json may follow it);\neverything after it goes to ssh unchanged. It never falls back to mandala terminal.\nMANDALA_SSH_GATEWAY=host[:port] (default ssh.mandala.computer:2222) and\nMANDALA_SSH_GATEWAY_KNOWN_HOSTS (a known_hosts line, or file, pinning that gateway's key)\npoint the SSH commands at another gateway.\n` : ''}`;
 }

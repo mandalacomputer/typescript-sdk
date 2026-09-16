@@ -985,19 +985,16 @@ describe('argument handling', () => {
     expect(out).toContain('runs no command');
   });
 
-  it('refuses ssh with one stderr line and nothing on stdout', async () => {
+  it('answers ssh --help offline, and never opens the websocket terminal for ssh', async () => {
     const { main } = await import('../src/cli.js');
-    const line =
-      'mandala ssh is being rebuilt as a real OpenSSH session; use "mandala terminal" for a shell.\n';
-    for (const args of [
-      ['ssh'],
-      ['ssh', 'demo'],
-      ['ssh', 'demo', '--session', 'x'],
-      ['ssh', '--help'],
-    ]) {
+    for (const [args, code, wanted] of [
+      [['ssh', '--help'], 0, 'OpenSSH session through the Mandala gateway'],
+      [['ssh'], 1, 'mandala ssh <computer> [ssh-args...]'],
+      [['ssh', '--session', 'x', 'demo'], 1, 'unknown option --session'],
+    ] as const) {
       let out = '';
       let err = '';
-      const code = await main(args, {
+      const result = await main([...args], {
         env: {},
         stdout: {
           write: ((s: unknown) => {
@@ -1012,12 +1009,12 @@ describe('argument handling', () => {
           }) as NodeJS.WritableStream['write'],
         },
         createClient: () => {
-          throw new Error('ssh must not create a client');
+          throw new Error('ssh must not create a client here');
         },
       });
-      expect(code).not.toBe(0);
-      expect(out).toBe('');
-      expect(err).toBe(line);
+      expect(result).toBe(code);
+      expect(out + err).toContain(wanted);
+      expect(out + err).not.toContain('terminal session');
     }
   });
 });

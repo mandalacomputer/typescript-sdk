@@ -2938,3 +2938,81 @@ export function toWebhookDelivery(d: Record<string, unknown>): WebhookDelivery {
     raw: { ...d },
   };
 }
+
+// --- SSH ------------------------------------------------------------------
+
+/**
+ * One OpenSSH public key registered to the person the credential belongs to.
+ *
+ * A key is a person's, not an account's: every computer on every account that
+ * person can reach accepts it once SSH is switched on there.
+ */
+export type SshKey = {
+  /** `sshk-` and sixteen hex characters. */
+  id: string;
+  /** The label. Defaults to the comment that followed the key when it was added. */
+  name: string;
+  /** `<type> <base64>`, re-encoded: no options and no comment. */
+  publicKey: string;
+  /** `SHA256:` and 43 characters, exactly as `ssh-keygen -l -f <file>` prints it. */
+  fingerprint: string;
+  /** `ssh-ed25519`, `ecdsa-sha2-nistp256`, `ssh-rsa` and so on. */
+  keyType: string;
+  createdAt: string;
+  /** When the key last opened a connection to a computer; `null` until it has. */
+  lastUsedAt: string | null;
+  raw: Record<string, unknown>;
+};
+
+export function toSshKey(d: Record<string, unknown>): SshKey {
+  return {
+    id: str(d.id),
+    name: str(d.name),
+    publicKey: str(d.public_key),
+    fingerprint: str(d.fingerprint),
+    keyType: str(d.key_type),
+    createdAt: str(d.created_at),
+    lastUsedAt: stamp(d.last_used_at) ?? null,
+    raw: { ...d },
+  };
+}
+
+/**
+ * Whether SSH is on for one computer, and whether it can work there.
+ *
+ * `available` has three answers and all three matter: `false` is a computer
+ * made from an image that predates SSH (a new computer is the fix), `null` is
+ * one that has not been asked yet (it is asked when it next starts).
+ */
+export type SshAccess = {
+  /** The computer this is about. */
+  computer: string;
+  /** Switched on for this computer. Off until somebody switches it on. */
+  enabled: boolean;
+  /** Whether the computer can run SSH at all; `null` while that is not yet known. */
+  available: boolean | null;
+  /** The computer has yet to receive the current setting and key list. */
+  pending: boolean;
+  /** How many keys may log in: every key of every member of the account. `0` while off. */
+  keyCount: number;
+  /** How many of those the computer is given; lower than `keyCount` only past the per-computer cap. */
+  keysPushed: number;
+  /** Why the computer refused the current setting; `null` otherwise. */
+  error: string | null;
+  raw: Record<string, unknown>;
+};
+
+export function toSshAccess(d: Record<string, unknown>): SshAccess {
+  const available = wire(d.available);
+  return {
+    computer: str(d.computer),
+    // Strict: an `enabled` this client cannot read is not one to connect on.
+    enabled: said(d.enabled),
+    available: available === WIRE.TRUE ? true : available === WIRE.FALSE ? false : null,
+    pending: said(d.pending),
+    keyCount: num(d.key_count),
+    keysPushed: num(d.keys_pushed),
+    error: d.error == null ? null : str(d.error),
+    raw: { ...d },
+  };
+}

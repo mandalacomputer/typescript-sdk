@@ -67,6 +67,12 @@ export const RETENTION = 'retention';
  * by the control plane from its own tables, never by a hypervisor.
  */
 export const WEBHOOKS = 'webhooks';
+/**
+ * The caller's own SSH public keys. Scoped to the person rather than to a
+ * computer or an account: one key opens every computer that person can reach
+ * once SSH is switched on there.
+ */
+export const SSH_KEYS = 'ssh-keys';
 
 /**
  * One id, in a path, refused when it is empty.
@@ -171,6 +177,7 @@ type ComputerAction =
   | 'files'
   | 'snapshots'
   | 'schedule'
+  | 'ssh'
   | 'agent';
 
 export const computerAction = (id: string, action: ComputerAction): string =>
@@ -454,6 +461,7 @@ export function computerState(v: ComputerState | undefined): ComputerState | und
 }
 
 export const build = (id: string): string => `${BUILDS}/${pathId(id, 'build id')}`;
+export const sshKey = (id: string): string => `${SSH_KEYS}/${pathId(id, 'ssh key id')}`;
 export const webhook = (id: string): string => `${WEBHOOKS}/${pathId(id, 'webhook id')}`;
 export const webhookAction = (id: string, action: 'rotate' | 'test' | 'deliveries'): string =>
   `${webhook(id)}/${action}`;
@@ -1918,4 +1926,48 @@ export function webhookUpdateBody(args: WebhookUpdateArgs): Json {
     );
   }
   return body;
+}
+
+// --- SSH ------------------------------------------------------------------
+
+/** What a key is registered with. */
+export type SshKeyAddArgs = {
+  /** One OpenSSH public key line, as in `~/.ssh/id_ed25519.pub`. A comment is allowed. */
+  publicKey: string;
+  /** A label. The platform defaults it to the key line's comment. */
+  name?: string;
+};
+
+/**
+ * The body for `POST ssh-keys`.
+ *
+ * Only what is knowable here is checked: one non-empty line, and never a
+ * PRIVATE key — a file picked by mistake is the one error worth catching
+ * before it leaves the machine. Whether the line parses as a key is the
+ * platform's answer.
+ */
+export function sshKeyBody(args: SshKeyAddArgs): Json {
+  if (!isRecord(args)) {
+    throw new ValidationError(
+      `ssh key arguments must be an object with a publicKey (got ${typeof args})`,
+    );
+  }
+  const key = requireString(args.publicKey, 'publicKey').trim();
+  if (!key) throw new ValidationError('publicKey must not be empty');
+  if (key.includes('PRIVATE KEY')) {
+    throw new ValidationError('publicKey is a private key; pass the public key (the .pub file)');
+  }
+  if (/[\r\n]/.test(key)) throw new ValidationError('publicKey must be a single line');
+  if (args.name !== undefined && !requireString(args.name, 'name').trim()) {
+    throw new ValidationError('name must not be empty');
+  }
+  return omitUndefined({ public_key: key, name: args.name });
+}
+
+/** The body for `PUT computers/:id/ssh`. */
+export function sshAccessBody(enabled: boolean): Json {
+  if (typeof enabled !== 'boolean') {
+    throw new ValidationError(`enabled must be a boolean (got ${typeof enabled})`);
+  }
+  return { enabled };
 }

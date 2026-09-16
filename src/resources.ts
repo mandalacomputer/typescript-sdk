@@ -17,6 +17,7 @@ import type {
   RetiredTemplates,
   Size,
   Snapshot,
+  SshKey,
   Template,
   TemplateBuild,
   TemplateCheck,
@@ -40,6 +41,7 @@ import {
   toRetiredTemplates,
   toSize,
   toSnapshot,
+  toSshKey,
   toTemplate,
   toTemplateBuild,
   toTemplateCheck,
@@ -1865,5 +1867,55 @@ export class Webhooks {
     const path = P.webhookAction(webhookId, 'deliveries');
     const data = await this.#t.jsonArray('GET', path, { signal: opts.signal });
     return data.filter(P.isRecord).map(toWebhookDelivery);
+  }
+}
+
+/**
+ * The caller's SSH public keys.
+ *
+ * Keys belong to the person the credential belongs to, not to a computer: a
+ * registered key opens every computer that person can reach, on each computer
+ * where SSH is switched on ({@link Computer.setSshAccess}). A key can belong to
+ * one person only, so registering one somebody else holds is a
+ * `ConflictError`, as is a person's key past the per-person limit.
+ */
+export class SshKeys {
+  #t: Transport;
+
+  /** @internal */
+  constructor(transport: Transport) {
+    this.#t = transport;
+  }
+
+  /** Every key registered to the caller. */
+  async list(opts: CallOptions = {}): Promise<SshKey[]> {
+    const data = await this.#t.jsonArray('GET', P.SSH_KEYS, { signal: opts.signal });
+    return data.filter(P.isRecord).map(toSshKey);
+  }
+
+  /**
+   * Register one public key.
+   *
+   * ```ts
+   * const key = await client.sshKeys.add({
+   *   publicKey: await readFile(`${homedir()}/.ssh/id_ed25519.pub`, 'utf8'),
+   * });
+   * ```
+   *
+   * Registering a key that is already registered is a `ConflictError`; compare
+   * {@link SshKey.fingerprint} from {@link list} first to make it idempotent.
+   */
+  async add(args: P.SshKeyAddArgs, opts: CallOptions = {}): Promise<SshKey> {
+    const data = await this.#t.json('POST', P.SSH_KEYS, {
+      body: P.sshKeyBody(args),
+      signal: opts.signal,
+    });
+    if (!P.isRecord(data)) throw new MandalaError(`expected an ssh key from POST ${P.SSH_KEYS}`);
+    return toSshKey(data);
+  }
+
+  /** Remove one key. Computers stop accepting it once they receive the new list. */
+  async remove(keyId: string, opts: CallOptions = {}): Promise<void> {
+    await this.#t.json('DELETE', P.sshKey(keyId), { signal: opts.signal });
   }
 }

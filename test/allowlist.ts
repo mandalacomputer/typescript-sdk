@@ -160,12 +160,6 @@ export const UNIMPLEMENTED: ReadonlySet<string> = new Set([
   'GET computers/:id/activities/:activity/results',
   // Passive platform signals have no client convenience method yet.
   'GET computers/:id/signals',
-  // SSH keys and the per-computer SSH switch have no client methods yet.
-  'GET ssh-keys',
-  'POST ssh-keys',
-  'DELETE ssh-keys/:id',
-  'GET computers/:id/ssh',
-  'PUT computers/:id/ssh',
 ]);
 
 /**

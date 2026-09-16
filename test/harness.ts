@@ -762,6 +762,28 @@ export const agentEvents = (): Response =>
     { status: 200, headers: { 'content-type': 'text/event-stream' } },
   );
 
+/** A registered SSH key, as the platform's reference illustrates one. */
+export const SSH_KEY = {
+  id: 'sshk-a1b2c3d4e5f60718',
+  name: 'laptop',
+  public_key: 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJlZegWyY5KLksV9y22mZHnDI4qm++st9qZnbpSId1DR',
+  fingerprint: 'SHA256:09QlEDFrF+XXV/2u4X/pBAufS+8iaKwRzW6+EvIPVkg',
+  key_type: 'ssh-ed25519',
+  created_at: '2026-09-16T12:00:00.000Z',
+  last_used_at: null,
+};
+
+/** A computer with SSH on, one key, everything delivered. */
+export const SSH_ACCESS = {
+  computer: 'vm-1',
+  enabled: true,
+  available: true,
+  pending: false,
+  key_count: 1,
+  keys_pushed: 1,
+  error: null,
+};
+
 export const anyRoute: Responder = (call) => {
   const { path, method } = call;
   const get = method === 'GET';
@@ -854,6 +876,9 @@ export const anyRoute: Responder = (call) => {
   if (path.endsWith('/webhooks/whk-1/test')) return json(WEBHOOK_DELIVERY, { status: 202 });
   if (path.endsWith('/webhooks/whk-1/deliveries')) return json([WEBHOOK_DELIVERY]);
   if (/^\/webhooks\/[^/]+$/.test(path)) return json(method === 'DELETE' ? { ok: true } : WEBHOOK);
+  if (path === '/ssh-keys') return json(get ? [SSH_KEY] : SSH_KEY, get ? {} : { status: 201 });
+  if (/^\/ssh-keys\/[^/]+$/.test(path)) return new Response(null, { status: 204 });
+  if (path.endsWith('/ssh')) return json(SSH_ACCESS);
   if (path === '/moves') return json({ moves: [MOVE_DONE] });
   if (path.endsWith('/move')) return json(MOVE_STARTED, { status: 202 });
   if (path === '/computers') return json(get ? [COMPUTER] : COMPUTER);

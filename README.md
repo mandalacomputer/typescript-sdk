@@ -2384,7 +2384,8 @@ credentials nor network access and never prompt for input.
 | `snapshots` | `list`, `create`, `restore`, `clone`, `delete`, `holdings`, `schedule get`, `schedule set`, `schedule clear`, `retention` |
 | `webhooks` | `list`, `create`, `get`, `update`, `delete`, `rotate`, `test`, `deliveries` |
 | `agent` | `run` |
-| Top-level commands | `login`, `account`, `usage`, `terminal`, `scp`, `manifest`, `completion` |
+| `ssh-key` | `list`, `add`, `rm` |
+| Top-level commands | `login`, `account`, `usage`, `ssh`, `ssh-access`, `ssh-config`, `terminal`, `scp`, `manifest`, `completion` |
 
 Command-specific flags follow the command name. Flags with values accept
 `--name value` or `--name=value`; boolean flags take no value. Repeat only flags
@@ -2393,12 +2394,14 @@ Use `--` before a positional argument beginning with a dash. Unknown commands,
 unknown flags, and conflicting arguments fail instead of being ignored.
 
 `mandala manifest` prints a JSON command tree by default. Its `schemaVersion` is
-`1`; each entry in `commands` describes the command's `path` array, required
-`arguments`, `flags` with types and constraints, and `jsonMode` (`finite`,
-`ndjson`, or `unsupported`). Flags with aliases, choices, repetition, or conflicts
+`1`; each entry in `commands` describes the command's `path` array, its
+`arguments` (each marked `required` or not), `flags` with types and constraints,
+and `jsonMode` (`finite`, `ndjson`, or `unsupported`). `ssh` also carries
+`passthrough`: everything after its computer goes to `ssh` unless `--setup` came first. Flags with aliases, choices, repetition, or conflicts
 carry those properties. Conditional SDK requirements also appear in command help
-and the sections below. The manifest reports `terminal` as unsupported in JSON mode:
-`terminal --json` returns an error before resolving a computer or connecting.
+and the sections below. The manifest reports `terminal` and `ssh` as unsupported in
+JSON mode: `terminal --json` and `ssh --json` return an error before resolving a
+computer or connecting (`ssh --setup --json` is a finite result).
 `mandala manifest --json` wraps the tree in the finite result envelope below.
 
 Shell completion scripts come from the same command inventory:
@@ -2693,6 +2696,127 @@ A download is paged and written chunk by chunk, so it is not bounded by the
 exists for. A failure part-way leaves what arrived on disk, as scp and curl do.
 
 Both take a computer's name or its id and use the shared credential/profile selection.
+
+### SSH access
+
+`mandala ssh` is real OpenSSH: your own `ssh` binary, your own key, port
+forwarding, `scp` and `sftp`. Connections go through the platform's SSH gateway
+(`ssh.mandala.computer`, port 2222), a jump host that checks your key; the
+computer's own sshd then logs you in as `user`.
+
+Once per computer, register a public key and switch SSH on:
+
+```sh
+mandala ssh --setup dev            # uses ~/.ssh/id_ed25519.pub, id_ecdsa.pub or id_rsa.pub
+mandala ssh --setup dev --key ~/.ssh/work.pub
+```
+
+`--setup` is safe to repeat: a key whose fingerprint is already registered is
+not uploaded again. With `--json` it prints one finite result whose `data` is
+`{computer, name, key, key_added, ssh, command}`. Then connect. Everything after
+the computer goes to `ssh` unchanged, and `mandala ssh` exits with `ssh`'s own
+status:
+
+```sh
+mandala ssh dev
+mandala ssh dev -- uname -a
+mandala ssh dev -L 8080:localhost:8080     # the guest's port 8080 on yours
+mandala ssh dev -i ~/.ssh/work             # the key is offered to the gateway too
+```
+
+`mandala`'s own options go before the computer; with `--setup`, `--key` and
+`--json` may also follow it. `mandala ssh --json` is refused with exit 2: the
+session is interactive.
+
+The CLI fills in the jump and pins the gateway's host key, in a known_hosts
+file it keeps at `~/.mandala/ssh_known_hosts`. Each computer's own host key is
+trusted the first time you connect and stored in the same file under the
+computer's id, so renaming the computer does not look like a new machine. The
+jump is an explicit `ProxyCommand` rather than `-J`, because `ssh` does not
+apply `-o` options from its own command line to a `-J` hop.
+
+`mandala ssh` never falls back to `mandala terminal`. If SSH is off for the
+computer, you have no key registered, the computer was made from a template
+that predates SSH (create a new computer), or there is no `ssh` on your PATH
+(exit 127), it exits non-zero with one line saying what to do.
+
+The pieces, one at a time:
+
+```sh
+mandala ssh-key list               # --json for the rows
+mandala ssh-key add [PATH] [--name NAME]
+mandala ssh-key rm sshk-74025eba1b658b99
+mandala ssh-access dev             # the status; --json for the object
+mandala ssh-access dev on          # or off
+```
+
+A key belongs to you rather than to an account, and reaches the computers of
+every account you are an owner or member of. Each person holds eight.
+
+#### Without the CLI: `ssh-config`, VS Code, scp and sftp
+
+`mandala ssh-config dev` prints a `~/.ssh/config` entry: a `Host` block for the
+gateway, with its pinned key, and a `Host dev` block that jumps through it.
+`--write` adds it to `~/.ssh/config` between marker comments, replacing the
+block it wrote before for that computer and leaving everything else alone (a
+missing file is created with mode 0600). When the name cannot be a `Host`, or
+another computer has the same name, the block is written under the computer's
+id instead. After that, every OpenSSH tool knows the computer by name:
+
+```sh
+mandala ssh-config dev --write
+ssh dev
+scp report.csv dev:/home/user/
+sftp dev
+```
+
+In VS Code, with the Remote-SSH extension, run **Remote-SSH: Connect to
+Host…** and pick `dev`; it reads the same file. **Add New SSH Host** also
+takes the one-liner below, but the entry it writes carries no pinned gateway
+key, so prefer the `--write` entry.
+
+Without the CLI at all, this works once `ssh-access` is on and your key is
+registered (you will be asked to confirm the gateway's key the first time):
+
+```sh
+ssh -J mandala@ssh.mandala.computer:2222 user@dev
+```
+
+The gateway's host key fingerprint is
+`SHA256:09QlEDFrF+XXV/2u4X/pBAufS+8iaKwRzW6+EvIPVkg`.
+
+#### `terminal` or `ssh`?
+
+`mandala terminal` needs no key and no SSH setting: it is a shell over the
+platform's own websocket, on a PTY the platform keeps alive, so a disconnect
+detaches rather than ends it. `mandala ssh` is OpenSSH end to end, so it has
+forwarding, `scp`, `sftp`, agent forwarding and every editor that speaks SSH,
+and a session ends when the connection does.
+
+#### Self-hosting and testing
+
+Two environment variables point the CLI at another gateway:
+`MANDALA_SSH_GATEWAY=host:port` (port 2222 if omitted) and
+`MANDALA_SSH_GATEWAY_KNOWN_HOSTS`, a known_hosts line (or the path of a file of
+them) pinning that gateway's key. Without the second, the other gateway must
+present the public gateway's key.
+
+#### From the SDK
+
+```ts
+const key = await client.sshKeys.add({ publicKey: line, name: 'ci' }); // SshKey
+const keys = await client.sshKeys.list();
+await client.sshKeys.remove(key.id);
+
+const dev = await client.computers.get('vm-…');
+const access = await dev.setSshAccess(true); // or dev.sshAccess() to read
+```
+
+`SshAccess` has `enabled`, `available`, `pending`, `keyCount`, `keysPushed` and
+`error`. `available` is `false` for a computer made from a template that
+predates SSH, and `null` until the computer has been asked, which happens when
+it next starts. Registering a key that is already registered is a
+`ConflictError`.
 
 ## Design notes
 
