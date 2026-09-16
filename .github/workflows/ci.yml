@@ -25,6 +25,10 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
           cache: npm
+      - name: Install shells for completion tests
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends zsh fish
       - run: npm ci
       - run: npm run lint
       # This repo is public and the platform it speaks to is not. Every batch of

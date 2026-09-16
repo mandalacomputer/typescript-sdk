@@ -31,13 +31,19 @@ export function completion(shell: string): string {
     }
   }
   if (shell === 'fish') {
-    return `${[...contexts]
+    const globals = GLOBAL_FLAGS.flatMap((f) => [
+      `--${f.name}`,
+      ...(f.alias ? [`-${f.alias}`] : []),
+    ]);
+    const contextPatterns = [...contexts.keys()]
+      .filter(Boolean)
+      .map((key) => `'${key}'`)
+      .join(' ');
+    const matcher = `function __mandala_matches_context\n  set -l context ''\n  for word in (commandline -opc)[2..-1]\n    if contains -- "$word" ${globals.map((flag) => `'${flag}'`).join(' ')}\n      continue\n    end\n    if test "$word" = '--'\n      break\n    end\n    set -l candidate "$word"\n    if test -n "$context"\n      set candidate "$context $word"\n    end\n    switch "$candidate"\n      case ${contextPatterns}\n        set context "$candidate"\n    end\n  end\n  test "$context" = "$argv[1]"\nend\n`;
+    return `${matcher}${[...contexts]
       .flatMap(([context, candidates]) =>
         [...candidates].map((word) => {
-          const parts = context.split(' ').filter(Boolean);
-          const condition = parts.length
-            ? `test (string join ' ' (commandline -opc)[2..${parts.length + 1}]) = '${context}'`
-            : '__fish_use_subcommand';
+          const condition = `__mandala_matches_context '${context}'`;
           const spec = [
             ...GLOBAL_FLAGS,
             ...(COMMANDS.find((c) => c.path === context)?.flags ?? []),

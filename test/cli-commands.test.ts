@@ -1,7 +1,9 @@
+import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
+import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { main } from '../src/cli.js';
 import type { CliIO } from '../src/cli-runtime.js';
@@ -30,7 +32,12 @@ function harness(
   input?: string,
   environment: NodeJS.ProcessEnv = {},
 ) {
-  const rec = recorder(respond);
+  // The collection contains demo as a name, not as an ID. Its direct route is 404.
+  const rec = recorder((call) =>
+    call.method === 'GET' && call.path === `/computers/${COMPUTER.name}`
+      ? json({ error: 'no such computer ID' }, { status: 404 })
+      : respond(call),
+  );
   const stdout: Uint8Array[] = [];
   const stderr: Uint8Array[] = [];
   const stdin = Object.assign(Readable.from(input === undefined ? [] : [Buffer.from(input)]), {
@@ -151,6 +158,7 @@ describe('computer commands use distinct SDK requests', () => {
     const result = await h.run(['computers', 'get', COMPUTER.name]);
     expect(h.rec.routes()).toEqual([
       ['GET', 'computers'],
+      ['GET', `computers/${COMPUTER.name}`],
       ['GET', `computers/${COMPUTER.id}`],
     ]);
     expect(result.frames[0].data.cpu).toBe(7);
@@ -167,6 +175,7 @@ describe('computer commands use distinct SDK requests', () => {
     const result = await h.run(['computers', verb, COMPUTER.name, ...flags]);
     expect(h.rec.routes()).toEqual([
       ['GET', 'computers'],
+      ['GET', `computers/${COMPUTER.name}`],
       ['POST', `computers/${COMPUTER.id}/${verb}`],
     ]);
     expect(h.rec.last().query).toEqual(query);
@@ -179,6 +188,7 @@ describe('computer commands use distinct SDK requests', () => {
     const result = await h.run(['computers', 'clone', COMPUTER.name, '--name', 'fork-one']);
     expect(h.rec.routes()).toEqual([
       ['GET', 'computers'],
+      ['GET', `computers/${COMPUTER.name}`],
       ['POST', `computers/${COMPUTER.id}/clone`],
     ]);
     expect(h.rec.last().body).toEqual({ name: 'fork-one' });
@@ -199,6 +209,7 @@ describe('computer commands use distinct SDK requests', () => {
     ]);
     expect(h.rec.routes()).toEqual([
       ['GET', 'computers'],
+      ['GET', `computers/${COMPUTER.name}`],
       ['DELETE', `computers/${COMPUTER.id}`],
     ]);
     expect(h.rec.last().query).toEqual({ snapshots: 'delete', expect: 'fingerprint-7' });
@@ -250,12 +261,17 @@ describe('computer commands use distinct SDK requests', () => {
       until === 'guest'
         ? [
             ['GET', 'computers'],
+            ['GET', `computers/${COMPUTER.name}`],
             ['POST', `computers/${COMPUTER.id}/exec`],
           ]
         : until === 'built'
-          ? [['GET', 'computers']]
+          ? [
+              ['GET', 'computers'],
+              ['GET', `computers/${COMPUTER.name}`],
+            ]
           : [
               ['GET', 'computers'],
+              ['GET', `computers/${COMPUTER.name}`],
               ['GET', `computers/${COMPUTER.id}`],
             ],
     );
@@ -268,7 +284,10 @@ describe('computer commands use distinct SDK requests', () => {
     const result = await h.run(['computers', 'stop', COMPUTER.name]);
     expect(result.code).toBe(1);
     expect(result.frames[0].error.code).toBe('ambiguous_computer');
-    expect(h.rec.routes()).toEqual([['GET', 'computers']]);
+    expect(h.rec.routes()).toEqual([
+      ['GET', 'computers'],
+      ['GET', `computers/${COMPUTER.name}`],
+    ]);
   });
 
   it('can resolve an ID when the inventory request fails', async () => {
@@ -282,6 +301,122 @@ describe('computer commands use distinct SDK requests', () => {
       ['GET', `computers/${COMPUTER.id}`],
       ['POST', `computers/${COMPUTER.id}/stop`],
     ]);
+  });
+});
+
+describe('computer ID precedence and lookup uncertainty', () => {
+  const target = 'vm-lost';
+  const other = { ...COMPUTER, id: 'vm-live', name: target };
+  const lost = { ...COMPUTER, id: target, name: 'archived desktop', state: 'lost' };
+
+  it('deletes an exact ID omitted from the list instead of a colliding live name', async () => {
+    const h = harness((call) => {
+      if (call.path === '/computers') return json([other]);
+      if (call.method === 'GET' && call.path === `/computers/${target}`) return json(lost);
+      return json({ snapshots_deleted: 0 });
+    });
+    const result = await h.run(['computers', 'delete', target]);
+    expect(result.code).toBe(0);
+    expect(h.rec.routes()).toEqual([
+      ['GET', 'computers'],
+      ['GET', `computers/${target}`],
+      ['DELETE', `computers/${target}`],
+    ]);
+    expect(result.frames[0].data.id).toBe(target);
+  });
+
+  it('uses a listed exact ID even when another computer has that name', async () => {
+    const h = harness((call) =>
+      call.path === '/computers' ? json([other, lost]) : json({ snapshots_deleted: 0 }),
+    );
+    const result = await h.run(['computers', 'delete', target]);
+    expect(result.code).toBe(0);
+    expect(h.rec.routes()).toEqual([
+      ['GET', 'computers'],
+      ['DELETE', `computers/${target}`],
+    ]);
+    expect(result.frames[0].data.id).toBe(target);
+  });
+
+  it('does not fall back to a name when the direct ID request loses its connection', async () => {
+    const h = harness((call) => {
+      if (call.path === '/computers') return json([other]);
+      throw new TypeError('connection lost');
+    });
+    const result = await h.run(['computers', 'delete', target]);
+    expect(result.code).toBe(1);
+    expect(h.rec.routes()).toEqual([
+      ['GET', 'computers'],
+      ['GET', `computers/${target}`],
+    ]);
+  });
+
+  it.each([401, 403, 429, 503])(
+    'does not fall back to a name after HTTP %s from the ID lookup',
+    async (status) => {
+      const h = harness((call) =>
+        call.path === '/computers'
+          ? json([other])
+          : json({ error: 'ID lookup refused' }, { status }),
+      );
+      const result = await h.run(['computers', 'delete', target]);
+      expect(result.code).toBe(1);
+      expect(result.frames[0].error.status).toBe(status);
+      expect(h.rec.routes()).toEqual([
+        ['GET', 'computers'],
+        ['GET', `computers/${target}`],
+      ]);
+    },
+  );
+
+  it('falls back to a unique name only after a direct 404', async () => {
+    const h = harness((call) => {
+      if (call.path === '/computers') return json([other]);
+      if (call.method === 'GET') return json({ error: 'no such ID' }, { status: 404 });
+      return json({ snapshots_deleted: 0 });
+    });
+    const result = await h.run(['computers', 'delete', target]);
+    expect(result.code).toBe(0);
+    expect(h.rec.routes()).toEqual([
+      ['GET', 'computers'],
+      ['GET', `computers/${target}`],
+      ['DELETE', 'computers/vm-live'],
+    ]);
+    expect(result.frames[0].data.id).toBe('vm-live');
+  });
+
+  it('does not select a name from an incomplete inventory even after a direct 404', async () => {
+    const h = harness((call) =>
+      call.path === '/computers'
+        ? json([other], { headers: { 'X-GC-Incomplete': '0' } })
+        : json({ error: 'no such ID' }, { status: 404 }),
+    );
+    const result = await h.run(['computers', 'delete', target]);
+    expect(result.code).toBe(1);
+    expect(h.rec.calls.every((call) => call.method === 'GET')).toBe(true);
+  });
+
+  it('refuses an ambiguous name after a direct 404', async () => {
+    const h = harness((call) =>
+      call.path === '/computers'
+        ? json([other, { ...other, id: 'vm-second' }])
+        : json({ error: 'no such ID' }, { status: 404 }),
+    );
+    const result = await h.run(['computers', 'delete', target]);
+    expect(result.frames[0].error.code).toBe('ambiguous_computer');
+    expect(h.rec.routes()).toEqual([
+      ['GET', 'computers'],
+      ['GET', `computers/${target}`],
+    ]);
+  });
+
+  it('refuses a mismatched computer returned by the direct ID endpoint', async () => {
+    const h = harness((call) =>
+      call.path === '/computers' ? json([other]) : json({ ...lost, id: 'different-id' }),
+    );
+    const result = await h.run(['computers', 'delete', target]);
+    expect(result.code).toBe(1);
+    expect(h.rec.calls.every((call) => call.method === 'GET')).toBe(true);
   });
 });
 
@@ -397,6 +532,58 @@ describe('exec preserves bytes, input and result semantics', () => {
   });
 });
 
+describe('executable process exit status', () => {
+  it('normalizes fractional remote exit codes before the real entrypoint exits', async () => {
+    const directory = await tempDir();
+    const root = fileURLToPath(new URL('..', import.meta.url));
+    execFileSync(
+      process.execPath,
+      [
+        fileURLToPath(new URL('../node_modules/typescript/bin/tsc', import.meta.url)),
+        '-p',
+        'tsconfig.build.json',
+        '--outDir',
+        directory,
+      ],
+      { cwd: root, timeout: 30_000 },
+    );
+    await writeFile(join(directory, 'package.json'), '{"type":"module"}');
+    const preload = join(directory, 'fetch.mjs');
+    await writeFile(
+      preload,
+      `const computer = ${JSON.stringify(COMPUTER)};
+globalThis.fetch = async (input) => new Response(JSON.stringify(String(input).endsWith('/exec') ? {exit_code:0.5,stdout_b64:'',stderr_b64:'',timed_out:false} : String(input).endsWith('/computers') ? [computer] : computer), {headers:{'content-type':'application/json'}});`,
+    );
+    const result = spawnSync(
+      process.execPath,
+      [
+        '--import',
+        preload,
+        join(directory, 'cli.js'),
+        'computers',
+        'exec',
+        COMPUTER.id,
+        '-c',
+        'exit 0',
+        '--json',
+      ],
+      {
+        env: { ...process.env, MANDALA_API_KEY: 'com_executable_test', MANDALA_BASE_URL: BASE },
+        encoding: 'utf8',
+        timeout: 10_000,
+      },
+    );
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBe(1);
+    expect(result.stderr).toBe('');
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      ok: false,
+      exitCode: 1,
+      data: { exitCode: 0.5 },
+    });
+  }, 40_000);
+});
+
 describe('templates', () => {
   it('lists raw template fields and completeness', async () => {
     const h = harness(() => json([TEMPLATE_CHECK.template]));
@@ -487,7 +674,8 @@ describe('templates', () => {
 
 describe('snapshots', () => {
   it('lists with filters, unfinished rows and partial status', async () => {
-    const h = harness(() => json([SNAPSHOT], { headers: { 'X-GC-Incomplete': '1' } }));
+    const unrelated = { ...SNAPSHOT, id: 'snapshot-other', computer_id: 'vm-other' };
+    const h = harness(() => json([SNAPSHOT, unrelated], { headers: { 'X-GC-Incomplete': '1' } }));
     const result = await h.run([
       'snapshots',
       'list',

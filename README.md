@@ -2122,8 +2122,12 @@ completion setup; the CLI does not edit shell files or install completions.
 
 ### Computers and remote commands
 
-Computer operands accept an ID or a unique name. An exact ID takes precedence;
-ambiguous names fail with the matching IDs so you can select one explicitly.
+Computer operands accept an ID or a unique name. An exact ID takes precedence,
+including IDs absent from the default inventory. When no listed ID matches,
+the CLI checks the direct ID endpoint before accepting a name. Only a 404 from
+that lookup permits name fallback, and the inventory must be complete. Other
+lookup failures stop the command. Ambiguous names fail with the matching IDs so
+you can select one explicitly.
 Listing filters and webhook filters that say `--computer` take IDs.
 
 ```sh
@@ -2303,7 +2307,7 @@ acknowledged write is an error.
 
 The process exits zero on success and 1 on ordinary errors, invalid template
 validation, failed builds, or unfinished agent runs. Foreground exec preserves
-remote exit codes from 0 through 255, uses 124 for a timeout, and 1 when the
+integer remote exit codes from 0 through 255, uses 124 for a timeout, and 1 when the
 reported code cannot be represented or is unknown. Cancellation exits 130.
 Running `mandala` without arguments prints help and exits 2. CLI-generated output uses no
 color escapes, including with `NO_COLOR` or piped output. Guest terminal and

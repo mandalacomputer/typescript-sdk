@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { Readable } from 'node:stream';
 import { describe, expect, it } from 'vitest';
@@ -205,6 +205,33 @@ describe('offline discovery', () => {
     );
     const values = `${completion('bash')}\nCOMP_WORDS=(mandala computers list --state lo); COMP_CWORD=4; _mandala_complete; printf '%s\\n' "\${COMPREPLY[@]}"`;
     expect(execFileSync('/bin/bash', ['-c', values], { encoding: 'utf8' })).toBe('lost\n');
+  });
+
+  const fishAvailable = spawnSync('fish', ['--version'], { encoding: 'utf8' }).status === 0;
+  // Fish may be absent locally. CI installs it and must execute every probe.
+  it.skipIf(!fishAvailable && !process.env.CI).each([
+    ['mandala computers li', 'list'],
+    ['mandala --json computers li', 'list'],
+    ['mandala --help computers li', 'list'],
+    ['mandala -h computers li', 'list'],
+    ['mandala --json computers exec desktop --ti', '--timeout'],
+    ['mandala computers --json exec desktop --ti', '--timeout'],
+    ['mandala --json snapshots schedule cl', 'clear'],
+    ['mandala --json computers list --state lo', 'lost'],
+  ])('fish completes %s from the actual command context', (line, expected) => {
+    expect(fishAvailable, 'CI requires fish for shell completion probes').toBe(true);
+    const result = spawnSync('fish', ['--no-config'], {
+      input: `${completion('fish')}\ncomplete -C '${line}'\n`,
+      encoding: 'utf8',
+    });
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe('');
+    expect(
+      result.stdout
+        .trim()
+        .split('\n')
+        .map((entry) => entry.split('\t')[0]),
+    ).toContain(expected);
   });
 
   it('keeps CLI modules outside the browser-compatible library import graph', async () => {

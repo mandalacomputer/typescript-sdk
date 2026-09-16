@@ -528,39 +528,10 @@ export async function finishInteraction(
   }
 }
 
-/** The computer `target` names — an exact id, or a unique name. */
-async function resolve(client: Client, target: string): Promise<Computer> {
-  let computers: Computer[];
-  try {
-    computers = await client.computers.list();
-  } catch (err) {
-    // A listing fans out across every host on the account, so one unreachable
-    // hypervisor answers 503 for the whole thing — and takes down a command
-    // that named an id the computer's own route would have answered. Tried
-    // second rather than first: a get() on a name is a 404, and paying for one
-    // on the spelling people actually use is the wrong way round.
-    const byId = await client.computers.get(target).catch(() => undefined);
-    if (byId) return byId;
-    throw err;
-  }
-  const byId = computers.find((c) => c.id === target);
-  if (byId) return byId;
-  const named = computers.filter((c) => c.name === target);
-  if (named.length === 1) return named[0]!;
-  if (named.length) {
-    die(
-      `${target} names ${named.length} computers — use an id: ${named.map((c) => c.id).join(', ')}`,
-    );
-  }
-  if (!computers.length) die(`no computer named ${target}; the account has no computers`);
-  const have = computers.map((c) => `  ${c.id}  ${c.name}  ${c.status}`).join('\n');
-  die(`no computer named ${target}. You have:\n${have}`);
-}
-
 // --- ssh -------------------------------------------------------------------
 
 async function cmdSsh(target: string, session: string): Promise<number> {
-  const c = await (await resolve(new Client(), target)).refresh();
+  const c = await (await resolveComputer(new Client(), target)).refresh();
   const vnc = c.vnc;
   if (!vnc?.terminalUrl) {
     if (c.os === 'windows') {

@@ -6,7 +6,7 @@ import { CliError, help, type Parsed, parseArgs } from './cli-options.js';
 import { errorInfo, Output } from './cli-output.js';
 import { type CliIO, documentInput, readInput } from './cli-runtime.js';
 import type { Computer } from './computer.js';
-import { MandalaError, ValidationError } from './errors.js';
+import { MandalaError, NotFoundError, ValidationError } from './errors.js';
 import type { BuildProgress, Client, Listing } from './index.js';
 import * as P from './paths.js';
 import { checkWait } from './wait.js';
@@ -33,18 +33,32 @@ export async function resolveComputer(
   signal?: AbortSignal,
 ): Promise<Computer> {
   P.computer(target);
-  let listing: Listing<Computer>;
+  let listing: Listing<Computer> | undefined;
+  let listingError: unknown;
   try {
     listing = await client.computers.listWithStatus({ signal });
   } catch (error) {
     signal?.throwIfAborted();
-    const byId = await client.computers.get(target, { signal }).catch(() => undefined);
-    signal?.throwIfAborted();
-    if (byId) return byId;
-    throw error;
+    listingError = error;
   }
-  const byId = listing.items.find((c) => c.id === target);
-  if (byId) return byId;
+  const listedId = listing?.items.find((c) => c.id === target);
+  if (listedId) return listedId;
+
+  // Default listings omit some lifecycle states. Establish that no direct ID
+  // exists before accepting a name that could identify a different computer.
+  let idLookupError: NotFoundError;
+  try {
+    const byId = await client.computers.get(target, { signal });
+    if (byId.id !== target) {
+      throw new CliError('unexpected_computer', 'The computer ID lookup returned a different ID');
+    }
+    return byId;
+  } catch (error) {
+    signal?.throwIfAborted();
+    if (!(error instanceof NotFoundError)) throw error;
+    idLookupError = error;
+  }
+  if (!listing) throw listingError;
   if (listing.incomplete !== null)
     throw new CliError(
       'incomplete_listing',
@@ -57,8 +71,7 @@ export async function resolveComputer(
       'ambiguous_computer',
       `${target} names ${named.length} computers — use an id: ${named.map((c) => c.id).join(', ')}`,
     );
-  // An ID may refer to a stopped, deleted, or lost computer absent from the default list.
-  return client.computers.get(target, { signal });
+  throw idLookupError;
 }
 
 /** Format the SDK's public projection explicitly; never expose desktop credentials. */
@@ -274,7 +287,10 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
             ? 124
             : b('background')
               ? 0
-              : result.exitCode !== undefined && result.exitCode >= 0 && result.exitCode <= 255
+              : result.exitCode !== undefined &&
+                  Number.isInteger(result.exitCode) &&
+                  result.exitCode >= 0 &&
+                  result.exitCode <= 255
                 ? result.exitCode
                 : 1;
         const { stdout, stderr, raw: _raw, ...fields } = result;
