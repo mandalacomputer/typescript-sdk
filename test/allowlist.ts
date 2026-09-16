@@ -138,16 +138,6 @@ export const ALLOWED: ReadonlySet<string> = new Set(
  * design is that it is enumerable.
  */
 export const UNIMPLEMENTED: ReadonlySet<string> = new Set([
-  // Explicit retained output is tracked here until client helpers are available.
-  'POST computers/:id/executions/:executionId/retained-output',
-  'GET computers/:id/results/:resultId',
-  'GET computers/:id/results/:resultId/output',
-  'DELETE computers/:id/results/:resultId',
-  // Explicit artifacts are tracked until runtime helpers are available.
-  'POST computers/:id/artifacts',
-  'GET computers/:id/artifacts/:artifactId',
-  'GET computers/:id/artifacts/:artifactId/download',
-  'DELETE computers/:id/artifacts/:artifactId',
   // The OpenAI-shaped door onto the agent loop. Deliberately not wrapped: a
   // caller who wants it already has an OpenAI client and points its baseURL
   // here, and a second, worse OpenAI client inside this SDK would be a
@@ -390,8 +380,6 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
  * would say nothing the route's own line does not.
  */
 export const UNIMPLEMENTED_PARAMETERS: ReadonlySet<string> = new Set([
-  // Synchronous output retention is tracked until runtime support is available.
-  'POST computers/:id/exec  body:retain_output',
   // File transfers cannot yet opt out of waking a suspended computer.
   'GET computers/:id/files  query:no_wake',
   'PUT computers/:id/files  query:no_wake',
@@ -433,6 +421,10 @@ export function patternFor(path: string): string {
       out.push(':id');
     else if (prev === 'exec') out.push(':pid');
     else if (prev === 'executions') out.push(':executionId');
+    else if (out.length === 3 && out[0] === 'computers' && prev === 'results')
+      out.push(':resultId');
+    else if (out.length === 3 && out[0] === 'computers' && prev === 'artifacts')
+      out.push(':artifactId');
     else if (prev === 'windows') out.push(':window');
     else out.push(seg);
   }
@@ -458,6 +450,8 @@ const PATH_PARAMETERS: ReadonlySet<string> = new Set([
   ':id',
   ':pid',
   ':executionId',
+  ':resultId',
+  ':artifactId',
   ':window',
   ':namespace',
   ':name',

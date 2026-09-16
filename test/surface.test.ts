@@ -53,6 +53,79 @@ const SURFACE = inventory();
 /** The new stable reads use their finite response contracts. */
 const executionRoutes = (call: Call): Response | Promise<Response> => {
   const executionId = 'exec_0123456789abcdef0123456789abcdef';
+  const resultId = 'res_0123456789abcdef0123456789abcdef';
+  const artifactId = 'art_0123456789abcdef0123456789abcdef';
+  const hash = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
+  if (call.path.includes('/results/') || call.path.endsWith('/retained-output')) {
+    if (call.method === 'DELETE') return new Response(null, { status: 204 });
+    if (call.path.endsWith('/output'))
+      return new Response(new Uint8Array(), {
+        headers: {
+          'Content-Type': 'application/octet-stream',
+          'Content-Length': '0',
+          'X-Result-Offset': '0',
+          'X-Result-Next-Offset': '0',
+          'X-Result-EOF': 'true',
+        },
+      });
+    const prefix = {
+      bytes: 0,
+      sha256: hash,
+      source_offset: 0,
+      next_source_offset: 0,
+      end_reason: 'observed_eof',
+    };
+    return json(
+      {
+        version: 1,
+        result_id: resultId,
+        kind: 'background-output',
+        state: 'ready',
+        account_id: 'acc-1',
+        computer_id: 'vm-1',
+        workspace_id: null,
+        execution_id: executionId,
+        capture_started_at: '2026-09-15T12:00:00Z',
+        captured_at: '2026-09-15T12:00:01Z',
+        expires_at: '2026-09-16T12:00:00Z',
+        source: 'volatile_guest_files',
+        execution_observation: { status: 'running', observed_at: '2026-09-15T12:00:00Z' },
+        stdout: prefix,
+        stderr: prefix,
+        diagnostic: { bytes: 0, sha256: hash, source: 'wrapper', diagnostic_truncated: false },
+      },
+      { status: call.method === 'POST' ? 201 : 200 },
+    );
+  }
+  if (call.path.includes('/artifacts')) {
+    if (call.method === 'DELETE') return new Response(null, { status: 204 });
+    if (call.path.endsWith('/download'))
+      return new Response(new Uint8Array(), {
+        headers: { 'Content-Type': 'application/octet-stream', 'Content-Length': '0' },
+      });
+    return json(
+      {
+        artifact_id: artifactId,
+        kind: 'artifact',
+        state: 'ready',
+        computer_id: 'vm-1',
+        workspace_id: null,
+        created_at: '2026-09-15T12:00:00Z',
+        expires_at: '2026-09-16T12:00:00Z',
+        size: 0,
+        sha256: hash,
+        execution_association:
+          call.method === 'POST'
+            ? {
+                kind: 'caller_selected',
+                execution_id: executionId,
+                verified_at: '2026-09-15T12:00:00Z',
+              }
+            : null,
+      },
+      { status: call.method === 'POST' ? 201 : 200 },
+    );
+  }
   if (call.path.endsWith(`/executions/${executionId}/output`))
     return json({
       execution_id: executionId,
@@ -209,6 +282,7 @@ async function exerciseEverything(client: Client): Promise<void> {
   await c.cursorPosition();
 
   await c.exec('true');
+  await c.exec('true', { retainOutput: true });
   await c.exec('make', { timeoutS: 60, desktop: true, cwd: '/src', env: { CI: '1' } });
   await c.execBackground('sleep 100');
   await c.execBackground('make', { desktop: true, cwd: '/src', env: { CI: '1' } });
@@ -220,6 +294,27 @@ async function exerciseEverything(client: Client): Promise<void> {
     stderrOffset: 0,
     limit: 1024,
   });
+  await c.retainExecutionOutput('exec_0123456789abcdef0123456789abcdef', {
+    maxBytesPerStream: 1024,
+    retentionSeconds: 3600,
+  });
+  await c.result('res_0123456789abcdef0123456789abcdef');
+  await c.resultOutput('res_0123456789abcdef0123456789abcdef', {
+    stream: 'stdout',
+    offset: 0,
+    limit: 1024,
+  });
+  await c.deleteResult('res_0123456789abcdef0123456789abcdef');
+  await c.publishArtifact('/tmp/report', {
+    expectedSize: 0,
+    expectedSha256: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+    executionId: 'exec_0123456789abcdef0123456789abcdef',
+    maxBytes: 1024,
+    retentionSeconds: 3600,
+  });
+  await c.artifact('art_0123456789abcdef0123456789abcdef');
+  await c.downloadArtifact('art_0123456789abcdef0123456789abcdef', { maxBytes: 1024 });
+  await c.deleteArtifact('art_0123456789abcdef0123456789abcdef');
   await c.open('https://example.com');
 
   await c.readFile('/home/user/out.txt');

@@ -59,7 +59,15 @@ const TRANSPORT = '#t';
  * `#fetchRaw` — an array, a listing with its short-answer header, raw bytes or
  * a byte range, and a stream of frames.
  */
-const VERBS: ReadonlySet<string> = new Set(['json', 'jsonArray', 'listing', 'bytes', 'sse']);
+const VERBS: ReadonlySet<string> = new Set([
+  'json',
+  'jsonArray',
+  'listing',
+  'bytes',
+  'sse',
+  'boundedJson',
+  'boundedBytes',
+]);
 
 /**
  * Public transport members that deliberately do not put a request on the wire.

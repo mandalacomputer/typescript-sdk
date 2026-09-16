@@ -75,7 +75,7 @@ const MAX_ERROR_BODY_BYTES = 1 << 20;
  * caller for it, and holding the socket open to finish reading a body we have
  * decided not to keep would be worse than either.
  */
-const textUpTo = async (resp: Response, max: number): Promise<string> => {
+const textUpTo = async (resp: Response, max: number, signal?: AbortSignal): Promise<string> => {
   // A null-body status has nothing to read and no reader to take; `.text()`
   // answers '' without touching the network.
   if (!resp.body) return resp.text();
@@ -85,7 +85,7 @@ const textUpTo = async (resp: Response, max: number): Promise<string> => {
   let seen = 0;
   try {
     for (;;) {
-      const { done, value } = await reader.read();
+      const { done, value } = await abortedRead(reader.read(), signal);
       // The flush: a multi-byte character split across the last two chunks is
       // only completed by a final decode with no input.
       if (done) return text + decoder.decode();
@@ -99,6 +99,86 @@ const textUpTo = async (resp: Response, max: number): Promise<string> => {
     // the socket, and this runs on the path that is already reporting a
     // failure — the error is the news, not the teardown.
     void reader.cancel().catch(() => {});
+  }
+};
+
+/** Race only the new bounded reads; injected fetch bodies need not implement abort themselves. */
+const abortedRead = <T>(read: Promise<T>, signal?: AbortSignal): Promise<T> => {
+  if (!signal) return read;
+  return new Promise<T>((resolve, reject) => {
+    const abort = () => {
+      signal.removeEventListener('abort', abort);
+      reject(signal.reason);
+    };
+    if (signal.aborted) {
+      reject(signal.reason);
+      void read.catch(() => {});
+      return;
+    }
+    signal.addEventListener('abort', abort, { once: true });
+    read
+      .then(resolve, reject)
+      .finally(() => signal.removeEventListener('abort', abort))
+      .catch(() => {});
+  });
+};
+
+export type BoundedOptions = RequestOptions & { maxBytes: number; expectedStatus?: number };
+export type BoundedBytes = {
+  bytes: Uint8Array;
+  offset: string | null;
+  nextOffset: string | null;
+  eof: string | null;
+};
+const contentLength = (resp: Response): number | undefined => {
+  const text = resp.headers.get('content-length');
+  if (text === null) return undefined;
+  if (!/^(0|[1-9][0-9]*)$/.test(text) || !Number.isSafeInteger(Number(text)))
+    throw new MandalaError('invalid retained Content-Length');
+  return Number(text);
+};
+/** Complete-or-error, including an EOF read at the exact cap. No successful prefix. */
+const completeBytes = async (
+  resp: Response,
+  max: number,
+  signal?: AbortSignal,
+): Promise<Uint8Array> => {
+  if (!resp.body) {
+    signal?.throwIfAborted();
+    return new Uint8Array();
+  }
+  const reader = resp.body.getReader();
+  let buffer: Uint8Array | undefined;
+  let length = 0;
+  let complete = false;
+  try {
+    for (;;) {
+      signal?.throwIfAborted();
+      const { done, value } = await abortedRead(reader.read(), signal);
+      signal?.throwIfAborted();
+      if (done) {
+        complete = true;
+        break;
+      }
+      if (value.byteLength > max - length)
+        throw new MandalaError(
+          'retained response exceeds its byte limit; publication, if requested, is unconfirmed',
+        );
+      // Own the allowed bytes: a tiny view can otherwise retain an enormous backing buffer.
+      if (value.byteLength) {
+        buffer ??= new Uint8Array(max);
+        buffer.set(value, length);
+      }
+      length += value.byteLength;
+    }
+    return buffer === undefined
+      ? new Uint8Array()
+      : length === max
+        ? buffer
+        : buffer.slice(0, length);
+  } finally {
+    if (!complete) void reader.cancel().catch(() => {});
+    reader.releaseLock();
   }
 };
 
@@ -282,7 +362,7 @@ export type TransportOptions = {
  * and runs under the same signal — see {@link Transport.#readBody}, which needs
  * the number to say what a mid-read abort actually was.
  */
-type Sent = { resp: Response; timeoutMs: number };
+type Sent = { resp: Response; timeoutMs: number; signal?: AbortSignal };
 
 /**
  * A message out of a parsed error body, from whichever hop wrote it.
@@ -500,8 +580,14 @@ export class Transport {
     return caller ? AbortSignal.any([caller, timeout]) : timeout;
   }
 
-  async #fetchRaw(method: string, path: string, opts: RequestOptions = {}): Promise<Sent> {
+  async #fetchRaw(
+    method: string,
+    path: string,
+    opts: RequestOptions = {},
+    bounded = false,
+  ): Promise<Sent> {
     const timeoutMs = this.#deadlineMs(opts);
+    const signal = this.#signal(opts.signal, timeoutMs);
     const headers: Record<string, string> = { ...this.#headers, ...opts.headers };
     let body: string | Uint8Array | ReadableStream<Uint8Array> | undefined;
     // The two are documented as exclusive and the branch below picks `raw`, so
@@ -552,7 +638,7 @@ export class Transport {
         // Cast because @types/node does not put Uint8Array in BodyInit even
         // though undici accepts it.
         body: body as RequestInit['body'],
-        signal: this.#signal(opts.signal, timeoutMs),
+        signal,
         // Fetch follows redirects by default. A 301/302 on POST is converted
         // to GET with the body dropped, and Authorization is stripped on a
         // cross-origin hop — including `http://` → `https://`. The SDK then
@@ -564,7 +650,16 @@ export class Transport {
         redirect: 'manual',
       };
       if (opts.raw !== undefined && bodyByteLength(opts.raw) === undefined) init.duplex = 'half';
-      resp = await this.#fetch(this.#url(path, opts.query), init);
+      const pending = this.#fetch(this.#url(path, opts.query), init);
+      if (bounded) {
+        void pending.then(
+          (response) => {
+            if (signal?.aborted) void response.body?.cancel().catch(() => {});
+          },
+          () => {},
+        );
+        resp = await abortedRead(pending, signal);
+      } else resp = await pending;
     } catch (cause) {
       // A caller's own signal firing is a cancellation whatever its reason is
       // named. Judged first, so a custom reason — `ac.abort(new Error(...))` —
@@ -604,8 +699,18 @@ export class Transport {
         { cause },
       );
     }
-    if (!resp.ok) throw await this.#error(resp, method, path, timeoutMs, opts.signal);
-    return { resp, timeoutMs };
+    if (!resp.ok) {
+      const failure = this.#error(
+        resp,
+        method,
+        path,
+        timeoutMs,
+        opts.signal,
+        bounded ? signal : undefined,
+      );
+      throw await failure;
+    }
+    return { resp, timeoutMs, signal };
   }
 
   /**
@@ -690,6 +795,7 @@ export class Transport {
     path: string,
     timeoutMs: number,
     caller?: AbortSignal,
+    boundedSignal?: AbortSignal,
   ): Promise<APIError> {
     let body: unknown;
     let message = `HTTP ${resp.status}`;
@@ -700,7 +806,7 @@ export class Transport {
     // `ConflictError`, which this SDK documents as the one worth retrying.
     // #fetchRaw's rule, applied to the one body that was outside it.
     const text = await this.#readBody(
-      () => textUpTo(resp, MAX_ERROR_BODY_BYTES),
+      () => textUpTo(resp, MAX_ERROR_BODY_BYTES, boundedSignal),
       method,
       path,
       { resp, timeoutMs },
@@ -763,9 +869,107 @@ export class Transport {
     }
   }
 
-  async json<T = unknown>(method: string, path: string, opts: RequestOptions = {}): Promise<T> {
+  async json<T = unknown>(
+    method: string,
+    path: string,
+    opts: RequestOptions = {},
+    responseStatus?: (status: number) => void,
+  ): Promise<T> {
     const sent = await this.#fetchRaw(method, path, opts);
+    responseStatus?.(sent.resp.status);
     return (await this.#decode<T>(sent, method, path, opts.signal)) as T;
+  }
+
+  async #bounded(
+    method: string,
+    path: string,
+    opts: BoundedOptions,
+    binary: boolean,
+  ): Promise<BoundedBytes> {
+    if (
+      !Number.isSafeInteger(opts.maxBytes) ||
+      opts.maxBytes < 0 ||
+      opts.maxBytes > 64 * 1024 * 1024
+    )
+      throw new ValidationError('invalid retained response byte limit');
+    opts.signal?.throwIfAborted();
+    const sent = await this.#fetchRaw(
+      method,
+      path,
+      { ...opts, headers: { ...opts.headers, 'Accept-Encoding': 'identity' } },
+      true,
+    );
+    const { resp } = sent;
+    return this.#readBody(
+      async () => {
+        try {
+          sent.signal?.throwIfAborted();
+          if (resp.status !== (opts.expectedStatus ?? 200))
+            throw new MandalaError(
+              'unexpected retained response status; publication, if requested, is unconfirmed',
+            );
+          const type = resp.headers.get('content-type')?.split(';')[0]?.trim().toLowerCase();
+          const encoding = resp.headers.get('content-encoding');
+          if (
+            resp.headers.has('content-range') ||
+            (encoding !== null && encoding.toLowerCase() !== 'identity')
+          )
+            throw new MandalaError('partial or encoded retained response is unsupported');
+          if (
+            resp.status !== 204 &&
+            type !== (binary ? 'application/octet-stream' : 'application/json')
+          )
+            throw new MandalaError('unexpected retained response Content-Type');
+          const declared = contentLength(resp);
+          if (
+            (binary && declared === undefined) ||
+            (declared !== undefined && declared > opts.maxBytes)
+          )
+            throw new MandalaError(
+              'retained response Content-Length exceeds or omits the allowed length',
+            );
+          const bytes = await completeBytes(resp, opts.maxBytes, sent.signal);
+          sent.signal?.throwIfAborted();
+          if (declared !== undefined && declared !== bytes.length)
+            throw new MandalaError('retained response Content-Length mismatch');
+          return {
+            bytes,
+            offset: resp.headers.get('x-result-offset'),
+            nextOffset: resp.headers.get('x-result-next-offset'),
+            eof: resp.headers.get('x-result-eof'),
+          };
+        } finally {
+          if (!resp.bodyUsed) void resp.body?.cancel().catch(() => {});
+        }
+      },
+      method,
+      path,
+      sent,
+      opts.signal,
+    );
+  }
+
+  /** Narrow success cap for immutable manifests and exact 204 deletions. */
+  async boundedJson(method: string, path: string, opts: BoundedOptions): Promise<unknown> {
+    const { bytes } = await this.#bounded(method, path, opts, false);
+    if (opts.expectedStatus === 204) return undefined;
+    try {
+      const value: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+      if (!isRecord(value)) throw new Error('not an object');
+      opts.signal?.throwIfAborted();
+      return value;
+    } catch (cause) {
+      if (opts.signal?.aborted) throw opts.signal.reason;
+      throw new MandalaError(
+        'invalid retained JSON response; publication, if requested, is unconfirmed',
+        { cause },
+      );
+    }
+  }
+
+  /** Full 200 raw bytes only, bounded during consumption, with finite page headers. */
+  async boundedBytes(method: string, path: string, opts: BoundedOptions): Promise<BoundedBytes> {
+    return this.#bounded(method, path, opts, true);
   }
 
   /** {@link json}, for the routes whose answer is a list. See {@link expectArray}. */

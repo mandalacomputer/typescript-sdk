@@ -1926,6 +1926,8 @@ export function toHoldings(d: Record<string, unknown>): Holdings {
  * SDK's own boundary, so what this hands back is what the command wrote.
  */
 export type ExecResult = {
+  /** Confirmed optional retained synchronous output; absent on older servers or unconfirmed capture. */
+  resultId?: string;
   exitCode: number;
   /** What the command wrote to stdout, byte for byte. */
   stdout: Uint8Array;

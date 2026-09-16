@@ -1967,3 +1967,109 @@ describe('a connection failure after the request was sent (OPL-3855)', () => {
       });
   });
 });
+
+describe('retained bytes over real loopback HTTP', () => {
+  const rid = 'res_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+  const serve = async (output: (response: import('node:http').ServerResponse) => void) => {
+    const server = createServer((req, res) => {
+      if (req.url === '/api/v1/computers/vm-1') {
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify(COMPUTER));
+      } else if (req.url?.startsWith(`/api/v1/computers/vm-1/results/${rid}/output?`)) output(res);
+      else {
+        res.statusCode = 500;
+        res.end('unexpected test route');
+      }
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', resolve);
+    });
+    const { port } = server.address() as AddressInfo;
+    return {
+      c: await new Client({
+        apiKey: 'com_test',
+        baseUrl: `http://127.0.0.1:${port}/api/v1`,
+      }).computers.get('vm-1'),
+      close: () =>
+        new Promise<void>((resolve) => {
+          server.closeAllConnections();
+          server.close(() => resolve());
+        }),
+    };
+  };
+  const head = (res: import('node:http').ServerResponse, size: number) => {
+    res.writeHead(200, {
+      'Content-Type': 'application/octet-stream',
+      'Content-Length': String(size),
+      'X-Result-Offset': '0',
+      'X-Result-Next-Offset': String(size),
+      'X-Result-EOF': 'true',
+    });
+  };
+  it('reads exact binary bytes through native fetch without changing the route or cursor', async () => {
+    const bytes = Uint8Array.from({ length: 256 }, (_, i) => i);
+    const server = await serve((res) => {
+      head(res, bytes.length);
+      res.write(bytes.subarray(0, 239));
+      res.end(bytes.subarray(239));
+    });
+    try {
+      expect(
+        (await server.c.resultOutput(rid, { stream: 'stdout', offset: 0, limit: 256 })).bytes,
+      ).toEqual(bytes);
+    } finally {
+      await server.close();
+    }
+  });
+  it('rejects a real incomplete HTTP body as interrupted', async () => {
+    let cut!: () => void;
+    let opened!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      opened = resolve;
+    });
+    const server = await serve((res) => {
+      head(res, 10);
+      res.write(new Uint8Array([1]));
+      cut = () => res.destroy();
+      opened();
+    });
+    try {
+      const pending = server.c.resultOutput(rid, { stream: 'stdout', offset: 0 });
+      const failed = expect(pending).rejects.toBeInstanceOf(ConnectionInterruptedError);
+      await ready;
+      // Let native fetch receive the response before closing its incomplete body.
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      cut();
+      await failed;
+    } finally {
+      await server.close();
+    }
+  });
+  it('cancels a native held response with the original caller reason', async () => {
+    let opened!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      opened = resolve;
+    });
+    const server = await serve((res) => {
+      head(res, 10);
+      res.write(new Uint8Array([1]));
+      opened();
+    });
+    try {
+      const ac = new AbortController();
+      const reason = new Error('cancel native retained read');
+      const pending = server.c.resultOutput(rid, {
+        stream: 'stdout',
+        offset: 0,
+        signal: ac.signal,
+      });
+      const failed = expect(pending).rejects.toBe(reason);
+      await ready;
+      ac.abort(reason);
+      await failed;
+    } finally {
+      await server.close();
+    }
+  });
+});

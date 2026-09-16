@@ -219,5 +219,24 @@ export {
 
 export const VERSION = '0.4.0';
 
+export type {
+  Artifact,
+  ArtifactAssociation,
+  DownloadArtifactOptions,
+  PublishArtifactOptions,
+} from './artifacts.js';
+
+export type {
+  BackgroundResult,
+  ResultObservation,
+  ResultOutput,
+  ResultOutputOptions,
+  ResultPrefix,
+  ResultStream,
+  RetainedResult,
+  RetainOutputOptions,
+  SynchronousResult,
+  SynchronousResultPrefix,
+} from './results.js';
 /** Re-exported so a caller can build a URL against the same default. */
 export { DEFAULT_BASE_URL as BASE_URL };

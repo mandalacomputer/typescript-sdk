@@ -201,6 +201,30 @@ export const execution = (id: string, executionId: string): string => {
   return `${computer(id)}/executions/${executionId}`;
 };
 
+export const isResultId = (v: unknown): v is string =>
+  typeof v === 'string' && v.length === 36 && /^res_[a-f0-9]{32}$/.test(v);
+export const isArtifactId = (v: unknown): v is string =>
+  typeof v === 'string' && v.length === 36 && /^art_[a-f0-9]{32}$/.test(v);
+export const retainedOutput = (id: string, executionId: string): string =>
+  `${execution(id, executionId)}/retained-output`;
+export function result(id: string, resultId: string): string {
+  if (!isResultId(resultId))
+    throw new ValidationError('resultId must be res_ followed by 32 lowercase hexadecimal digits');
+  return `${computer(id)}/results/${resultId}`;
+}
+export const resultOutput = (id: string, resultId: string): string =>
+  `${result(id, resultId)}/output`;
+export const artifacts = (id: string): string => `${computer(id)}/artifacts`;
+export function artifact(id: string, artifactId: string): string {
+  if (!isArtifactId(artifactId))
+    throw new ValidationError(
+      'artifactId must be art_ followed by 32 lowercase hexadecimal digits',
+    );
+  return `${artifacts(id)}/${artifactId}`;
+}
+export const artifactDownload = (id: string, artifactId: string): string =>
+  `${artifact(id, artifactId)}/download`;
+
 export const executionOutput = (id: string, executionId: string): string =>
   `${execution(id, executionId)}/output`;
 
