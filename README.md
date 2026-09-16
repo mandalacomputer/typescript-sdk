@@ -1350,10 +1350,96 @@ the body has been read and the work prepared. For those the durable write has
 `agent()` is itself the stream, read to its `done`. `agentOnce()` is the same
 run as a single non-streaming request — simpler, and worse for anything long,
 since nothing is reported until the whole run is over and a proxy between you
-and the platform may well close a request held open for minutes. There is also
-an OpenAI-shaped door onto the same loop, `POST /chat/completions`, which this
-SDK deliberately does not wrap: a caller who wants it already has an OpenAI
-client and points its `baseURL` here.
+and the platform may well close a request held open for minutes.
+
+#### Using an OpenAI client with your own model key
+
+The same computer agent is available at
+`POST https://app.mandala.computer/api/v1/chat/completions`. This SDK has no
+chat-completions wrapper; configure an external OpenAI client with the base URL
+`https://app.mandala.computer/api/v1`.
+
+Install `openai` separately from `mandala-computer`. This Node.js example is
+tested with `npm install openai@7.16.0`. Set these process environment variables:
+
+- `MANDALA_API_KEY`: your **Mandala** API key, with member role or stronger and
+  access to the computer's account/workspace. It becomes the bearer credential.
+- `MANDALA_COMPUTER_ID`: a computer that is **already running** and accessible
+  to that key. This endpoint does not start it; another agent owning it can
+  also cause a refusal.
+- `ANTHROPIC_API_KEY`: your separate **Anthropic** key, sent in `X-Model-Key`.
+  An OpenAI provider key cannot replace it.
+- `ANTHROPIC_MODEL`: an Anthropic model identifier available to your key and
+  appropriate for computer use. The string is passed through unchanged, with
+  no translation from OpenAI model names. The OpenAI client requires it;
+  raw HTTP can omit `model` to use the service default.
+
+This external client does not read `~/.mandala/credentials.json`, so
+`mandala login` does not configure it. That file holds a Mandala credential,
+not your Anthropic key. Existing computer charges and API rate budgets apply;
+Anthropic bills model usage to your key. This endpoint provides no hosted
+inference, included model credits, or saved dashboard conversation.
+
+<!-- byok-openai-example:start -->
+```ts
+import OpenAI from 'openai';
+
+function required(name: string): string {
+  const value = process.env[name];
+  if (!value) throw new Error(`Set ${name}`);
+  return value;
+}
+
+const client = new OpenAI({
+  apiKey: required('MANDALA_API_KEY'),
+  baseURL: 'https://app.mandala.computer/api/v1',
+  maxRetries: 0,
+});
+
+const request = {
+  model: required('ANTHROPIC_MODEL'),
+  messages: [{ role: 'user' as const, content: 'Read the page title in the browser and report it.' }],
+  computer_id: required('MANDALA_COMPUTER_ID'),
+  max_steps: 5,
+  stream: false as const,
+};
+const completion = await client.chat.completions.create(request, {
+  headers: { 'X-Model-Key': required('ANTHROPIC_API_KEY') },
+});
+console.log(completion.choices[0]?.message.content);
+```
+<!-- byok-openai-example:end -->
+
+The printed text is the model's report, not a completion guarantee. Inspect
+the optional JSON `agent.stop` field for the actual stop reason; the native
+SDK's `agent()` provides typed details and sets `finished` only for `end_turn`.
+Limits and pause map to `finish_reason: 'length'`, and refusal to
+`'content_filter'`. Even `'stop'` can mean the API rate budget ran out.
+The response's `model` is an endpoint label; it does not prove which provider
+model ran.
+
+`computer_id` and `max_steps` are top-level JSON body extensions. Holding the
+request in a variable lets the TypeScript client send them without a cast.
+`max_steps` counts desktop actions, not tokens or a billing cap; completed
+actions remain real when the run stops early. Only the last user message
+supplies the task, and system messages are concatenated. Earlier user/assistant
+history is not replayed. This is limited chat-completions compatibility, with
+no general promise for developer messages, image parts, tool-call histories,
+or the Responses API.
+
+`maxRetries: 0` disables the OpenAI client's automatic retries. A failed,
+interrupted, or aborted request may already have changed the desktop; inspect
+its state before deciding to run the task again. JSON errors may contain a
+string `error` from validation/authorization or a nested `error` object from
+a failed run. A 401 can concern either key: inspect the envelope, reason and
+request ID as well as the status.
+
+Omitting `stream` or setting it to `false` returns one JSON completion.
+Explicit `stream: true` returns OpenAI-style SSE chunks with keepalive comments
+and `[DONE]`, a different format from the native SDK's named events. The stream
+does not include the JSON response's full `agent` or usage extensions, and
+errors can arrive in error frames after HTTP 200. Handle those errors and close
+the stream when leaving it early.
 
 ### Power
 
