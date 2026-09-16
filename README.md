@@ -1781,6 +1781,56 @@ without one, and deliberately does **not** fetch it for you: a fingerprint read 
 millisecond before the delete binds the purge to whatever the set is *now*, which
 is precisely the race the interlock exists for.
 
+### Account quota
+
+`client.account.read()` returns an `AccountQuota`: instantaneous plan ceilings,
+per-computer maxima, capabilities, consumption and remaining headroom. It uses
+one read-only `GET /account` with no selectors. Viewer access is enough, and
+workspace-scoped keys receive the same **account-wide aggregates**. Use
+[`client.usage.read()`](#usage) for historical metering instead.
+
+```ts
+import { Client } from 'mandala-computer';
+
+const client = new Client(); // MANDALA_API_KEY
+const quota = await client.account.read();
+console.log(quota.plan.label, quota.observedAt, '(advisory)');
+if (quota.complete.computers) {
+  console.log('Configured vCPU headroom:', quota.remaining.configuredVcpu);
+  console.log('Running/reserved RAM headroom (MB):', quota.remaining.runningOrReservedRamMb);
+} else {
+  console.log('Current computer consumption and headroom are unknown.');
+}
+if (quota.complete.snapshots) {
+  console.log('Indexed snapshot byte headroom:', quota.remaining.snapshotStorageBytes);
+} else {
+  console.log('Current snapshot consumption and headroom are unknown.');
+}
+```
+
+`complete.computers` and `complete.snapshots` are independent. An incomplete
+group has explicit `null` for **every** related `usage` and `remaining` field;
+the other group and verified plan ceilings remain usable. A complete empty
+inventory has numeric zeros. Missing or malformed required fields raise
+`MandalaError`; the SDK never turns them into an empty account. Unknown future
+fields remain available in `raw`.
+
+Configured vCPU and disk GB include all kept computers, including stopped ones;
+disk is provisioned capacity, not filesystem occupancy. Running/reserved RAM MB
+includes pending reservations and excludes released stopped RAM. The separate
+running/reserved computer and vCPU totals describe that active subset. Snapshot
+storage is **indexed stored bytes**, including pending/deleting rows and stored
+copies during handover; it excludes in-flight capture reservations. Its remaining
+bytes do not predict whether a new capture will be admitted.
+
+Zero ceilings, including a no-plan account, are real limits. Retained resources
+can exceed a ceiling: usage stays visible and remaining headroom is clamped at
+zero. `advisory` is always true. `observedAt` is the UTC collection completion
+time, not a consistency token; concurrent changes can make it stale immediately.
+The read creates no reservation, promises no later operation will fit, and is
+not a check of host capacity. Read again for a fresh observation; pass
+`{ signal }` to cancel through the normal transport.
+
 ### Usage
 
 What the account has spent, in the same figures the dashboard shows and the

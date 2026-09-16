@@ -20,6 +20,7 @@
  */
 
 import {
+  Account,
   Builds,
   Computers,
   Moves,
@@ -42,6 +43,7 @@ export type ClientOptions = TransportOptions;
  * wrong rather than a thing to use.
  */
 export class Client {
+  readonly account: Account;
   readonly builds: Builds;
   readonly computers: Computers;
   readonly moves: Moves;
@@ -58,6 +60,7 @@ export class Client {
    */
   constructor(opts: ClientOptions = {}) {
     this.#t = new Transport(opts);
+    this.account = new Account(this.#t);
     this.builds = new Builds(this.#t);
     this.computers = new Computers(this.#t);
     this.moves = new Moves(this.#t);
@@ -148,6 +151,14 @@ export {
 } from './events.js';
 export type { ExecutionMetadata, ExecutionOutput, ExecutionOutputOptions } from './executions.js';
 export type {
+  AccountCapabilities,
+  AccountCompleteness,
+  AccountLimits,
+  AccountPerComputer,
+  AccountPlan,
+  AccountQuota,
+  AccountRemaining,
+  AccountUsage,
   BackgroundExec,
   BuildProgress,
   BuildStep,
@@ -200,6 +211,7 @@ export type {
   UsageOptions,
 } from './resources.js';
 export {
+  Account,
   Builds,
   Computers,
   Moves,
