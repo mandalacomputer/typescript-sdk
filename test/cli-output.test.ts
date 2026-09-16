@@ -23,7 +23,7 @@ function writer(json = true) {
     },
     now: () => new Date('2026-02-03T04:05:06Z'),
   });
-  return { output: new Output(io, 'computers get', json), read: () => ({ stdout, stderr }) };
+  return { io, output: new Output(io, 'computers get', json), read: () => ({ stdout, stderr }) };
 }
 
 describe('versioned output contract', () => {
@@ -131,4 +131,16 @@ describe('versioned output contract', () => {
     w.output.error(new CliError('invalid_arguments', 'bad flag'));
     expect(w.read()).toEqual({ stdout: '', stderr: 'mandala: bad flag\n' });
   });
+});
+
+it('redacts invocation-local file/device/issued secrets in fields, errors and object member names', () => {
+  const w = writer();
+  for (const secret of ['file-key-canary', 'device-secret-canary', 'issued-key-canary'])
+    w.io.secrets!.add(secret);
+  w.output.result({ 'file-key-canary': ['device-secret-canary', { value: 'issued-key-canary' }] });
+  w.output.error(new CliError('failure', 'device-secret-canary', { key: 'issued-key-canary' }));
+  w.output.diagnostic('file-key-canary device-secret-canary issued-key-canary');
+  const text = w.read().stdout + w.read().stderr;
+  for (const secret of w.io.secrets!) expect(text).not.toContain(secret);
+  expect(text).toContain('[REDACTED]');
 });

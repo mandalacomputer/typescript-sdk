@@ -5,18 +5,24 @@ import { APIError, MandalaError, ValidationError } from './errors.js';
 export const SCHEMA_VERSION = 1;
 
 /** Mask credentials even when a remote error or payload repeats their values. */
-export function redact(value: unknown, env: NodeJS.ProcessEnv): unknown {
+export function redact(
+  value: unknown,
+  env: NodeJS.ProcessEnv,
+  secrets: Iterable<string> = [],
+): unknown {
   if (typeof value === 'string') {
-    for (const secret of [env.MANDALA_API_KEY, env.MANDALA_MODEL_KEY].flatMap((key) =>
+    for (const secret of [...secrets, env.MANDALA_API_KEY, env.MANDALA_MODEL_KEY].flatMap((key) =>
       key ? [key, key.trim()] : [],
     )) {
       if (secret) value = (value as string).split(secret).join('[REDACTED]');
     }
     return value;
   }
-  if (Array.isArray(value)) return value.map((v) => redact(v, env));
+  if (Array.isArray(value)) return value.map((v) => redact(v, env, secrets));
   if (value && typeof value === 'object')
-    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, redact(v, env)]));
+    return Object.fromEntries(
+      Object.entries(value).map(([k, v]) => [redact(k, env, secrets), redact(v, env, secrets)]),
+    );
   return value;
 }
 
@@ -38,7 +44,14 @@ export function errorInfo(error: unknown): {
     return { code: error.name, message: error.message, status: error.status };
   if (error instanceof Error && error.name === 'AbortError')
     return { code: 'cancelled', message: 'Cancelled' };
-  if (error instanceof MandalaError) return { code: error.name, message: error.message };
+  if (error instanceof MandalaError)
+    return {
+      code:
+        typeof (error as { code?: unknown }).code === 'string'
+          ? (error as unknown as { code: string }).code
+          : error.name,
+      message: error.message,
+    };
   if (error instanceof Error && typeof (error as { code?: unknown }).code === 'string')
     return { code: (error as Error & { code: string }).code, message: error.message };
   return {
@@ -55,7 +68,7 @@ export class Output {
   ) {}
 
   emitJson(value: unknown): void {
-    this.io.stdout.write(`${JSON.stringify(redact(value, this.io.env))}\n`);
+    this.io.stdout.write(`${JSON.stringify(redact(value, this.io.env, this.io.secrets))}\n`);
   }
 
   result(data: unknown, exitCode = 0): number {
@@ -67,7 +80,10 @@ export class Output {
         data,
         exitCode,
       });
-    else this.io.stdout.write(`${JSON.stringify(redact(data, this.io.env), null, 2)}\n`);
+    else
+      this.io.stdout.write(
+        `${JSON.stringify(redact(data, this.io.env, this.io.secrets), null, 2)}\n`,
+      );
     return exitCode;
   }
 
@@ -99,12 +115,12 @@ export class Output {
     else {
       const text = typeof data === 'string' ? data : JSON.stringify(data);
       this.io.stdout.write(
-        `${this.io.now().toISOString()} ${type}: ${redact(text, this.io.env)}\n`,
+        `${this.io.now().toISOString()} ${type}: ${redact(text, this.io.env, this.io.secrets)}\n`,
       );
     }
   }
 
   diagnostic(text: string): void {
-    this.io.stderr.write(`${redact(text, this.io.env)}\n`);
+    this.io.stderr.write(`${redact(text, this.io.env, this.io.secrets)}\n`);
   }
 }

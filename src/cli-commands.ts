@@ -1,18 +1,20 @@
 import { writeFile } from 'node:fs/promises';
 import process from 'node:process';
 import { completion } from './cli-completion.js';
+import { loginCommand } from './cli-login.js';
 import { manifest } from './cli-manifest.js';
 import { CliError, help, type Parsed, parseArgs } from './cli-options.js';
 import { errorInfo, Output, redact } from './cli-output.js';
 import { type CliIO, documentInput, readInput } from './cli-runtime.js';
 import type { Computer } from './computer.js';
+import { CredentialSaveError } from './credentials.js';
 import { MandalaError, NotFoundError, ValidationError } from './errors.js';
 import type { AccountQuota, BuildProgress, Client, Listing, UsageReport } from './index.js';
 import * as P from './paths.js';
 import { checkWait } from './wait.js';
 
 export type LegacyCommands = {
-  ssh: (computer: string, session: string) => Promise<number>;
+  ssh: (computer: string, session: string, io: CliIO) => Promise<number>;
   scp: (
     source: string,
     destination: string,
@@ -271,13 +273,32 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
       io.stdout.write(script);
       return 0;
     }
+    const createClient = io.createClient;
+    io = {
+      ...io,
+      secrets: io.secrets ?? new Set<string>(),
+      createClient: () => createClient(f.profile as string | undefined),
+    };
+    output = new Output(io, path, json);
+    if (path === 'login') {
+      process.on('SIGINT', cancel);
+      process.on('SIGTERM', cancel);
+      return await loginCommand(
+        f.profile as string | undefined,
+        f.workspace as string | undefined,
+        f['base-url'] as string | undefined,
+        io,
+        output,
+        signal,
+      );
+    }
     if (path === 'ssh') {
       if (json)
         throw new CliError(
           'unsupported_mode',
           'Interactive ssh does not support --json; use computers exec for machine-readable output',
         );
-      return await legacy.ssh(args[0]!, (f.session as string | undefined) ?? 'main');
+      return await legacy.ssh(args[0]!, (f.session as string | undefined) ?? 'main', io);
     }
     process.on('SIGINT', cancel);
     process.on('SIGTERM', cancel);
@@ -391,7 +412,7 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
         const quota = await client.account.read(call);
         const { raw: _raw, ...data } = quota;
         if (json) return output.result(data);
-        io.stdout.write(`${redact(accountText(quota), io.env)}\n`);
+        io.stdout.write(`${redact(accountText(quota), io.env, io.secrets)}\n`);
         return 0;
       }
       case 'usage': {
@@ -400,7 +421,7 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
         const { raw: _raw, ...data } = report;
         if (json)
           return output.result({ ...data, reportedThrough: report.reportedThrough ?? null });
-        io.stdout.write(`${redact(usageText(report), io.env)}\n`);
+        io.stdout.write(`${redact(usageText(report), io.env, io.secrets)}\n`);
         return 0;
       }
       case 'computers list': {
@@ -617,6 +638,7 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
         throw new CliError('invalid_arguments', `unknown command ${path}`);
     }
   } catch (error) {
+    if (error instanceof CredentialSaveError && error.committed) return output.error(error);
     if (controller.signal.aborted)
       return output.error(new CliError('cancelled', 'Cancelled'), 130, watching);
     // Preserve stacks for programming faults in the human CLI, including terminal DOMExceptions.

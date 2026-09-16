@@ -33,9 +33,9 @@ import { isatty, WriteStream } from 'node:tty';
 import { pathToFileURL } from 'node:url';
 import { type LegacyCommands, resolveComputer, runCli } from './cli-commands.js';
 import { CliError } from './cli-options.js';
+import { redact } from './cli-output.js';
 import { type CliIO, runtime } from './cli-runtime.js';
 import type { Computer } from './computer.js';
-import { Client } from './index.js';
 
 /**
  * The whole guest-side scrollback is smaller than this; anything bigger in one
@@ -530,8 +530,8 @@ export async function finishInteraction(
 
 // --- ssh -------------------------------------------------------------------
 
-async function cmdSsh(target: string, session: string): Promise<number> {
-  const c = await (await resolveComputer(new Client(), target)).refresh();
+async function cmdSsh(target: string, session: string, io: CliIO): Promise<number> {
+  const c = await (await resolveComputer(io.createClient(), target)).refresh();
   const vnc = c.vnc;
   if (!vnc?.terminalUrl) {
     if (c.os === 'windows') {
@@ -1010,8 +1010,9 @@ if (invokedDirectly) {
   const exit = (code: number): void => {
     flushOutput(process.stdout, process.stderr, () => process.exit(code));
   };
-  main().then(exit, (err) => {
-    process.stderr.write(`mandala: ${unexpectedErrorText(err)}\n`);
+  const io = runtime();
+  main(undefined, io).then(exit, (err) => {
+    process.stderr.write(`mandala: ${redact(unexpectedErrorText(err), io.env, io.secrets)}\n`);
     exit(1);
   });
 }

@@ -21,12 +21,54 @@ npm install mandala-computer
 Published as ES modules, with type declarations alongside. The install also
 puts a `mandala` command on your PATH; see [The `mandala` CLI](#the-mandala-cli).
 
-You need an API key from the dashboard — **Settings → API keys**, a `com_…`
-string. It is scoped to your account and it *is* every computer on it, so treat
-it the way you would treat a password. Never ship it to a browser.
+Sign in once on your local Node installation:
 
 ```sh
-export MANDALA_API_KEY=com_…
+mandala login
+# Or request exactly one workspace and save a named profile:
+mandala login --profile Work --workspace Research
+```
+
+Compare the code shown in your terminal with the browser approval page, confirm
+the account and scope, and approve. The first command requests access to the
+whole account. The CLI always prints the URL and code for manual or headless use.
+A successful login saves a normal device-named API key in
+`~/.mandala/credentials.json`; it never prints the key. Revoke it in **Settings →
+API keys** when access is no longer needed. Treat the file like a password and
+never ship a credential to browser users.
+
+You can also create a key in Settings and use `MANDALA_API_KEY` or `apiKey`.
+Resolution happens once when constructing a client: a supplied `apiKey` wins,
+then a nonempty `MANDALA_API_KEY`, then the credentials file. An explicit empty
+or wrong-type key fails instead of falling through. Empty environment values
+are absent. A key supplied explicitly or through the environment performs no
+credential-file or home-directory lookup, even when `profile` is set.
+
+File selection uses `new Client({ profile: 'Work' })`, then `MANDALA_PROFILE`,
+then the saved default. Profile names are case-sensitive ASCII names of 1–64
+characters, starting with a letter or digit and continuing with letters, digits,
+dots, underscores or hyphens; object-prototype names are reserved. A file key
+is bound to its saved API base, including its complete path prefix. An explicit
+or environment base override must match that canonical base. Invalid stores,
+permissions, missing profiles, or mismatched bases fail locally before a request.
+Existing clients retain their selected key after the file changes; a new client
+reads the latest file. A revoked key raises the normal `AuthenticationError`
+with status 401 and its revoked reason, without fallback, replay, or automatic login.
+
+Local file authentication requires POSIX owner/mode verification: an owned real
+0700 `~/.mandala` directory and an owned regular 0600 file with one link.
+Symlinks, hardlinks, unsafe modes, malformed JSON, files above 64 KiB, and more
+than 100 profiles are refused. Windows file protection is unsupported in this
+version; explicit/environment keys still work. Browser and default package
+conditions support explicit keys and injected `fetch`; they never import the
+local filesystem or use browser storage for profiles.
+
+The same file can be read by the Python SDK and local MCP server. After login,
+no API-key environment variable is needed for local clients:
+
+```sh
+mandala computers list --profile Work
+claude mcp add mandala -- npx -y mandala-computer-mcp --profile Work
 ```
 
 Requests go to `https://app.mandala.computer/api/v1`; `MANDALA_BASE_URL` or
@@ -44,7 +86,7 @@ a `signal` among its options, so any one request can be cancelled.
 ```ts
 import { Client } from 'mandala-computer';
 
-const client = new Client();                  // reads MANDALA_API_KEY
+const client = new Client();                  // environment key or saved default profile
 
 const c = await client.computers.launch({ template: 'base' });
 try {
@@ -2209,16 +2251,44 @@ npx --package=mandala-computer mandala manifest
 npx --package=mandala-computer mandala computers list --json
 ```
 
-Requests use `MANDALA_API_KEY`, with `MANDALA_BASE_URL` as an optional server
-override. Agent runs also require `MANDALA_MODEL_KEY`, your model-provider key.
-There is no CLI login, credentials file, or profile selection in this release.
-Account and usage reads use the account bound to `MANDALA_API_KEY` and need no model key.
+Requests use the credential precedence described above. Global `--profile` reaches
+every authenticated command, including `account`, `usage`, SSH and SCP. Agent
+runs also require `MANDALA_MODEL_KEY`, your model-provider key; account and usage
+reads need no model key.
+
+`mandala login [--profile name] [--workspace name] [--base-url URL]` always starts
+an explicit anonymous browser approval, even if an API-key environment variable
+exists. Its destination is the explicit profile, `MANDALA_PROFILE`, the existing
+saved default, or `default` for a first unnamed login. Replacing a profile
+preserves other profiles and the existing default. Login uses HTTPS by default;
+local development HTTP must explicitly name a loopback base through `--base-url`
+or `MANDALA_BASE_URL`. Bootstrap requests go to the control-plane origin's
+`/api/auth/device/start` and `/api/auth/device/poll`, outside the bearer API path.
+They do not follow redirects.
+
+The CLI waits at least the advertised interval, respects slowdown/backoff and
+stops at the original ten-minute expiry. Ctrl-C stops waiting and attempts one
+bounded cancellation. An interrupted connection or failed local save can happen
+after a key was issued: check and revoke the device-named key in Settings before
+a fresh explicit login. The CLI never automatically issues another key.
+
+Saving uses a short exclusive lock only after approval, rereads the store under
+that lock, and atomically replaces a flushed private temporary file. Cancellation
+before replacement preserves the old file; after replacement the CLI reports
+saved state. A lock timeout never steals another writer's lock. If an abandoned
+`~/.mandala/.credentials.lock` remains, stop all login processes and verify that
+no writer is active before manually removing that owned regular lock file.
+Never remove an unfamiliar or unsafe lock path merely because a login timed out.
+
+`login --json` puts the URL/code and progress on stderr. Its final stdout envelope
+contains only `profile`, `base_url`, `account`, `scope`, and `saved: true`. It does
+not return the device secret, API key, or full credentials file.
 
 ### Discover commands and flags
 
 `mandala --help`, `mandala computers --help`, and
 `mandala computers exec --help` show progressively narrower help. Every command
-accepts `--help` (`-h`) and `--json`. Help, manifest, and completion need neither
+accepts `--help` (`-h`), `--json`, and `--profile`. Help, manifest, and completion need neither
 credentials nor network access and never prompt for input.
 
 | Command group | Available commands |
@@ -2228,7 +2298,7 @@ credentials nor network access and never prompt for input.
 | `snapshots` | `list`, `create`, `restore`, `clone`, `delete`, `holdings`, `schedule get`, `schedule set`, `schedule clear`, `retention` |
 | `webhooks` | `list`, `create`, `get`, `update`, `delete`, `rotate`, `test`, `deliveries` |
 | `agent` | `run` |
-| Top-level commands | `account`, `usage`, `ssh`, `scp`, `manifest`, `completion` |
+| Top-level commands | `login`, `account`, `usage`, `ssh`, `scp`, `manifest`, `completion` |
 
 Command-specific flags follow the command name. Flags with values accept
 `--name value` or `--name=value`; boolean flags take no value. Repeat only flags
@@ -2536,7 +2606,7 @@ A download is paged and written chunk by chunk, so it is not bounded by the
 `mandala scp vm:/home/user/build.tar .` is the copy the SDK's `readFileChunks`
 exists for. A failure part-way leaves what arrived on disk, as scp and curl do.
 
-Both take a computer's name or its id, and authenticate with `MANDALA_API_KEY`.
+Both take a computer's name or its id and use the shared credential/profile selection.
 
 ## Design notes
 
