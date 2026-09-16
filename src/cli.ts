@@ -5,7 +5,7 @@
  *
  * These two subcommands retain their terminal and file-transfer lifecycles:
  *
- * `mandala ssh <computer>`
+ * `mandala terminal <computer>`
  *   An interactive shell in the guest, over the platform's terminal websocket —
  *   a PTY the platform keeps alive server-side. Disconnecting detaches the
  *   session rather than ending it; running the same command reattaches and
@@ -321,12 +321,12 @@ export function unexpectedErrorText(err: unknown): string {
  *
  * stdin first: it is the descriptor raw mode is set from, and its terminal is
  * the one SIGWINCH reports on. stdout is not the right answer on its own —
- * `mandala ssh dev | tee session.log` is still a session in whatever window the
+ * `mandala terminal dev | tee session.log` is still a session in whatever window the
  * user is sitting in, and sizing it from the pipe left the guest PTY at the
  * broker's 80x24 default for the whole session, with `vim`, `htop` and `less`
  * wrong all the way through (OPL-4264; OPL-4246 was the same defect in the
  * Python SDK). The other two are tried after it so a redirected stdin
- * (`mandala ssh dev < script`) still reports the window its output is drawn in.
+ * (`mandala terminal dev < script`) still reports the window its output is drawn in.
  *
  * Descriptors rather than `process.stdin.isTTY`, because a descriptor is what
  * the measurement below has to name.
@@ -528,9 +528,9 @@ export async function finishInteraction(
   }
 }
 
-// --- ssh -------------------------------------------------------------------
+// --- terminal --------------------------------------------------------------
 
-async function cmdSsh(target: string, session: string, io: CliIO): Promise<number> {
+async function cmdTerminal(target: string, session: string, io: CliIO): Promise<number> {
   const c = await (await resolveComputer(io.createClient(), target)).refresh();
   const vnc = c.vnc;
   if (!vnc?.terminalUrl) {
@@ -576,7 +576,7 @@ export async function interact(
   } = {},
 ): Promise<number> {
   if (typeof WebSocket === 'undefined') {
-    die('this Node has no global WebSocket — mandala ssh needs Node 22 or newer');
+    die('this Node has no global WebSocket — mandala terminal needs Node 22 or newer');
   }
   const ws = new WebSocket(url);
   ws.binaryType = 'arraybuffer';
@@ -644,7 +644,7 @@ export async function interact(
   /**
    * Piped input ran out — tell the remote shell so, rather than nothing.
    *
-   * `mandala ssh vm < script` otherwise hangs forever after the last line: the
+   * `mandala terminal vm < script` otherwise hangs forever after the last line: the
    * PTY is still waiting for input nobody will ever type, and the only thing
    * that ends this session is the socket closing. Ctrl-D is what a terminal
    * sends at that point, and it is what makes the guest's shell exit and report
@@ -727,7 +727,7 @@ export async function interact(
               // exit 0 — that is the difference between success and a shrug.
               // An integer or the string spelling of one both count: nothing
               // in-repo pins which the terminal server sends, and reading its
-              // "0" as exit 1 would break `mandala ssh vm cmd && next`. What
+              // "0" as exit 1 would break `mandala terminal vm cmd && next`. What
               // stays refused is everything Number() shrugs into 0 — null,
               // '', booleans — and anything not an integer at all.
               const code =
@@ -738,7 +738,7 @@ export async function interact(
                     : Number.NaN;
               // Clamped, not just checked for integrality. process.exit takes
               // the low byte, so 256 left the shell reading exit 0 — a guest
-              // failure turned into the success `mandala ssh vm cmd && next`
+              // failure turned into the success `mandala terminal vm cmd && next`
               // acts on, which is the one outcome the guard above exists to
               // stop. Out of range is refused rather than masked to 256 % 256
               // for the same reason a non-integer is: a code this process
@@ -982,7 +982,7 @@ export async function main(
   argv: string[] = process.argv.slice(2),
   overrides: Partial<CliIO> = {},
 ): Promise<number> {
-  return runCli(argv, runtime(overrides), { ssh: cmdSsh, scp: cmdScp });
+  return runCli(argv, runtime(overrides), { terminal: cmdTerminal, scp: cmdScp });
 }
 
 // Guarded so importing this module — which the tests do, for remoteSide — does

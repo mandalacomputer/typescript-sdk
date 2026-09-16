@@ -3,7 +3,7 @@ import process from 'node:process';
 import { completion } from './cli-completion.js';
 import { loginCommand } from './cli-login.js';
 import { manifest } from './cli-manifest.js';
-import { CliError, help, type Parsed, parseArgs } from './cli-options.js';
+import { CliError, help, type Parsed, parseArgs, SSH_REFUSAL } from './cli-options.js';
 import { errorInfo, Output, redact } from './cli-output.js';
 import { type CliIO, documentInput, readInput } from './cli-runtime.js';
 import type { Computer } from './computer.js';
@@ -14,7 +14,7 @@ import * as P from './paths.js';
 import { checkWait } from './wait.js';
 
 export type LegacyCommands = {
-  ssh: (computer: string, session: string, io: CliIO) => Promise<number>;
+  terminal: (computer: string, session: string, io: CliIO) => Promise<number>;
   scp: (
     source: string,
     destination: string,
@@ -292,13 +292,13 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
         signal,
       );
     }
-    if (path === 'ssh') {
+    if (path === 'terminal') {
       if (json)
         throw new CliError(
           'unsupported_mode',
-          'Interactive ssh does not support --json; use computers exec for machine-readable output',
+          'Interactive terminal does not support --json; use computers exec for machine-readable output',
         );
-      return await legacy.ssh(args[0]!, (f.session as string | undefined) ?? 'main', io);
+      return await legacy.terminal(args[0]!, (f.session as string | undefined) ?? 'main', io);
     }
     process.on('SIGINT', cancel);
     process.on('SIGTERM', cancel);
@@ -652,6 +652,10 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
       errorInfo(error).code === 'internal_error'
     )
       throw error;
+    if (!output.json && error instanceof CliError && error.message === SSH_REFUSAL) {
+      io.stderr.write(`${SSH_REFUSAL}\n`);
+      return 1;
+    }
     return output.error(error, 1, watching);
   } finally {
     process.off('SIGINT', cancel);

@@ -1,7 +1,7 @@
 /**
  * The `mandala` command.
  *
- * Pure helpers and the socket/stream boundaries of the interactive ssh loop.
+ * Pure helpers and the socket/stream boundaries of the interactive terminal loop.
  */
 
 import { execFileSync, spawnSync } from 'node:child_process';
@@ -689,7 +689,7 @@ describe('terminal geometry', () => {
   const ttys = (fds: number[]) => (fd: number) => fds.includes(fd);
 
   it('measures the terminal on stdin, not on a piped stdout', () => {
-    // `mandala ssh dev | tee session.log` — stdin is the window, stdout a pipe.
+    // `mandala terminal dev | tee session.log` — stdin is the window, stdout a pipe.
     expect(terminalFd(ttys([0, 2]))).toBe(0);
   });
 
@@ -886,14 +886,14 @@ describe('argument handling', () => {
   it('prints usage and fails when given nothing', async () => {
     const { code, out } = await run([]);
     expect(code).toBe(2);
-    expect(out).toContain('mandala ssh');
+    expect(out).toContain('mandala terminal');
     expect(out).toContain('mandala scp');
   });
 
   it('prints usage and succeeds when asked for help', async () => {
     expect((await run(['--help'])).code).toBe(0);
-    expect((await run(['ssh', '--help'])).code).toBe(0);
-    expect((await run(['ssh', '-h'])).code).toBe(0);
+    expect((await run(['terminal', '--help'])).code).toBe(0);
+    expect((await run(['terminal', '-h'])).code).toBe(0);
     expect((await run(['scp', '--help'])).code).toBe(0);
     expect((await run(['scp', '-h'])).code).toBe(0);
   });
@@ -927,20 +927,20 @@ describe('argument handling', () => {
     expect(out).toContain('mandala scp <src> <dst>');
   });
 
-  it('refuses an ssh with no computer', async () => {
-    const { code, out } = await run(['ssh']);
+  it('refuses a terminal with no computer', async () => {
+    const { code, out } = await run(['terminal']);
     expect(code).toBe(1);
-    expect(out).toContain('mandala ssh <computer>');
+    expect(out).toContain('mandala terminal <computer>');
   });
 
   it('refuses --session with nothing after it', async () => {
-    const { code, out } = await run(['ssh', 'demo', '--session']);
+    const { code, out } = await run(['terminal', 'demo', '--session']);
     expect(code).toBe(1);
     expect(out).toContain('--session needs a name');
   });
 
   it('refuses an empty equals-form session name', async () => {
-    const { code, out } = await run(['ssh', 'demo', '--session=']);
+    const { code, out } = await run(['terminal', 'demo', '--session=']);
     expect(code).toBe(1);
     expect(out).toContain('--session needs a name');
   });
@@ -964,7 +964,7 @@ describe('argument handling', () => {
         : json(call.path === '/computers' ? [computer] : computer),
     ).fetch;
     try {
-      const thrown = await run(['ssh', 'demo']).catch((e) => e);
+      const thrown = await run(['terminal', 'demo']).catch((e) => e);
       expect(thrown).toBeInstanceOf(DOMException);
       expect(typeof (thrown as DOMException).code).toBe('number');
     } finally {
@@ -976,24 +976,60 @@ describe('argument handling', () => {
     }
   });
 
-  it('refuses an ssh carrying a command rather than silently dropping it', async () => {
-    // `mandala ssh vm ls -la` is the ubiquitous ssh idiom and this command does
-    // not have it. Ignoring the tail opened an interactive shell instead, which
+  it('refuses a terminal carrying a command rather than silently dropping it', async () => {
+    // `mandala terminal vm ls -la` reads like the ssh idiom and this command
+    // does not have it. Ignoring the tail opened an interactive shell instead, which
     // looks like it worked.
-    const { code, out } = await run(['ssh', 'demo', 'ls']);
+    const { code, out } = await run(['terminal', 'demo', 'ls']);
     expect(code).toBe(1);
     expect(out).toContain('runs no command');
+  });
+
+  it('refuses ssh with one stderr line and nothing on stdout', async () => {
+    const { main } = await import('../src/cli.js');
+    const line =
+      'mandala ssh is being rebuilt as a real OpenSSH session; use "mandala terminal" for a shell.\n';
+    for (const args of [
+      ['ssh'],
+      ['ssh', 'demo'],
+      ['ssh', 'demo', '--session', 'x'],
+      ['ssh', '--help'],
+    ]) {
+      let out = '';
+      let err = '';
+      const code = await main(args, {
+        env: {},
+        stdout: {
+          write: ((s: unknown) => {
+            out += s;
+            return true;
+          }) as NodeJS.WritableStream['write'],
+        },
+        stderr: {
+          write: ((s: unknown) => {
+            err += s;
+            return true;
+          }) as NodeJS.WritableStream['write'],
+        },
+        createClient: () => {
+          throw new Error('ssh must not create a client');
+        },
+      });
+      expect(code).not.toBe(0);
+      expect(out).toBe('');
+      expect(err).toBe(line);
+    }
   });
 });
 
 /**
- * The ssh loop, driven end to end against a fake socket and a fake platform.
+ * The terminal loop, driven end to end against a fake socket and a fake platform.
  *
- * Worth the setup for one thing the pure parts cannot show: what `mandala ssh`
+ * Worth the setup for one thing the pure parts cannot show: what `mandala terminal`
  * RETURNS, which is the number a shell reads as success or failure.
  */
 describe('the exit code a session reports', () => {
-  const sshWith = async (frame: unknown): Promise<number> => {
+  const terminalWith = async (frame: unknown): Promise<number> => {
     const savedKey = process.env.MANDALA_API_KEY;
     const savedBase = process.env.MANDALA_BASE_URL;
     const savedFetch = globalThis.fetch;
@@ -1026,7 +1062,7 @@ describe('the exit code a session reports', () => {
     } as unknown as typeof WebSocket;
     try {
       const { main } = await import('../src/cli.js');
-      return await main(['ssh', 'demo']);
+      return await main(['terminal', 'demo']);
     } finally {
       globalThis.WebSocket = savedWS;
       globalThis.fetch = savedFetch;
@@ -1038,17 +1074,17 @@ describe('the exit code a session reports', () => {
   };
 
   it('passes an ordinary code through', async () => {
-    expect(await sshWith({ type: 'exit', code: 0 })).toBe(0);
-    expect(await sshWith({ type: 'exit', code: 3 })).toBe(3);
-    expect(await sshWith({ type: 'exit', code: '7' })).toBe(7);
+    expect(await terminalWith({ type: 'exit', code: 0 })).toBe(0);
+    expect(await terminalWith({ type: 'exit', code: 3 })).toBe(3);
+    expect(await terminalWith({ type: 'exit', code: '7' })).toBe(7);
   });
 
   it('refuses a code process.exit cannot carry, rather than letting it wrap', async () => {
     // process.exit takes the low byte, so 256 arrived at the shell as 0 — a
-    // guest failure reported as the success `mandala ssh vm cmd && next` acts
+    // guest failure reported as the success `mandala terminal vm cmd && next` acts
     // on. -1 wrapping to 255 is at least still a failure; this one inverts.
-    expect(await sshWith({ type: 'exit', code: 256 })).toBe(1);
-    expect(await sshWith({ type: 'exit', code: -1 })).toBe(1);
+    expect(await terminalWith({ type: 'exit', code: 256 })).toBe(1);
+    expect(await terminalWith({ type: 'exit', code: -1 })).toBe(1);
   });
 });
 

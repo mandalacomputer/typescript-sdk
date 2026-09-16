@@ -58,7 +58,7 @@ const expectedCommands = [
   'webhooks test',
   'webhooks deliveries',
   'agent run',
-  'ssh',
+  'terminal',
   'scp',
   'manifest',
   'completion',
@@ -103,7 +103,7 @@ describe('one command inventory', () => {
     expect(new Set(COMMANDS.map((c) => c.path)).size).toBe(expectedCommands.length);
     const tree = manifest();
     expect(tree.commands.map((c) => c.path.join(' '))).toEqual(expectedCommands);
-    expect(tree.commands.find((c) => c.path[0] === 'ssh')?.jsonMode).toBe('unsupported');
+    expect(tree.commands.find((c) => c.path[0] === 'terminal')?.jsonMode).toBe('unsupported');
     expect(tree.commands.find((c) => c.path.join(' ') === 'agent run')?.jsonMode).toBe('ndjson');
     expect(tree.commands.find((c) => c.path[0] === 'completion')?.arguments[0]).toMatchObject({
       choices: ['bash', 'zsh', 'fish'],
@@ -175,7 +175,7 @@ describe('offline discovery', () => {
     ['help'],
     ['computers', '--help'],
     ['snapshots', 'schedule', '--help'],
-    ['ssh', '--help'],
+    ['terminal', '--help'],
     ['scp', '--help'],
     ['account', '--help'],
     ['usage', '--help'],

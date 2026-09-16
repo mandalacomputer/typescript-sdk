@@ -20,7 +20,7 @@ export function manifest() {
         fields: ['schemaVersion', 'command', 'type', 'timestamp', 'data'],
         terminalTypes: ['done', 'error'],
       },
-      ssh: '--json returns unsupported_mode before connecting',
+      terminal: '--json returns unsupported_mode before connecting',
       scp: 'One finite result with source, destination, and transfer byte accounting',
       screenshot: 'Writes exact image bytes to --output; JSON data contains path and bytes',
       exec: 'JSON data contains base64 stdout/stderr, decoded text, exitCode and completion flags; process exit follows the remote status (124 on timeout, 1 if unknown)',
