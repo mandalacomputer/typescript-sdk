@@ -543,6 +543,7 @@ export class Transport {
   readonly #fetch: typeof globalThis.fetch;
   readonly #retries: number;
   readonly #retryDelays = new WeakMap<APIError, number>();
+  readonly #terminalBodies = new WeakSet<APIError>();
 
   constructor(opts: TransportOptions = {}) {
     const retries = opts.retries;
@@ -659,24 +660,8 @@ export class Transport {
       attempt >= this.#retries ||
       !['GET', 'HEAD'].includes(method.toUpperCase()) ||
       /\/computers\/[^/]+\/exec\/[^/]+\/?$/.test(pathname) ||
-      [...causes(error)].some(
-        (cause) =>
-          [
-            'TimeoutError',
-            'AbortError',
-            'ConnectTimeoutError',
-            'HeadersTimeoutError',
-            'BodyTimeoutError',
-          ].includes(String(cause.name)) ||
-          [
-            'UND_ERR_CONNECT_TIMEOUT',
-            'UND_ERR_HEADERS_TIMEOUT',
-            'UND_ERR_BODY_TIMEOUT',
-            'ERR_TLS_HANDSHAKE_TIMEOUT',
-            'ETIMEDOUT',
-            'ESOCKETTIMEDOUT',
-          ].includes(String(cause.code)),
-      )
+      isTimeoutFailure(error) ||
+      (error instanceof APIError && this.#terminalBodies.has(error))
     )
       return undefined;
     if (
@@ -932,6 +917,7 @@ export class Transport {
     boundedSignal?: AbortSignal,
   ): Promise<APIError> {
     let body: unknown;
+    let terminalBody = false;
     let message = `HTTP ${resp.status}`;
     // Read through #readBody, not `.catch(() => '')`. The composed signal
     // governs this body like any other, so a caller cancelling here, or a
@@ -950,9 +936,12 @@ export class Transport {
       // platform actually sent with a connection failure (OPL-3855).
       false,
     ).catch((cause) => {
-      // Anything else is a body that would not come, which says nothing the
-      // status does not. Answer with the status, as before.
       if (caller?.aborted || cause instanceof ConnectionError) throw cause;
+      // Keep the typed status and its metadata, including for default-off
+      // callers, but retain the retry distinction privately. Only a known
+      // non-timeout transport interruption permits another attempt; decoding
+      // and unclassified body failures cannot become permission through 503.
+      terminalBody = isTimeoutFailure(cause) || !isTransportFailure(cause);
       return '';
     });
     if (text) {
@@ -971,12 +960,14 @@ export class Transport {
         body = text;
       }
     }
-    return errorForStatus(resp.status, message, body, {
+    const error = errorForStatus(resp.status, message, body, {
       retryAfterMs: retryAfterMs(resp.headers.get('retry-after')),
       // Only ever set on a 416, which is the one status that answers with a
       // Content-Range naming the file rather than a window of it.
       rangeTotal: unsatisfiedTotal(resp.headers.get('content-range')),
     });
+    if (terminalBody) this.#terminalBodies.add(error);
+    return error;
   }
 
   /**
@@ -1388,6 +1379,28 @@ function* causes(err: unknown, depth = 0): Generator<Record<string, unknown>> {
   if (Array.isArray(e.errors)) {
     for (const inner of e.errors) yield* causes(inner, depth + 1);
   }
+}
+
+/** Native phase timeouts and cancellation remain terminal through nested causes. */
+function isTimeoutFailure(error: unknown): boolean {
+  return [...causes(error)].some(
+    (cause) =>
+      [
+        'TimeoutError',
+        'AbortError',
+        'ConnectTimeoutError',
+        'HeadersTimeoutError',
+        'BodyTimeoutError',
+      ].includes(String(cause.name)) ||
+      [
+        'UND_ERR_CONNECT_TIMEOUT',
+        'UND_ERR_HEADERS_TIMEOUT',
+        'UND_ERR_BODY_TIMEOUT',
+        'ERR_TLS_HANDSHAKE_TIMEOUT',
+        'ETIMEDOUT',
+        'ESOCKETTIMEDOUT',
+      ].includes(String(cause.code)),
+  );
 }
 
 /**

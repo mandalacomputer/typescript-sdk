@@ -372,8 +372,10 @@ describe('independent byte cursors', () => {
       diagnostic_truncated: true,
     });
     const chunk = await c.executionOutput(ID, { ...zero, limit: 1048576 });
-    expect(chunk.stdout).toEqual(new Uint8Array(content));
-    expect(chunk.diagnostic).toEqual(new Uint8Array(diagnostic));
+    expect(chunk.stdout).toBeInstanceOf(Uint8Array);
+    expect(chunk.diagnostic).toBeInstanceOf(Uint8Array);
+    expect(content.equals(chunk.stdout)).toBe(true);
+    expect(diagnostic.equals(chunk.diagnostic)).toBe(true);
     expect(chunk.diagnosticTruncated).toBe(true);
   });
 

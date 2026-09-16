@@ -564,3 +564,143 @@ it.each(['json', 'sse'] as const)(
     expect(vi.getTimerCount()).toBe(0);
   },
 );
+
+const readModes = ['json', 'listing', 'bytes', 'boundedJson', 'boundedBytes', 'sse'] as const;
+type ReadMode = (typeof readModes)[number];
+const readMode = (t: Transport, kind: ReadMode): Promise<unknown> => {
+  if (kind === 'sse') return t.sse('GET', '/builds/b/events').next();
+  if (kind === 'listing') return t.listing('/computers');
+  if (kind === 'boundedJson' || kind === 'boundedBytes')
+    return t[kind]('GET', '/computers/vm/results/r/output', { maxBytes: 100 });
+  return t[kind]('GET', '/computers');
+};
+const modeHeaders = (kind: ReadMode) => ({
+  'content-type':
+    kind === 'sse'
+      ? 'text/event-stream'
+      : kind === 'bytes' || kind === 'boundedBytes'
+        ? 'application/octet-stream'
+        : 'application/json',
+  'content-length': '2',
+});
+const recoveredRead = (kind: ReadMode) =>
+  new Response(kind === 'sse' ? 'data: {}\n\n' : kind === 'listing' ? '[]' : '{}', {
+    headers: modeHeaders(kind),
+  });
+
+for (const kind of readModes) {
+  for (const status of [200, 429, 500, 502, 503, 504]) {
+    for (const idempotent of [0, 1]) {
+      it.each(['name', 'code', 'nested', 'unknown'])(
+        `${kind} HTTP ${status} preserves terminal body failure %s with retries=${idempotent}`,
+        async (shape) => {
+          const failure =
+            shape === 'name'
+              ? Object.assign(new Error('body timed out'), { name: 'BodyTimeoutError' })
+              : shape === 'code'
+                ? Object.assign(new Error('body timed out'), { code: 'UND_ERR_BODY_TIMEOUT' })
+                : shape === 'nested'
+                  ? new TypeError('terminated', {
+                      cause: new AggregateError([
+                        new Error('another failure'),
+                        new Error('body failed', {
+                          cause: Object.assign(new Error('body timed out'), {
+                            code: 'UND_ERR_BODY_TIMEOUT',
+                          }),
+                        }),
+                      ]),
+                    })
+                  : new Error('unclassified body failure');
+          const response = new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                controller.error(failure);
+              },
+            }),
+            { status, headers: { ...modeHeaders(kind), 'Retry-After': '9' } },
+          );
+          const fetch = vi
+            .fn<typeof globalThis.fetch>()
+            .mockResolvedValueOnce(response)
+            .mockImplementation(async () => recoveredRead(kind));
+          const error = await settle(
+            readMode(transport(fetch, { idempotent }, { timeoutMs: 0 }), kind),
+          ).catch((error) => error);
+          expect(fetch).toHaveBeenCalledTimes(1);
+          expect(error).toBeInstanceOf(Error);
+          if (status !== 200) {
+            expect(error).toBeInstanceOf(APIError);
+            expect(error).toMatchObject({ status, retryAfterMs: 9000, body: undefined });
+            // Preserve the default status error's public shape, including its absent cause.
+            expect(error).not.toHaveProperty('cause');
+            expect(error).toHaveProperty(
+              'name',
+              status === 429
+                ? 'RateLimitError'
+                : status === 503
+                  ? 'UnavailableError'
+                  : status === 504
+                    ? 'GatewayTimeoutError'
+                    : 'APIError',
+            );
+          }
+          expect(vi.getTimerCount()).toBe(0);
+        },
+      );
+
+      it(`${kind} HTTP ${status} does not replay native gzip failure with retries=${idempotent}`, async () => {
+        // Native decompression completes outside Vitest's fake timer queue.
+        vi.useRealTimers();
+        const encoded = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode('not a gzip body'));
+            controller.close();
+          },
+        });
+        const response = new Response(encoded.pipeThrough(new DecompressionStream('gzip')), {
+          status,
+          headers: { ...modeHeaders(kind), 'content-encoding': 'gzip', 'Retry-After': '0' },
+        });
+        const fetch = vi
+          .fn<typeof globalThis.fetch>()
+          .mockResolvedValueOnce(response)
+          .mockImplementation(async () => recoveredRead(kind));
+        const error = await readMode(
+          transport(fetch, { idempotent }, { timeoutMs: 0 }),
+          kind,
+        ).catch((error) => error);
+        expect(fetch).toHaveBeenCalledTimes(1);
+        expect(error).toBeInstanceOf(Error);
+        if (status !== 200) {
+          expect(error).toBeInstanceOf(APIError);
+          expect(error).toMatchObject({ status, retryAfterMs: 0, body: undefined });
+          expect(error).not.toHaveProperty('cause');
+        }
+      });
+    }
+  }
+
+  for (const status of [502, 503, 504]) {
+    it.each([0, 1])(
+      `${kind} HTTP ${status} retains ordinary socket interruption behavior with retries=%s`,
+      async (idempotent) => {
+        const times: number[] = [];
+        const fetch = vi.fn<typeof globalThis.fetch>(async () => {
+          times.push(Date.now());
+          return brokenBody('lost error body', status, { 'Retry-After': '9' });
+        });
+        const error = await settle(
+          readMode(transport(fetch, { idempotent }, { timeoutMs: 0 }), kind),
+        ).catch((error) => error);
+        expect(fetch).toHaveBeenCalledTimes(idempotent + 1);
+        expect(times.slice(1).map((time, index) => time - (times[index] ?? 0))).toEqual(
+          idempotent ? [9000] : [],
+        );
+        expect(error).toBeInstanceOf(APIError);
+        expect(error).toMatchObject({ status, retryAfterMs: 9000, body: undefined });
+        expect(error).not.toHaveProperty('cause');
+        expect(vi.getTimerCount()).toBe(0);
+      },
+    );
+  }
+}
