@@ -136,9 +136,6 @@ export const UNIMPLEMENTED: ReadonlySet<string> = new Set([
   'POST chat/completions',
   // The SDK can read and write files, but has no directory-listing method yet.
   'GET computers/:id/files/list',
-  // Stable execution reads have no client convenience methods yet.
-  'GET computers/:id/executions/:executionId',
-  'GET computers/:id/executions/:executionId/output',
   // Retained API history has no SDK convenience methods yet.
   'GET computers/:id/activities',
   'GET computers/:id/activities/:activity',
@@ -383,6 +380,7 @@ export function patternFor(path: string): string {
     )
       out.push(':id');
     else if (prev === 'exec') out.push(':pid');
+    else if (prev === 'executions') out.push(':executionId');
     else if (prev === 'windows') out.push(':window');
     else out.push(seg);
   }
@@ -407,6 +405,7 @@ export function patternFor(path: string): string {
 const PATH_PARAMETERS: ReadonlySet<string> = new Set([
   ':id',
   ':pid',
+  ':executionId',
   ':window',
   ':namespace',
   ':name',

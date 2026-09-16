@@ -651,6 +651,51 @@ through a multi-byte character. Write the bytes to a stream as above, or join
 them and decode once at the end; `s.stdoutText` decodes each chunk on its own,
 which is what you want for a line of output and lossy across a cut.
 
+### Independent execution reads
+
+Newer platforms supply `job.executionId` on an accepted background command.
+Older replies may omit it; the SDK never fabricates an ID or falls back to a PID
+when you request a stable read. PID polling and killing above keep their existing
+shared, consuming behavior and can address a newer command after PID reuse.
+
+```ts
+if (job.executionId) {
+  const signal = new AbortController().signal;
+  const observed = await c.execution(job.executionId, { signal });
+  console.log(observed.status);
+  // Each reader owns two independent byte positions; both are always explicit.
+  const first = await c.executionOutput(job.executionId, {
+    stdoutOffset: 0, stderrOffset: 0, limit: 65536, signal,
+  });
+  const next = await c.executionOutput(job.executionId, {
+    stdoutOffset: first.stdoutOffset,
+    stderrOffset: first.stderrOffset,
+    limit: 65536, signal,
+  });
+  for (const chunk of [first, next]) {
+    process.stdout.write(chunk.stdout); // Uint8Array, including NUL or partial UTF-8
+    process.stderr.write(chunk.stderr);
+  }
+  // Another reader can still read from zero, independently of these calls or execPoll.
+}
+```
+
+`execution()` reports the last observed `running`, `exited`, or `lost` state.
+Only `exited` includes `endedAt` and a signed `exitCode`; `running` does not prove
+that the computer is awake, and `lost` establishes no success or failure.
+`executionOutput()` returns separate `stdoutMore` and `stderrMore` flags. False
+means EOF at this instant, not final completion. Decode text with a streaming
+`TextDecoder` across chunks to preserve split UTF-8. The separate `diagnostic`
+bytes repeat in full on every read, may be truncated (`diagnosticTruncated`), and
+never advance either stream offset.
+
+These methods perform one request: no automatic execution, resume, wait, retry,
+output capture, or fallback. Output reads perform guest I/O and are unsuitable
+for passive history views. The files are mutable guest content, not retained
+artifacts. Handles disappear on platform/computer state loss, replacement or
+cleanup; observed exits expire after ten minutes. Unavailable reads throw the
+normal API error instead of returning an empty successful result.
+
 ### Events
 
 **A computer says what it is doing.** Waiting for something to happen is a
