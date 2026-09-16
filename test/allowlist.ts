@@ -127,6 +127,14 @@ export const ALLOWED: ReadonlySet<string> = new Set(
       ['POST', 'webhooks/:id/rotate'],
       ['POST', 'webhooks/:id/test'],
       ['GET', 'webhooks/:id/deliveries'],
+
+      // SSH access: the caller's own public keys, which belong to the person
+      // rather than the account, and whether SSH is on for one computer.
+      ['GET', 'ssh-keys'],
+      ['POST', 'ssh-keys'],
+      ['DELETE', 'ssh-keys/:id'],
+      ['GET', 'computers/:id/ssh'],
+      ['PUT', 'computers/:id/ssh'],
     ] as Route[]
   ).map(([m, p]) => `${m} ${p}`),
 );
@@ -152,6 +160,12 @@ export const UNIMPLEMENTED: ReadonlySet<string> = new Set([
   'GET computers/:id/activities/:activity/results',
   // Passive platform signals have no client convenience method yet.
   'GET computers/:id/signals',
+  // SSH keys and the per-computer SSH switch have no client methods yet.
+  'GET ssh-keys',
+  'POST ssh-keys',
+  'DELETE ssh-keys/:id',
+  'GET computers/:id/ssh',
+  'PUT computers/:id/ssh',
 ]);
 
 /**
@@ -364,6 +378,13 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
   ['POST webhooks/:id/rotate', []],
   ['POST webhooks/:id/test', []],
   ['GET webhooks/:id/deliveries', []],
+
+  // A key is one OpenSSH public key line; `name` is optional.
+  ['GET ssh-keys', []],
+  ['POST ssh-keys', ['body:public_key', 'body:name']],
+  ['DELETE ssh-keys/:id', []],
+  ['GET computers/:id/ssh', []],
+  ['PUT computers/:id/ssh', ['body:enabled']],
 ]);
 
 /**
