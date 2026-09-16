@@ -868,7 +868,9 @@ describe('argument handling', () => {
     process.env.MANDALA_API_KEY = 'com_test';
     process.env.MANDALA_BASE_URL = BASE;
     globalThis.fetch = recorder((call) =>
-      json(call.path === '/computers' ? [computer] : computer),
+      call.path === `/computers/${COMPUTER.name}`
+        ? json({ error: 'no such computer ID' }, { status: 404 })
+        : json(call.path === '/computers' ? [computer] : computer),
     ).fetch;
     try {
       const thrown = await run(['ssh', 'demo']).catch((e) => e);
@@ -908,7 +910,9 @@ describe('the exit code a session reports', () => {
     process.env.MANDALA_API_KEY = 'com_test';
     process.env.MANDALA_BASE_URL = BASE;
     globalThis.fetch = recorder((call) =>
-      json(call.path === '/computers' ? [COMPUTER] : COMPUTER),
+      call.path === `/computers/${COMPUTER.name}`
+        ? json({ error: 'no such computer ID' }, { status: 404 })
+        : json(call.path === '/computers' ? [COMPUTER] : COMPUTER),
     ).fetch;
     globalThis.WebSocket = class extends FakeSocket {
       binaryType = 'blob';
@@ -962,7 +966,11 @@ describe('scp upload', () => {
     local: string,
     respond: Parameters<typeof recorder>[0],
   ): Promise<ReturnType<typeof recorder>> => {
-    const rec = recorder(respond);
+    const rec = recorder((call) =>
+      call.path === `/computers/${COMPUTER.name}`
+        ? json({ error: 'no such computer ID' }, { status: 404 })
+        : respond(call),
+    );
     const savedKey = process.env.MANDALA_API_KEY;
     const savedBase = process.env.MANDALA_BASE_URL;
     const savedFetch = globalThis.fetch;
