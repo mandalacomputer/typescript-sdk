@@ -26,6 +26,7 @@ import {
   Moves,
   Sizes,
   Snapshots,
+  SshKeys,
   Templates,
   Usage,
   Webhooks,
@@ -48,6 +49,7 @@ export class Client {
   readonly computers: Computers;
   readonly moves: Moves;
   readonly snapshots: Snapshots;
+  readonly sshKeys: SshKeys;
   readonly templates: Templates;
   readonly sizes: Sizes;
   readonly usage: Usage;
@@ -65,6 +67,7 @@ export class Client {
     this.computers = new Computers(this.#t);
     this.moves = new Moves(this.#t);
     this.snapshots = new Snapshots(this.#t);
+    this.sshKeys = new SshKeys(this.#t);
     this.templates = new Templates(this.#t);
     this.sizes = new Sizes(this.#t);
     this.usage = new Usage(this.#t);
@@ -174,6 +177,8 @@ export type {
   Schedule,
   Size,
   Snapshot,
+  SshAccess,
+  SshKey,
   Template,
   TemplateBuild,
   TemplateCheck,
@@ -192,6 +197,7 @@ export type {
   ExecArgs,
   MoveArgs,
   ScrollDirection,
+  SshKeyAddArgs,
   UpdateArgs,
   WebhookCreateArgs,
   WebhookUpdateArgs,
@@ -217,6 +223,7 @@ export {
   Moves,
   Sizes,
   Snapshots,
+  SshKeys,
   Templates,
   Usage,
   Webhooks,

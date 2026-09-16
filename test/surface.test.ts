@@ -446,6 +446,13 @@ async function exerciseEverything(client: Client): Promise<void> {
   await client.webhooks.deliveries('whk-1');
   await client.webhooks.delete('whk-1');
 
+  // SSH: the caller's keys, and one computer's switch — both bodies in full.
+  await client.sshKeys.list();
+  await client.sshKeys.add({ publicKey: 'ssh-ed25519 AAAAC3Nz laptop', name: 'laptop' });
+  await client.sshKeys.remove('sshk-1');
+  await c.sshAccess();
+  await c.setSshAccess(true);
+
   // Last, and both shapes: the purge is what `expect` binds, and a delete that
   // keeps the snapshots sends neither key.
   await (await client.computers.get('vm-2')).delete({ deleteSnapshots: true, expect: 'abc123' });

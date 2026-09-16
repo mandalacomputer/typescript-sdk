@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import process from 'node:process';
 import { CliError } from './cli-options.js';
+import type { SshRuntime } from './cli-ssh.js';
 import { resolveCredentials } from './credentials.js';
 import type { DeviceLoginDependencies } from './device-login.js';
 import { Client } from './index.js';
@@ -17,6 +18,8 @@ export type CliIO = {
     openBrowser?: (url: string) => Promise<boolean>;
   };
   now: () => Date;
+  /** The machine the SSH commands run on; the real one unless replaced. */
+  ssh?: SshRuntime;
 };
 
 export function runtime(overrides: Partial<CliIO> = {}): CliIO {

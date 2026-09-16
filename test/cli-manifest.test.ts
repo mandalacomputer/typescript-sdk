@@ -58,6 +58,12 @@ const expectedCommands = [
   'webhooks test',
   'webhooks deliveries',
   'agent run',
+  'ssh',
+  'ssh-key list',
+  'ssh-key add',
+  'ssh-key rm',
+  'ssh-access',
+  'ssh-config',
   'terminal',
   'scp',
   'manifest',
@@ -66,11 +72,24 @@ const expectedCommands = [
 
 const valueFor = (flag: Flag) =>
   flag.type === 'boolean' ? [] : [flag.choices?.[0] ?? (flag.type === 'number' ? '7' : 'value')];
+const positionals = (command: Command) =>
+  command.args
+    .filter((name) => !name.endsWith('?'))
+    .map((name) => command.argumentChoices?.[name]?.[0] ?? name);
 const baseArgs = (command: Command) => [
   ...command.path.split(' '),
-  ...command.args.map((name) => command.argumentChoices?.[name]?.[0] ?? name),
+  ...positionals(command),
   ...command.flags.filter((f) => f.required).flatMap((f) => [`--${f.name}`, ...valueFor(f)]),
 ];
+/**
+ * `flag` in a position the command reads it from. A passthrough command hands
+ * everything after its positionals to another program, so its own flags go
+ * before them.
+ */
+const withFlag = (command: Command, args: string[], flag: string[]) =>
+  command.passthrough
+    ? [...command.path.split(' '), ...flag, ...args.slice(command.path.split(' ').length)]
+    : [...args, ...flag];
 
 async function offline(args: string[]) {
   let out = '';
@@ -104,6 +123,18 @@ describe('one command inventory', () => {
     const tree = manifest();
     expect(tree.commands.map((c) => c.path.join(' '))).toEqual(expectedCommands);
     expect(tree.commands.find((c) => c.path[0] === 'terminal')?.jsonMode).toBe('unsupported');
+    expect(tree.commands.find((c) => c.path[0] === 'ssh')).toMatchObject({
+      jsonMode: 'unsupported',
+      passthrough: { unless: ['setup'] },
+      arguments: [{ name: 'computer', required: true }],
+    });
+    expect(tree.commands.find((c) => c.path[0] === 'ssh-access')?.arguments).toEqual([
+      { name: 'computer', required: true, type: 'string' },
+      { name: 'state', required: false, type: 'string', choices: ['on', 'off'] },
+    ]);
+    expect(tree.commands.find((c) => c.path.join(' ') === 'ssh-key add')?.arguments).toEqual([
+      { name: 'path', required: false, type: 'string' },
+    ]);
     expect(tree.commands.find((c) => c.path.join(' ') === 'agent run')?.jsonMode).toBe('ndjson');
     expect(tree.commands.find((c) => c.path[0] === 'completion')?.arguments[0]).toMatchObject({
       choices: ['bash', 'zsh', 'fish'],
@@ -132,7 +163,7 @@ describe('one command inventory', () => {
         const args = baseArgs(command);
         const already = args.indexOf(`--${flag.name}`);
         if (already >= 0) args.splice(already, flag.type === 'boolean' ? 1 : 2);
-        const parsed = parseArgs([...args, `--${flag.name}`, ...valueFor(flag)]);
+        const parsed = parseArgs(withFlag(command, args, [`--${flag.name}`, ...valueFor(flag)]));
         expect(parsed.flags[flag.name]).toEqual(
           flag.repeatable
             ? valueFor(flag)
@@ -145,10 +176,13 @@ describe('one command inventory', () => {
         expect(help(command.path)).toContain(`--${flag.name}`);
         if (flag.alias)
           expect(
-            parseArgs([...args, `-${flag.alias}`, ...valueFor(flag)]).flags[flag.name],
+            parseArgs(withFlag(command, args, [`-${flag.alias}`, ...valueFor(flag)])).flags[
+              flag.name
+            ],
           ).toEqual(parsed.flags[flag.name]);
       }
-      for (const arg of entry.arguments) expect(arg.required).toBe(true);
+      for (const [i, arg] of entry.arguments.entries())
+        expect(arg.required).toBe(!command.args[i]!.endsWith('?'));
     });
   }
 

@@ -1751,18 +1751,15 @@ describe('legacy JSON modes', () => {
     h.io.createClient = () => {
       throw new Error('must not connect');
     };
-    const result = await h.run(['ssh', 'desktop']);
-    expect(result.code).toBe(1);
-    expect(result.frames).toEqual([
-      expect.objectContaining({
-        ok: false,
-        error: {
-          code: 'invalid_arguments',
-          message:
-            'mandala ssh is being rebuilt as a real OpenSSH session; use "mandala terminal" for a shell.',
-        },
-      }),
-    ]);
+    const result = await h.run(['--json', 'ssh', 'desktop'], false);
+    expect(result.code).toBe(2);
+    expect(JSON.parse(result.out)).toMatchObject({
+      ok: false,
+      command: 'ssh',
+      exitCode: 2,
+      error: { code: 'unsupported_mode', message: 'ssh is interactive and has no --json output' },
+    });
+    expect(h.rec.calls).toEqual([]);
   });
 
   it('copies a binary download and reports one finite result', async () => {

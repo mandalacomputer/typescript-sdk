@@ -65,6 +65,7 @@ import type {
   Point,
   Schedule,
   Snapshot,
+  SshAccess,
   VncConnect,
   WindowResult,
 } from './models.js';
@@ -84,6 +85,7 @@ import {
   toMove,
   toSchedule,
   toSnapshot,
+  toSshAccess,
   toVncConnect,
   toWindowListing,
   toWindowResult,
@@ -4145,6 +4147,40 @@ export class Computer {
     // refusing would fail a working call against a platform that acknowledges
     // with `"cleared"` or `[]`, and learn nothing by it.
     return toSchedule(P.isRecord(data) ? data : {});
+  }
+
+  // --- SSH -------------------------------------------------------------
+
+  /**
+   * Whether SSH is on for this computer, and whether it can work here.
+   *
+   * Check {@link SshAccess.available} as well as `enabled`: `false` there is a
+   * computer made from an image that predates SSH, which no setting fixes.
+   */
+  async sshAccess(opts: CallOptions = {}): Promise<SshAccess> {
+    const path = P.computerAction(this.id, 'ssh');
+    const data = await this.#t.json('GET', path, { signal: opts.signal });
+    if (!P.isRecord(data) || !Object.keys(data).length) {
+      throw new MandalaError(`expected an SSH setting from GET ${path}`);
+    }
+    return toSshAccess(data);
+  }
+
+  /**
+   * Switch SSH on or off for this computer. Keys are managed on
+   * `client.sshKeys`; switching on lets every registered key of every member
+   * of the account log in as `user`.
+   */
+  async setSshAccess(enabled: boolean, opts: CallOptions = {}): Promise<SshAccess> {
+    const path = P.computerAction(this.id, 'ssh');
+    const data = await this.#t.json('PUT', path, {
+      body: P.sshAccessBody(enabled),
+      signal: opts.signal,
+    });
+    if (!P.isRecord(data) || !Object.keys(data).length) {
+      throw new MandalaError(`expected an SSH setting from PUT ${path}`);
+    }
+    return toSshAccess(data);
   }
 
   // --- the agent loop -------------------------------------------------

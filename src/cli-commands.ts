@@ -3,9 +3,19 @@ import process from 'node:process';
 import { completion } from './cli-completion.js';
 import { loginCommand } from './cli-login.js';
 import { manifest } from './cli-manifest.js';
-import { CliError, help, type Parsed, parseArgs, SSH_REFUSAL } from './cli-options.js';
+import { CliError, help, type Parsed, parseArgs } from './cli-options.js';
 import { errorInfo, Output, redact } from './cli-output.js';
 import { type CliIO, documentInput, readInput } from './cli-runtime.js';
+import {
+  defaultSshRuntime,
+  sshAccessCommand,
+  sshConfigCommand,
+  sshConnect,
+  sshKeyAdd,
+  sshKeyList,
+  sshKeyRemove,
+  sshSetup,
+} from './cli-ssh.js';
 import type { Computer } from './computer.js';
 import { CredentialSaveError } from './credentials.js';
 import { MandalaError, NotFoundError, ValidationError } from './errors.js';
@@ -33,12 +43,15 @@ export async function resolveComputer(
   client: Client,
   target: string,
   signal?: AbortSignal,
+  /** Filled with the listing the lookup read, when it read one. */
+  seen: { listing?: Listing<Computer> } = {},
 ): Promise<Computer> {
   P.computer(target);
   let listing: Listing<Computer> | undefined;
   let listingError: unknown;
   try {
     listing = await client.computers.listWithStatus({ signal });
+    seen.listing = listing;
   } catch (error) {
     signal?.throwIfAborted();
     listingError = error;
@@ -299,6 +312,33 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
           'Interactive terminal does not support --json; use computers exec for machine-readable output',
         );
       return await legacy.terminal(args[0]!, (f.session as string | undefined) ?? 'main', io);
+    }
+    const ssh = io.ssh ?? defaultSshRuntime;
+    if (path === 'ssh' && !f.setup) {
+      if (json)
+        throw new CliError(
+          'unsupported_mode',
+          'ssh is interactive and has no --json output',
+          undefined,
+          2,
+        );
+      if (f.key !== undefined)
+        throw new CliError(
+          'invalid_arguments',
+          '--key goes with --setup; to connect with a particular key, pass -i PATH after the computer',
+          undefined,
+          2,
+        );
+      // The lookups are cancellable; once ssh runs, Ctrl-C is ssh's.
+      process.on('SIGINT', cancel);
+      process.on('SIGTERM', cancel);
+      return await sshConnect(io.createClient(), io, ssh, args[0]!, parsed.rest, {
+        signal,
+        beforeRun: () => {
+          process.off('SIGINT', cancel);
+          process.off('SIGTERM', cancel);
+        },
+      });
     }
     process.on('SIGINT', cancel);
     process.on('SIGTERM', cancel);
@@ -610,6 +650,22 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
         return output.result(raw(await client.webhooks.test(target, call)));
       case 'webhooks deliveries':
         return output.result((await client.webhooks.deliveries(target, call)).map(raw));
+      case 'ssh':
+        return await sshSetup(client, io, output, ssh, target, s('key'), signal);
+      case 'ssh-key list':
+        return await sshKeyList(client, io, output);
+      case 'ssh-key add':
+        return await sshKeyAdd(client, io, output, ssh, args[0], s('name'));
+      case 'ssh-key rm':
+        return await sshKeyRemove(client, io, output, target);
+      case 'ssh-access':
+        return await sshAccessCommand(await computer(), io, output, args[1]);
+      case 'ssh-config': {
+        // The listing the lookup read is also what tells a shared name apart.
+        const seen: { listing?: Listing<Computer> } = {};
+        const c = await resolveComputer(client, target, signal, seen);
+        return await sshConfigCommand(c, seen.listing, io, output, ssh, b('write') ?? false);
+      }
       case 'agent run': {
         const c = await resolveComputer(client, s('computer')!, signal);
         watching = true;
@@ -652,11 +708,8 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
       errorInfo(error).code === 'internal_error'
     )
       throw error;
-    if (!output.json && error instanceof CliError && error.message === SSH_REFUSAL) {
-      io.stderr.write(`${SSH_REFUSAL}\n`);
-      return 1;
-    }
-    return output.error(error, 1, watching);
+    const exitCode = error instanceof CliError && error.exitCode !== undefined ? error.exitCode : 1;
+    return output.error(error, exitCode, watching);
   } finally {
     process.off('SIGINT', cancel);
     process.off('SIGTERM', cancel);
