@@ -387,7 +387,11 @@ const messageFromBody = (body: unknown): string | undefined => {
   if (!body || typeof body !== 'object') return undefined;
   const said = (v: unknown) => (typeof v === 'string' && v.trim() ? v : undefined);
   const b = body as { error?: unknown; detail?: unknown; title?: unknown };
-  return said(b.error) ?? said(b.detail) ?? said(b.title);
+  const nested =
+    b.error && typeof b.error === 'object' && !Array.isArray(b.error)
+      ? (b.error as { message?: unknown }).message
+      : undefined;
+  return said(b.error) ?? said(nested) ?? said(b.detail) ?? said(b.title);
 };
 
 /** The incomplete-header count, or 0 for anything that is not a number. */
@@ -961,6 +965,9 @@ export class Transport {
       }
     }
     const error = errorForStatus(resp.status, message, body, {
+      requestId: resp.headers.get('x-request-id') ?? undefined,
+      allow: resp.headers.get('allow') ?? undefined,
+      wwwAuthenticate: resp.headers.get('www-authenticate') ?? undefined,
       retryAfterMs: retryAfterMs(resp.headers.get('retry-after')),
       // Only ever set on a 416, which is the one status that answers with a
       // Content-Range naming the file rather than a window of it.

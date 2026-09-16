@@ -370,6 +370,8 @@ function pointPastTheCeiling(err: unknown): unknown {
       'size, or readFilePart(path, { offset, length }) for one window of it',
     err.status,
     err.body,
+    err.retryAfterMs,
+    err,
   );
 }
 
