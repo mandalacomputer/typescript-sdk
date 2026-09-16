@@ -2,6 +2,7 @@
 
 import { describe, expect, it } from 'vitest';
 import { Client, MandalaError, TimeoutError } from '../src/index.js';
+import { patternFor } from './allowlist.js';
 import {
   anyRoute,
   BASE,
@@ -1495,4 +1496,16 @@ describe('computer reachability metadata', () => {
     const { client: c } = client(() => json(row));
     expect((await c.computers.get('vm-1')).unreachable).toBe(expected);
   });
+});
+
+it('retained route reduction is structural and leaves unrelated literals unchanged', () => {
+  // Real allowlist reduction is checked beside the legacy wire contract.
+  expect(patternFor('computers/results/results/res_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/output')).toBe(
+    'computers/:id/results/:resultId/output',
+  );
+  expect(
+    patternFor('computers/artifacts/artifacts/art_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/download'),
+  ).toBe('computers/:id/artifacts/:artifactId/download');
+  expect(patternFor('templates/results')).toBe('templates/results');
+  expect(patternFor('activities/1/results/result')).toBe('activities/1/results/result');
 });

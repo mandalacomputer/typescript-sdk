@@ -37,6 +37,12 @@ describe('the request-making rule', () => {
     );
   });
 
+  it.each(['boundedJson', 'boundedBytes'])('classifies narrow retained verb %s', (verb) => {
+    expect(
+      sorted(scan(`class A { async go() { await this.#t.${verb}('GET', 'x'); } }`), 'A'),
+    ).toEqual(['go']);
+  });
+
   it('follows a chain of private helpers to the end', () => {
     const found = scan(`class A {
       async click() { return this.#input('click'); }

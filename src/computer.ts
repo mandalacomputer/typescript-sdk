@@ -8,6 +8,17 @@ import {
   toAgentResult,
 } from './agent.js';
 import {
+  ARTIFACT_MANIFEST_BYTES,
+  type Artifact,
+  artifactBody,
+  artifactCrypto,
+  artifactDownloadCap,
+  type DownloadArtifactOptions,
+  type PublishArtifactOptions,
+  toArtifact,
+  verifyArtifact,
+} from './artifacts.js';
+import {
   // TYPE-ONLY, both of them, and kept rather than dropped. Every reference to
   // either in this file is a `{@link}` in a doc comment — `APIError.reason` on
   // the two clipboard methods, `isTransient` on the retry advice beside them —
@@ -84,6 +95,20 @@ import {
 } from './models.js';
 import * as P from './paths.js';
 import type { CallOptions } from './resources.js';
+import {
+  type BackgroundResult,
+  captureBody,
+  RESULT_MANIFEST_BYTES,
+  type ResultOutput,
+  type ResultOutputOptions,
+  type RetainedResult,
+  type RetainOutputOptions,
+  resultOutputQuery,
+  synchronousResultId,
+  syncRetentionBody,
+  toResultOutput,
+  toRetainedResult,
+} from './results.js';
 import {
   type Bytes,
   bodyByteLength,
@@ -3055,6 +3080,7 @@ export class Computer {
     command: string,
     opts: {
       timeoutS?: number;
+      retainOutput?: boolean | RetainOutputOptions;
       desktop?: boolean;
       cwd?: string;
       env?: Readonly<Record<string, string>>;
@@ -3068,13 +3094,25 @@ export class Computer {
     // guest with its output unreachable.
     //
     // Validate the server's foreground limit before deriving the HTTP deadline.
-    const body = P.execBody({ command, timeoutS, desktop, cwd, env });
+    const retained = syncRetentionBody(opts.retainOutput);
+    const body = {
+      ...P.execBody({ command, timeoutS, desktop, cwd, env }),
+      ...(retained === undefined ? {} : { retain_output: retained }),
+    };
+    let responseStatus = 0;
     const minTimeoutMs = (timeoutS + 30) * 1_000;
-    const data = await this.#t.json<Record<string, unknown>>('POST', path, {
-      body,
-      minTimeoutMs,
-      signal: opts.signal,
-    });
+    const data = await this.#t.json<Record<string, unknown>>(
+      'POST',
+      path,
+      {
+        body,
+        minTimeoutMs,
+        signal: opts.signal,
+      },
+      (status) => {
+        responseStatus = status;
+      },
+    );
     // Checked rather than defaulted to `{}`. A 204 or an empty body decodes to
     // `undefined` here, and the decoder refuses that too — but it can only name
     // the FIELD it could not read. This names the ROUTE, which is what says
@@ -3083,7 +3121,10 @@ export class Computer {
     if (!P.isRecord(data)) {
       throw new MandalaError(`expected an exec result from POST ${path}`);
     }
-    return toExecResult(data);
+    const result = toExecResult(data);
+    const resultId = responseStatus === 200 ? synchronousResultId(data) : undefined;
+    if (resultId !== undefined) result.resultId = resultId;
+    return result;
   }
 
   /**
@@ -3194,6 +3235,133 @@ export class Computer {
     const data = await this.#t.json('GET', path, { query, signal });
     signal?.throwIfAborted();
     return toExecutionOutput(data, executionId, query);
+  }
+
+  /** Explicit guest-output capture. A lost response leaves publication unconfirmed; never retries. */
+  async retainExecutionOutput(
+    executionId: string,
+    opts: RetainOutputOptions & CallOptions = {},
+  ): Promise<BackgroundResult> {
+    const computerId = this.id;
+    const path = P.retainedOutput(computerId, executionId);
+    const body = captureBody(opts);
+    const signal = opts.signal;
+    signal?.throwIfAborted();
+    const data = await this.#t.boundedJson('POST', path, {
+      body,
+      signal,
+      minTimeoutMs: 90000,
+      maxBytes: RESULT_MANIFEST_BYTES,
+      expectedStatus: 201,
+    });
+    signal?.throwIfAborted();
+    return toRetainedResult(data, computerId, undefined, executionId) as BackgroundResult;
+  }
+
+  /** Immutable retained metadata, including synchronous prefixes. Does not query the guest. */
+  async result(resultId: string, opts: CallOptions = {}): Promise<RetainedResult> {
+    const computerId = this.id;
+    const path = P.result(computerId, resultId);
+    opts.signal?.throwIfAborted();
+    const data = await this.#t.boundedJson('GET', path, {
+      signal: opts.signal,
+      maxBytes: RESULT_MANIFEST_BYTES,
+    });
+    opts.signal?.throwIfAborted();
+    return toRetainedResult(data, computerId, resultId);
+  }
+
+  /** One independent raw byte page. EOF is this retained prefix's end, not command completion. */
+  async resultOutput(resultId: string, opts: ResultOutputOptions): Promise<ResultOutput> {
+    const path = P.resultOutput(this.id, resultId);
+    const query = resultOutputQuery(opts);
+    opts.signal?.throwIfAborted();
+    const data = await this.#t.boundedBytes('GET', path, {
+      query,
+      signal: opts.signal,
+      maxBytes: query.limit ?? 65536,
+    });
+    opts.signal?.throwIfAborted();
+    return toResultOutput(data, resultId, query);
+  }
+
+  /** Delete one retained result. A repeated 404 remains unavailable. */
+  async deleteResult(resultId: string, opts: CallOptions = {}): Promise<void> {
+    const path = P.result(this.id, resultId);
+    await this.#t.boundedJson('DELETE', path, {
+      signal: opts.signal,
+      maxBytes: 0,
+      expectedStatus: 204,
+    });
+    opts.signal?.throwIfAborted();
+  }
+
+  /** Publish exactly the caller's nominated path, size and hash. No automatic guest preflight. */
+  async publishArtifact(path: string, opts: PublishArtifactOptions): Promise<Artifact> {
+    const computerId = this.id;
+    const endpoint = P.artifacts(computerId);
+    const body = artifactBody(path, opts);
+    opts.signal?.throwIfAborted();
+    const data = await this.#t.boundedJson('POST', endpoint, {
+      body,
+      signal: opts.signal,
+      minTimeoutMs: 90000,
+      maxBytes: ARTIFACT_MANIFEST_BYTES,
+      expectedStatus: 201,
+    });
+    opts.signal?.throwIfAborted();
+    return toArtifact(data, computerId, undefined, body);
+  }
+
+  /** Read immutable artifact metadata. The execution association records caller selection only. */
+  async artifact(artifactId: string, opts: CallOptions = {}): Promise<Artifact> {
+    const computerId = this.id;
+    const path = P.artifact(computerId, artifactId);
+    const data = await this.#t.boundedJson('GET', path, {
+      signal: opts.signal,
+      maxBytes: ARTIFACT_MANIFEST_BYTES,
+    });
+    opts.signal?.throwIfAborted();
+    return toArtifact(data, computerId, artifactId);
+  }
+
+  /** Full, SHA-256-verified bytes: metadata then one fixed download, default cap 8 MiB, maximum 64 MiB. */
+  async downloadArtifact(
+    artifactId: string,
+    opts: DownloadArtifactOptions = {},
+  ): Promise<Uint8Array> {
+    const computerId = this.id;
+    const path = P.artifact(computerId, artifactId);
+    const downloadPath = P.artifactDownload(computerId, artifactId);
+    const cap = artifactDownloadCap(opts);
+    const subtle = artifactCrypto();
+    const signal = opts.signal;
+    signal?.throwIfAborted();
+    const data = await this.#t.boundedJson('GET', path, {
+      signal,
+      maxBytes: ARTIFACT_MANIFEST_BYTES,
+    });
+    signal?.throwIfAborted();
+    const manifest = toArtifact(data, computerId, artifactId);
+    if (manifest.size > cap)
+      throw new ValidationError('artifact size exceeds the download maxBytes cap');
+    const content = await this.#t.boundedBytes('GET', downloadPath, {
+      signal,
+      minTimeoutMs: 90000,
+      maxBytes: manifest.size,
+    });
+    return verifyArtifact(content.bytes, manifest, subtle, signal);
+  }
+
+  /** Delete one artifact without a preflight. A repeated 404 remains unavailable. */
+  async deleteArtifact(artifactId: string, opts: CallOptions = {}): Promise<void> {
+    const path = P.artifact(this.id, artifactId);
+    await this.#t.boundedJson('DELETE', path, {
+      signal: opts.signal,
+      maxBytes: 0,
+      expectedStatus: 204,
+    });
+    opts.signal?.throwIfAborted();
   }
 
   /**

@@ -696,6 +696,92 @@ artifacts. Handles disappear on platform/computer state loss, replacement or
 cleanup; observed exits expire after ten minutes. Unavailable reads throw the
 normal API error instead of returning an empty successful result.
 
+### Retained results and nominated artifacts
+
+Retained versions are explicit, immutable snapshots with expiry. Background capture
+reads the guest's volatile output once; later metadata and byte reads use retained
+storage and do not resume the computer or poll a PID. Each explicit capture creates
+a new version, even for the same execution.
+
+```ts
+if (job.executionId) {
+  const captured = await c.retainExecutionOutput(job.executionId, {
+    maxBytesPerStream: 1024 * 1024, retentionSeconds: 86400, signal,
+  });
+  const metadata = await c.result(captured.resultId, { signal });
+  const page = await c.resultOutput(metadata.resultId, {
+    stream: 'stdout', offset: 0, limit: 65536, signal,
+  });
+  // page.bytes is authoritative, including invalid UTF-8 and binary data.
+  // The next independent read can use page.nextOffset. There is no shared cursor.
+  await c.deleteResult(metadata.resultId, { signal });
+}
+
+const finished = await c.exec('make test', { retainOutput: true, signal });
+if (finished.resultId) {
+  const retained = await c.result(finished.resultId, { signal });
+  console.log(retained.kind); // synchronous-output
+}
+```
+
+`retainOutput` is synchronous exec only: absent or `false` keeps the ordinary
+request; `true` or `{ maxBytesPerStream, retentionSeconds }` requests retention.
+Older servers and unconfirmed optional capture leave `resultId` absent. Missing or
+malformed optional retention metadata does not invalidate the executed command.
+No helper retries a capture or replays a command after an uncertain response.
+
+`RetainedResult` distinguishes `background-output` from `synchronous-output`.
+Background observations can still be running. Page EOF describes the retained
+prefix, and `ready` describes stored bytes; neither means the task succeeded or
+that all original output was retained. Synchronous prefixes report
+`sourceResponseBytes` and `upstreamTruncated` separately from the retained
+`endReason`. Their `diagnostic` is null; requesting that stream preserves the
+server's 409 rather than fabricating empty output. Background diagnostics are
+separate wrapper bytes and are independently paged like stdout and stderr.
+Capture limits are 1..4 MiB per stream; retention is 1..604800 seconds (default
+86400). A page is at most 65536 bytes. Metadata is finite and excludes unknown
+response fields.
+
+Artifact publication requires the caller to already know the exact guest path,
+byte count and SHA-256. It does not stat, read, hash or run a guest command to
+prepare the nomination. Paths remain byte-for-byte intact; Linux absolute paths,
+Windows drive-qualified paths and UNC forms are accepted for backend OS validation.
+
+```ts
+const artifact = await c.publishArtifact('/tmp/report.bin', {
+  expectedSize: reportSize, expectedSha256: reportSha256,
+  maxBytes: 8 * 1024 * 1024, retentionSeconds: 86400, signal,
+  // executionId: job.executionId, // optional caller selection, not provenance
+});
+const info = await c.artifact(artifact.artifactId, { signal });
+const bytes = await c.downloadArtifact(info.artifactId, {
+  maxBytes: 8 * 1024 * 1024, signal,
+});
+await c.deleteArtifact(info.artifactId, { signal });
+```
+
+`downloadArtifact` performs one metadata GET and, if its size is within the
+independent download cap, one whole-content GET. It returns a `Uint8Array` only
+after exact length and SHA-256 verification against that invocation's metadata.
+The default download cap is 8 MiB; the maximum is 64 MiB. Publication's `maxBytes`
+is a separate capture cap with the same default and maximum. Empty artifacts
+still require the correct empty digest. Web Crypto SHA-256 support is required
+and checked before transfer, including with an injected fetch in a browser or
+worker. These helpers never follow a download URL or filename from the response,
+write local files, return a partial prefix, use Range, or fall back to guest files.
+
+New manifest and byte transports enforce caps during streaming, including an EOF
+check at the exact cap. Invalid framing, incomplete content, hash mismatch,
+authority loss and cancellation return no successful bytes. Explicit capture,
+publication and the whole-content download request use at least a 90-second
+request allowance; a larger configured client timeout remains larger, and
+`timeoutMs: 0` still disables the SDK deadline. Caller cancellation remains active.
+This is a per-request allowance, not a deadline for a multi-request operation.
+A lost publication response leaves its commit unconfirmed. Do not automatically
+repeat the POST. `deleteResult` and `deleteArtifact` make one DELETE each; 204
+returns void, while a repeated 404 remains unavailable. Activities and their
+result-detail convenience methods remain outside this SDK surface.
+
 ### Events
 
 **A computer says what it is doing.** Waiting for something to happen is a
