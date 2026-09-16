@@ -46,24 +46,49 @@ import { Client } from 'mandala-computer';
 
 const client = new Client();                  // reads MANDALA_API_KEY
 
-await client.computers.ephemeral({ template: 'base' }, async (c) => {
-  await c.waitForGuest();                     // the guest agent answers, not just the VM
+const c = await client.computers.launch({ template: 'base' });
+try {
   await c.open('https://example.com');        // on the screen, not as root
   const png = await c.screenshot();
   await c.click(640, 400);
   await c.type('hello');
+} finally {
+  await c.delete();
+}
+```
+
+`launch()` creates once, waits for the disk, starts the computer if needed, and
+returns when its guest agent answers. Guest readiness does not guarantee that
+the visible desktop has finished logging in. It accepts every `create()` option;
+`start: false` is sent unchanged to create, then launch starts the computer after
+its disk is ready. An already admitted start is waited on, and failed starts are
+reported without retrying them.
+
+Pass `{ timeoutMs: 600_000, signal }` as the second argument for a larger build or
+cancellation. The default readiness budget is 180,000 milliseconds, beginning
+after create returns. Disk, running and guest waits share the remaining budget,
+including elapsed start work. Create and start retain their usual transport
+deadlines, so this is not a total wall-clock limit on launch. `pollMs` defaults
+to 3,000 for all stages.
+
+The returned computer is persistent. A failed or cancelled launch can leave a
+computer behind; SDK errors after creation include its id and keep their type
+(including `TimeoutError`). Cancellation preserves the caller's original reason.
+No failure automatically deletes the computer. The `finally` above cleans up
+after a successful return; use the id in a readiness error to inspect or delete
+a computer whose launch failed.
+
+For cleanup tied to a callback, use `ephemeral()`:
+
+```ts
+await client.computers.ephemeral({ template: 'base' }, async (c) => {
+  await c.waitForGuest();
+  await c.open('https://example.com');
 });                                           // destroyed here, even if the block threw
 ```
 
-`create()` deliberately does not destroy anything. Deleting a computer destroys
-its disk, so tying that to a scope is only safe when the scope is unambiguously
-the machine's whole lifetime — which is what `ephemeral()` declares:
-
-```ts
-const c = await client.computers.create({ size: 'large' });
-await c.waitForGuest();
-// ... it outlives this function. Delete it when you mean to.
-```
+`create()` returns as soon as provisioning responds and never deletes anything.
+Use it when you want to manage each readiness stage yourself.
 
 A create takes a `name`, and `start: false` leaves the computer stopped. Finding
 one again is `computers.get(id)` or `computers.list()`; a handle you already

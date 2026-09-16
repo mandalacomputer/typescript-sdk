@@ -55,6 +55,7 @@ import {
   isDeadlineAbort,
   isTransientForPoll,
   retryDelay,
+  sleep,
   sleepUntilNextPoll,
   type WaitOptions,
 } from './wait.js';
@@ -214,6 +215,92 @@ export class Computers {
       signal: opts.signal,
     });
     return oneComputer(this.#t, data, 'POST', P.COMPUTERS);
+  }
+
+  /**
+   * Create a computer, start it if needed, and wait for its guest agent to answer.
+   *
+   * Accepts every {@link create} argument unchanged. `start: false` defers the
+   * start until the disk is built; launch still starts it before returning.
+   * An admitted start is waited on, and a failed start is never retried.
+   *
+   * `timeoutMs` defaults to 180,000 and is one readiness budget beginning after
+   * create returns. Disk, running and guest waits share the remaining time;
+   * elapsed start work also consumes it. Create and start keep their usual
+   * transport deadlines, so this is not a total wall-clock limit on launch.
+   * `pollMs` defaults to 3,000 for every stage. `signal` cancels all stages.
+   *
+   * The returned computer is persistent. Failure never deletes it. SDK errors
+   * after creation retain their type and include its id; cancellation retains
+   * the caller's original reason. Use {@link ephemeral} for scoped cleanup.
+   * Guest readiness does not guarantee a visible desktop has finished logging in.
+   */
+  async launch(args: P.CreateArgs = {}, opts: WaitOptions = {}): Promise<Computer> {
+    const { timeoutMs = 180_000, pollMs = 3_000, signal } = opts;
+    checkWait(timeoutMs, pollMs);
+    signal?.throwIfAborted();
+    const computer = await this.create(args, { signal });
+    const id = computer.id;
+    const deadline = performance.now() + timeoutMs;
+    const remaining = (): number => {
+      signal?.throwIfAborted();
+      const left = deadline - performance.now();
+      if (left <= 0) throw new TimeoutError(`readiness budget of ${timeoutMs}ms expired`);
+      return left;
+    };
+    try {
+      let startAdmitted = (computer.runningRamMb ?? 0) > 0;
+      let delayMs = 0;
+      for (;;) {
+        signal?.throwIfAborted();
+        if (computer.buildFailed) {
+          await computer.waitUntilBuilt({ timeoutMs: 0, pollMs, signal });
+        }
+        if (computer.startError) {
+          throw new MandalaError(`did not start: ${computer.startError}`);
+        }
+        const status = computer.raw.status;
+        if (status === 'running' || status === 'stopped' || status === 'suspended') break;
+        if (delayMs > 0) await sleep(Math.min(delayMs, remaining()), signal);
+        try {
+          await computer.refresh({ signal: deadlineSignal(remaining(), signal) });
+          // A later stopped row must not erase an earlier admitted attempt.
+          startAdmitted ||= (computer.runningRamMb ?? 0) > 0;
+          delayMs = pollMs;
+        } catch (err) {
+          signal?.throwIfAborted();
+          if (!isDeadlineAbort(err) && !isTransientForPoll(err)) throw err;
+          remaining();
+          delayMs = retryDelay(pollMs, err);
+        }
+      }
+      await computer.waitUntilBuilt({ timeoutMs: remaining(), pollMs, signal });
+      signal?.throwIfAborted();
+      if (computer.startError) {
+        throw new MandalaError(`did not start: ${computer.startError}`);
+      }
+      if (
+        !startAdmitted &&
+        (computer.status === 'stopped' || computer.isSuspended) &&
+        (computer.runningRamMb === 0 ||
+          (args.start === false && computer.runningRamMb === undefined))
+      ) {
+        remaining();
+        await computer.start({ signal });
+      }
+      await computer.waitUntilRunning({ timeoutMs: remaining(), pollMs, signal });
+      await computer.waitForGuest({ timeoutMs: remaining(), pollMs, signal });
+      signal?.throwIfAborted();
+      return computer;
+    } catch (err) {
+      // start() may wrap a cancelled refresh after its POST succeeded.
+      signal?.throwIfAborted();
+      if (err instanceof MandalaError) {
+        // Keep API status, response body, causes and the original error identity.
+        err.message = `launch of ${id} failed: ${err.message}`;
+      }
+      throw err;
+    }
   }
 
   /**
