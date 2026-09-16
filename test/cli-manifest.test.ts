@@ -1,5 +1,7 @@
 import { execFileSync, spawnSync } from 'node:child_process';
-import { readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { describe, expect, it } from 'vitest';
 import { main } from '../src/cli.js';
@@ -218,20 +220,27 @@ describe('offline discovery', () => {
     ['mandala computers --json exec desktop --ti', '--timeout'],
     ['mandala --json snapshots schedule cl', 'clear'],
     ['mandala --json computers list --state lo', 'lost'],
-  ])('fish completes %s from the actual command context', (line, expected) => {
+  ])('fish completes %s from the actual command context', async (line, expected) => {
     expect(fishAvailable, 'CI requires fish for shell completion probes').toBe(true);
-    const result = spawnSync('fish', ['--no-config'], {
-      input: `${completion('fish')}\ncomplete -C '${line}'\n`,
-      encoding: 'utf8',
-    });
-    expect(result.status).toBe(0);
-    expect(result.stderr).toBe('');
-    expect(
-      result.stdout
-        .trim()
-        .split('\n')
-        .map((entry) => entry.split('\t')[0]),
-    ).toContain(expected);
+    const directory = await mkdtemp(join(tmpdir(), 'mandala-fish-'));
+    try {
+      const scriptPath = join(directory, 'completion.fish');
+      // Fish 3.7 cannot read scripts from the socket Node supplies as stdin.
+      await writeFile(scriptPath, `${completion('fish')}\ncomplete -C '${line}'\n`);
+      const result = spawnSync('fish', ['--no-config', scriptPath], {
+        encoding: 'utf8',
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stderr).toBe('');
+      expect(
+        result.stdout
+          .trim()
+          .split('\n')
+          .map((entry) => entry.split('\t')[0]),
+      ).toContain(expected);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   it('keeps CLI modules outside the browser-compatible library import graph', async () => {
