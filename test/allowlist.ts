@@ -68,6 +68,10 @@ export const ALLOWED: ReadonlySet<string> = new Set(
       ['GET', 'computers/:id/results/:resultId'],
       ['GET', 'computers/:id/results/:resultId/output'],
       ['DELETE', 'computers/:id/results/:resultId'],
+      ['POST', 'computers/:id/artifacts'],
+      ['GET', 'computers/:id/artifacts/:artifactId'],
+      ['GET', 'computers/:id/artifacts/:artifactId/download'],
+      ['DELETE', 'computers/:id/artifacts/:artifactId'],
       ['GET', 'computers/:id/activities'],
       ['GET', 'computers/:id/activities/:activity'],
       ['GET', 'computers/:id/signals'],
@@ -138,6 +142,11 @@ export const UNIMPLEMENTED: ReadonlySet<string> = new Set([
   'GET computers/:id/results/:resultId',
   'GET computers/:id/results/:resultId/output',
   'DELETE computers/:id/results/:resultId',
+  // Explicit artifacts are tracked until runtime helpers are available.
+  'POST computers/:id/artifacts',
+  'GET computers/:id/artifacts/:artifactId',
+  'GET computers/:id/artifacts/:artifactId/download',
+  'DELETE computers/:id/artifacts/:artifactId',
   // The OpenAI-shaped door onto the agent loop. Deliberately not wrapped: a
   // caller who wants it already has an OpenAI client and points its baseURL
   // here, and a second, worse OpenAI client inside this SDK would be a
@@ -270,6 +279,20 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
   ['GET computers/:id/results/:resultId', []],
   ['GET computers/:id/results/:resultId/output', ['query:stream', 'query:offset', 'query:limit']],
   ['DELETE computers/:id/results/:resultId', []],
+  [
+    'POST computers/:id/artifacts',
+    [
+      'body:path',
+      'body:expected_size',
+      'body:expected_sha256',
+      'body:execution_id',
+      'body:max_bytes',
+      'body:retention_seconds',
+    ],
+  ],
+  ['GET computers/:id/artifacts/:artifactId', []],
+  ['GET computers/:id/artifacts/:artifactId/download', []],
+  ['DELETE computers/:id/artifacts/:artifactId', []],
   [
     'POST computers/:id/windows/:window',
     ['body:action', 'body:x', 'body:y', 'body:width', 'body:height'],
