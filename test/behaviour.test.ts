@@ -3832,9 +3832,9 @@ describe('power', () => {
     const reason = new Error('cancel start');
     await expect(
       computer.start({ resumeOnly: true, signal: AbortSignal.abort(reason) }),
-    ).rejects.toThrow('cancel start');
-    // The recorder sees fetch before it checks the signal; no refresh follows.
-    expect(rec.routes()).toEqual([['POST', 'computers/vm-1/start']]);
+    ).rejects.toBe(reason);
+    // Pre-aborted calls stop before dispatch, so neither start nor refresh is sent.
+    expect(rec.routes()).toEqual([]);
   });
 
   it('reads the computer off the action response rather than re-fetching it', async () => {

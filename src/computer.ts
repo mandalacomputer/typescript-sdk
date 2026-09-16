@@ -3221,7 +3221,8 @@ export class Computer {
   /**
    * One independent byte read from volatile guest files. Both positions are required.
    * A false more flag is current EOF, not completion. Diagnostics repeat separately.
-   * No retry, resume, PID fallback, or command replay occurs, including on unavailable output.
+   * One request by default; opt-in safe GET retries can repeat the same read.
+   * No resume, PID fallback, or command replay occurs, including on unavailable output.
    * Guest I/O makes this unsuitable for passive history views; output is not retained.
    */
   async executionOutput(

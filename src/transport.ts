@@ -11,7 +11,7 @@
  */
 
 import {
-  type APIError,
+  APIError,
   ConnectionError,
   ConnectionInterruptedError,
   errorForStatus,
@@ -351,6 +351,11 @@ export type TransportOptions = {
    * still cancels — whichever fires first wins.
    */
   timeoutMs?: number;
+  /** Additional safe GET/HEAD attempts on connection failures or 502/503/504. Default: 0.
+   * Backoff starts at 250ms and doubles to 30s; Retry-After is a lower bound.
+   * One deadline covers all attempts. Legacy consuming execution polls are excluded.
+   */
+  retries?: { idempotent: number };
   /** Swap in a fetch implementation. Defaults to the global one. */
   fetch?: typeof globalThis.fetch;
 };
@@ -445,12 +450,14 @@ export function unsatisfiedTotal(header: string | null): number | undefined {
 }
 
 /** A Retry-After header, in milliseconds from now. */
-const retryAfterMs = (header: string | null): number | undefined => {
+const retryAfterMs = (header: string | null, cap = true): number | undefined => {
   if (!header) return undefined;
   const value = header.trim();
   const seconds = /^\d+$/.test(value) ? Number(value) : Number.NaN;
   const delay =
-    Number.isFinite(seconds) && seconds >= 0
+    // Keep digit-only overflow for the guarded, chunked retry wait. Public
+    // error metadata keeps its existing finite-value behavior.
+    (Number.isFinite(seconds) && seconds >= 0) || (!cap && seconds === Number.POSITIVE_INFINITY)
       ? seconds * 1_000
       : (() => {
           // HTTP dates have three supported formats. Date.parse alone also
@@ -467,7 +474,7 @@ const retryAfterMs = (header: string | null): number | undefined => {
   // Retry-After would then become an immediate retry of a 429, which is the
   // opposite of what the header asked for.
   if (delay === undefined) return undefined;
-  return Math.min(delay, MAX_TIMER_MS);
+  return cap ? Math.min(delay, MAX_TIMER_MS) : delay;
 };
 
 const env = (name: string): string | undefined =>
@@ -477,13 +484,79 @@ const env = (name: string): string | undefined =>
   // so the answer there is "pass one".
   typeof process !== 'undefined' ? process.env?.[name] : undefined;
 
+/** Chunk long waits so valid Retry-After values cannot overflow a native timer. */
+async function retrySleep(delay: number, signal?: AbortSignal): Promise<void> {
+  while (delay > 0) {
+    const chunk = Math.min(delay, MAX_TIMER_MS);
+    await new Promise<void>((resolve, reject) => {
+      signal?.throwIfAborted();
+      const abort = () => {
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', abort);
+        reject(signal?.reason);
+      };
+      const timer = setTimeout(() => {
+        signal?.removeEventListener('abort', abort);
+        resolve();
+      }, chunk);
+      signal?.addEventListener('abort', abort, { once: true });
+    });
+    delay -= chunk;
+  }
+  signal?.throwIfAborted();
+}
+
+/** Buffer one complete finite answer; cancellation releases its reader before any retry. */
+async function finiteBytes(resp: Response, signal?: AbortSignal): Promise<Uint8Array> {
+  if (!resp.body) {
+    signal?.throwIfAborted();
+    return new Uint8Array();
+  }
+  const reader = resp.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    for (;;) {
+      const { done, value } = await abortedRead(reader.read(), signal);
+      signal?.throwIfAborted();
+      if (done) break;
+      chunks.push(value.slice());
+      size += value.length;
+    }
+    const bytes = new Uint8Array(size);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.length;
+    }
+    return bytes;
+  } finally {
+    void reader.cancel().catch(() => {});
+    reader.releaseLock();
+  }
+}
+
 export class Transport {
   readonly baseUrl: string;
   readonly #headers: Record<string, string>;
   readonly #timeoutMs: number;
   readonly #fetch: typeof globalThis.fetch;
+  readonly #retries: number;
+  readonly #retryDelays = new WeakMap<APIError, number>();
+  readonly #terminalBodies = new WeakSet<APIError>();
 
   constructor(opts: TransportOptions = {}) {
+    const retries = opts.retries;
+    if (
+      retries !== undefined &&
+      (!isRecord(retries) ||
+        Object.keys(retries).length !== 1 ||
+        !Object.hasOwn(retries, 'idempotent') ||
+        !Number.isInteger(retries.idempotent) ||
+        retries.idempotent < 0)
+    )
+      throw new ValidationError('retries must be { idempotent: a non-negative finite integer }');
+    this.#retries = retries?.idempotent ?? 0;
     const key = (opts.apiKey ?? env('MANDALA_API_KEY'))?.trim();
     if (!key) {
       throw new MandalaError(
@@ -580,14 +653,65 @@ export class Transport {
     return caller ? AbortSignal.any([caller, timeout]) : timeout;
   }
 
+  #retryDelay(method: string, path: string, error: unknown, attempt: number): number | undefined {
+    // The PID endpoint advances a shared output cursor, despite its GET method.
+    const pathname = new URL(this.#url(path)).pathname;
+    if (
+      attempt >= this.#retries ||
+      !['GET', 'HEAD'].includes(method.toUpperCase()) ||
+      /\/computers\/[^/]+\/exec\/[^/]+\/?$/.test(pathname) ||
+      isTimeoutFailure(error) ||
+      (error instanceof APIError && this.#terminalBodies.has(error))
+    )
+      return undefined;
+    if (
+      !(error instanceof ConnectionError) &&
+      !(error instanceof APIError && [502, 503, 504].includes(error.status))
+    )
+      return undefined;
+    return Math.max(
+      Math.min(250 * 2 ** Math.min(attempt, 7), 30_000),
+      error instanceof APIError ? (this.#retryDelays.get(error) ?? error.retryAfterMs ?? 0) : 0,
+    );
+  }
+
+  async #exchange<T>(
+    method: string,
+    path: string,
+    opts: RequestOptions,
+    read: (sent: Sent) => Promise<T>,
+  ): Promise<T> {
+    const timeoutMs = this.#deadlineMs(opts);
+    const operation = { timeoutMs, signal: this.#signal(opts.signal, timeoutMs) };
+    for (let attempt = 0; ; attempt++) {
+      try {
+        const sent = await this.#fetchRaw(method, path, opts, operation);
+        return await read(sent);
+      } catch (error) {
+        if (operation.signal?.aborted) throw error;
+        const delay = this.#retryDelay(method, path, error, attempt);
+        if (delay === undefined) throw error;
+        try {
+          await retrySleep(delay, operation.signal);
+        } catch (cause) {
+          if (opts.signal?.aborted) throw opts.signal.reason;
+          throw new ConnectionInterruptedError(
+            `${method} ${path} timed out after ${timeoutMs}ms while waiting to retry.`,
+            { cause },
+          );
+        }
+      }
+    }
+  }
+
   async #fetchRaw(
     method: string,
     path: string,
     opts: RequestOptions = {},
-    bounded = false,
+    operation?: { timeoutMs: number; signal?: AbortSignal },
   ): Promise<Sent> {
-    const timeoutMs = this.#deadlineMs(opts);
-    const signal = this.#signal(opts.signal, timeoutMs);
+    const timeoutMs = operation?.timeoutMs ?? this.#deadlineMs(opts);
+    const signal = operation ? operation.signal : this.#signal(opts.signal, timeoutMs);
     const headers: Record<string, string> = { ...this.#headers, ...opts.headers };
     let body: string | Uint8Array | ReadableStream<Uint8Array> | undefined;
     // The two are documented as exclusive and the branch below picks `raw`, so
@@ -650,21 +774,20 @@ export class Transport {
         redirect: 'manual',
       };
       if (opts.raw !== undefined && bodyByteLength(opts.raw) === undefined) init.duplex = 'half';
+      signal?.throwIfAborted();
       const pending = this.#fetch(this.#url(path, opts.query), init);
-      if (bounded) {
-        void pending.then(
-          (response) => {
-            if (signal?.aborted) void response.body?.cancel().catch(() => {});
-          },
-          () => {},
-        );
-        resp = await abortedRead(pending, signal);
-      } else resp = await pending;
+      void pending.then(
+        (response) => {
+          if (signal?.aborted) void response.body?.cancel().catch(() => {});
+        },
+        () => {},
+      );
+      resp = await abortedRead(pending, signal);
     } catch (cause) {
       // A caller's own signal firing is a cancellation whatever its reason is
       // named. Judged first, so a custom reason — `ac.abort(new Error(...))` —
       // is not rewritten below into a claim that the platform was unreachable.
-      if (opts.signal?.aborted) throw cause;
+      if (opts.signal?.aborted) throw opts.signal.reason;
       // A timeout is reported as what it is. Left as the raw TimeoutError from
       // AbortSignal.timeout it says only "the operation was aborted", which is
       // indistinguishable from a caller cancelling on purpose.
@@ -700,15 +823,11 @@ export class Transport {
       );
     }
     if (!resp.ok) {
-      const failure = this.#error(
-        resp,
-        method,
-        path,
-        timeoutMs,
-        opts.signal,
-        bounded ? signal : undefined,
-      );
-      throw await failure;
+      const failure = this.#error(resp, method, path, timeoutMs, opts.signal, signal);
+      const error = await failure;
+      const delay = retryAfterMs(resp.headers.get('retry-after'), false);
+      if (delay !== undefined) this.#retryDelays.set(error, delay);
+      throw error;
     }
     return { resp, timeoutMs, signal };
   }
@@ -747,11 +866,11 @@ export class Transport {
     wrapTransportFailure = true,
   ): Promise<T> {
     try {
-      return await read();
+      return await abortedRead(read(), sent.signal);
     } catch (cause) {
       // A caller's own signal firing is a cancellation whatever its reason is
       // named, and is never rewritten — #fetchRaw's rule, for its reason.
-      if (caller?.aborted) throw cause;
+      if (caller?.aborted) throw caller.reason;
       // Always the post-dispatch class from here down. Getting into this method
       // means the response headers arrived, so the platform received the request
       // and acted on it; what was lost is the answer (OPL-3855).
@@ -798,6 +917,7 @@ export class Transport {
     boundedSignal?: AbortSignal,
   ): Promise<APIError> {
     let body: unknown;
+    let terminalBody = false;
     let message = `HTTP ${resp.status}`;
     // Read through #readBody, not `.catch(() => '')`. The composed signal
     // governs this body like any other, so a caller cancelling here, or a
@@ -816,9 +936,12 @@ export class Transport {
       // platform actually sent with a connection failure (OPL-3855).
       false,
     ).catch((cause) => {
-      // Anything else is a body that would not come, which says nothing the
-      // status does not. Answer with the status, as before.
       if (caller?.aborted || cause instanceof ConnectionError) throw cause;
+      // Keep the typed status and its metadata, including for default-off
+      // callers, but retain the retry distinction privately. Only a known
+      // non-timeout transport interruption permits another attempt; decoding
+      // and unclassified body failures cannot become permission through 503.
+      terminalBody = isTimeoutFailure(cause) || !isTransportFailure(cause);
       return '';
     });
     if (text) {
@@ -837,12 +960,14 @@ export class Transport {
         body = text;
       }
     }
-    return errorForStatus(resp.status, message, body, {
+    const error = errorForStatus(resp.status, message, body, {
       retryAfterMs: retryAfterMs(resp.headers.get('retry-after')),
       // Only ever set on a 416, which is the one status that answers with a
       // Content-Range naming the file rather than a window of it.
       rangeTotal: unsatisfiedTotal(resp.headers.get('content-range')),
     });
+    if (terminalBody) this.#terminalBodies.add(error);
+    return error;
   }
 
   /**
@@ -860,7 +985,13 @@ export class Transport {
     caller?: AbortSignal,
   ): Promise<T | undefined> {
     if (sent.resp.status === 204) return undefined;
-    const text = await this.#readBody(() => sent.resp.text(), method, path, sent, caller);
+    const text = await this.#readBody(
+      async () => new TextDecoder().decode(await finiteBytes(sent.resp, sent.signal)),
+      method,
+      path,
+      sent,
+      caller,
+    );
     if (!text) return undefined;
     try {
       return JSON.parse(text) as T;
@@ -875,9 +1006,11 @@ export class Transport {
     opts: RequestOptions = {},
     responseStatus?: (status: number) => void,
   ): Promise<T> {
-    const sent = await this.#fetchRaw(method, path, opts);
-    responseStatus?.(sent.resp.status);
-    return (await this.#decode<T>(sent, method, path, opts.signal)) as T;
+    return this.#exchange(method, path, opts, async (sent) => {
+      const value = (await this.#decode<T>(sent, method, path, opts.signal)) as T;
+      responseStatus?.(sent.resp.status);
+      return value;
+    });
   }
 
   async #bounded(
@@ -893,59 +1026,60 @@ export class Transport {
     )
       throw new ValidationError('invalid retained response byte limit');
     opts.signal?.throwIfAborted();
-    const sent = await this.#fetchRaw(
+    return this.#exchange(
       method,
       path,
       { ...opts, headers: { ...opts.headers, 'Accept-Encoding': 'identity' } },
-      true,
-    );
-    const { resp } = sent;
-    return this.#readBody(
-      async () => {
-        try {
-          sent.signal?.throwIfAborted();
-          if (resp.status !== (opts.expectedStatus ?? 200))
-            throw new MandalaError(
-              'unexpected retained response status; publication, if requested, is unconfirmed',
-            );
-          const type = resp.headers.get('content-type')?.split(';')[0]?.trim().toLowerCase();
-          const encoding = resp.headers.get('content-encoding');
-          if (
-            resp.headers.has('content-range') ||
-            (encoding !== null && encoding.toLowerCase() !== 'identity')
-          )
-            throw new MandalaError('partial or encoded retained response is unsupported');
-          if (
-            resp.status !== 204 &&
-            type !== (binary ? 'application/octet-stream' : 'application/json')
-          )
-            throw new MandalaError('unexpected retained response Content-Type');
-          const declared = contentLength(resp);
-          if (
-            (binary && declared === undefined) ||
-            (declared !== undefined && declared > opts.maxBytes)
-          )
-            throw new MandalaError(
-              'retained response Content-Length exceeds or omits the allowed length',
-            );
-          const bytes = await completeBytes(resp, opts.maxBytes, sent.signal);
-          sent.signal?.throwIfAborted();
-          if (declared !== undefined && declared !== bytes.length)
-            throw new MandalaError('retained response Content-Length mismatch');
-          return {
-            bytes,
-            offset: resp.headers.get('x-result-offset'),
-            nextOffset: resp.headers.get('x-result-next-offset'),
-            eof: resp.headers.get('x-result-eof'),
-          };
-        } finally {
-          if (!resp.bodyUsed) void resp.body?.cancel().catch(() => {});
-        }
+      async (sent) => {
+        const { resp } = sent;
+        return this.#readBody(
+          async () => {
+            try {
+              sent.signal?.throwIfAborted();
+              if (resp.status !== (opts.expectedStatus ?? 200))
+                throw new MandalaError(
+                  'unexpected retained response status; publication, if requested, is unconfirmed',
+                );
+              const type = resp.headers.get('content-type')?.split(';')[0]?.trim().toLowerCase();
+              const encoding = resp.headers.get('content-encoding');
+              if (
+                resp.headers.has('content-range') ||
+                (encoding !== null && encoding.toLowerCase() !== 'identity')
+              )
+                throw new MandalaError('partial or encoded retained response is unsupported');
+              if (
+                resp.status !== 204 &&
+                type !== (binary ? 'application/octet-stream' : 'application/json')
+              )
+                throw new MandalaError('unexpected retained response Content-Type');
+              const declared = contentLength(resp);
+              if (
+                (binary && declared === undefined) ||
+                (declared !== undefined && declared > opts.maxBytes)
+              )
+                throw new MandalaError(
+                  'retained response Content-Length exceeds or omits the allowed length',
+                );
+              const bytes = await completeBytes(resp, opts.maxBytes, sent.signal);
+              sent.signal?.throwIfAborted();
+              if (declared !== undefined && declared !== bytes.length)
+                throw new MandalaError('retained response Content-Length mismatch');
+              return {
+                bytes,
+                offset: resp.headers.get('x-result-offset'),
+                nextOffset: resp.headers.get('x-result-next-offset'),
+                eof: resp.headers.get('x-result-eof'),
+              };
+            } finally {
+              if (!resp.bodyUsed) void resp.body?.cancel().catch(() => {});
+            }
+          },
+          method,
+          path,
+          sent,
+          opts.signal,
+        );
       },
-      method,
-      path,
-      sent,
-      opts.signal,
     );
   }
 
@@ -997,77 +1131,79 @@ export class Transport {
     path: string,
     opts: RequestOptions = {},
   ): Promise<Listing<Record<string, unknown>>> {
-    const sent = await this.#fetchRaw('GET', path, opts);
-    const short = sent.resp.headers.get(INCOMPLETE_HEADER);
-    const data = await this.#decode<unknown>(sent, 'GET', path, opts.signal);
-    // The same check and the same element filter {@link jsonArray}'s callers
-    // get, because these are the list routes a user actually calls. Cast to
-    // `T[]`, an object answer reached `items.map` as an anonymous TypeError,
-    // and a single null element reached toSnapshot as `d.id` of null — both of
-    // them naming neither the request nor the platform.
-    const rows = expectArray(data, 'GET', path);
-    const items = rows.filter(isRecord);
-    return {
-      items,
-      // A header that is not a number came from something other than the
-      // platform, and Number() turns it into a NaN that poisons the first sum a
-      // caller does with it. Presence is the signal — see {@link Listing} — so
-      // the warning survives as a count of 0 rather than as arithmetic nobody
-      // can trace back to a header.
-      //
-      // And a row the filter above threw away leaves the answer exactly as
-      // short as a row the platform could not fan out to, in the one shape the
-      // caller acts on: an array diffed against their own idea of the estate,
-      // with a delete on the difference. `X-GC-Incomplete` is a "this list is
-      // short" channel rather than a "a host was unreachable" one — it replaced
-      // a header that named hosts precisely so the count could stand for the
-      // shortfall by itself — so a client-side drop belongs in it rather than
-      // in a second signal nobody would read. Only when the platform has not
-      // already flagged the answer: presence is what a caller tests, and adding
-      // to a count the platform documents as best effort would make it no
-      // truer.
-      //
-      // A body that never arrived counts too. `expectArray` answers an absent
-      // one with `[]` and that stays the answer — a route legitimately saying
-      // "nothing" with a 204 exists on this platform, and refusing the response
-      // would break it — but an empty ARRAY and an empty RESPONSE are not the
-      // same claim, and only the first is the platform stating the account is
-      // empty. The hazard in reading the second as the first is that a caller
-      // diffs the array it was given against its own idea of the world, and the
-      // obvious next thing it does with a computer that has "disappeared" is
-      // tidy it up. That hazard does not care
-      // whether the rows went missing in a fan-out, in this decoder, or in a
-      // proxy that answered 204 for a route that has no empty answer — no list
-      // route here produces one — so it is reported through the one channel
-      // that already carries it.
-      incomplete:
-        short !== null
-          ? incompleteCount(short)
-          : data == null
-            ? 0
-            : shortfall(rows.length - items.length),
-    };
+    return this.#exchange('GET', path, opts, async (sent) => {
+      const short = sent.resp.headers.get(INCOMPLETE_HEADER);
+      const data = await this.#decode<unknown>(sent, 'GET', path, opts.signal);
+      // The same check and the same element filter {@link jsonArray}'s callers
+      // get, because these are the list routes a user actually calls. Cast to
+      // `T[]`, an object answer reached `items.map` as an anonymous TypeError,
+      // and a single null element reached toSnapshot as `d.id` of null — both of
+      // them naming neither the request nor the platform.
+      const rows = expectArray(data, 'GET', path);
+      const items = rows.filter(isRecord);
+      return {
+        items,
+        // A header that is not a number came from something other than the
+        // platform, and Number() turns it into a NaN that poisons the first sum a
+        // caller does with it. Presence is the signal — see {@link Listing} — so
+        // the warning survives as a count of 0 rather than as arithmetic nobody
+        // can trace back to a header.
+        //
+        // And a row the filter above threw away leaves the answer exactly as
+        // short as a row the platform could not fan out to, in the one shape the
+        // caller acts on: an array diffed against their own idea of the estate,
+        // with a delete on the difference. `X-GC-Incomplete` is a "this list is
+        // short" channel rather than a "a host was unreachable" one — it replaced
+        // a header that named hosts precisely so the count could stand for the
+        // shortfall by itself — so a client-side drop belongs in it rather than
+        // in a second signal nobody would read. Only when the platform has not
+        // already flagged the answer: presence is what a caller tests, and adding
+        // to a count the platform documents as best effort would make it no
+        // truer.
+        //
+        // A body that never arrived counts too. `expectArray` answers an absent
+        // one with `[]` and that stays the answer — a route legitimately saying
+        // "nothing" with a 204 exists on this platform, and refusing the response
+        // would break it — but an empty ARRAY and an empty RESPONSE are not the
+        // same claim, and only the first is the platform stating the account is
+        // empty. The hazard in reading the second as the first is that a caller
+        // diffs the array it was given against its own idea of the world, and the
+        // obvious next thing it does with a computer that has "disappeared" is
+        // tidy it up. That hazard does not care
+        // whether the rows went missing in a fan-out, in this decoder, or in a
+        // proxy that answered 204 for a route that has no empty answer — no list
+        // route here produces one — so it is reported through the one channel
+        // that already carries it.
+        incomplete:
+          short !== null
+            ? incompleteCount(short)
+            : data == null
+              ? 0
+              : shortfall(rows.length - items.length),
+      };
+    });
   }
 
   /** For the routes whose body is not JSON: the screenshot and the file download. */
   async bytes(method: string, path: string, opts: RequestOptions = {}): Promise<Bytes> {
-    const sent = await this.#fetchRaw(method, path, opts);
-    const buffer = await this.#readBody(
-      () => sent.resp.arrayBuffer(),
-      method,
-      path,
-      sent,
-      opts.signal,
-    );
-    const acceptRanges = sent.resp.headers.get('accept-ranges');
-    return {
-      bytes: new Uint8Array(buffer),
-      contentType: sent.resp.headers.get('content-type') ?? 'application/octet-stream',
-      filename: filenameFrom(sent.resp.headers.get('content-disposition')),
-      status: sent.resp.status,
-      contentRange: parseContentRange(sent.resp.headers.get('content-range')),
-      acceptRanges: acceptRanges?.trim().toLowerCase() || undefined,
-    };
+    return this.#exchange(method, path, opts, async (sent) => {
+      const buffer = await this.#readBody(
+        () => finiteBytes(sent.resp, sent.signal),
+        method,
+        path,
+        sent,
+        opts.signal,
+      );
+      const acceptRanges = sent.resp.headers.get('accept-ranges');
+      return {
+        bytes: new Uint8Array(buffer),
+        contentType: sent.resp.headers.get('content-type') ?? 'application/octet-stream',
+        filename: filenameFrom(sent.resp.headers.get('content-disposition')),
+        status: sent.resp.status,
+        contentRange: parseContentRange(sent.resp.headers.get('content-range')),
+        acceptRanges: acceptRanges?.trim().toLowerCase() || undefined,
+      };
+    });
   }
 
   /**
@@ -1082,6 +1218,24 @@ export class Transport {
    * place. A caller's own `signal` is the only thing that stops one early.
    */
   async *sse(method: string, path: string, opts: RequestOptions = {}): AsyncGenerator<SSEEvent> {
+    let exposed = false;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        for await (const event of this.#sseAttempt(method, path, opts)) {
+          exposed = true;
+          yield event;
+        }
+        return;
+      } catch (error) {
+        if (exposed || opts.signal?.aborted) throw error;
+        const delay = this.#retryDelay(method, path, error, attempt);
+        if (delay === undefined) throw error;
+        await retrySleep(delay, opts.signal);
+      }
+    }
+  }
+
+  async *#sseAttempt(method: string, path: string, opts: RequestOptions): AsyncGenerator<SSEEvent> {
     const sent = await this.#fetchRaw(method, path, {
       ...opts,
       headers: { ...opts.headers, Accept: 'text/event-stream' },
@@ -1096,7 +1250,7 @@ export class Transport {
     // it.
     const contentType = resp.headers.get('content-type') ?? '';
     if (!contentType.toLowerCase().includes('text/event-stream')) {
-      const text = await textUpTo(resp, MAX_ERROR_BODY_BYTES).catch(() => '');
+      const text = await textUpTo(resp, MAX_ERROR_BODY_BYTES, opts.signal).catch(() => '');
       // Cancellation wins even when the diagnostic read completed in the same
       // turn. An unreadable body still falls back to the content-type message.
       opts.signal?.throwIfAborted();
@@ -1225,6 +1379,28 @@ function* causes(err: unknown, depth = 0): Generator<Record<string, unknown>> {
   if (Array.isArray(e.errors)) {
     for (const inner of e.errors) yield* causes(inner, depth + 1);
   }
+}
+
+/** Native phase timeouts and cancellation remain terminal through nested causes. */
+function isTimeoutFailure(error: unknown): boolean {
+  return [...causes(error)].some(
+    (cause) =>
+      [
+        'TimeoutError',
+        'AbortError',
+        'ConnectTimeoutError',
+        'HeadersTimeoutError',
+        'BodyTimeoutError',
+      ].includes(String(cause.name)) ||
+      [
+        'UND_ERR_CONNECT_TIMEOUT',
+        'UND_ERR_HEADERS_TIMEOUT',
+        'UND_ERR_BODY_TIMEOUT',
+        'ERR_TLS_HANDSHAKE_TIMEOUT',
+        'ETIMEDOUT',
+        'ESOCKETTIMEDOUT',
+      ].includes(String(cause.code)),
+  );
 }
 
 /**
