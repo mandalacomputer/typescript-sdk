@@ -62,6 +62,19 @@ export const GLOBAL_FLAGS: readonly Flag[] = [
 ];
 
 export const COMMANDS: readonly Command[] = [
+  command('account', 'Read instantaneous account-wide quota and advisory headroom'),
+  command(
+    'usage',
+    'Read historical metered usage (default: current billing period)',
+    [],
+    [
+      flag('from', 'Window start: RFC 3339 timestamp with a time zone'),
+      flag(
+        'to',
+        'Window end: RFC 3339 timestamp with a time zone; future ends are capped by the API',
+      ),
+    ],
+  ),
   command(
     'computers list',
     'List computers with completeness status',

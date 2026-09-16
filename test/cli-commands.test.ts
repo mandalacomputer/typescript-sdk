@@ -21,6 +21,7 @@ import {
   recorder,
   SNAPSHOT,
   TEMPLATE_CHECK,
+  USAGE,
   WEBHOOK,
   WEBHOOK_CREATED,
   WEBHOOK_DELIVERY,
@@ -92,6 +93,696 @@ async function tempDir() {
   const path = await mkdtemp(join(tmpdir(), 'mandala-cli-'));
   temp.push(path);
   return path;
+}
+
+describe('account and historical usage commands', () => {
+  it('reads instantaneous account quota with one authenticated GET', async () => {
+    const h = harness(() => json(accountReport()));
+    const result = await h.run(['account']);
+    expect(result.code).toBe(0);
+    expect(h.rec.routes()).toEqual([['GET', 'account']]);
+    expect(h.rec.last().query).toEqual({});
+    expect(h.rec.last().body).toBeUndefined();
+    expect(h.rec.last().headers.Authorization).toBe('Bearer com_cli_test');
+    expect(result.frames).toHaveLength(1);
+    expect(result.frames[0]).toMatchObject({
+      schemaVersion: 1,
+      command: 'account',
+      ok: true,
+      exitCode: 0,
+      data: {
+        scope: 'account',
+        advisory: true,
+        observedAt: accountReport().observed_at,
+        complete: { computers: true, snapshots: true },
+        usage: { configuredVcpu: 14, runningOrReservedVcpu: 6 },
+        remaining: { configuredVcpu: 10, snapshotStorageBytes: 106300440575 },
+      },
+    });
+    expect(result.err).toBe('');
+  });
+
+  it('reads historical usage with no invented default bounds', async () => {
+    const h = harness(() => json(USAGE));
+    const result = await h.run(['usage']);
+    expect(result.code).toBe(0);
+    expect(h.rec.routes()).toEqual([['GET', 'usage']]);
+    expect(h.rec.last().query).toEqual({});
+    expect(h.rec.last().body).toBeUndefined();
+    expect(result.frames).toHaveLength(1);
+    expect(result.frames[0]).toMatchObject({
+      schemaVersion: 1,
+      command: 'usage',
+      ok: true,
+      exitCode: 0,
+      data: {
+        period: USAGE.period,
+        from: USAGE.from,
+        to: USAGE.to,
+        usage: { vcpuHours: 25, diskGbMonths: 0.66, computers: [{ id: 'vm-1' }] },
+        degraded: false,
+        unmetered: false,
+        breakdown: true,
+        reportedThrough: USAGE.reported_through,
+      },
+    });
+    expect(result.err).toBe('');
+  });
+
+  it.each([
+    [false, true],
+    [true, false],
+    [false, false],
+  ])(
+    'keeps independent unknown quota groups: computers=%s snapshots=%s',
+    async (computers, snapshots) => {
+      const report = accountReport();
+      report.complete = { computers, snapshots };
+      for (const section of [report.usage, report.remaining]) {
+        for (const key of Object.keys(section)) {
+          if (!(key === 'snapshot_storage_bytes' ? snapshots : computers))
+            (section as Record<string, number | null>)[key] = null;
+        }
+      }
+      const machine = await harness(() => json(report)).run(['account']);
+      expect(machine.code).toBe(0);
+      expect(machine.frames[0].data.complete).toEqual({ computers, snapshots });
+      for (const section of ['usage', 'remaining'] as const) {
+        for (const [key, value] of Object.entries(machine.frames[0].data[section])) {
+          expect(value === null).toBe(!(key === 'snapshotStorageBytes' ? snapshots : computers));
+        }
+      }
+      expect(machine.frames[0].data.limits.vcpuPool).toBe(24);
+      const human = await harness(() => json(report)).run(['account'], false);
+      expect(human.code).toBe(0);
+      expect(human.out).toContain(`Computer inventory: ${computers ? 'complete' : 'unknown'}`);
+      expect(human.out).toContain(`Snapshot inventory: ${snapshots ? 'complete' : 'unknown'}`);
+      expect(human.out).toContain(
+        `Configured vCPU: used ${computers ? '14' : 'unknown'}; limit 24; remaining ${computers ? '10' : 'unknown'}`,
+      );
+      expect(human.out).toContain(
+        `Indexed snapshot storage (bytes): used ${snapshots ? '1073741825' : 'unknown'}; limit 107374182400; remaining ${snapshots ? '106300440575' : 'unknown'}`,
+      );
+    },
+  );
+
+  it.each(['zero', 'no plan', 'overage'])(
+    'preserves quota %s without hiding usage or inventing unlimited capacity',
+    async (state) => {
+      const report = accountReport();
+      if (state === 'zero') {
+        for (const key of Object.keys(report.usage))
+          (report.usage as Record<string, number>)[key] = 0;
+        report.remaining = {
+          kept_computers: 5,
+          configured_vcpu: 24,
+          configured_disk_gb: 400,
+          running_or_reserved_ram_mb: 32768,
+          snapshot_storage_bytes: 107374182400,
+        };
+      } else if (state === 'no plan') {
+        report.plan = { id: 'none', label: 'No plan' };
+        for (const section of [report.limits, report.per_computer, report.remaining])
+          for (const key of Object.keys(section)) (section as Record<string, number>)[key] = 0;
+      } else {
+        report.limits.vcpu_pool = 4;
+        report.remaining.configured_vcpu = 0;
+      }
+      const machine = await harness(() => json(report)).run(['account']);
+      expect(machine.code).toBe(0);
+      expect(machine.frames[0].data.usage.configuredVcpu).toBe(state === 'zero' ? 0 : 14);
+      expect(machine.frames[0].data.remaining.configuredVcpu).toBe(state === 'zero' ? 24 : 0);
+      expect(machine.frames[0].data.plan).toEqual(report.plan);
+      const human = await harness(() => json(report)).run(['account'], false);
+      expect(human.out).toContain(
+        `Configured vCPU: used ${report.usage.configured_vcpu}; limit ${report.limits.vcpu_pool}; remaining ${report.remaining.configured_vcpu}`,
+      );
+      expect(human.out).not.toContain('unlimited');
+      expect(human.out).not.toContain('unknown');
+    },
+  );
+
+  it('labels quota units, distinct accounting and advisory limits in plain output', async () => {
+    const h = harness(() => json(accountReport()), undefined, {
+      NO_COLOR: '1',
+      MANDALA_MODEL_KEY: '',
+    });
+    const result = await h.run(['account'], false);
+    expect(h.rec.routes()).toEqual([['GET', 'account']]);
+    expect(result.out).toContain('Account quota (instantaneous, account-wide)');
+    expect(result.out).toContain(`Observed: ${accountReport().observed_at}`);
+    expect(result.out).toContain('Plan: Standard (standard)');
+    expect(result.out).toContain('not a reservation or host-capacity guarantee');
+    expect(result.out).toContain('Configured disk (GiB): used 120');
+    expect(result.out).toContain('Running/reserved vCPU: 6');
+    expect(result.out).toContain('Running/reserved RAM (MiB): used 8192');
+    expect(result.out).toContain('excludes in-flight capture reservations');
+    expect(result.out).toContain('Per-computer maxima: 16 vCPU; 16384 MiB RAM; 200 GiB disk');
+    expect(result.out).toContain('Windows capability: no');
+    expect(result.out).not.toContain('\u001b');
+    expect(result.err).toBe('');
+  });
+
+  it.each([
+    { from: '2026-08-01T00:00:00+01:00' },
+    { to: '2026-09-01t00:00:00z' },
+    { from: '2026-08-01T00:00:00.123456Z', to: '2026-09-01T00:00:00-05:00' },
+    { from: '2026-08-01T01:00:00+02:00', to: '2026-08-01T00:00:00Z' },
+    { to: '2099-01-01T00:00:00Z' },
+  ])('forwards timestamp bounds unchanged: %j', async (bounds) => {
+    const h = harness(() => json(USAGE), undefined, { MANDALA_MODEL_KEY: '' });
+    const result = await h.run([
+      'usage',
+      ...Object.entries(bounds).flatMap(([key, value]) => [`--${key}`, value]),
+    ]);
+    expect(result.code).toBe(0);
+    expect(h.rec.routes()).toEqual([['GET', 'usage']]);
+    expect(h.rec.last().query).toEqual(bounds);
+    expect(h.rec.last().body).toBeUndefined();
+    expect(h.rec.last().headers.Authorization).toBe('Bearer com_cli_test');
+    // The API's measured bounds can differ from the requested window.
+    expect(result.frames[0].data.from).toBe(USAGE.from);
+    expect(result.frames[0].data.to).toBe(USAGE.to);
+  });
+
+  it.each([
+    ['account', 'other-account'],
+    ['account', '--account', 'other-account'],
+    ['account', '--from', '2026-08-01T00:00:00Z'],
+    ['usage', 'computer'],
+    ['usage', '--computer', 'computer'],
+    ['usage', '--from'],
+    ['usage', '--to='],
+    ['usage', '--from', '2026-08-01'],
+    ['usage', '--to', '2026-08-01T00:00:00'],
+    ['usage', '--from', '2026-13-45T00:00:00Z'],
+    ['usage', '--to', '2026-08-01T25:00:00Z'],
+    ['usage', '--to', '2026-08-01T00:00:00+25:00'],
+    ['usage', '--from', '2026-09-01T00:00:00Z', '--to', '2026-08-01T00:00:00Z'],
+    ['usage', '--from', '2026-08-01T01:00:00+01:00', '--to', '2026-08-01T00:00:00Z'],
+    ['usage', '--from', '2026-08-01T00:00:00Z', '--from', '2026-08-02T00:00:00Z'],
+  ])('rejects invalid arguments before client creation: %j', async (...args) => {
+    const h = harness();
+    const create = vi.fn(() => {
+      throw new Error('must remain offline');
+    });
+    h.io.createClient = create;
+    const result = await h.run(args);
+    expect(result.code).toBe(1);
+    expect(result.frames[0]).toMatchObject({
+      ok: false,
+      error: { code: 'invalid_arguments' },
+      exitCode: 1,
+    });
+    expect(create).not.toHaveBeenCalled();
+    expect(h.rec.calls).toEqual([]);
+  });
+
+  it.each([
+    [false, false],
+    [true, false],
+    [false, true],
+    [true, true],
+  ])('preserves historical shortfalls: degraded=%s unmetered=%s', async (degraded, unmetered) => {
+    const report = { ...USAGE, degraded, unmetered, reported_through: null };
+    const result = await harness(() => json(report)).run(['usage']);
+    expect(result.code).toBe(0);
+    expect(result.frames[0].data).toMatchObject({
+      degraded,
+      unmetered,
+      reportedThrough: null,
+      usage: { vcpuHours: 25, snapshotGbMonths: 0.13 },
+    });
+    const human = await harness(() => json(report)).run(['usage'], false);
+    expect(human.out).toContain('Historical metered usage (account-wide)');
+    expect(human.out).toContain(`Completeness: degraded=${degraded}; unmetered=${unmetered}`);
+    expect(human.out.includes('totals may be too small')).toBe(degraded);
+    expect(human.out.includes('retrying alone will not recover it')).toBe(unmetered);
+    expect(human.out).toContain('Settled for billing through: none of this window');
+    expect(human.out).toContain(`Measured window: ${USAGE.from} to ${USAGE.to}`);
+    expect(human.out).toContain(
+      `Billing period: ${USAGE.period.start} to ${USAGE.period.end} (subscription)`,
+    );
+    expect(human.out).toContain('RAM GB-hours: 50');
+    expect(human.out).toContain('Disk GB-hours: 480; GB-months: 0.66');
+    expect(human.out).toContain('Snapshot GB-hours: 96; GB-months: 0.13');
+  });
+
+  it('keeps a complete zero historical window distinct from withheld or incomplete usage', async () => {
+    const report = {
+      ...USAGE,
+      to: USAGE.from,
+      reported_through: null,
+      usage: {
+        run_hours: 0,
+        vcpu_hours: 0,
+        ram_gb_hours: 0,
+        disk_gb_hours: 0,
+        disk_gb_months: 0,
+        snapshot_gb_hours: 0,
+        snapshot_gb_months: 0,
+        computers: [],
+      },
+    };
+    const result = await harness(() => json(report)).run(['usage']);
+    expect(result.code).toBe(0);
+    expect(result.frames[0].data).toMatchObject({
+      degraded: false,
+      unmetered: false,
+      breakdown: true,
+      usage: {
+        runHours: 0,
+        vcpuHours: 0,
+        ramGbHours: 0,
+        diskGbMonths: 0,
+        snapshotGbMonths: 0,
+        computers: [],
+      },
+    });
+    const human = await harness(() => json(report)).run(['usage'], false);
+    expect(human.out).toContain('Run hours: 0');
+    expect(human.out).toContain('Computer breakdown: empty');
+    expect(human.out).not.toContain('Incomplete:');
+  });
+
+  it.each(['empty', 'withheld', 'deleted'])(
+    'distinguishes a %s historical breakdown',
+    async (state) => {
+      const usage = { ...USAGE.usage } as Record<string, unknown>;
+      if (state === 'withheld') delete usage.computers;
+      else usage.computers = state === 'empty' ? [] : [{ ...USAGE.usage.computers[0], gone: true }];
+      const report = { ...USAGE, usage };
+      const result = await harness(() => json(report)).run(['usage']);
+      expect(result.frames[0].data.breakdown).toBe(state !== 'withheld');
+      expect(result.frames[0].data.usage.computers).toHaveLength(state === 'deleted' ? 1 : 0);
+      const human = await harness(() => json(report)).run(['usage'], false);
+      expect(human.out).toContain(
+        `Computer breakdown: ${state === 'deleted' ? 'available' : state}`,
+      );
+      if (state === 'deleted')
+        expect(human.out).toContain(
+          'scratch (vm-1) [deleted]: 12.5 run hours; 25 vCPU-hours; 50 RAM GB-hours',
+        );
+    },
+  );
+
+  it.each([true, false])(
+    'preserves named and unnamed live and deleted usage rows (JSON=%s)',
+    async (jsonMode) => {
+      const report = {
+        ...USAGE,
+        usage: {
+          ...USAGE.usage,
+          computers: [
+            { id: 'named-live', name: 'desktop', run_hours: 1, vcpu_hours: 2, ram_gb_hours: 4 },
+            { id: 'unnamed-live', run_hours: 2, vcpu_hours: 4, ram_gb_hours: 8 },
+            {
+              id: 'named-deleted',
+              name: 'former',
+              gone: true,
+              run_hours: 3,
+              vcpu_hours: 6,
+              ram_gb_hours: 12,
+            },
+            {
+              id: 'unnamed-deleted',
+              gone: true,
+              run_hours: 6.5,
+              vcpu_hours: 13,
+              ram_gb_hours: 26,
+            },
+          ],
+        },
+      };
+      const h = harness(() => json(report));
+      const result = await h.run(['usage'], jsonMode);
+      expect(result.code).toBe(0);
+      expect(result.err).toBe('');
+      expect(h.rec.routes()).toEqual([['GET', 'usage']]);
+      if (jsonMode) {
+        expect(result.frames).toHaveLength(1);
+        expect(result.frames[0]).toMatchObject({
+          schemaVersion: 1,
+          command: 'usage',
+          ok: true,
+          exitCode: 0,
+          data: { breakdown: true },
+        });
+        expect(result.frames[0].data.usage).toEqual({
+          runHours: 12.5,
+          vcpuHours: 25,
+          ramGbHours: 50,
+          diskGbHours: 480,
+          diskGbMonths: 0.66,
+          snapshotGbHours: 96,
+          snapshotGbMonths: 0.13,
+          computers: [
+            {
+              id: 'named-live',
+              name: 'desktop',
+              runHours: 1,
+              vcpuHours: 2,
+              ramGbHours: 4,
+              gone: false,
+            },
+            { id: 'unnamed-live', name: '', runHours: 2, vcpuHours: 4, ramGbHours: 8, gone: false },
+            {
+              id: 'named-deleted',
+              name: 'former',
+              runHours: 3,
+              vcpuHours: 6,
+              ramGbHours: 12,
+              gone: true,
+            },
+            {
+              id: 'unnamed-deleted',
+              name: '',
+              runHours: 6.5,
+              vcpuHours: 13,
+              ramGbHours: 26,
+              gone: true,
+            },
+          ],
+        });
+      } else {
+        for (const line of [
+          'Run hours: 12.5',
+          'vCPU-hours: 25',
+          'RAM GB-hours: 50',
+          'Disk GB-hours: 480; GB-months: 0.66',
+          'Snapshot GB-hours: 96; GB-months: 0.13',
+          'desktop (named-live): 1 run hours; 2 vCPU-hours; 4 RAM GB-hours',
+          'unnamed-live (unnamed-live): 2 run hours; 4 vCPU-hours; 8 RAM GB-hours',
+          'former (named-deleted) [deleted]: 3 run hours; 6 vCPU-hours; 12 RAM GB-hours',
+          'unnamed-deleted (unnamed-deleted) [deleted]: 6.5 run hours; 13 vCPU-hours; 26 RAM GB-hours',
+        ]) {
+          expect(result.out).toContain(line);
+        }
+      }
+    },
+  );
+
+  it('accepts open period sources, empty names and future fields at every level', async () => {
+    const report = {
+      ...USAGE,
+      period: { ...USAGE.period, source: 'future-period-basis', future_field: null },
+      future_field: { extra: true },
+      usage: {
+        ...USAGE.usage,
+        future_field: 'new total',
+        computers: [
+          { ...USAGE.usage.computers[0], name: '', gone: false, future_field: ['new detail'] },
+        ],
+      },
+    };
+    const machine = await harness(() => json(report)).run(['usage']);
+    expect(machine.code).toBe(0);
+    expect(machine.frames[0].data).toMatchObject({
+      period: { source: 'future-period-basis' },
+      usage: { computers: [{ id: 'vm-1', name: '', gone: false }] },
+    });
+    expect(machine.out).not.toContain('future_field');
+    const human = await harness(() => json(report)).run(['usage'], false);
+    expect(human.code).toBe(0);
+    expect(human.out).toContain('(future-period-basis)');
+    expect(human.out).toContain('vm-1 (vm-1): 12.5 run hours');
+    expect(human.err).toBe('');
+  });
+
+  function withUsageField(field: string, value: unknown) {
+    const report: Record<string, unknown> = structuredClone(USAGE);
+    const keys = field.split('.');
+    const last = keys.pop()!;
+    let parent = report;
+    for (const key of keys) parent = parent[key] as Record<string, unknown>;
+    if (value === undefined) delete parent[last];
+    else parent[last] = value;
+    return report;
+  }
+
+  async function expectUsageFailure(respond: Responder, jsonMode: boolean) {
+    const h = harness(respond);
+    const result = await h.run(['usage'], jsonMode);
+    expect(result.code).toBe(1);
+    expect(h.rec.routes()).toEqual([['GET', 'usage']]);
+    if (jsonMode) {
+      expect(result.frames).toHaveLength(1);
+      expect(result.frames[0]).toMatchObject({
+        schemaVersion: 1,
+        command: 'usage',
+        ok: false,
+        exitCode: 1,
+        error: { code: 'MandalaError', message: expect.stringContaining('Invalid usage report:') },
+      });
+      expect(result.frames[0]).not.toHaveProperty('data');
+      expect(result.err).toBe('');
+    } else {
+      expect(result.out).toBe('');
+      expect(result.err).toContain('mandala: Invalid usage report:');
+    }
+  }
+
+  for (const jsonMode of [true, false]) {
+    describe(`${jsonMode ? 'JSON' : 'human'} usage validation`, () => {
+      it('rejects an empty totals object before displaying defaulted metadata or zeros', async () => {
+        await expectUsageFailure(() => json({ usage: {} }), jsonMode);
+        await expectUsageFailure(() => json({ ...USAGE, usage: {} }), jsonMode);
+      });
+
+      it.each([
+        'usage.run_hours',
+        'usage.vcpu_hours',
+        'usage.ram_gb_hours',
+        'usage.disk_gb_hours',
+        'usage.disk_gb_months',
+        'usage.snapshot_gb_hours',
+        'usage.snapshot_gb_months',
+        'usage.computers.0.run_hours',
+        'usage.computers.0.vcpu_hours',
+        'usage.computers.0.ram_gb_hours',
+      ])('rejects missing, null or malformed numeric field %s', async (field) => {
+        for (const value of [undefined, null, '0', false, -1, {}, []]) {
+          await expectUsageFailure(() => json(withUsageField(field, value)), jsonMode);
+        }
+      });
+
+      it('rejects nonfinite numbers parsed from valid JSON', async () => {
+        for (const field of ['usage.vcpu_hours', 'usage.computers.0.run_hours']) {
+          const body = JSON.stringify(withUsageField(field, 'overflow')).replace(
+            '"overflow"',
+            '1e400',
+          );
+          await expectUsageFailure(() => new Response(body), jsonMode);
+        }
+      });
+
+      it('rejects missing or malformed period objects', async () => {
+        for (const value of [undefined, null, [], 'broken', {}]) {
+          await expectUsageFailure(() => json(withUsageField('period', value)), jsonMode);
+        }
+      });
+
+      it.each(['from', 'to', 'period.start', 'period.end'])(
+        'rejects missing or malformed timestamp %s',
+        async (field) => {
+          for (const value of [
+            undefined,
+            null,
+            0,
+            '',
+            'broken',
+            '2026-08-01',
+            '2026-08-01T00:00:00',
+            '2026-13-01T00:00:00Z',
+            '2026-02-30T00:00:00Z',
+            '2026-08-01T24:00:00Z',
+          ]) {
+            await expectUsageFailure(() => json(withUsageField(field, value)), jsonMode);
+          }
+        },
+      );
+
+      it('rejects a missing or malformed period source', async () => {
+        for (const value of [undefined, null, 0, '', ' ']) {
+          await expectUsageFailure(() => json(withUsageField('period.source', value)), jsonMode);
+        }
+      });
+
+      it.each(['degraded', 'unmetered'])(
+        'rejects a missing or malformed %s caveat',
+        async (field) => {
+          for (const value of [undefined, null, 0, 1, 'false', {}, []]) {
+            await expectUsageFailure(() => json(withUsageField(field, value)), jsonMode);
+          }
+        },
+      );
+
+      it('requires an explicit null or valid settlement day', async () => {
+        for (const value of [
+          undefined,
+          false,
+          0,
+          '',
+          'broken',
+          '2026-02-30',
+          '2026-08-20T00:00:00Z',
+        ]) {
+          await expectUsageFailure(() => json(withUsageField('reported_through', value)), jsonMode);
+        }
+      });
+
+      it('rejects malformed breakdown containers and rows without dropping them', async () => {
+        for (const value of [null, 'broken', {}, [null], [true], [[]], [{}]]) {
+          await expectUsageFailure(() => json(withUsageField('usage.computers', value)), jsonMode);
+        }
+      });
+
+      it('rejects missing or malformed row IDs', async () => {
+        for (const value of [undefined, null, 0, {}, [], '']) {
+          await expectUsageFailure(
+            () => json(withUsageField('usage.computers.0.id', value)),
+            jsonMode,
+          );
+        }
+      });
+
+      it('rejects malformed present row names', async () => {
+        for (const value of [null, 0, false, {}, []]) {
+          await expectUsageFailure(
+            () => json(withUsageField('usage.computers.0.name', value)),
+            jsonMode,
+          );
+        }
+      });
+
+      it('rejects a malformed optional deletion flag', async () => {
+        for (const value of [null, 0, 'true', {}, []]) {
+          await expectUsageFailure(
+            () => json(withUsageField('usage.computers.0.gone', value)),
+            jsonMode,
+          );
+        }
+      });
+    });
+  }
+
+  it.each(['account', 'usage'])(
+    'retains %s redaction and excludes untyped extra payload fields',
+    async (command) => {
+      const report =
+        command === 'account'
+          ? { ...accountReport(), plan: { id: 'standard', label: 'com_cli_test' } }
+          : { ...USAGE, period: { ...USAGE.period, source: 'com_cli_test' } };
+      for (const jsonMode of [true, false]) {
+        const result = await harness(() =>
+          json({ ...report, future_field: 'untyped-payload' }),
+        ).run([command], jsonMode);
+        expect(result.code).toBe(0);
+        expect(result.out).toContain('[REDACTED]');
+        expect(result.out).not.toContain('com_cli_test');
+        expect(result.out).not.toContain('untyped-payload');
+        if (jsonMode) expect(result.frames[0].data).not.toHaveProperty('raw');
+      }
+    },
+  );
+
+  it.each(['account', 'usage'])(
+    'fails a malformed %s read instead of returning empty success',
+    async (command) => {
+      for (const body of [null, [], {}, { usage: [] }]) {
+        const h = harness(() => json(body));
+        const result = await h.run([command]);
+        expect(result.code).toBe(1);
+        expect(result.frames).toHaveLength(1);
+        expect(result.frames[0]).toMatchObject({
+          command,
+          ok: false,
+          exitCode: 1,
+          error: { code: 'MandalaError' },
+        });
+        expect(result.frames[0]).not.toHaveProperty('data');
+        expect(h.rec.routes()).toEqual([['GET', command]]);
+      }
+    },
+  );
+
+  for (const command of ['account', 'usage']) {
+    it.each([400, 401, 403, 402, 429, 503])(
+      `preserves ${command} HTTP %i errors without retry or mutation`,
+      async (status) => {
+        const h = harness(() => json({ error: 'request failed com_cli_test' }, { status }));
+        const result = await h.run([command]);
+        expect(result.code).toBe(1);
+        expect(result.frames[0]).toMatchObject({
+          command,
+          ok: false,
+          exitCode: 1,
+          error: { status },
+        });
+        expect(result.frames[0]).not.toHaveProperty('data');
+        expect(result.out).toContain('[REDACTED]');
+        expect(result.out).not.toContain('com_cli_test');
+        expect(h.rec.routes()).toEqual([['GET', command]]);
+      },
+    );
+
+    it.each(['SIGINT', 'SIGTERM'] as const)(
+      `cancels ${command} with %s and restores listeners`,
+      async (event) => {
+        const h = harness(() => new Promise<Response>(() => {}));
+        const before = [process.listenerCount('SIGINT'), process.listenerCount('SIGTERM')];
+        const pending = h.run([command]);
+        await vi.waitFor(() => expect(h.rec.calls).toHaveLength(1));
+        process.emit(event);
+        const result = await pending;
+        expect(result.code).toBe(130);
+        expect(result.frames).toHaveLength(1);
+        expect(result.frames[0]).toMatchObject({
+          command,
+          ok: false,
+          exitCode: 130,
+          error: { code: 'cancelled' },
+        });
+        expect(h.rec.routes()).toEqual([['GET', command]]);
+        expect([process.listenerCount('SIGINT'), process.listenerCount('SIGTERM')]).toEqual(before);
+      },
+    );
+  }
+});
+
+function accountReport() {
+  return {
+    scope: 'account',
+    advisory: true,
+    observed_at: '2026-09-16T12:34:56.123Z',
+    plan: { id: 'standard', label: 'Standard' },
+    limits: {
+      max_computers: 5,
+      vcpu_pool: 24,
+      ram_pool_mb: 32768,
+      disk_pool_gb: 400,
+      snapshot_storage_bytes: 107374182400,
+    },
+    per_computer: { max_vcpu: 16, max_ram_mb: 16384, max_disk_gb: 200 },
+    capabilities: { windows: false },
+    complete: { computers: true, snapshots: true },
+    usage: {
+      kept_computers: 3,
+      configured_vcpu: 14,
+      configured_disk_gb: 120,
+      running_or_reserved_computers: 2,
+      running_or_reserved_vcpu: 6,
+      running_or_reserved_ram_mb: 8192,
+      snapshot_storage_bytes: 1073741825,
+    },
+    remaining: {
+      kept_computers: 2,
+      configured_vcpu: 10,
+      configured_disk_gb: 280,
+      running_or_reserved_ram_mb: 24576,
+      snapshot_storage_bytes: 106300440575,
+    },
+  };
 }
 
 describe('computer commands use distinct SDK requests', () => {
