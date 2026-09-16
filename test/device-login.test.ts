@@ -186,6 +186,65 @@ describe('anonymous device exchange', () => {
     });
     await expect(flow().run('Research')).rejects.toMatchObject({ code: 'invalid_device_response' });
   });
+  it('normalizes a padded workspace before start and saves the authorized CLI credential', async () => {
+    const scope = { type: 'workspace', workspace_id: 'workspace_test', workspace_name: 'Research' };
+    const result = await cli(['--workspace', ' \tResearch\n '], {}, [
+      Response.json({ ...authorized, scope }),
+    ]);
+    expect(result.code).toBe(0);
+    expect(JSON.parse(result.f.fetch.mock.calls[0]![1]!.body as string)).toMatchObject({
+      scope: 'workspace',
+      workspace_name: 'Research',
+    });
+    expect(result.f.fetch).toHaveBeenCalledTimes(2);
+    expect(readCredentials()!.profiles.default).toMatchObject({ api_key: apiKey, scope });
+  });
+  for (const workspace of [' \t\n ', 'x'.repeat(41)])
+    it(`rejects an invalid workspace before start (${workspace.length} characters)`, async () => {
+      const f = flow();
+      await expect(f.run(workspace)).rejects.toMatchObject({ code: 'invalid_workspace' });
+      expect(f.fetch).not.toHaveBeenCalled();
+    });
+  for (const header of [
+    'Wed, 16 Sep 2026 00:01:05 GMT',
+    'Wednesday, 16-Sep-26 00:01:05 GMT',
+    'Wed Sep 16 00:01:05 2026',
+  ])
+    it(`honors HTTP-date Retry-After with a controlled wall clock: ${header}`, async () => {
+      const f = flow([
+        Response.json(
+          { error: 'Wait', code: 'rate_limited', request_id: 'request_test', retry_after: 5 },
+          { status: 429, headers: { 'Retry-After': header } },
+        ),
+        Response.json(authorized),
+      ]);
+      f.deps.wallNow = () => Date.UTC(2026, 8, 16) + f.deps.now();
+      expect((await f.run()).api_key).toBe(apiKey);
+      expect(f.waits).toEqual([5000, 60_000]);
+      expect(f.fetch).toHaveBeenCalledTimes(3);
+    });
+  it('combines date pacing with a larger body delay and preserves the original expiry', async () => {
+    const f = flow([
+      Response.json(
+        {
+          error: 'Busy',
+          code: 'temporarily_unavailable',
+          request_id: 'request_test',
+          retry_after: 90,
+        },
+        { status: 503, headers: { 'Retry-After': 'Wed, 16 Sep 2026 00:01:05 GMT' } },
+      ),
+      Response.json(
+        { error: 'Wait', code: 'rate_limited', request_id: 'request_test' },
+        { status: 429, headers: { 'Retry-After': 'Wed, 16 Sep 2026 01:00:00 GMT' } },
+      ),
+    ]);
+    f.deps.wallNow = () => Date.UTC(2026, 8, 16) + f.deps.now();
+    await expect(f.run()).rejects.toMatchObject({ code: 'expired_token' });
+    expect(f.waits).toEqual([5000, 90_000, 505_000]);
+    expect(f.fetch).toHaveBeenCalledTimes(3);
+    expect(f.fetch.mock.calls.filter(([url]) => String(url).endsWith('/start'))).toHaveLength(1);
+  });
   for (const [code, status] of [
     ['access_denied', 403],
     ['expired_token', 400],
@@ -412,6 +471,62 @@ describe('credential writer corpus', () => {
       expect(performance.now() - startTime).toBeLessThan(1000);
       expect(fs.readFileSync(lock, 'utf8')).toBe('other writer');
     });
+  it('retries when a contended lock disappears between exclusive open and inspection', async () => {
+    store();
+    const lock = join(directory, '.credentials.lock');
+    fs.writeFileSync(lock, 'finishing writer', { mode: 0o600 });
+    const open = fs.openSync;
+    const lstat = fs.lstatSync;
+    let opens = 0;
+    let releaseBeforeInspection = false;
+    vi.spyOn(fs, 'openSync').mockImplementation((name, flags, mode) => {
+      if (name === lock) {
+        opens++;
+        if (opens === 1) releaseBeforeInspection = true;
+      }
+      return open(name, flags, mode);
+    });
+    vi.spyOn(fs, 'lstatSync').mockImplementation(((name: fs.PathLike, options?: any) => {
+      if (name === lock && releaseBeforeInspection) {
+        releaseBeforeInspection = false;
+        fs.unlinkSync(lock);
+      }
+      return lstat(name, options);
+    }) as typeof fs.lstatSync);
+    await expect(saveCredentials(entry, 'New', { lockTimeoutMs: 1000 })).resolves.toMatchObject({
+      saved: true,
+    });
+    expect(opens).toBe(2);
+    expect(readCredentials()!.profiles.New).toEqual(entry);
+    expect(readCredentials()!.profiles.Work).toEqual(corpus.base_document.profiles.Work);
+    expect(fs.existsSync(lock)).toBe(false);
+  });
+  it('does not retry a released lock after the same acquisition deadline expires', async () => {
+    store();
+    const lock = join(directory, '.credentials.lock');
+    const open = fs.openSync;
+    const lstat = fs.lstatSync;
+    fs.writeFileSync(lock, 'finishing writer', { mode: 0o600 });
+    let clock = 0;
+    let opens = 0;
+    vi.spyOn(performance, 'now').mockImplementation(() => clock);
+    vi.spyOn(fs, 'openSync').mockImplementation((name, flags, mode) => {
+      if (name === lock) opens++;
+      return open(name, flags, mode);
+    });
+    vi.spyOn(fs, 'lstatSync').mockImplementation(((name: fs.PathLike, options?: any) => {
+      if (name === lock) {
+        fs.unlinkSync(lock);
+        clock = 30;
+      }
+      return lstat(name, options);
+    }) as typeof fs.lstatSync);
+    await expect(saveCredentials(entry, 'New', { lockTimeoutMs: 30 })).rejects.toMatchObject({
+      code: 'writer_lock_timeout',
+    });
+    expect(opens).toBe(1);
+    expect(readCredentials()!.profiles.New).toBeUndefined();
+  });
   it(corpus.writer_cases[7].id, async () => {
     store();
     const lock = join(directory, '.credentials.lock');

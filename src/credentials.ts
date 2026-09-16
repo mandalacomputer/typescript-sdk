@@ -44,13 +44,15 @@ function size(info: Stats): void {
   if (info.size > MAX_CREDENTIAL_BYTES) credentialError('file_too_large');
 }
 type Directory = { name: string; fd: number; info: Stats; deadline: number };
-function checkDirectory(dir: Directory): void {
+function checkDirectory(dir: Directory, readCtimeNs?: bigint): void {
   if (performance.now() >= dir.deadline) credentialError('read_timeout');
   const descriptor = fs.fstatSync(dir.fd);
   const named = fs.lstatSync(dir.name);
   protection(descriptor, true);
   protection(named, true);
   if (!same(dir.info, descriptor) || !same(dir.info, named)) credentialError('unsafe_directory');
+  if (readCtimeNs !== undefined && fs.fstatSync(dir.fd, { bigint: true }).ctimeNs !== readCtimeNs)
+    credentialError('unsafe_directory');
 }
 function openDirectory(create = false): Directory | undefined {
   supported();
@@ -97,20 +99,27 @@ function readDirectory(dir: Directory): CredentialsFile | undefined {
   let fd: number | undefined;
   const name = path.join(dir.name, 'credentials.json');
   try {
-    checkDirectory(dir);
+    // Node has no atomic directory-relative open. Pin the directory's change
+    // timestamp for this read as well as its identity to detect rename/restore
+    // substitutions around the named file operations. Bigint retains the
+    // filesystem's native timestamp precision. Each writer read starts after
+    // its own lock or temporary-file creation, never across those mutations.
+    const readCtimeNs = fs.fstatSync(dir.fd, { bigint: true }).ctimeNs;
+    if (typeof readCtimeNs !== 'bigint') credentialError('unsupported_file_protection');
+    checkDirectory(dir, readCtimeNs);
     let before: Stats;
     try {
       before = fs.lstatSync(name);
     } catch (error) {
       if (missing(error)) {
-        checkDirectory(dir);
+        checkDirectory(dir, readCtimeNs);
         return undefined;
       }
       throw error;
     }
     protection(before, false);
     size(before);
-    checkDirectory(dir);
+    checkDirectory(dir, readCtimeNs);
     fd = fs.openSync(
       name,
       fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK,
@@ -119,11 +128,11 @@ function readDirectory(dir: Directory): CredentialsFile | undefined {
     protection(opened, false);
     size(opened);
     if (!same(before, opened)) credentialError('unsafe_file');
-    checkDirectory(dir);
+    checkDirectory(dir, readCtimeNs);
     const bytes = new Uint8Array(MAX_CREDENTIAL_BYTES + 1);
     let count = 0;
     while (count <= MAX_CREDENTIAL_BYTES) {
-      checkDirectory(dir);
+      checkDirectory(dir, readCtimeNs);
       const read = fs.readSync(fd, bytes, count, bytes.length - count, count);
       count += read;
       if (count > MAX_CREDENTIAL_BYTES) credentialError('file_too_large');
@@ -143,7 +152,7 @@ function readDirectory(dir: Directory): CredentialsFile | undefined {
       opened.ctimeMs !== after.ctimeMs
     )
       credentialError('unsafe_file');
-    checkDirectory(dir);
+    checkDirectory(dir, readCtimeNs);
     return parseCredentials(bytes.subarray(0, count));
   } catch (error) {
     if (error instanceof CredentialsError) throw error;
@@ -229,8 +238,11 @@ export async function saveCredentials(
   let committed = false;
   try {
     const deadline = performance.now() + lockTimeoutMs;
+    let attempted = false;
     for (;;) {
       signal?.throwIfAborted();
+      if (attempted && performance.now() >= deadline) credentialError('writer_lock_timeout');
+      attempted = true;
       // The lock acquisition has its own explicit bound; each store read is separately bounded.
       dir.deadline = performance.now() + 5000;
       checkDirectory(dir);
@@ -250,8 +262,17 @@ export async function saveCredentials(
         break;
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-        protection(fs.lstatSync(lock), false);
+        let released = false;
+        try {
+          protection(fs.lstatSync(lock), false);
+        } catch (inspectionError) {
+          if (!missing(inspectionError)) throw inspectionError;
+          // The current owner can finish between our exclusive open and lstat.
+          // Retry creation; disappearance never grants permission to remove a lock.
+          released = true;
+        }
         if (performance.now() >= deadline) credentialError('writer_lock_timeout');
+        if (released) continue;
         await pause(Math.min(50, Math.max(1, deadline - performance.now())), signal);
       }
     }

@@ -50,12 +50,29 @@ export type DeviceLoginOptions = {
 };
 export type DeviceLoginDependencies = {
   fetch: typeof globalThis.fetch;
+  /** Monotonic clock for the original grant lifetime. */
   now: () => number;
+  /** Wall clock used only to interpret HTTP-date Retry-After values. */
+  wallNow?: () => number;
   sleep: (ms: number, signal: AbortSignal) => Promise<void>;
   prompt: (value: DevicePrompt) => Promise<void>;
   registerSecret: (secret: string) => void;
   diagnostic: (message: string) => void;
 };
+
+function deviceRetryAfterSeconds(header: string | null, wallNow: () => number): number {
+  if (!header) return 0;
+  const value = header.trim();
+  if (/^[0-9]+$/.test(value)) {
+    const seconds = Number(value);
+    return Number.isSafeInteger(seconds) ? seconds : 0;
+  }
+  const httpDate =
+    /^(?:[A-Za-z]{3}, \d{2} [A-Za-z]{3} \d{4} \d{2}:\d{2}:\d{2} GMT|[A-Za-z]+, \d{2}-[A-Za-z]{3}-\d{2} \d{2}:\d{2}:\d{2} GMT|[A-Za-z]{3} [A-Za-z]{3} {1,2}\d{1,2} \d{2}:\d{2}:\d{2} \d{4})$/;
+  if (!httpDate.test(value)) return 0;
+  const at = Date.parse(value.endsWith(' GMT') ? value : `${value} GMT`);
+  return Number.isFinite(at) ? Math.max(0, Math.ceil((at - wallNow()) / 1000)) : 0;
+}
 export const sleepForLogin = (ms: number, signal: AbortSignal): Promise<void> =>
   new Promise((resolve, reject) => {
     const finish = () => {
@@ -134,10 +151,11 @@ export async function deviceLogin(
       'invalid_device_name',
       'Device name must contain 1–60 characters without controls.',
     );
-  if (
-    options.workspace !== undefined &&
-    (!boundedText(options.workspace, 40) || !options.workspace.trim())
-  )
+  // Workspace request names use the service's name trimming, independently of
+  // the fixed whitespace algorithm for stored credentials and profile names.
+  const workspace =
+    typeof options.workspace === 'string' ? options.workspace.trim() : options.workspace;
+  if (workspace !== undefined && !boundedText(workspace, 40))
     throw new DeviceLoginError(
       'invalid_workspace',
       'Workspace name must contain 1–40 characters without controls.',
@@ -187,12 +205,13 @@ export async function deviceLogin(
       );
       if (response.status >= 300 && response.status < 400) invalid();
       const data = await readResponse(response, controller.signal);
-      const header = response.headers.get('retry-after');
-      const retryAfter = header && /^[0-9]+$/.test(header) ? Number(header) : 0;
       return {
         status: response.status,
         data,
-        retryAfter: Number.isSafeInteger(retryAfter) ? retryAfter : 0,
+        retryAfter: deviceRetryAfterSeconds(
+          response.headers.get('retry-after'),
+          deps.wallNow ?? Date.now,
+        ),
       };
     } catch (error) {
       if (error instanceof DeviceLoginError || signal.aborted) throw error;
@@ -248,12 +267,12 @@ export async function deviceLogin(
   try {
     const start = await post(
       'start',
-      options.workspace === undefined
+      workspace === undefined
         ? { device_name: options.deviceName, scope: 'account' }
         : {
             device_name: options.deviceName,
             scope: 'workspace',
-            workspace_name: options.workspace,
+            workspace_name: workspace,
           },
     );
     const d = start.data;
@@ -381,10 +400,10 @@ export async function deviceLogin(
       }
       // Requested scope is an invariant, never silently widened by a response.
       if (
-        options.workspace === undefined
+        workspace === undefined
           ? entry.scope.type !== 'account'
           : entry.scope.type !== 'workspace' ||
-            entry.scope.workspace_name.toLowerCase() !== options.workspace.toLowerCase()
+            entry.scope.workspace_name.toLowerCase() !== workspace.toLowerCase()
       )
         invalid();
       entry.api_key = trimCredentialWhitespace(entry.api_key);

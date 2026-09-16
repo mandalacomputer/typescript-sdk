@@ -216,6 +216,46 @@ describe('shared credential corpus', () => {
 });
 
 describe('native credential objects', () => {
+  it('F14 directory restored around every named file operation cannot select a replacement', () => {
+    put();
+    const replacement = join(home, '.replacement');
+    const parked = join(home, '.parked-original');
+    fs.mkdirSync(replacement, { mode: 0o700 });
+    const other = structuredClone(corpus.base_document);
+    other.default_profile = 'Work';
+    fs.writeFileSync(join(replacement, 'credentials.json'), JSON.stringify(other), { mode: 0o600 });
+    const lstat = fs.lstatSync;
+    const open = fs.openSync;
+    const before = lstat(directory, { bigint: true });
+    let substitutions = 0;
+    const whileReplaced = <T>(operation: () => T): T => {
+      substitutions++;
+      fs.renameSync(directory, parked);
+      fs.renameSync(replacement, directory);
+      try {
+        return operation();
+      } finally {
+        fs.renameSync(directory, replacement);
+        fs.renameSync(parked, directory);
+      }
+    };
+    vi.spyOn(fs, 'lstatSync').mockImplementation(((name: fs.PathLike, options?: any) =>
+      name === file
+        ? whileReplaced(() => lstat(name, options))
+        : lstat(name, options)) as typeof fs.lstatSync);
+    vi.spyOn(fs, 'openSync').mockImplementation((name, flags, mode) =>
+      name === file ? whileReplaced(() => open(name, flags, mode)) : open(name, flags, mode),
+    );
+    const started = performance.now();
+    expect(() => resolveCredentials({}, {})).toThrowError(
+      expect.objectContaining({ code: 'unsafe_directory' }),
+    );
+    expect(performance.now() - started).toBeLessThan(5000);
+    expect(substitutions).toBeGreaterThan(0);
+    const after = lstat(directory, { bigint: true });
+    expect([after.dev, after.ino]).toEqual([before.dev, before.ino]);
+    expect(after.ctimeNs).not.toBe(before.ctimeNs);
+  });
   for (const vector of corpus.native_file_cases) {
     // These owner arrangements require a privileged test runner; the ordinary suite reports them as skipped.
     const ownerCase = ['F04', 'F05'].some((id) => vector.id.startsWith(id));
