@@ -55,6 +55,7 @@ import {
   isDeadlineAbort,
   isTransientForPoll,
   retryDelay,
+  sleep,
   sleepUntilNextPoll,
   type WaitOptions,
 } from './wait.js';
@@ -248,12 +249,38 @@ export class Computers {
       return left;
     };
     try {
+      let startAdmitted = (computer.runningRamMb ?? 0) > 0;
+      let delayMs = 0;
+      for (;;) {
+        signal?.throwIfAborted();
+        if (computer.buildFailed) {
+          await computer.waitUntilBuilt({ timeoutMs: 0, pollMs, signal });
+        }
+        if (computer.startError) {
+          throw new MandalaError(`did not start: ${computer.startError}`);
+        }
+        const status = computer.raw.status;
+        if (status === 'running' || status === 'stopped' || status === 'suspended') break;
+        if (delayMs > 0) await sleep(Math.min(delayMs, remaining()), signal);
+        try {
+          await computer.refresh({ signal: deadlineSignal(remaining(), signal) });
+          // A later stopped row must not erase an earlier admitted attempt.
+          startAdmitted ||= (computer.runningRamMb ?? 0) > 0;
+          delayMs = pollMs;
+        } catch (err) {
+          signal?.throwIfAborted();
+          if (!isDeadlineAbort(err) && !isTransientForPoll(err)) throw err;
+          remaining();
+          delayMs = retryDelay(pollMs, err);
+        }
+      }
       await computer.waitUntilBuilt({ timeoutMs: remaining(), pollMs, signal });
       signal?.throwIfAborted();
       if (computer.startError) {
         throw new MandalaError(`did not start: ${computer.startError}`);
       }
       if (
+        !startAdmitted &&
         (computer.status === 'stopped' || computer.isSuspended) &&
         (computer.runningRamMb === 0 ||
           (args.start === false && computer.runningRamMb === undefined))
@@ -266,7 +293,9 @@ export class Computers {
       signal?.throwIfAborted();
       return computer;
     } catch (err) {
-      if (!signal?.aborted && err instanceof MandalaError) {
+      // start() may wrap a cancelled refresh after its POST succeeded.
+      signal?.throwIfAborted();
+      if (err instanceof MandalaError) {
         // Keep API status, response body, causes and the original error identity.
         err.message = `launch of ${id} failed: ${err.message}`;
       }

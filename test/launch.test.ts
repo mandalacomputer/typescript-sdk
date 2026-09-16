@@ -16,7 +16,10 @@ const computer = (status = 'running', held = 1024) => ({
 });
 const guest = { exit_code: 0, stdout_b64: '', stderr_b64: '' };
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.useRealTimers();
+});
 
 describe('computers.launch', () => {
   it('creates once and returns a refreshed running computer after a guest probe', async () => {
@@ -89,7 +92,7 @@ describe('launch lifecycle and budget', () => {
       resolution: '1920x1080',
       start: false,
     });
-    expect(built.mock.calls[0]![0]!.timeoutMs).toBe(100);
+    expect(built.mock.calls[0]![0]!.timeoutMs).toBe(40);
     expect(running.mock.calls[0]![0]!.timeoutMs).toBe(20);
     expect(ready.mock.calls[0]![0]!.timeoutMs).toBe(10);
   });
@@ -255,6 +258,51 @@ describe('launch lifecycle and budget', () => {
 });
 
 describe('launch cancellation', () => {
+  it.each([undefined, new Error('cancelled'), new MandalaError('cancelled'), 'cancelled'])(
+    'preserves reason %s when an acknowledged start is cancelled during its refresh',
+    async (reason) => {
+      const controller = new AbortController();
+      const rec = recorder((call) => {
+        if (call.path === '/computers') return json(computer('stopped', 0));
+        if (call.path.endsWith('/start')) return json({ ok: true });
+        queueMicrotask(() => controller.abort(reason));
+        return new Promise<Response>(() => {});
+      });
+      const client = new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: rec.fetch });
+      const error = await client.computers
+        .launch({}, { signal: controller.signal })
+        .catch((err) => err);
+      expect(controller.signal.aborted).toBe(true);
+      expect(error).toBe(controller.signal.reason);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      expect(rec.routes()).toEqual([
+        ['POST', 'computers'],
+        ['POST', 'computers/launch-42/start'],
+        ['GET', 'computers/launch-42'],
+      ]);
+    },
+  );
+
+  it('preserves an acknowledged start refresh failure when the caller did not cancel', async () => {
+    const rec = recorder((call) => {
+      if (call.path === '/computers') return json(computer('stopped', 0));
+      if (call.path.endsWith('/start')) return json({ ok: true });
+      return json({ error: 'key revoked' }, { status: 401 });
+    });
+    const client = new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: rec.fetch });
+    const error = await client.computers.launch().catch((err) => err);
+    expect(error).toBeInstanceOf(MandalaError);
+    expect(error).not.toBeInstanceOf(TimeoutError);
+    expect(error.message).toContain('launch-42');
+    expect(error.cause).toBeInstanceOf(AuthenticationError);
+    expect(error.cause.body).toEqual({ error: 'key revoked' });
+    expect(rec.routes()).toEqual([
+      ['POST', 'computers'],
+      ['POST', 'computers/launch-42/start'],
+      ['GET', 'computers/launch-42'],
+    ]);
+  });
+
   it('rejects a pre-aborted signal before creating', async () => {
     const reason = new Error('cancelled');
     const rec = recorder(() => json(computer()));
@@ -339,4 +387,112 @@ it('starts an explicitly deferred create even when the response omits reservatio
     ['GET', 'computers/launch-42'],
     ['POST', 'computers/launch-42/exec'],
   ]);
+});
+
+it.each([true, false])(
+  'does not replay a start admitted during disk preparation (initial: %s)',
+  async (initial) => {
+    let reads = 0;
+    let replayed = false;
+    const rec = recorder((call) => {
+      if (call.path === '/computers') return json(computer('building', initial ? 2048 : 0));
+      if (call.path.endsWith('/start')) {
+        replayed = true;
+        return json(computer());
+      }
+      if (call.path.endsWith('/exec')) return json(guest);
+      reads += 1;
+      if (!initial && reads === 1) return json(computer('building', 2048));
+      return json(replayed ? computer() : computer('stopped', 0));
+    });
+    const client = new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: rec.fetch });
+    const result = client.computers.launch({}, { pollMs: 1 });
+    await expect(result).rejects.toBeInstanceOf(MandalaError);
+    await expect(result).rejects.toThrow('launch-42');
+    expect(replayed).toBe(false);
+    expect(rec.calls.some((call) => call.path.endsWith('/exec') || call.method === 'DELETE')).toBe(
+      false,
+    );
+  },
+);
+
+it.each([undefined, '', ['stopped'], 'unrecognized'])(
+  'waits on unreadable or unknown build status %j without entering another stage',
+  async (status) => {
+    let now = 0;
+    vi.spyOn(performance, 'now').mockImplementation(() => now);
+    const rec = recorder(() => {
+      if (rec.calls.length === 2) now = 100;
+      return json({ ...computer('building', 0), status });
+    });
+    const client = new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: rec.fetch });
+    const error = await client.computers.launch({}, { timeoutMs: 100 }).catch((err) => err);
+    expect(error).toBeInstanceOf(TimeoutError);
+    expect(error.message).toContain('launch-42');
+    expect(error.message).not.toContain('still building');
+    expect(rec.routes()).toEqual([
+      ['POST', 'computers'],
+      ['GET', 'computers/launch-42'],
+    ]);
+  },
+);
+
+it('preserves a permanent build refresh refusal even when its response spends the budget', async () => {
+  let now = 0;
+  vi.spyOn(performance, 'now').mockImplementation(() => now);
+  const rec = recorder(() => {
+    if (rec.calls.length === 1) return json(computer('building', 0));
+    now = 100;
+    return json({ error: 'key revoked' }, { status: 401 });
+  });
+  const client = new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: rec.fetch });
+  const error = await client.computers.launch({}, { timeoutMs: 100 }).catch((err) => err);
+  expect(error).toBeInstanceOf(AuthenticationError);
+  expect(error.message).toContain('launch-42');
+  expect(rec.calls).toHaveLength(2);
+});
+
+it('does not describe a stale build row as current after a transient refresh spends the budget', async () => {
+  let now = 0;
+  vi.spyOn(performance, 'now').mockImplementation(() => now);
+  const rec = recorder(() => {
+    if (rec.calls.length === 1) return json(computer('building', 0));
+    now = 100;
+    return json({ error: 'temporarily unavailable' }, { status: 503 });
+  });
+  const client = new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: rec.fetch });
+  const error = await client.computers.launch({}, { timeoutMs: 100 }).catch((err) => err);
+  expect(error).toBeInstanceOf(TimeoutError);
+  expect(error.message).toContain('launch-42');
+  expect(error.message).not.toContain('still building');
+  expect(rec.calls).toHaveLength(2);
+});
+
+it('honours Retry-After and transient build reads before starting an unreserved computer once', async () => {
+  vi.useFakeTimers({ toFake: ['Date', 'performance', 'setTimeout', 'clearTimeout'] });
+  let reads = 0;
+  const rec = recorder((call) => {
+    if (call.path === '/computers') return json(computer('building', 0));
+    if (call.path.endsWith('/exec')) return json(guest);
+    if (call.path.endsWith('/start')) return json(computer());
+    reads += 1;
+    if (reads === 1)
+      return json({ error: 'rate limited' }, { status: 429, headers: { 'Retry-After': '1' } });
+    if (reads === 2) return json({ error: 'busy' }, { status: 503 });
+    return json(reads === 3 ? computer('stopped', 0) : computer());
+  });
+  const client = new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: rec.fetch });
+  const result = client.computers.launch({ start: false }, { timeoutMs: 2000, pollMs: 10 });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(rec.calls).toHaveLength(2);
+  await vi.advanceTimersByTimeAsync(999);
+  expect(rec.calls).toHaveLength(2);
+  await vi.advanceTimersByTimeAsync(1);
+  expect(rec.calls).toHaveLength(3);
+  await vi.advanceTimersByTimeAsync(9);
+  expect(rec.calls).toHaveLength(3);
+  await vi.advanceTimersByTimeAsync(1);
+  expect((await result).id).toBe('launch-42');
+  expect(rec.calls.filter((call) => call.path.endsWith('/start'))).toHaveLength(1);
+  expect(rec.calls[0]!.body).toEqual({ start: false });
 });
