@@ -57,11 +57,21 @@ const command = (
 ): Command => ({ path, description, args, flags, jsonMode });
 
 export const GLOBAL_FLAGS: readonly Flag[] = [
+  flag('profile', 'Local credential profile (after explicit/environment API keys)'),
   bool('json', 'Emit version 1 JSON; streaming commands emit NDJSON'),
   bool('help', 'Show help without credentials or network', { alias: 'h' }),
 ];
 
 export const COMMANDS: readonly Command[] = [
+  command(
+    'login',
+    'Sign in through browser approval and save a local credential',
+    [],
+    [
+      flag('workspace', 'Request exactly one workspace (default: whole account)'),
+      flag('base-url', 'Explicit login API base (default: MANDALA_BASE_URL or public API)'),
+    ],
+  ),
   command('account', 'Read instantaneous account-wide quota and advisory headroom'),
   command(
     'usage',

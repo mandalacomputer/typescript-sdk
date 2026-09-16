@@ -27,6 +27,13 @@
       "default": "./dist/index.js"
     }
   },
+  "imports": {
+    "#credentials": {
+      "browser": "./dist/credentials-browser.js",
+      "node": "./dist/credentials.js",
+      "default": "./dist/credentials-browser.js"
+    }
+  },
   "types": "./dist/index.d.ts",
   "files": [
     "dist",

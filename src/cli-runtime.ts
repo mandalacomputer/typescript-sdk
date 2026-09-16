@@ -1,6 +1,8 @@
 import { readFile } from 'node:fs/promises';
 import process from 'node:process';
 import { CliError } from './cli-options.js';
+import { resolveCredentials } from './credentials.js';
+import type { DeviceLoginDependencies } from './device-login.js';
 import { Client } from './index.js';
 
 export type CliIO = {
@@ -9,18 +11,28 @@ export type CliIO = {
   stdout: Pick<NodeJS.WritableStream, 'write'> & { isTTY?: boolean };
   stderr: Pick<NodeJS.WritableStream, 'write'> & { isTTY?: boolean };
   env: NodeJS.ProcessEnv;
-  createClient: () => Client;
+  createClient: (profile?: string) => Client;
+  secrets?: Set<string>;
+  login?: Partial<Pick<DeviceLoginDependencies, 'fetch' | 'now' | 'sleep'>> & {
+    openBrowser?: (url: string) => Promise<boolean>;
+  };
   now: () => Date;
 };
 
 export function runtime(overrides: Partial<CliIO> = {}): CliIO {
   const env = overrides.env ?? process.env;
+  const secrets = overrides.secrets ?? new Set<string>();
   return {
+    secrets,
     stdin: process.stdin,
     stdout: process.stdout,
     stderr: process.stderr,
     env,
-    createClient: () => new Client({ apiKey: env.MANDALA_API_KEY, baseUrl: env.MANDALA_BASE_URL }),
+    createClient: (profile) => {
+      const auth = resolveCredentials({ profile }, env);
+      secrets.add(auth.apiKey);
+      return new Client({ apiKey: auth.apiKey, baseUrl: auth.baseUrl });
+    },
     now: () => new Date(),
     ...overrides,
   };

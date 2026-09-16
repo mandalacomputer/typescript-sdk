@@ -1,6 +1,7 @@
 import { execFileSync, spawnSync } from 'node:child_process';
+import fs from 'node:fs';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import os, { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
@@ -1238,7 +1239,19 @@ describe('executable process exit status', () => {
       ],
       { cwd: root, timeout: 30_000 },
     );
-    await writeFile(join(directory, 'package.json'), '{"type":"module"}');
+    await writeFile(
+      join(directory, 'package.json'),
+      JSON.stringify({
+        type: 'module',
+        imports: {
+          '#credentials': {
+            browser: './credentials-browser.js',
+            node: './credentials.js',
+            default: './credentials-browser.js',
+          },
+        },
+      }),
+    );
     const preload = join(directory, 'fetch.mjs');
     await writeFile(
       preload,
@@ -1914,5 +1927,100 @@ describe('malformed arguments are offline failures', () => {
     const result = await h.run(argv);
     expect(result.code).toBe(1);
     expect(h.rec.calls).toEqual([]);
+  });
+});
+
+// These checks use the real runtime factory, including the actual legacy SSH/SCP dispatch.
+describe('credential-free discovery and profile dispatch', () => {
+  it('O01-offline: discovery ignores an unavailable home and malformed unused profile', async () => {
+    const lookup = vi.spyOn(os, 'homedir').mockImplementation(() => {
+      throw new Error('home lookup forbidden');
+    });
+    const fetch = vi.fn<typeof globalThis.fetch>();
+    vi.stubGlobal('fetch', fetch);
+    try {
+      for (const args of [['--help'], ['login', '--help'], ['manifest'], ['completion', 'bash']]) {
+        const h = harness();
+        const result = await h.run([...args, '--profile', '../unused']);
+        expect(result.code).toBe(0);
+      }
+      expect(lookup).not.toHaveBeenCalled();
+      expect(fetch).not.toHaveBeenCalled();
+    } finally {
+      lookup.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+  it('O02-profile-cli-paths: list, account, usage, SSH and SCP use Work and its bound base', async () => {
+    const home = await tempDir();
+    const directory = join(home, '.mandala');
+    fs.mkdirSync(directory, { mode: 0o700 });
+    const fixture = JSON.parse(
+      await readFile(new URL('./fixtures/credentials-v1.json', import.meta.url), 'utf8'),
+    );
+    fs.writeFileSync(join(directory, 'credentials.json'), JSON.stringify(fixture.base_document), {
+      mode: 0o600,
+    });
+    const key = fixture.base_document.profiles.Work.api_key;
+    const lookup = vi.spyOn(os, 'homedir').mockReturnValue(home);
+    const fetch = vi.fn<typeof globalThis.fetch>(async () =>
+      Response.json({ error: `Revoked ${key}`, reason: 'revoked' }, { status: 401 }),
+    );
+    vi.stubGlobal('fetch', fetch);
+    try {
+      for (const args of [
+        ['computers', 'list'],
+        ['account'],
+        ['usage'],
+        ['ssh', 'demo'],
+        ['scp', 'demo:/tmp/file', join(home, 'out')],
+      ]) {
+        let text = '';
+        fetch.mockClear();
+        const write = ((s: unknown) => {
+          text += s;
+          return true;
+        }) as NodeJS.WritableStream['write'];
+        expect(
+          await main([...args, '--profile', 'Work'], {
+            env: {},
+            stdout: { write },
+            stderr: { write },
+            stdin: Readable.from([]),
+          }),
+        ).toBe(1);
+        expect(fetch.mock.calls.length).toBeGreaterThan(0);
+        for (const [url, init] of fetch.mock.calls) {
+          expect(String(url)).toMatch(/^https:\/\/beta\.example\.test\/api\/v1\//);
+          expect(new Headers(init?.headers).get('Authorization')).toBe(`Bearer ${key}`);
+        }
+        expect(text).not.toContain(key);
+        expect(text).toContain('[REDACTED]');
+      }
+      for (const command of ['account', 'usage']) {
+        const quota = accountReport();
+        quota.plan.label = key;
+        const usage = structuredClone(USAGE);
+        usage.usage.computers[0]!.name = key;
+        fetch.mockImplementation(async () => Response.json(command === 'account' ? quota : usage));
+        let text = '';
+        const write = ((s: unknown) => {
+          text += s;
+          return true;
+        }) as NodeJS.WritableStream['write'];
+        expect(
+          await main([command, '--profile', 'Work'], {
+            env: {},
+            stdout: { write },
+            stderr: { write },
+          }),
+        ).toBe(0);
+        expect(text).not.toContain(key);
+        expect(text).toContain('[REDACTED]');
+      }
+    } finally {
+      lookup.mockRestore();
+      vi.unstubAllGlobals();
+    }
   });
 });

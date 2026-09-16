@@ -17,6 +17,7 @@ import {
 } from '../src/cli-options.js';
 
 const expectedCommands = [
+  'login',
   'account',
   'usage',
   'computers list',
@@ -117,8 +118,8 @@ describe('one command inventory', () => {
       { path: ['account'], arguments: [], jsonMode: 'finite' },
       { path: ['usage'], arguments: [], jsonMode: 'finite' },
     ]);
-    expect(entries[0]!.flags.map((f) => f.name)).toEqual(['json', 'help']);
-    expect(entries[1]!.flags.map((f) => f.name)).toEqual(['json', 'help', 'from', 'to']);
+    expect(entries[0]!.flags.map((f) => f.name)).toEqual(['profile', 'json', 'help']);
+    expect(entries[1]!.flags.map((f) => f.name)).toEqual(['profile', 'json', 'help', 'from', 'to']);
     expect(help('usage')).toContain('RFC 3339 timestamp with a time zone');
   });
 

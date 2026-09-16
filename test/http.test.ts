@@ -1,7 +1,10 @@
 /** The transport: auth, status mapping, listings, streams. */
 
+import fs from 'node:fs';
 import { createServer } from 'node:http';
 import { type AddressInfo, createServer as createSocketServer, type Socket } from 'node:net';
+import os from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import {
   errorForStatus,
@@ -39,11 +42,18 @@ const client = (rec: ReturnType<typeof recorder>, opts = {}) =>
 describe('auth', () => {
   it('refuses to build without a key, naming where to get one', () => {
     const saved = process.env.MANDALA_API_KEY;
+    const selected = process.env.MANDALA_PROFILE;
+    const home = fs.mkdtempSync(join(os.tmpdir(), 'mandala-empty-home-'));
+    const homeSpy = vi.spyOn(os, 'homedir').mockReturnValue(home);
     delete process.env.MANDALA_API_KEY;
+    delete process.env.MANDALA_PROFILE;
     try {
       expect(() => new Client()).toThrow(/Settings → API keys/);
     } finally {
       if (saved !== undefined) process.env.MANDALA_API_KEY = saved;
+      if (selected !== undefined) process.env.MANDALA_PROFILE = selected;
+      homeSpy.mockRestore();
+      fs.rmSync(home, { recursive: true, force: true });
     }
   });
 

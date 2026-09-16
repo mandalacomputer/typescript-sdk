@@ -6,6 +6,7 @@
     "lib": ["es2023", "esnext.disposable"],
     "module": "node16",
     "moduleResolution": "node16",
+    "paths": { "#credentials": ["./src/credentials.ts"] },
     "strict": true,
     "noUncheckedIndexedAccess": true,
     "noImplicitOverride": true,

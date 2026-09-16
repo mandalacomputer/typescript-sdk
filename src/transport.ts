@@ -10,6 +10,7 @@
  * — key resolution, URL building, the status table — is the whole file here.
  */
 
+import { resolveCredentials } from '#credentials';
 import {
   APIError,
   ConnectionError,
@@ -340,8 +341,10 @@ function expectArray(data: unknown, method: string, path: string): unknown[] {
 export type SSEEvent = { event: string; data: unknown };
 
 export type TransportOptions = {
-  /** Defaults to `MANDALA_API_KEY`. */
+  /** Explicit key; otherwise MANDALA_API_KEY, then the local credentials file. */
   apiKey?: string;
+  /** Local credential profile; defaults to MANDALA_PROFILE, then the saved default. */
+  profile?: string;
   /** Defaults to `MANDALA_BASE_URL`, then the public API. */
   baseUrl?: string;
   /**
@@ -481,13 +484,6 @@ const retryAfterMs = (header: string | null, cap = true): number | undefined => 
   return cap ? Math.min(delay, MAX_TIMER_MS) : delay;
 };
 
-const env = (name: string): string | undefined =>
-  // Guarded so the library imports cleanly in a browser or a worker, where
-  // `process` does not exist and reading it is a ReferenceError rather than
-  // undefined. Those runtimes have no environment to read a key from anyway,
-  // so the answer there is "pass one".
-  typeof process !== 'undefined' ? process.env?.[name] : undefined;
-
 /** Chunk long waits so valid Retry-After values cannot overflow a native timer. */
 async function retrySleep(delay: number, signal?: AbortSignal): Promise<void> {
   while (delay > 0) {
@@ -561,17 +557,10 @@ export class Transport {
     )
       throw new ValidationError('retries must be { idempotent: a non-negative finite integer }');
     this.#retries = retries?.idempotent ?? 0;
-    const key = (opts.apiKey ?? env('MANDALA_API_KEY'))?.trim();
-    if (!key) {
-      throw new MandalaError(
-        'No API key. Pass apiKey, or set MANDALA_API_KEY ' + '(create one at Settings → API keys).',
-      );
-    }
-    // Empty environment variables are common in layered configuration and are
-    // absence, not a URL. Let them continue down the documented fallback chain
-    // instead of storing '' and throwing an anonymous Invalid URL on first use.
-    const baseUrl = opts.baseUrl?.trim() || env('MANDALA_BASE_URL')?.trim() || DEFAULT_BASE_URL;
-    this.baseUrl = baseUrl.replace(/\/+$/, '');
+    const credentials = resolveCredentials(opts);
+    const key = credentials.apiKey;
+    const baseUrl = credentials.baseUrl;
+    this.baseUrl = baseUrl;
     try {
       // Named here rather than left for `new URL` on the first request: that
       // throw is a raw TypeError ("Invalid URL") that says nothing about

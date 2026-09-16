@@ -50,7 +50,19 @@ it('runs built account and usage commands with finite output and process exits',
       ],
       { cwd: fileURLToPath(new URL('..', import.meta.url)), timeout: 30_000 },
     );
-    await writeFile(join(directory, 'package.json'), '{"type":"module"}');
+    await writeFile(
+      join(directory, 'package.json'),
+      JSON.stringify({
+        type: 'module',
+        imports: {
+          '#credentials': {
+            browser: './credentials-browser.js',
+            node: './credentials.js',
+            default: './credentials-browser.js',
+          },
+        },
+      }),
+    );
     const preload = join(directory, 'fetch.mjs');
     await writeFile(
       preload,

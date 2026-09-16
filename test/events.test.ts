@@ -1301,7 +1301,19 @@ describe('explicit event stream cancellation', () => {
     // a temporary fixture so this regression never depends on a prior build.
     const dir = await mkdtemp(join(tmpdir(), 'mandala-event-retention-'));
     try {
-      await writeFile(join(dir, 'package.json'), '{"type":"module"}');
+      await writeFile(
+        join(dir, 'package.json'),
+        JSON.stringify({
+          type: 'module',
+          imports: {
+            '#credentials': {
+              browser: './credentials-browser.js',
+              node: './credentials.js',
+              default: './credentials-browser.js',
+            },
+          },
+        }),
+      );
       // EVERY module, not the five `events.ts` happens to reach today. A hand-
       // written list is a second copy of the import graph, and the copy is not
       // checked by anything: the day a new import is added the fixture stops
