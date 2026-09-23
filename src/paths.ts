@@ -608,6 +608,7 @@ export function secretBindingsBody(list: SecretBindingArgs[], what = 'secrets'):
       throw new ValidationError(`${what}[${i}] must be an object`);
     }
     const id = requireString(b.secretId, `${what}[${i}].secretId`);
+    if (!id.trim()) throw new ValidationError(`${what}[${i}].secretId must not be empty`);
     if (ids.has(id)) throw new ValidationError(`${what}[${i}]: ${id} is bound twice`);
     ids.add(id);
     if ((b.env === undefined) === (b.file === undefined)) {
@@ -632,7 +633,14 @@ export function secretBindingsBody(list: SecretBindingArgs[], what = 'secrets'):
       }
       files.add(b.file as string);
     }
-    if (b.revisionId !== undefined) requireString(b.revisionId, `${what}[${i}].revisionId`);
+    if (
+      b.revisionId !== undefined &&
+      !requireString(b.revisionId, `${what}[${i}].revisionId`).trim()
+    ) {
+      throw new ValidationError(
+        `${what}[${i}].revisionId must not be empty; omit it to record the latest`,
+      );
+    }
     return omitUndefined({ secret_id: id, env: b.env, file: b.file, revision_id: b.revisionId });
   });
   if (files.size > SECRET_FILES_MAX) {

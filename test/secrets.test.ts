@@ -12,8 +12,22 @@ const client = (respond: Responder) => {
   return { rec, client: new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: rec.fetch }) };
 };
 
-const everything: Responder = (call) =>
-  call.path.endsWith('/secrets') ? json(SECRET_BINDINGS) : json({ ...COMPUTER, id: 'vm-1' });
+/**
+ * A PUT is answered with what it sent, as the platform does, so the answer a
+ * replace decodes is the list it replaced with and not a constant.
+ */
+const everything: Responder = (call) => {
+  if (!call.path.endsWith('/secrets')) return json({ ...COMPUTER, id: 'vm-1' });
+  if (call.method !== 'PUT') return json(SECRET_BINDINGS);
+  const sent = call.body as { secrets: Record<string, string>[]; version?: number };
+  return json({
+    secrets: sent.secrets.map((b) => ({
+      ...b,
+      revision_id: b.revision_id ?? 'csr-ffffffffffffffffffffffff',
+    })),
+    version: (sent.version ?? 3) + 1,
+  });
+};
 
 describe('binding secrets at create', () => {
   it('sends each binding in the wire spelling, as a variable or as a file', async () => {
@@ -26,10 +40,12 @@ describe('binding secrets at create', () => {
       ],
     });
     const create = rec.calls.find((x) => x.method === 'POST' && x.path === '/computers');
-    expect((create?.body as Record<string, unknown>).secrets).toEqual([
-      { secret_id: A, env: 'API_TOKEN' },
-      { secret_id: B, file: 'kubeconfig' },
-    ]);
+    expect(create?.body).toMatchObject({
+      secrets: [
+        { secret_id: A, env: 'API_TOKEN' },
+        { secret_id: B, file: 'kubeconfig' },
+      ],
+    });
   });
 
   it('sends no secrets key at all when none are bound', async () => {
@@ -72,6 +88,9 @@ describe('binding secrets at create', () => {
         ],
       ],
       ['nine files', nine],
+      ['an empty secret id', [{ secretId: '', env: 'X' }]],
+      ['a blank secret id', [{ secretId: '   ', env: 'X' }]],
+      ['an empty revision id', [{ secretId: A, env: 'X', revisionId: '' }]],
     ];
     for (const [name, secrets] of bad) {
       await expect(c.computers.create({ template: 'base', secrets }), name).rejects.toThrow(
@@ -104,7 +123,7 @@ describe('a computer’s bindings', () => {
   it('replaces them whole, with the version and a kept revision', async () => {
     const { rec, client: c } = client(everything);
     const vm = await c.computers.get('vm-1');
-    await vm.setSecrets(
+    const after = await vm.setSecrets(
       [
         { secretId: A, env: 'API_TOKEN', revisionId: 'csr-0123456789abcdef01234567' },
         { secretId: B, file: 'kubeconfig' },
@@ -120,15 +139,38 @@ describe('a computer’s bindings', () => {
       ],
       version: 3,
     });
+    expect(after.version).toBe(4);
+    expect(after.secrets[1]).toEqual({
+      secretId: B,
+      revisionId: 'csr-ffffffffffffffffffffffff',
+      file: 'kubeconfig',
+    });
     await vm.setSecrets([]);
     expect(rec.calls.filter((x) => x.method === 'PUT').at(-1)?.body).toEqual({ secrets: [] });
     await expect(vm.setSecrets([], { version: -1 })).rejects.toThrow(ValidationError);
   });
 
-  it('refuses an answer that is not a binding list', async () => {
-    const { client: c } = client((call) =>
-      call.path.endsWith('/secrets') ? json({ error: 'nope' }) : json({ ...COMPUTER, id: 'vm-1' }),
-    );
-    await expect((await c.computers.get('vm-1')).secrets()).rejects.toThrow(MandalaError);
+  it('refuses an answer it cannot read whole, rather than a shorter list', async () => {
+    const row = { secret_id: A, revision_id: 'csr-0123456789abcdef01234567', env: 'X' };
+    for (const answer of [
+      { error: 'nope' },
+      { secrets: [row] },
+      { secrets: [row], version: -1 },
+      { secrets: [row], version: '3' },
+      { secrets: [row, null], version: 3 },
+      { secrets: [{ ...row, secret_id: '' }], version: 3 },
+      { secrets: [{ revision_id: row.revision_id, env: 'X' }], version: 3 },
+      { secrets: [{ secret_id: A, env: 'X' }], version: 3 },
+      { secrets: [{ ...row, file: 'x' }], version: 3 },
+      { secrets: [{ secret_id: A, revision_id: row.revision_id }], version: 3 },
+    ]) {
+      const { client: c } = client((call) =>
+        call.path.endsWith('/secrets') ? json(answer) : json({ ...COMPUTER, id: 'vm-1' }),
+      );
+      await expect(
+        (await c.computers.get('vm-1')).secrets(),
+        JSON.stringify(answer),
+      ).rejects.toThrow(MandalaError);
+    }
   });
 });

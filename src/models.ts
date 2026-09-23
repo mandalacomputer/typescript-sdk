@@ -3042,22 +3042,39 @@ export type SecretBindings = {
   raw: Record<string, unknown>;
 };
 
-export function toSecretBinding(d: Record<string, unknown>): SecretBinding {
-  const b: SecretBinding = { secretId: str(d.secret_id), revisionId: str(d.revision_id) };
-  if (typeof d.env === 'string') b.env = d.env;
-  if (typeof d.file === 'string') b.file = d.file;
-  return b;
+/**
+ * Strict, because the list is what a caller edits and sends back whole: a row
+ * dropped or coerced here is a secret the caller never saw, unbound by a
+ * replace that looked like it kept everything. So a row this client cannot
+ * read refuses the whole answer, as a window list does.
+ */
+export function toSecretBinding(d: unknown, at = 0): SecretBinding {
+  if (!isRecord(d)) throw new MandalaError(`expected secret binding ${at} to be an object`);
+  const id = d.secret_id;
+  const rev = d.revision_id;
+  if (typeof id !== 'string' || !id.trim() || typeof rev !== 'string' || !rev.trim()) {
+    throw new MandalaError(`expected secret binding ${at} to carry a secret_id and a revision_id`);
+  }
+  const env = typeof d.env === 'string' && d.env !== '' ? d.env : undefined;
+  const file = typeof d.file === 'string' && d.file !== '' ? d.file : undefined;
+  if ((env === undefined) === (file === undefined)) {
+    throw new MandalaError(`expected secret binding ${at} to name exactly one of env and file`);
+  }
+  return env !== undefined
+    ? { secretId: id, revisionId: rev, env }
+    : { secretId: id, revisionId: rev, file: file as string };
 }
 
 export function toSecretBindings(d: Record<string, unknown>): SecretBindings {
-  const list = Array.isArray(d.secrets) ? d.secrets : [];
+  if (!Array.isArray(d.secrets)) throw new MandalaError('expected a list of secret bindings');
+  // The token a change sends back to say which list it is changing. Never
+  // invented: a 0 this client made up is one the platform never issued.
+  if (typeof d.version !== 'number' || !Number.isInteger(d.version) || d.version < 0) {
+    throw new MandalaError('expected secret bindings to carry their version');
+  }
   return {
-    secrets: list
-      .filter(
-        (x): x is Record<string, unknown> => !!x && typeof x === 'object' && !Array.isArray(x),
-      )
-      .map(toSecretBinding),
-    version: typeof d.version === 'number' && Number.isInteger(d.version) ? d.version : 0,
+    secrets: d.secrets.map((row, i) => toSecretBinding(row, i)),
+    version: d.version,
     raw: { ...d },
   };
 }

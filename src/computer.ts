@@ -4227,9 +4227,7 @@ export class Computer {
   async secrets(opts: CallOptions = {}): Promise<SecretBindings> {
     const path = P.computerAction(this.id, 'secrets');
     const data = await this.#t.json('GET', path, { signal: opts.signal });
-    if (!P.isRecord(data) || !Array.isArray(data.secrets)) {
-      throw new MandalaError(`expected secret bindings from GET ${path}`);
-    }
+    if (!P.isRecord(data)) throw new MandalaError(`expected secret bindings from GET ${path}`);
     return toSecretBindings(data);
   }
 
@@ -4251,9 +4249,7 @@ export class Computer {
       body: P.secretsBody(secrets, opts.version),
       signal: opts.signal,
     });
-    if (!P.isRecord(data) || !Array.isArray(data.secrets)) {
-      throw new MandalaError(`expected secret bindings from PUT ${path}`);
-    }
+    if (!P.isRecord(data)) throw new MandalaError(`expected secret bindings from PUT ${path}`);
     return toSecretBindings(data);
   }
 
