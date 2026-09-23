@@ -7,7 +7,7 @@ project is pre-1.0, so a minor version may carry a behaviour change.
 The reasoning behind a change lives in its commit message rather than here.
 This is the summary you read to decide whether to upgrade.
 
-## [Unreleased]
+## [0.5.0] — 2026-09-23
 
 ### Added
 
@@ -28,6 +28,68 @@ This is the summary you read to decide whether to upgrade.
   snapshot clone returns, they say when the session you asked for was not
   resumed and the computer was built from the disk instead (`"secrets"` or
   `"bindings unrecorded"`). Check it before assuming the session came across.
+- **`computers.launch()` creates a computer and returns it ready.** It creates,
+  starts it if needed, and waits for the guest agent, sharing one 180-second
+  readiness budget after the create. A failure leaves the computer in place and
+  the error carries its id, so nothing is created twice or left untracked.
+- **Stable execution ids and independent output reads.** A background command
+  on a newer platform carries `job.executionId`. `computer.execution(id)` reads
+  its state and `computer.executionOutput(id, { stdoutOffset, stderrOffset })`
+  reads its bytes at offsets you hold, so several readers no longer split one
+  output between them and a reused pid cannot point at the wrong command. PID
+  polling and `execKill` are unchanged, and an older reply simply has no id.
+- **Retained output and artifacts.** `computer.retainExecutionOutput()` and
+  `exec(cmd, { retainOutput: true })` keep a command's output as an immutable,
+  expiring result that `result()` and `resultOutput()` read without waking the
+  computer; `deleteResult()` removes it. `publishArtifact(path, { expectedSize,
+  expectedSha256 })` keeps a guest file you name, and `downloadArtifact()` returns
+  it only after checking its length and SHA-256 in full.
+- **Account quota.** `client.account.read()` returns the account's current
+  quota, keeping an unknown value distinct from zero. The CLI gains
+  `mandala account` and `mandala usage --from/--to`.
+- **SSH keys and per-computer SSH.** `client.sshKeys.list()`, `add()` and
+  `remove()` manage your keys (a duplicate is a `ConflictError`), and
+  `computer.sshAccess()` / `setSshAccess(enabled)` switch the gateway on and off.
+  `mandala ssh <computer>` runs your system OpenSSH through the Mandala gateway
+  with its host key pinned, and `mandala ssh --setup`, `ssh-key`, `ssh-access`
+  and `ssh-config` register a key, switch it on, and write a `~/.ssh/config`
+  block that scp, sftp and VS Code Remote-SSH can use.
+- **`mandala login` and saved profiles.** Approving in a browser saves an
+  account or workspace API key to `~/.mandala/credentials.json`, shared with the
+  Python client. `new Client({ profile })`, then `MANDALA_PROFILE`, selects one.
+  An explicit `apiKey` or `MANDALA_API_KEY` still wins and never reads the file,
+  and browser builds do not import the file store at all.
+- **Opt-in retries for safe reads.** `new Client({ retries: { idempotent: N } })`
+  retries GET and HEAD on a connection failure or a 502/503/504, with backoff
+  that honours `Retry-After`, inside the original deadline and signal. It is
+  off by default; mutations and consuming polls such as `execPoll` never retry.
+- **A full `mandala` CLI.** Commands for computers, templates, snapshots,
+  webhooks, agent runs, files and remote commands, with offline help, a JSON
+  command manifest, Bash/Zsh/Fish completions, versioned `--json`/NDJSON output
+  and distinct exit statuses.
+- **Error metadata.** API errors carry `requestId`, `allow` and
+  `wwwAuthenticate` when the response had them, and a 405 is now the exported
+  `MethodNotAllowedError` rather than a plain `APIError`.
+
+### Changed
+
+- **The CLI's websocket shell is now `mandala terminal`.** It was `mandala ssh`,
+  with the same flags and exit codes. `mandala ssh` now opens a real OpenSSH
+  session and needs a registered key and SSH switched on for the computer, so a
+  script that used `mandala ssh` for a shell should say `terminal`.
+
+### Fixed
+
+- **A nested error is classified by its HTTP status.** An error body nested
+  inside another kept its message and reason but could be classified by the
+  wrong status; it now uses the response's actual status and keeps the full
+  body. A failed event stream keeps its partial-work evidence without becoming
+  safe to replay.
+
+### Documentation
+
+- The OpenAI-compatible chat-completions endpoint has an executable example
+  using the `openai` client, with separate Mandala and Anthropic keys.
 
 ## [0.4.0] — 2026-09-14
 
@@ -98,4 +160,5 @@ No effect on the published surface, listed because it is most of the window.
 - Several parser fixes landed before that scanner was retired, each ported
   to and from the MCP server's byte-identical copy.
 
+[0.5.0]: https://github.com/mandalacomputer/typescript-sdk/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/mandalacomputer/typescript-sdk/compare/v0.3.0...v0.4.0
