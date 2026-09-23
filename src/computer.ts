@@ -64,6 +64,7 @@ import type {
   Move,
   Point,
   Schedule,
+  SecretBindings,
   Snapshot,
   SshAccess,
   VncConnect,
@@ -84,6 +85,7 @@ import {
   toHoldings,
   toMove,
   toSchedule,
+  toSecretBindings,
   toSnapshot,
   toSshAccess,
   toVncConnect,
@@ -4214,6 +4216,41 @@ export class Computer {
       throw new MandalaError(`expected an SSH setting from PUT ${path}`);
     }
     return toSshAccess(data);
+  }
+
+  // --- secret bindings -------------------------------------------------
+
+  /**
+   * The secrets this computer is bound to, and the `version` to send back with
+   * {@link setSecrets}. Names and revisions only: no value is ever returned.
+   */
+  async secrets(opts: CallOptions = {}): Promise<SecretBindings> {
+    const path = P.computerAction(this.id, 'secrets');
+    const data = await this.#t.json('GET', path, { signal: opts.signal });
+    if (!P.isRecord(data)) throw new MandalaError(`expected secret bindings from GET ${path}`);
+    return toSecretBindings(data);
+  }
+
+  /**
+   * Replace the secrets this computer is bound to; `[]` removes every one.
+   *
+   * The new values reach the desktop at the next start or restart, and a
+   * binding that names the revision the computer holds now keeps it. Binding
+   * a computer for the first time needs it STOPPED. Pass the `version` a
+   * {@link secrets} read answered to change only that list: a 409 if it has
+   * changed since.
+   */
+  async setSecrets(
+    secrets: P.SecretBindingArgs[],
+    opts: CallOptions & { version?: number } = {},
+  ): Promise<SecretBindings> {
+    const path = P.computerAction(this.id, 'secrets');
+    const data = await this.#t.json('PUT', path, {
+      body: P.secretsBody(secrets, opts.version),
+      signal: opts.signal,
+    });
+    if (!P.isRecord(data)) throw new MandalaError(`expected secret bindings from PUT ${path}`);
+    return toSecretBindings(data);
   }
 
   // --- the agent loop -------------------------------------------------

@@ -774,6 +774,23 @@ export const SSH_KEY = {
 };
 
 /** A computer with SSH on, one key, everything delivered. */
+/** A computer's secret bindings, as `GET computers/:id/secrets` answers (OPL-4963, OPL-4944). */
+export const SECRET_BINDINGS = {
+  secrets: [
+    {
+      secret_id: 'csec-0123456789abcdef',
+      revision_id: 'csr-0123456789abcdef01234567',
+      env: 'API_TOKEN',
+    },
+    {
+      secret_id: 'csec-0123456789abcde0',
+      revision_id: 'csr-0123456789abcdef01234568',
+      file: 'kubeconfig',
+    },
+  ],
+  version: 3,
+};
+
 export const SSH_ACCESS = {
   computer: 'vm-1',
   enabled: true,
@@ -879,6 +896,7 @@ export const anyRoute: Responder = (call) => {
   if (path === '/ssh-keys') return json(get ? [SSH_KEY] : SSH_KEY, get ? {} : { status: 201 });
   if (/^\/ssh-keys\/[^/]+$/.test(path)) return new Response(null, { status: 204 });
   if (path.endsWith('/ssh')) return json(SSH_ACCESS);
+  if (path.endsWith('/secrets')) return json(SECRET_BINDINGS);
   if (path === '/moves') return json({ moves: [MOVE_DONE] });
   if (path.endsWith('/move')) return json(MOVE_STARTED, { status: 202 });
   if (path === '/computers') return json(get ? [COMPUTER] : COMPUTER);

@@ -11,6 +11,14 @@ This is the summary you read to decide whether to upgrade.
 
 ### Added
 
+- **Secret bindings.** `computers.create({ secrets: [...] })` binds secrets
+  from the account at create, each as an environment variable (`env`) or as a
+  file under `/run/mandala-secrets/user/files` (`file`). `computer.secrets()`
+  reads a computer's bindings with the `version` to send back, and
+  `computer.setSecrets(list, { version })` replaces them. A binding's
+  `revisionId` is the revision last delivered: every start and restart delivers
+  each secret's latest value, and a secret bound as a file is replaced on a
+  running computer as soon as its value is.
 - **Memory snapshot clone options.** `snapshots.clone(id, name, { memory: false })`
   builds a memory snapshot's clone from its disk alone, as a fresh boot with its
   own network identity. `{ inheritSecrets: true }` consents to resuming a memory

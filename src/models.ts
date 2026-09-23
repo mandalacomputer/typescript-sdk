@@ -10,7 +10,7 @@
  */
 
 import { MandalaError, ValidationError } from './errors.js';
-import { isExecutionId, isRecord, MOVES } from './paths.js';
+import { isExecutionId, isRecord, MOVES, SECRET_ENV, SECRET_FILE } from './paths.js';
 
 /**
  * A string from a payload, with a fallback for an absent one.
@@ -3013,6 +3013,77 @@ export function toSshAccess(d: Record<string, unknown>): SshAccess {
     keyCount: num(d.key_count),
     keysPushed: num(d.keys_pushed),
     error: d.error == null ? null : str(d.error),
+    raw: { ...d },
+  };
+}
+
+// --- secret bindings --------------------------------------------------------
+
+/**
+ * One secret a computer is bound to, as the platform records it.
+ *
+ * `revisionId` is the revision last delivered to the computer: every start and
+ * restart delivers the secret's latest value and moves it there, and a secret
+ * bound as a file is replaced on a running computer as soon as its value is.
+ * Exactly one of `env` and `file` is set.
+ */
+export type SecretBinding = {
+  secretId: string;
+  revisionId: string;
+  env?: string;
+  file?: string;
+};
+
+/** A computer's secret bindings, and the `version` a change sends back. */
+export type SecretBindings = {
+  secrets: SecretBinding[];
+  /** Send this with {@link Computer.setSecrets} to change only the list you read. */
+  version: number;
+  raw: Record<string, unknown>;
+};
+
+/**
+ * Strict, because the list is what a caller edits and sends back whole: a row
+ * dropped or coerced here is a secret the caller never saw, unbound by a
+ * replace that looked like it kept everything. So a row this client cannot
+ * read refuses the whole answer, as a window list does.
+ */
+export function toSecretBinding(d: unknown, at = 0): SecretBinding {
+  if (!isRecord(d)) throw new MandalaError(`expected secret binding ${at} to be an object`);
+  const id = d.secret_id;
+  const rev = d.revision_id;
+  const exact = (v: unknown): v is string => typeof v === 'string' && v !== '' && v === v.trim();
+  if (!exact(id) || !exact(rev)) {
+    throw new MandalaError(`expected secret binding ${at} to carry a secret_id and a revision_id`);
+  }
+  // Held to what setSecrets would send, so a list read here can be sent back:
+  // a row this client would refuse to write is refused on the read instead.
+  const env = d.env === undefined || d.env === null ? undefined : d.env;
+  const file = d.file === undefined || d.file === null ? undefined : d.file;
+  if ((env === undefined) === (file === undefined)) {
+    throw new MandalaError(`expected secret binding ${at} to name exactly one of env and file`);
+  }
+  if (env !== undefined && (typeof env !== 'string' || !SECRET_ENV.test(env))) {
+    throw new MandalaError(`expected secret binding ${at} to name an environment variable`);
+  }
+  if (file !== undefined && (typeof file !== 'string' || !SECRET_FILE.test(file))) {
+    throw new MandalaError(`expected secret binding ${at} to name a file`);
+  }
+  return env !== undefined
+    ? { secretId: id, revisionId: rev, env: env as string }
+    : { secretId: id, revisionId: rev, file: file as string };
+}
+
+export function toSecretBindings(d: Record<string, unknown>): SecretBindings {
+  if (!Array.isArray(d.secrets)) throw new MandalaError('expected a list of secret bindings');
+  // The token a change sends back to say which list it is changing. Never
+  // invented: a 0 this client made up is one the platform never issued.
+  if (typeof d.version !== 'number' || !Number.isInteger(d.version) || d.version < 0) {
+    throw new MandalaError('expected secret bindings to carry their version');
+  }
+  return {
+    secrets: d.secrets.map((row, i) => toSecretBinding(row, i)),
+    version: d.version,
     raw: { ...d },
   };
 }
