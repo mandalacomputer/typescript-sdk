@@ -40,7 +40,9 @@ describe('binding secrets at create', () => {
       ],
     });
     const create = rec.calls.find((x) => x.method === 'POST' && x.path === '/computers');
-    expect(create?.body).toMatchObject({
+    expect(create?.body).toEqual({
+      template: 'base',
+      start: true,
       secrets: [
         { secret_id: A, env: 'API_TOKEN' },
         { secret_id: B, file: 'kubeconfig' },
@@ -91,6 +93,8 @@ describe('binding secrets at create', () => {
       ['an empty secret id', [{ secretId: '', env: 'X' }]],
       ['a blank secret id', [{ secretId: '   ', env: 'X' }]],
       ['an empty revision id', [{ secretId: A, env: 'X', revisionId: '' }]],
+      ['a padded secret id', [{ secretId: ` ${A} `, env: 'X' }]],
+      ['a padded revision id', [{ secretId: A, env: 'X', revisionId: ' csr-1 ' }]],
     ];
     for (const [name, secrets] of bad) {
       await expect(c.computers.create({ template: 'base', secrets }), name).rejects.toThrow(
@@ -163,14 +167,18 @@ describe('a computer’s bindings', () => {
       { secrets: [{ secret_id: A, env: 'X' }], version: 3 },
       { secrets: [{ ...row, file: 'x' }], version: 3 },
       { secrets: [{ secret_id: A, revision_id: row.revision_id }], version: 3 },
+      { secrets: [{ ...row, env: '   ' }], version: 3 },
+      { secrets: [{ ...row, env: '', file: 'kubeconfig' }], version: 3 },
+      { secrets: [{ secret_id: A, revision_id: row.revision_id, file: 'Ca.pem' }], version: 3 },
+      { secrets: [{ ...row, secret_id: ` ${A} ` }], version: 3 },
     ]) {
       const { client: c } = client((call) =>
         call.path.endsWith('/secrets') ? json(answer) : json({ ...COMPUTER, id: 'vm-1' }),
       );
-      await expect(
-        (await c.computers.get('vm-1')).secrets(),
-        JSON.stringify(answer),
-      ).rejects.toThrow(MandalaError);
+      const vm = await c.computers.get('vm-1');
+      await expect(vm.secrets(), JSON.stringify(answer)).rejects.toThrow(MandalaError);
+      // The replace decodes its answer the same way.
+      await expect(vm.setSecrets([]), JSON.stringify(answer)).rejects.toThrow(MandalaError);
     }
   });
 });

@@ -586,8 +586,8 @@ export type SecretBindingArgs = {
 /** At most this many secrets per computer, and this many of them as files. */
 export const SECRET_BINDINGS_MAX = 32;
 export const SECRET_FILES_MAX = 8;
-const SECRET_ENV = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
-const SECRET_FILE = /^[a-z][a-z0-9_-]{0,47}$/;
+export const SECRET_ENV = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
+export const SECRET_FILE = /^[a-z][a-z0-9_-]{0,47}$/;
 
 /**
  * A binding list as the wire takes it, checked for what the platform would
@@ -608,7 +608,9 @@ export function secretBindingsBody(list: SecretBindingArgs[], what = 'secrets'):
       throw new ValidationError(`${what}[${i}] must be an object`);
     }
     const id = requireString(b.secretId, `${what}[${i}].secretId`);
-    if (!id.trim()) throw new ValidationError(`${what}[${i}].secretId must not be empty`);
+    if (!id.trim() || id !== id.trim()) {
+      throw new ValidationError(`${what}[${i}].secretId must be an id, with no spaces around it`);
+    }
     if (ids.has(id)) throw new ValidationError(`${what}[${i}]: ${id} is bound twice`);
     ids.add(id);
     if ((b.env === undefined) === (b.file === undefined)) {
@@ -633,13 +635,13 @@ export function secretBindingsBody(list: SecretBindingArgs[], what = 'secrets'):
       }
       files.add(b.file as string);
     }
-    if (
-      b.revisionId !== undefined &&
-      !requireString(b.revisionId, `${what}[${i}].revisionId`).trim()
-    ) {
-      throw new ValidationError(
-        `${what}[${i}].revisionId must not be empty; omit it to record the latest`,
-      );
+    if (b.revisionId !== undefined) {
+      const rev = requireString(b.revisionId, `${what}[${i}].revisionId`);
+      if (!rev.trim() || rev !== rev.trim()) {
+        throw new ValidationError(
+          `${what}[${i}].revisionId must be a revision id, with no spaces around it; omit it to record the latest`,
+        );
+      }
     }
     return omitUndefined({ secret_id: id, env: b.env, file: b.file, revision_id: b.revisionId });
   });
