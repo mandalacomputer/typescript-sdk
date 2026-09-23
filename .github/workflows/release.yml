@@ -34,6 +34,13 @@ jobs:
           [ "$tag" = "$exported" ]
           echo "tag=$tag package.json=$declared"
           [ "$tag" = "$declared" ]
+      # The CLI completion tests run the generated scripts under the real
+      # shells, as CI does; the runner image has neither, so without these the
+      # 0.5.0 tag's tests failed and nothing was published.
+      - name: Install shells for completion tests
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends zsh fish
       - run: npm ci
       - run: npm run lint
       - run: npm run typecheck
