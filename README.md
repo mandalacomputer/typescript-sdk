@@ -1707,7 +1707,9 @@ A memory snapshot of a computer that **held secrets** is resumed only with
 secrets, lands in the source's workspace, and cannot run on the same host while
 its source is running. Without it the clone is built from the disk instead, and
 says so: check `computer.memoryDropped` (and `memoryDroppedReason`) before
-assuming the session came across.
+assuming the session came across. It is the clone's answer, kept on that handle
+through `waitUntilBuilt()`; a computer fetched later with `computers.get()` does
+not carry it.
 
 Naming one is worth the keystrokes. Snapshots outlive the computers they came
 from, so an account's listing fills up with generated names that record only when

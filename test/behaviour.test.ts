@@ -4594,6 +4594,24 @@ describe('cloning a memory snapshot', () => {
     expect(kept.memoryDropped).toBe(false);
     expect(kept.memoryDroppedReason).toBeUndefined();
 
+    // The clone's answer survives the wait that follows every clone: the
+    // computer's own record, which a refresh reads, never repeats it.
+    const waiting = client((call) =>
+      call.method === 'POST'
+        ? json({
+            ...COMPUTER,
+            status: 'building',
+            memory_dropped: true,
+            memory_dropped_reason: 'secrets',
+          })
+        : json({ ...COMPUTER, status: 'stopped' }),
+    ).client;
+    const built = await waiting.snapshots.clone('snap-1');
+    await built.refresh();
+    expect(built.memoryDropped).toBe(true);
+    expect(built.memoryDroppedReason).toBe('secrets');
+    expect(built.raw.memory_dropped).toBeUndefined();
+
     // A reason with no flag is not a drop.
     const odd = await client(() =>
       json({ ...COMPUTER, memory_dropped_reason: 'secrets' }),

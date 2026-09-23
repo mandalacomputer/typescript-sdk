@@ -1442,6 +1442,36 @@ describe('snapshots', () => {
     expect(result.frames[0].data.id).toBe(COMPUTER.id);
   });
 
+  // Platform OPL-4964: the two memory-clone flags map to the two options, and
+  // the platform's answer about the session is in the output as it came.
+  it.each([
+    [['--disk-only'], { memory: false }],
+    [['--inherit-secrets'], { inherit_secrets: true }],
+  ])('clones with %j as %j', async (flags, body) => {
+    const h = harness((call) =>
+      call.path === '/snapshots/snapshot-8/clone'
+        ? json({ ...COMPUTER, memory_dropped: true, memory_dropped_reason: 'secrets' })
+        : anyRoute(call),
+    );
+    const result = await h.run(['snapshots', 'clone', 'snapshot-8', ...flags]);
+    expect(h.rec.last().body).toEqual(body);
+    expect(result.frames[0].data.memory_dropped).toBe(true);
+    expect(result.frames[0].data.memory_dropped_reason).toBe('secrets');
+  });
+
+  it('refuses both memory-clone flags at once, before sending anything', async () => {
+    const h = harness();
+    const result = await h.run([
+      'snapshots',
+      'clone',
+      'snapshot-8',
+      '--disk-only',
+      '--inherit-secrets',
+    ]);
+    expect(result.code).not.toBe(0);
+    expect(h.rec.routes()).toEqual([]);
+  });
+
   it.each([true, false])('deletes with no-wait=%s', async (noWait) => {
     const h = harness((call) => (call.path === '/snapshots' ? json([]) : anyRoute(call)));
     const result = await h.run([
