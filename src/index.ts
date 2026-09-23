@@ -214,6 +214,7 @@ export type {
   CallOptions,
   ComputerListOptions,
   ListOptions,
+  SnapshotCloneOptions,
   UsageOptions,
 } from './resources.js';
 export {

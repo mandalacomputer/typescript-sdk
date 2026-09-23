@@ -211,7 +211,22 @@ export const COMMANDS: readonly Command[] = [
     [name, bool('memory', 'Include memory'), noWait, ...waits],
   ),
   command('snapshots restore', 'Restore a snapshot', ['snapshot']),
-  command('snapshots clone', 'Clone a snapshot into a computer', ['snapshot'], [name]),
+  command(
+    'snapshots clone',
+    'Clone a snapshot into a computer',
+    ['snapshot'],
+    [
+      name,
+      bool('disk-only', "Build a memory snapshot's clone from its disk alone, booting fresh", {
+        conflicts: ['inherit-secrets'],
+      }),
+      bool(
+        'inherit-secrets',
+        'Resume a memory snapshot of a computer that held secrets; the copy holds the same credentials',
+        { conflicts: ['disk-only'] },
+      ),
+    ],
+  ),
   command('snapshots delete', 'Delete a snapshot', ['snapshot'], [noWait, ...waits]),
   command('snapshots holdings', 'Read snapshot count, bytes and fingerprint', ['computer']),
   command('snapshots schedule get', 'Read the daily snapshot schedule', ['computer']),

@@ -101,6 +101,28 @@ export type ComputerListOptions = ListOptions & { state?: P.ComputerState };
 export type CallOptions = { signal?: AbortSignal };
 
 /**
+ * How {@link Snapshots.clone} treats a MEMORY snapshot (platform OPL-4964).
+ * Ignored for a disk snapshot, which has no session to resume.
+ */
+export type SnapshotCloneOptions = CallOptions & {
+  /**
+   * `false` builds the new computer from the snapshot's disk alone: a fresh
+   * boot with its own network identity, the way out when the saved session is
+   * what is broken. Defaults to `true`, which resumes the session.
+   */
+  memory?: boolean;
+  /**
+   * Consent to resuming a memory snapshot of a computer that held secrets. The
+   * new computer holds the SAME credentials, bound to the same secrets at the
+   * revisions its memory holds, and gets current values at its next reboot.
+   * Without it such a clone is built from the disk and says so — see
+   * {@link Computer.memoryDropped}. It lands in the source's workspace, and a
+   * resumed copy cannot run on the same host while its source is running.
+   */
+  inheritSecrets?: boolean;
+};
+
+/**
  * The one computer a route promised, refused when the payload was not one.
  *
  * {@link Computer.refresh} already guards its own answer this way, and for the
@@ -743,11 +765,21 @@ export class Snapshots {
    * of its whole chain — which runs for minutes, so the computer comes back
    * `"building"`. Until that lands there is nothing to boot and starting it
    * throws `ConflictError`; wait with {@link Computer.waitUntilBuilt}.
+   *
+   * `memory: false` clones a memory snapshot from its disk alone. A memory
+   * snapshot of a computer that held secrets is resumed only with
+   * `inheritSecrets: true`; otherwise it too is built from the disk, and the
+   * returned computer's {@link Computer.memoryDropped} says so — check it
+   * before assuming the session came across.
    */
-  async clone(snapshotId: string, name?: string, opts: CallOptions = {}): Promise<Computer> {
+  async clone(
+    snapshotId: string,
+    name?: string,
+    opts: SnapshotCloneOptions = {},
+  ): Promise<Computer> {
     const path = P.snapshotAction(snapshotId, 'clone');
     const data = await this.#t.json('POST', path, {
-      body: P.nameBody(name),
+      body: P.snapshotCloneBody(name, opts),
       signal: opts.signal,
     });
     return oneComputer(this.#t, data, 'POST', path);

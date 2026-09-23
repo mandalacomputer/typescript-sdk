@@ -723,6 +723,23 @@ export function updateBody(args: UpdateArgs): Json {
 }
 
 /**
+ * A snapshot clone's body: the optional name, and the two memory options only
+ * when set, so an ordinary clone sends exactly what it always did.
+ */
+export const snapshotCloneBody = (
+  name?: string,
+  opts: { memory?: boolean; inheritSecrets?: boolean } = {},
+): Json => {
+  const body = nameBody(name);
+  // Through {@link flag}, the file's one boolean check, so the refusal reads
+  // like every other one and a fix to it reaches these too.
+  const memory = flag(opts.memory, 'memory');
+  if (memory !== undefined) body.memory = memory;
+  if (flag(opts.inheritSecrets, 'inheritSecrets')) body.inherit_secrets = true;
+  return body;
+};
+
+/**
  * The optional name on a clone or a capture.
  *
  * Omitted means "you pick one", which is a real request. An all-whitespace name

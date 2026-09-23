@@ -642,6 +642,13 @@ const SNAPSHOT_POLL_MS = 5_000;
 export class Computer {
   #t: Transport;
   #data: Record<string, unknown>;
+  // What the snapshot clone that made this handle said about the session
+  // (platform OPL-4964). Kept APART from #data, because a refresh replaces
+  // #data with the computer's own record, which never repeats the clone's
+  // answer — and the refresh a caller is most sure to make is the
+  // waitUntilBuilt() that follows every clone.
+  #memoryDropped: boolean;
+  #memoryDroppedReason: string | undefined;
 
   /**
    * Obtain one from a {@link Client} — `client.computers.create()`, `.get()`, or
@@ -652,6 +659,11 @@ export class Computer {
   constructor(transport: Transport, data: Record<string, unknown>) {
     this.#t = transport;
     this.#data = { ...data };
+    this.#memoryDropped = data.memory_dropped === true;
+    this.#memoryDroppedReason =
+      this.#memoryDropped && typeof data.memory_dropped_reason === 'string'
+        ? data.memory_dropped_reason
+        : undefined;
   }
 
   // --- fields ---------------------------------------------------------
@@ -1025,6 +1037,27 @@ export class Computer {
    */
   get vnc(): VncConnect | undefined {
     return toVncConnect(this.#data.vnc);
+  }
+
+  /**
+   * On a computer returned by {@link Snapshots.clone}: whether the memory
+   * snapshot's session was asked for and the computer was built from the disk
+   * instead (platform OPL-4964). It survives {@link refresh} and
+   * {@link waitUntilBuilt} on this handle; a handle obtained any other way —
+   * `computers.get()`, a listing — does not know, and reads `false`.
+   */
+  get memoryDropped(): boolean {
+    return this.#memoryDropped;
+  }
+
+  /**
+   * Why {@link memoryDropped}: `"secrets"` for a snapshot of a computer that
+   * held secrets, cloned without `inheritSecrets`; `"bindings unrecorded"` for
+   * one taken before its bindings were recorded, which cannot be resumed with
+   * them. Undefined when nothing was dropped.
+   */
+  get memoryDroppedReason(): string | undefined {
+    return this.#memoryDroppedReason;
   }
 
   /** The API response verbatim, including any fields this SDK predates. */

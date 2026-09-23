@@ -611,7 +611,17 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
         await client.snapshots.restore(target, call);
         return output.result({ id: target, restored: true });
       case 'snapshots clone':
-        return output.result(computerData(await client.snapshots.clone(target, s('name'), call)));
+        // `memory_dropped` rides in the record itself, so it is in the output
+        // without being asked for (platform OPL-4964).
+        return output.result(
+          computerData(
+            await client.snapshots.clone(target, s('name'), {
+              ...call,
+              ...(b('disk-only') ? { memory: false } : {}),
+              ...(b('inherit-secrets') ? { inheritSecrets: true } : {}),
+            }),
+          ),
+        );
       case 'snapshots delete':
         await client.snapshots.delete(target, { wait: !b('no-wait'), ...wait });
         return output.result({ id: target, accepted: true, waited: !b('no-wait') });

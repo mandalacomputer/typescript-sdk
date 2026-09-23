@@ -413,6 +413,7 @@ async function exerciseEverything(client: Client): Promise<void> {
   await client.snapshots.restore('snap-1');
   await client.snapshots.clone('snap-1');
   await client.snapshots.clone('snap-1', 'from-snapshot');
+  await client.snapshots.clone('snap-1', undefined, { memory: false, inheritSecrets: true });
   // `wait: false`, because the sweep is about what this SDK SENDS and the wait
   // would poll the default listing — which carries this id — until its deadline.
   // The poll's own route and query are already swept by the `list()` calls above.
