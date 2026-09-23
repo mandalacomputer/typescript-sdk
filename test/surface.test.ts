@@ -242,6 +242,14 @@ async function exerciseEverything(client: Client): Promise<void> {
     resolution: '1920x1080x24',
     start: false,
   });
+  // Secrets bound at create, one as a variable and one as a file (OPL-4944).
+  await client.computers.create({
+    template: 'base',
+    secrets: [
+      { secretId: 'csec-0123456789abcdef', env: 'API_TOKEN' },
+      { secretId: 'csec-0123456789abcde0', file: 'kubeconfig' },
+    ],
+  });
   await client.computers.create({
     template: 'base',
     templateTransfer: 'prepare-token',
@@ -453,6 +461,12 @@ async function exerciseEverything(client: Client): Promise<void> {
   await client.sshKeys.remove('sshk-1');
   await c.sshAccess();
   await c.setSshAccess(true);
+
+  // A computer's secret bindings, read and replaced against the version read.
+  const bound = await c.secrets();
+  await c.setSecrets([{ secretId: 'csec-0123456789abcdef', env: 'API_TOKEN' }], {
+    version: bound.version,
+  });
 
   // Last, and both shapes: the purge is what `expect` binds, and a delete that
   // keeps the snapshots sends neither key.

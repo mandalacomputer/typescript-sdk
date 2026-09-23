@@ -3016,3 +3016,48 @@ export function toSshAccess(d: Record<string, unknown>): SshAccess {
     raw: { ...d },
   };
 }
+
+// --- secret bindings --------------------------------------------------------
+
+/**
+ * One secret a computer is bound to, as the platform records it.
+ *
+ * `revisionId` is the revision last delivered to the computer: every start and
+ * restart delivers the secret's latest value and moves it there, and a secret
+ * bound as a file is replaced on a running computer as soon as its value is.
+ * Exactly one of `env` and `file` is set.
+ */
+export type SecretBinding = {
+  secretId: string;
+  revisionId: string;
+  env?: string;
+  file?: string;
+};
+
+/** A computer's secret bindings, and the `version` a change sends back. */
+export type SecretBindings = {
+  secrets: SecretBinding[];
+  /** Send this with {@link Computer.setSecrets} to change only the list you read. */
+  version: number;
+  raw: Record<string, unknown>;
+};
+
+export function toSecretBinding(d: Record<string, unknown>): SecretBinding {
+  const b: SecretBinding = { secretId: str(d.secret_id), revisionId: str(d.revision_id) };
+  if (typeof d.env === 'string') b.env = d.env;
+  if (typeof d.file === 'string') b.file = d.file;
+  return b;
+}
+
+export function toSecretBindings(d: Record<string, unknown>): SecretBindings {
+  const list = Array.isArray(d.secrets) ? d.secrets : [];
+  return {
+    secrets: list
+      .filter(
+        (x): x is Record<string, unknown> => !!x && typeof x === 'object' && !Array.isArray(x),
+      )
+      .map(toSecretBinding),
+    version: typeof d.version === 'number' && Number.isInteger(d.version) ? d.version : 0,
+    raw: { ...d },
+  };
+}

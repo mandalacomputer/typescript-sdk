@@ -178,6 +178,7 @@ type ComputerAction =
   | 'snapshots'
   | 'schedule'
   | 'ssh'
+  | 'secrets'
   | 'agent';
 
 export const computerAction = (id: string, action: ComputerAction): string =>
@@ -553,7 +554,100 @@ export type CreateArgs = {
   resolution?: string;
   /** Boot it immediately. True by default. */
   start?: boolean;
+  /**
+   * Secrets from the account (Settings → Secrets) to deliver into the desktop
+   * session each time the computer starts: each as an environment variable
+   * (`env`) or as a file under `/run/mandala-secrets/user/files` (`file`).
+   * Linux only, and only on a template whose image can receive them.
+   */
+  secrets?: SecretBindingArgs[];
 };
+
+/**
+ * One secret to bind, by id, published under exactly one of `env` and `file`.
+ * `revisionId` is for a rebind only: naming the revision the computer holds
+ * now keeps it; leaving it out records the latest. Every start and restart
+ * delivers each secret's latest value regardless.
+ */
+export type SecretBindingArgs = {
+  secretId: string;
+  /** The environment variable the value is published under in the desktop session. */
+  env?: string;
+  /**
+   * The file the value is published as, `/run/mandala-secrets/user/files/<file>`:
+   * lowercase letters, digits, `-` and `_`, starting with a letter, at most 48
+   * characters. For what a program reads from a path. A file may hold any bytes,
+   * and a replaced value reaches a running computer's file within seconds.
+   */
+  file?: string;
+  revisionId?: string;
+};
+
+/** At most this many secrets per computer, and this many of them as files. */
+export const SECRET_BINDINGS_MAX = 32;
+export const SECRET_FILES_MAX = 8;
+const SECRET_ENV = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
+const SECRET_FILE = /^[a-z][a-z0-9_-]{0,47}$/;
+
+/**
+ * A binding list as the wire takes it, checked for what the platform would
+ * refuse anyway, so the mistake is named here rather than as a 400 later.
+ */
+export function secretBindingsBody(list: SecretBindingArgs[], what = 'secrets'): Json[] {
+  if (!Array.isArray(list)) {
+    throw new ValidationError(`${what} must be a list of {secretId, env} or {secretId, file}`);
+  }
+  if (list.length > SECRET_BINDINGS_MAX) {
+    throw new ValidationError(`${what}: at most ${SECRET_BINDINGS_MAX} secrets per computer`);
+  }
+  const ids = new Set<string>();
+  const envs = new Set<string>();
+  const files = new Set<string>();
+  const out = list.map((b, i) => {
+    if (!b || typeof b !== 'object' || Array.isArray(b)) {
+      throw new ValidationError(`${what}[${i}] must be an object`);
+    }
+    const id = requireString(b.secretId, `${what}[${i}].secretId`);
+    if (ids.has(id)) throw new ValidationError(`${what}[${i}]: ${id} is bound twice`);
+    ids.add(id);
+    if ((b.env === undefined) === (b.file === undefined)) {
+      throw new ValidationError(`${what}[${i}] must name exactly one of env and file`);
+    }
+    if (b.env !== undefined) {
+      if (!SECRET_ENV.test(requireString(b.env, `${what}[${i}].env`))) {
+        throw new ValidationError(
+          `${what}[${i}].env must be letters, digits and underscores, not starting with a digit, at most 64 characters`,
+        );
+      }
+      if (envs.has(b.env)) throw new ValidationError(`${what}[${i}].env ${b.env} is bound twice`);
+      envs.add(b.env);
+    } else {
+      if (!SECRET_FILE.test(requireString(b.file, `${what}[${i}].file`))) {
+        throw new ValidationError(
+          `${what}[${i}].file must be lowercase letters, digits, - and _, starting with a letter, at most 48 characters`,
+        );
+      }
+      if (files.has(b.file as string)) {
+        throw new ValidationError(`${what}[${i}].file ${b.file} is bound twice`);
+      }
+      files.add(b.file as string);
+    }
+    if (b.revisionId !== undefined) requireString(b.revisionId, `${what}[${i}].revisionId`);
+    return omitUndefined({ secret_id: id, env: b.env, file: b.file, revision_id: b.revisionId });
+  });
+  if (files.size > SECRET_FILES_MAX) {
+    throw new ValidationError(`${what}: at most ${SECRET_FILES_MAX} secrets as files`);
+  }
+  return out;
+}
+
+/** The body for `PUT computers/:id/secrets`. */
+export function secretsBody(list: SecretBindingArgs[], version?: number): Json {
+  if (version !== undefined && (!Number.isInteger(version) || version < 0)) {
+    throw new ValidationError(`version must be the whole number a read answered (got ${version})`);
+  }
+  return omitUndefined({ secrets: secretBindingsBody(list), version });
+}
 
 /**
  * Build a create payload, omitting anything unset.
@@ -562,7 +656,7 @@ export type CreateArgs = {
  * the four it stands in for or a preparation token is refused here.
  */
 export function createBody(args: CreateArgs): Json {
-  const { size, template, cpu, ramMb, diskGb, name, resolution, templateTransfer } = args;
+  const { size, template, cpu, ramMb, diskGb, name, resolution, templateTransfer, secrets } = args;
   // Defaulted after validation, not by destructuring: `start = true` fills in
   // only for `undefined`, so a `"false"` kept its own shape and went onto the
   // wire as a string where the platform expects a boolean.
@@ -609,6 +703,7 @@ export function createBody(args: CreateArgs): Json {
       ram_mb: ramMb,
       disk_gb: diskGb,
       resolution,
+      secrets: secrets === undefined ? undefined : secretBindingsBody(secrets),
     }),
     start,
   };
