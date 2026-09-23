@@ -731,6 +731,27 @@ export function updateBody(args: UpdateArgs): Json {
  * both refuse one, and a route reached through here should not be the way to
  * get a computer called `"  "`.
  */
+/**
+ * A snapshot clone's body: the optional name, and the two memory options only
+ * when set, so an ordinary clone sends exactly what it always did.
+ */
+export const snapshotCloneBody = (
+  name?: string,
+  opts: { memory?: unknown; inheritSecrets?: unknown } = {},
+): Json => {
+  const body = nameBody(name);
+  if (opts.memory !== undefined) {
+    if (typeof opts.memory !== 'boolean') throw new ValidationError('memory must be a boolean');
+    body.memory = opts.memory;
+  }
+  if (opts.inheritSecrets !== undefined) {
+    if (typeof opts.inheritSecrets !== 'boolean')
+      throw new ValidationError('inheritSecrets must be a boolean');
+    if (opts.inheritSecrets) body.inherit_secrets = true;
+  }
+  return body;
+};
+
 export const nameBody = (name?: string): Json => {
   if (name === undefined) return {};
   // Through {@link requireString}, the way {@link snapshotBody} reads the same

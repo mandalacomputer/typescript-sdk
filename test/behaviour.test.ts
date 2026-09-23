@@ -4540,3 +4540,65 @@ describe('the documented background polling loop', () => {
     expect(Buffer.concat(stderr).toString()).toBe('warningdetailend');
   });
 });
+
+// Platform OPL-4964, SDK OPL-4965: how a memory snapshot is cloned, and whether
+// the session the caller asked for came across.
+describe('cloning a memory snapshot', () => {
+  it('sends the two options only when set, and exactly as the platform spells them', async () => {
+    const { rec, client: c } = client(() => json(COMPUTER));
+    await c.snapshots.clone('snap-1');
+    await c.snapshots.clone('snap-1', 'twin', { inheritSecrets: true });
+    await c.snapshots.clone('snap-1', undefined, { memory: false });
+    await c.snapshots.clone('snap-1', undefined, {
+      memory: true,
+      inheritSecrets: false,
+    });
+    expect(rec.calls.map((call) => call.body)).toEqual([
+      {},
+      { name: 'twin', inherit_secrets: true },
+      { memory: false },
+      // `false` consent is the default, so it is not sent; an explicit
+      // `memory: true` is, because the caller said it.
+      { memory: true },
+    ]);
+  });
+
+  it('refuses an option that is not a boolean, before anything is sent', async () => {
+    const { rec, client: c } = client(() => json(COMPUTER));
+    // A JavaScript caller passing a string, which the platform would decode
+    // differently from what was meant ("false" is truthy to a person).
+    await expect(
+      c.snapshots.clone('snap-1', undefined, { memory: 'false' as never }),
+    ).rejects.toThrow(ValidationError);
+    await expect(
+      c.snapshots.clone('snap-1', undefined, { inheritSecrets: 1 as never }),
+    ).rejects.toThrow(ValidationError);
+    expect(rec.calls).toHaveLength(0);
+  });
+
+  it('says when the session was dropped, and why, and says nothing otherwise', async () => {
+    const dropped = client(() =>
+      json({
+        ...COMPUTER,
+        memory_dropped: true,
+        memory_dropped_reason: 'bindings unrecorded',
+      }),
+    ).client;
+    const got = await dropped.snapshots.clone('snap-1', undefined, {
+      inheritSecrets: true,
+    });
+    expect(got.memoryDropped).toBe(true);
+    expect(got.memoryDroppedReason).toBe('bindings unrecorded');
+
+    const kept = await client(() => json(COMPUTER)).client.snapshots.clone('snap-1');
+    expect(kept.memoryDropped).toBe(false);
+    expect(kept.memoryDroppedReason).toBeUndefined();
+
+    // A reason with no flag is not a drop.
+    const odd = await client(() =>
+      json({ ...COMPUTER, memory_dropped_reason: 'secrets' }),
+    ).client.snapshots.clone('snap-1');
+    expect(odd.memoryDropped).toBe(false);
+    expect(odd.memoryDroppedReason).toBeUndefined();
+  });
+});

@@ -1027,6 +1027,27 @@ export class Computer {
     return toVncConnect(this.#data.vnc);
   }
 
+  /**
+   * On a computer returned by {@link Snapshots.clone}: whether the memory
+   * snapshot's session was asked for and the computer was built from the disk
+   * instead (platform OPL-4964). `false` everywhere else, including after a
+   * {@link refresh}, which replaces the record this was read from.
+   */
+  get memoryDropped(): boolean {
+    return this.#data.memory_dropped === true;
+  }
+
+  /**
+   * Why {@link memoryDropped}: `"secrets"` for a snapshot of a computer that
+   * held secrets, cloned without `inheritSecrets`; `"bindings unrecorded"` for
+   * one taken before its bindings were recorded, which cannot be resumed with
+   * them. Undefined when nothing was dropped.
+   */
+  get memoryDroppedReason(): string | undefined {
+    const r = this.#data.memory_dropped_reason;
+    return this.memoryDropped && typeof r === 'string' ? r : undefined;
+  }
+
   /** The API response verbatim, including any fields this SDK predates. */
   get raw(): Record<string, unknown> {
     // A deep copy. A shallow one shares every nested object, and

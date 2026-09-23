@@ -1698,7 +1698,16 @@ const live = await c.snapshot({ memory: true, name: 'before-upgrade' });
 
 const forked = await client.snapshots.clone(live.id, 'twin');
 await forked.waitUntilBuilt();                      // resumes, does not boot
+
+const fresh = await client.snapshots.clone(live.id, 'fresh', { memory: false });  // disk only, boots
 ```
+
+A memory snapshot of a computer that **held secrets** is resumed only with
+`{ inheritSecrets: true }`: the copy holds the same credentials, bound to the same
+secrets, lands in the source's workspace, and cannot run on the same host while
+its source is running. Without it the clone is built from the disk instead, and
+says so: check `computer.memoryDropped` (and `memoryDroppedReason`) before
+assuming the session came across.
 
 Naming one is worth the keystrokes. Snapshots outlive the computers they came
 from, so an account's listing fills up with generated names that record only when
@@ -2554,7 +2563,9 @@ Snapshot create and delete wait for completion by default. Both accept
 `--timeout-ms`, `--poll-ms`, and `--no-wait`. With `--no-wait`, capture may return
 `state: "capturing"`; deletion reports `accepted: true, waited: false`. Acceptance
 is not proof of completion. `snapshots restore` restores the specified snapshot;
-`snapshots clone SNAPSHOT --name NAME` creates a new computer from one. Schedule set uses
+`snapshots clone SNAPSHOT --name NAME` creates a new computer from one; add `--disk-only` to build
+a memory snapshot's clone from its disk, or `--inherit-secrets` to resume one of a computer that
+held secrets (the output's `memory_dropped` says when a session did not come across). Schedule set uses
 04:00 UTC when time flags are omitted; `--disabled` disables the specified window.
 `schedule clear` removes it. Retention is read-only.
 
