@@ -135,6 +135,10 @@ export const ALLOWED: ReadonlySet<string> = new Set(
       ['DELETE', 'ssh-keys/:id'],
       ['GET', 'computers/:id/ssh'],
       ['PUT', 'computers/:id/ssh'],
+
+      // A computer's secret bindings, read and replaced whole (OPL-4963).
+      ['GET', 'computers/:id/secrets'],
+      ['PUT', 'computers/:id/secrets'],
     ] as Route[]
   ).map(([m, p]) => `${m} ${p}`),
 );
@@ -160,6 +164,9 @@ export const UNIMPLEMENTED: ReadonlySet<string> = new Set([
   'GET computers/:id/activities/:activity/results',
   // Passive platform signals have no client convenience method yet.
   'GET computers/:id/signals',
+  // A computer's secret bindings, read and replaced whole (OPL-4963); no client method yet.
+  'GET computers/:id/secrets',
+  'PUT computers/:id/secrets',
 ]);
 
 /**
@@ -380,6 +387,10 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
   ['DELETE ssh-keys/:id', []],
   ['GET computers/:id/ssh', []],
   ['PUT computers/:id/ssh', ['body:enabled']],
+
+  // The replace takes the whole list and the version it was read at.
+  ['GET computers/:id/secrets', []],
+  ['PUT computers/:id/secrets', ['body:secrets', 'body:version']],
 ]);
 
 /**
