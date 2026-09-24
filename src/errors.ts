@@ -6,7 +6,8 @@
  * one that is not uniform: most of them are a passing moment and worth
  * retrying, and two are decisions — the size that was asked for, and a
  * create-only upload onto a path that is taken — see {@link ConflictError},
- * {@link MoveRequiredError} and {@link FileExistsError}.
+ * {@link MoveRequiredError}, {@link FileExistsError} and
+ * {@link CreateOnlyConflictError}.
  * A 402 is a plan limit, which no amount of waiting fixes and which the account
  * holder — not the code — has to resolve.
  *
@@ -381,17 +382,38 @@ export class MoveRequiredError extends ConflictError {
  * unknown, read the file and compare before choosing another path or
  * overwriting.
  *
- * {@link APIError.reason} is `exists` when the platform's body said so, and
- * `undefined` when the 409 answering a create-only upload carried no usable
- * reason — a body interrupted in flight, empty, not the platform's JSON, or
- * JSON without a non-blank string `reason`. That refusal is raised as this
- * class too, with a message saying it was a conflict whose reason is unknown
- * (it does NOT say the path exists), because treating it as final is the safe
- * reading of a refusal this SDK cannot classify. Test `reason === 'exists'`,
- * not the class, before telling anyone the path is taken. {@link isTransient} answers false to this class either way.
+ * Raised only for the platform's explicit `reason: "exists"`, so the class is
+ * the claim: something is at the path. A create-only 409 whose reason could
+ * not be read is {@link CreateOnlyConflictError} instead, which claims nothing
+ * about the path.
  */
 export class FileExistsError extends ConflictError {
   override name = 'FileExistsError';
+}
+
+/**
+ * A create-only upload refused with 409 whose reason could not be read.
+ *
+ * `writeFile(path, data, { overwrite: false })` is answered 409 `exists`
+ * ({@link FileExistsError}) or 409 `unsupported` when it is refused. A 409 can
+ * also arrive with no usable reason: the body interrupted in flight, empty, a
+ * proxy's page instead of the platform's JSON, or JSON whose `reason` is
+ * missing, not a string, or blank. That refusal is raised as this class, with
+ * {@link APIError.reason} `undefined` and a message saying the reason is
+ * unknown. It does NOT say the path is taken, and it does not say whether the
+ * write landed: the answer did not come from a refusal this SDK can read.
+ *
+ * Final, not transient: {@link isTransient} says no to it. Sending the same
+ * create-only write again repeats a refusal that was not said to clear, and a
+ * delayed retry after the path is cleared could create the file when no one
+ * expected it. Read the path to find out what is there before deciding. The
+ * raw body is kept on {@link APIError.body} for diagnostics.
+ *
+ * A subclass of {@link ConflictError}, so `instanceof ConflictError` still
+ * catches it.
+ */
+export class CreateOnlyConflictError extends ConflictError {
+  override name = 'CreateOnlyConflictError';
 }
 
 /**
@@ -995,7 +1017,7 @@ export function isTransient(err: unknown): boolean {
   // By class as well as by word: a create-only upload whose 409 carried no
   // usable reason has no `reason` at all, and would otherwise fall through to the
   // ConflictError branch below and be called worth sending again.
-  if (err instanceof FileExistsError) return false;
+  if (err instanceof FileExistsError || err instanceof CreateOnlyConflictError) return false;
   // A lost RESPONSE is not a request that never left, and only one of the two
   // is safe to replay blind. Same shape as the line above and the same reason:
   // a subclass of a branch below that would otherwise say yes (OPL-3855). It

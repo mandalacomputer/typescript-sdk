@@ -16,12 +16,15 @@ This is the summary you read to decide whether to upgrade.
   with the new `FileExistsError` — a `ConflictError` whose `reason` is
   `"exists"`, which `isTransient` calls permanent — and that request writes
   nothing. A create-only upload's 409 with no usable reason (a body that could not
-  be read, or JSON without a string `reason`) is raised as `FileExistsError`
-  too, reason unknown, never as a transient conflict. If an earlier attempt's
+  be read, or JSON without a string `reason`) is raised as the new
+  `CreateOnlyConflictError`, a `ConflictError` that `isTransient` calls
+  permanent and that claims nothing about the path; `FileExistsError` is only
+  the platform's explicit `exists`. If an earlier attempt's
   outcome was unknown, the file may be yours: read it and compare before
   choosing another path or overwriting.
   The default is unchanged: an upload replaces the file. Linux computers only.
-  The CLI gains `scp --no-overwrite` for uploads.
+  The CLI gains `scp --no-overwrite` for uploads: error code `exists` for a
+  taken path, and `conflict` for a refusal whose reason could not be read.
 
 ## [0.5.0] — 2026-09-23
 

@@ -36,7 +36,7 @@ import { CliError } from './cli-options.js';
 import { redact } from './cli-output.js';
 import { type CliIO, runtime } from './cli-runtime.js';
 import type { Computer } from './computer.js';
-import { FileExistsError } from './errors.js';
+import { CreateOnlyConflictError, FileExistsError } from './errors.js';
 
 /**
  * The whole guest-side scrollback is smaller than this; anything bigger in one
@@ -965,18 +965,29 @@ const cmdScp: LegacyCommands['scp'] = async (srcArg, dstArg, io, signal, opts = 
     } catch (error) {
       if (error instanceof FileExistsError) {
         // Only THIS upload is known to have written nothing: an earlier attempt
-        // whose answer was lost may have written the file itself. The code says
-        // `exists` only when the platform did; a refusal with no usable reason is
-        // a `conflict`, reason unknown, and claims nothing about the path.
-        const exists = error.reason === 'exists';
-        const said = exists
-          ? `${remote.target}:${path} already exists`
-          : `${error.message} — ${remote.target}:${path}`;
+        // whose answer was lost may have written the file itself.
         throw new CliError(
-          exists ? 'exists' : 'conflict',
-          `${said}; this upload wrote nothing. If an earlier attempt's outcome was unknown, ` +
-            'the file may be yours: read it and compare before choosing another path or ' +
-            'dropping --no-overwrite to replace it.',
+          'exists',
+          `${remote.target}:${path} already exists; this upload wrote nothing. If an earlier ` +
+            "attempt's outcome was unknown, the file may be yours: read it and compare before " +
+            'choosing another path or dropping --no-overwrite to replace it.',
+          { status: error.status, reason: error.reason },
+        );
+      }
+      if (error instanceof CreateOnlyConflictError) {
+        // No usable reason, so nothing here says the path is taken. And only a
+        // refusal the platform wrote out (a JSON object) says this upload wrote
+        // nothing; an empty, cut-off or proxy body leaves that unconfirmed.
+        const structured =
+          error.body !== null && typeof error.body === 'object' && !Array.isArray(error.body);
+        const outcome = structured
+          ? 'this upload wrote nothing'
+          : 'whether this upload wrote anything is unconfirmed';
+        throw new CliError(
+          'conflict',
+          `${remote.target}:${path}: the create-only upload was refused as a conflict, reason ` +
+            `unknown; ${outcome}. Do not send the same upload again blind: read the remote path ` +
+            'to see what is there before choosing another path or dropping --no-overwrite.',
           { status: error.status, reason: error.reason },
         );
       }

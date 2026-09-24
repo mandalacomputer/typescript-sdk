@@ -31,6 +31,7 @@ import {
   type APIError,
   ConflictError,
   ConnectionError,
+  CreateOnlyConflictError,
   errorForEventStatus,
   FileExistsError,
   type isTransient,
@@ -650,20 +651,20 @@ const SNAPSHOT_POLL_MS = 5_000;
  * and the transport maps that body to {@link FileExistsError}. But a 409 can
  * arrive without a word this SDK can read: the body interrupted in flight,
  * empty, a proxy's page instead of the platform's JSON, or JSON with no
- * `reason`, a `reason` that is not a string, or a blank one. The transport
- * then leaves {@link APIError.reason} undefined, and a bare
+ * `reason`, a `reason` that is not a string, or a blank one. A bare
  * {@link ConflictError} is what {@link isTransient} calls worth sending again —
- * a retry of a refusal that does not clear, and one that could create the file
- * later if the path were cleared in between. So the request's own context,
- * create-only, decides here what the status alone cannot: the refusal is final,
- * and the message says only that it was a conflict whose reason is unknown,
- * not that the path exists. A 409 that DID carry a string reason keeps the
- * platform's classification, whatever the word.
+ * a retry of a refusal that was not said to clear, and one that could create
+ * the file later if the path were cleared in between. So the request's own
+ * context, create-only, decides here what the status alone cannot: the refusal
+ * is a {@link CreateOnlyConflictError}, final, with a message that says only
+ * that it was a conflict whose reason is unknown. A 409 that DID carry a
+ * string reason keeps the platform's classification, whatever the word.
  */
 function createOnlyRefusal(err: unknown): unknown {
   if (!(err instanceof ConflictError) || err instanceof FileExistsError) return err;
+  if (err instanceof CreateOnlyConflictError) return err;
   if (typeof err.reason === 'string' && err.reason.trim() !== '') return err;
-  const refusal = new FileExistsError(
+  const refusal = new CreateOnlyConflictError(
     // Neutral on purpose, and not the body's own text: a reasonless body whose
     // `error` says "already exists" would carry the very claim this avoids. The
     // body is kept on the error for diagnostics.
@@ -676,7 +677,7 @@ function createOnlyRefusal(err: unknown): unknown {
     { requestId: err.requestId, allow: err.allow, wwwAuthenticate: err.wwwAuthenticate },
   );
   // The constructor reads the body again, and would keep a blank word. Unknown
-  // is `undefined` here, as documented on FileExistsError.
+  // is `undefined`, as documented on CreateOnlyConflictError.
   (refusal as { reason?: string }).reason = undefined;
   return refusal;
 }
@@ -3807,8 +3808,9 @@ export class Computer {
    * one it wrote: read it and compare before choosing another path or
    * overwriting. A 409 that carries no usable reason (a body that could not be
    * read, or JSON without a string `reason`) is raised as
-   * {@link FileExistsError} too, with `reason` undefined and a message saying
-   * the reason is unknown, so it is never taken for a passing conflict. The default, `true`, replaces
+   * {@link CreateOnlyConflictError}, with `reason` undefined and a message
+   * saying the reason is unknown: final, and not a claim that the path is
+   * taken. The default, `true`, replaces
    * whatever is at `path`, as this method always has. Linux computers only: a
    * Windows computer refuses `overwrite: false` with a 400. A host that cannot
    * do create-only yet refuses it with a 409 whose `reason` is `unsupported`,

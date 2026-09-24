@@ -1227,8 +1227,7 @@ try {
   await c.writeFile('/home/user/config.toml', 'debug = false\n', { overwrite: false });
 } catch (e) {
   if (!(e instanceof FileExistsError)) throw e;
-  // This call wrote nothing. `e.reason === 'exists'` means something was already
-  // there; `undefined` means the refusal's reason is unknown, so do not say it was.
+  // Something was already there, and this call wrote nothing.
 }
 ```
 
@@ -1239,9 +1238,10 @@ A host that cannot do it yet answers a `ConflictError` with `reason`
 `"unsupported"`, and one whose support could not be confirmed an
 `UnavailableError`. In every one of those cases this request wrote nothing. A
 create-only 409 with no usable reason (a body that could not be read, or JSON
-without a string `reason`) is raised as `FileExistsError` too, with `reason`
-undefined and a message saying the reason is unknown, so it is never called
-transient.
+without a string `reason`) is raised as `CreateOnlyConflictError`, a
+`ConflictError` with `reason` undefined that is not transient either. It does
+not say the path is taken: read the path to find out what is there before
+deciding.
 
 "Nothing written" is about the request that was refused. If an earlier attempt
 lost its response, it may have written the file itself, and the retry then
@@ -2740,7 +2740,9 @@ exists for. A failure part-way leaves what arrived on disk, as scp and curl do.
 An upload replaces a file already at the guest path. `--no-overwrite` makes it
 create-only: a path that is taken fails with the error code `exists` and
 that upload writes nothing. A create-only refusal whose reason could not be read
-fails with the code `conflict` instead, and says the reason is unknown. It applies to uploads only, and is refused on a
+fails with the code `conflict` instead, says the reason is unknown, and says
+this upload wrote nothing only when the refusal was the platform's JSON;
+otherwise the upload's outcome is reported as unconfirmed. It applies to uploads only, and is refused on a
 download.
 
 ```sh

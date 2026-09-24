@@ -9,6 +9,7 @@ import {
   AuthenticationError,
   Client,
   ConflictError,
+  CreateOnlyConflictError,
   type FileChunk,
   FileExistsError,
   GatewayTimeoutError,
@@ -24,6 +25,7 @@ import {
   ValidationError,
 } from '../src/index.js';
 import * as P from '../src/paths.js';
+import { isTransientForPoll } from '../src/wait.js';
 import {
   anyRoute,
   BASE,
@@ -2353,12 +2355,15 @@ describe('files', () => {
       const err = await computer
         .writeFile('/tmp/a.txt', 'hello', { overwrite: false })
         .catch((e) => e);
-      expect(err).toBeInstanceOf(FileExistsError);
+      expect(err).toBeInstanceOf(CreateOnlyConflictError);
+      expect(err).toBeInstanceOf(ConflictError);
+      expect(err).not.toBeInstanceOf(FileExistsError);
       expect(err).toMatchObject({ status: 409 });
       expect((err as APIError).reason).toBeUndefined();
       expect((err as Error).message).toContain('refused as a conflict, reason unknown');
       expect((err as Error).message).not.toContain('already exists');
       expect(isTransient(err)).toBe(false);
+      expect(isTransientForPoll(err)).toBe(false);
     },
   );
 

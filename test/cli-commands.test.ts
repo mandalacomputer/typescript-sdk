@@ -1866,23 +1866,35 @@ describe('legacy JSON modes', () => {
     );
   });
 
-  it('never calls a create-only conflict with no usable reason `exists` in scp', async () => {
-    const path = join(await tempDir(), 'upload.bin');
-    await writeFile(path, Uint8Array.from([1, 2]));
-    const h = harness((call) =>
-      call.path === '/computers' ? json([COMPUTER]) : json({ error: 'conflict' }, { status: 409 }),
-    );
-    const result = await h.run(['scp', '--no-overwrite', path, `${COMPUTER.name}:/tmp/out.bin`]);
-    expect(result.code).toBe(1);
-    expect(result.frames[0]).toMatchObject({
-      ok: false,
-      error: {
-        code: 'conflict',
-        message: expect.stringContaining('refused as a conflict, reason unknown'),
-      },
-    });
-    expect(JSON.stringify(result.frames[0])).not.toContain('already exists');
-  });
+  it.each([
+    ['the platform JSON', () => json({ error: 'a file already exists' }, { status: 409 }), true],
+    ['an empty body', () => new Response('', { status: 409 }), false],
+    ['a proxy page', () => new Response('<html>conflict</html>', { status: 409 }), false],
+  ])(
+    'never calls a create-only conflict with no usable reason `exists` in scp (%s)',
+    async (_kind, answer, structured) => {
+      const path = join(await tempDir(), 'upload.bin');
+      await writeFile(path, Uint8Array.from([1, 2]));
+      const h = harness((call) => (call.path === '/computers' ? json([COMPUTER]) : answer()));
+      const result = await h.run(['scp', '--no-overwrite', path, `${COMPUTER.name}:/tmp/out.bin`]);
+      expect(result.code).toBe(1);
+      expect(result.frames[0]).toMatchObject({
+        ok: false,
+        error: {
+          code: 'conflict',
+          message: expect.stringContaining('refused as a conflict, reason unknown'),
+        },
+      });
+      const said = JSON.stringify(result.frames[0]);
+      expect(said).not.toContain('already exists');
+      if (structured) {
+        expect(said).toContain('this upload wrote nothing');
+      } else {
+        expect(said).not.toContain('wrote nothing');
+        expect(said).toContain('whether this upload wrote anything is unconfirmed');
+      }
+    },
+  );
 
   it('refuses scp --no-overwrite on a download before any request', async () => {
     const path = join(await tempDir(), 'copy.bin');
