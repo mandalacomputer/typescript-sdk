@@ -29,6 +29,7 @@ import {
   // The inline modifier rather than a second import statement, matching the
   // `./agent.js` line above.
   type APIError,
+  ComputerNotRunningError,
   ConflictError,
   ConnectionError,
   CreateOnlyConflictError,
@@ -60,16 +61,25 @@ import {
   toExecutionOutput,
 } from './executions.js';
 import type {
+  Activity,
+  ActivityPage,
+  ActivityResults,
   BackgroundExec,
+  DeleteResult,
   ExecResult,
+  GuestDirectory,
   GuestWindow,
   Holdings,
   Move,
   Point,
   Schedule,
+  SecretBinding,
   SecretBindings,
+  SecretsApplied,
+  SignalPage,
   Snapshot,
   SshAccess,
+  TypeResult,
   VncConnect,
   WindowResult,
 } from './models.js';
@@ -83,14 +93,23 @@ import {
   num,
   said,
   str,
+  toActivity,
+  toActivityPage,
+  toActivityResults,
   toBackgroundExec,
+  toDeleteResult,
   toExecResult,
+  toGuestDirectory,
   toHoldings,
   toMove,
   toSchedule,
+  toSecretBinding,
   toSecretBindings,
+  toSecretsApplied,
+  toSignalPage,
   toSnapshot,
   toSshAccess,
+  toTypeResult,
   toVncConnect,
   toWindowListing,
   toWindowResult,
@@ -674,10 +693,39 @@ function createOnlyRefusal(err: unknown): unknown {
     err.status,
     err.body,
     err.retryAfterMs,
-    { requestId: err.requestId, allow: err.allow, wwwAuthenticate: err.wwwAuthenticate },
+    {
+      requestId: err.requestId,
+      allow: err.allow,
+      wwwAuthenticate: err.wwwAuthenticate,
+      method: err.method,
+    },
   );
   // The constructor reads the body again, and would keep a blank word. Unknown
   // is `undefined`, as documented on CreateOnlyConflictError.
+  (refusal as { reason?: string }).reason = undefined;
+  return refusal;
+}
+
+/**
+ * A `noWake` transfer's reasonless 409, never left looking like a passing
+ * conflict. See {@link ComputerNotRunningError}.
+ */
+function notRunningRefusal(err: unknown): unknown {
+  if (!(err instanceof ConflictError) || err instanceof ComputerNotRunningError) return err;
+  if (typeof err.reason === 'string' && err.reason.trim() !== '') return err;
+  const refusal = new ComputerNotRunningError(
+    `${err.message} — noWake was set and the computer is not running (or the refusal ` +
+      'carried no reason to say otherwise): start it, or send the transfer without noWake',
+    err.status,
+    err.body,
+    err.retryAfterMs,
+    {
+      requestId: err.requestId,
+      allow: err.allow,
+      wwwAuthenticate: err.wwwAuthenticate,
+      method: err.method,
+    },
+  );
   (refusal as { reason?: string }).reason = undefined;
   return refusal;
 }
@@ -1097,10 +1145,91 @@ export class Computer {
    * Why {@link memoryDropped}: `"secrets"` for a snapshot of a computer that
    * held secrets, cloned without `inheritSecrets`; `"bindings unrecorded"` for
    * one taken before its bindings were recorded, which cannot be resumed with
-   * them. Undefined when nothing was dropped.
+   * them; `"capture unrecorded"` for one taken before the platform recorded
+   * which capture each snapshot is. An open set: show a word you do not
+   * recognise rather than switching on it. Undefined when nothing was dropped.
    */
   get memoryDroppedReason(): string | undefined {
     return this.#memoryDroppedReason;
+  }
+
+  // --- bound secrets --------------------------------------------------
+  //
+  // Read off the computer record itself, so a listing answers them without a
+  // call per computer. {@link secrets} is the call that also answers the
+  // `version` a change sends back.
+
+  /**
+   * The secrets this computer is bound to, as references — which secret, which
+   * revision of it was last delivered, and the variable or file it lands under.
+   * Never a value. `undefined` on a computer that holds none (the platform
+   * omits the whole group), and on a row that could not say.
+   *
+   * Decoded as strictly as {@link secrets}: a row this client cannot read
+   * throws rather than being dropped, because a list missing a binding is the
+   * list a caller would edit and send back.
+   */
+  get secretBindings(): SecretBinding[] | undefined {
+    const list = this.#data.secrets;
+    if (list === undefined || list === null) return undefined;
+    if (!Array.isArray(list)) throw new MandalaError(`expected ${this.id}'s secrets to be a list`);
+    return list.map((row, i) => toSecretBinding(row, i));
+  }
+
+  /**
+   * How many delivering starts this computer has had. Each cold start of a
+   * computer that holds secrets is one; {@link secretsApplied} names the one
+   * its receipt is for. `undefined` when not reported.
+   */
+  get secretsGeneration(): number | undefined {
+    const g = this.#data.secrets_generation;
+    return typeof g === 'number' && Number.isInteger(g) && g >= 0 ? g : undefined;
+  }
+
+  /**
+   * The receipt that the bound values reached the desktop session: which start,
+   * when, and which revision of each secret. A start whose delivery did not
+   * land has no receipt for its generation, and {@link secretsError} says why.
+   * `undefined` before the first delivery.
+   */
+  get secretsApplied(): SecretsApplied | undefined {
+    return toSecretsApplied(this.#data.secrets_applied);
+  }
+
+  /**
+   * Why the last delivering start was stopped, as one fixed sentence naming the
+   * class of failure — never a value. The computer stays stopped until started
+   * again. `undefined` when the last delivery landed or none was tried.
+   */
+  get secretsError(): string | undefined {
+    const e = this.#data.secrets_error;
+    return typeof e === 'string' && e ? e : undefined;
+  }
+
+  /**
+   * Whether this computer's desktop is missing a change to its secrets that a
+   * restart would deliver — a binding, a name, or a newer value it does not
+   * hold; or, once every binding is removed, whether its session still holds
+   * the old values.
+   *
+   * THREE ANSWERS AND AN ABSENCE, and none of them is to be read as another:
+   *
+   * - `true` — pending: restart to deliver. Only ever true of a running or
+   *   suspended computer.
+   * - `false` — the desktop holds what is bound.
+   * - `null` — the platform COULD NOT CHECK (the current values could not be
+   *   read, or the last delivery predates the record of the names it was made
+   *   under). Unknown, not false; a restart makes it known.
+   * - `undefined` — not reported. On a computer with no secrets bound the
+   *   platform sends it only while true, so there absence means not pending; on
+   *   a row that could not reach the host it means nothing at all.
+   *
+   * A value of any other type reads as `null`: unknown, never a guess.
+   */
+  get secretsPending(): boolean | null | undefined {
+    if (!('secrets_pending' in this.#data)) return undefined;
+    const v = this.#data.secrets_pending;
+    return typeof v === 'boolean' ? v : null;
   }
 
   /** The API response verbatim, including any fields this SDK predates. */
@@ -1662,21 +1791,35 @@ export class Computer {
    * that finished after you looked cannot be swept up in a decision that was
    * never about it.
    *
+   * A purge can finish in part: the platform answers 202 with `ok: false`
+   * while selected copies are still queued, and that does NOT throw. Pass
+   * `detailed: true` to get the whole {@link DeleteResult} — whether the
+   * cleanup completed, whether the computer's deletion was confirmed, and what
+   * became of each selected copy — and read it whenever you purge. A 409 means
+   * part of it was refused and a 503 that the outcome is unknown; neither is
+   * replayed by this SDK. Read {@link holdings} again before retrying.
+   *
    * @returns how many snapshots were destroyed, or `undefined` if the platform
    * did not say. Not defaulted to 0: that would turn "it did not say" into the
    * affirmative claim that nothing was destroyed, about an irreversible act.
+   * With `detailed: true`, the whole {@link DeleteResult} instead.
    */
-  async delete(opts: DeleteOptions = {}): Promise<number | undefined> {
-    const res = await this.#t.json<{ snapshots_deleted?: number } | undefined>(
-      'DELETE',
-      P.computer(this.id),
-      { query: P.deleteQuery(opts), signal: opts.signal },
-    );
+  async delete(opts: DeleteOptions & { detailed: true }): Promise<DeleteResult>;
+  /** {@link delete}, answering the count of snapshots destroyed. */
+  async delete(opts?: DeleteOptions & { detailed?: false }): Promise<number | undefined>;
+  async delete(
+    opts: DeleteOptions & { detailed?: boolean } = {},
+  ): Promise<number | DeleteResult | undefined> {
+    const res = await this.#t.json<unknown>('DELETE', P.computer(this.id), {
+      query: P.deleteQuery(opts),
+      signal: opts.signal,
+    });
+    if (opts.detailed === true) return toDeleteResult(res);
     // Normalized rather than handed back raw: a JSON null would otherwise
     // arrive against a type that says it cannot, and `=== undefined` — the
     // check a caller writes to find out whether the platform answered — is
     // false for it.
-    return count(res?.snapshots_deleted);
+    return count(P.isRecord(res) ? res.snapshots_deleted : undefined);
   }
 
   // --- readiness ------------------------------------------------------
@@ -2994,13 +3137,44 @@ export class Computer {
   }
 
   /**
-   * Type text as keystrokes.
+   * Type text as keystrokes: 1 to 400 characters per call.
    *
-   * Characters with no key mapping are skipped rather than raising, so a stray
-   * emoji in a prompt cannot fail the whole call.
+   * Plain ASCII is typed as US-layout key events, about 12 ms a character. Text
+   * with anything else in it is typed whole, in order, by a guest helper — its
+   * ASCII at the same key positions and every other character by GTK Unicode
+   * composition — which works in supported Chromium GTK3 and Xfce Terminal
+   * configurations on Linux X11 and is REFUSED elsewhere (Firefox, GTK4,
+   * Windows, Wayland) rather than typed partially. Tab and LF are keys, CRLF is
+   * one Return; bare CR and other control characters are refused. Unsupported
+   * text is refused before anything is typed.
+   *
+   * The answer says which {@link TypeResult.mechanism} was used. It confirms
+   * DISPATCH, not that the application accepted the text: check the target.
+   * A failure part-way can leave partial text, so inspect before retrying —
+   * this SDK never replays it. For fast insertion of long text use
+   * {@link paste}.
    */
-  async type(text: string, opts: CallOptions = {}): Promise<void> {
-    await this.#input(P.typeBody(text), opts);
+  async type(text: string, opts: CallOptions = {}): Promise<TypeResult> {
+    return toTypeResult(await this.#input(P.typeBody(text), opts));
+  }
+
+  /**
+   * Put `text` on the desktop clipboard and press Ctrl+V (or, with
+   * `shortcut: 'ctrl+shift+v'`, the shortcut a terminal needs). Up to 8192
+   * bytes of UTF-8 at once — the fast way to insert text, any script included.
+   *
+   * It REPLACES the clipboard and leaves it replaced. A successful answer means
+   * the clipboard write and the shortcut were delivered, not that the
+   * application inserted the text: check the target, and wait for it to consume
+   * the paste before changing the clipboard again. Linux guests with working
+   * clipboard support only. An interrupted paste can have side effects —
+   * inspect before retrying, and do not fall back to typing automatically.
+   */
+  async paste(
+    text: string,
+    opts: { shortcut?: P.PasteShortcut } & CallOptions = {},
+  ): Promise<void> {
+    await this.#input(P.pasteBody(text, opts.shortcut), opts);
   }
 
   /**
@@ -3500,7 +3674,7 @@ export class Computer {
    */
   async readFile(
     path: string,
-    opts: { timeoutMs?: number } & CallOptions = {},
+    opts: { timeoutMs?: number; noWake?: boolean } & CallOptions = {},
   ): Promise<Uint8Array> {
     return (await this.#readFileRequest(path, opts)).bytes;
   }
@@ -3508,7 +3682,7 @@ export class Computer {
   /** {@link readFile}, decoded as UTF-8. */
   async readTextFile(
     path: string,
-    opts: { timeoutMs?: number } & CallOptions = {},
+    opts: { timeoutMs?: number; noWake?: boolean } & CallOptions = {},
   ): Promise<string> {
     const bytes = await this.readFile(path, opts);
     try {
@@ -3521,12 +3695,13 @@ export class Computer {
   /** The one request behind every read on this route. */
   async #readFileRequest(
     path: string,
-    opts: { offset?: number; length?: number; timeoutMs?: number } & CallOptions,
+    opts: { offset?: number; length?: number; timeoutMs?: number; noWake?: boolean } & CallOptions,
   ): Promise<Bytes> {
     const headers = P.rangeHeaders(opts.offset, opts.length);
+    const query = P.filesQuery(path, opts.noWake);
     try {
       return await this.#t.bytes('GET', P.computerAction(this.id, 'files'), {
-        query: P.filesQuery(path),
+        query,
         headers,
         noTimeout: opts.timeoutMs === 0,
         minTimeoutMs: opts.timeoutMs,
@@ -3540,7 +3715,8 @@ export class Computer {
       // range and to the WINDOW when there is, so a ranged request cannot earn
       // a 413 at all. Which makes the rewrite unambiguous rather than a guess —
       // wherever it fires, paging really is the answer.
-      throw headers ? err : pointPastTheCeiling(err);
+      const refusal = opts.noWake === true ? notRunningRefusal(err) : err;
+      throw headers ? refusal : pointPastTheCeiling(refusal);
     }
   }
 
@@ -3569,7 +3745,12 @@ export class Computer {
    */
   async readFilePart(
     path: string,
-    opts: { offset?: number; length?: number; timeoutMs?: number } & CallOptions = {},
+    opts: {
+      offset?: number;
+      length?: number;
+      timeoutMs?: number;
+      noWake?: boolean;
+    } & CallOptions = {},
   ): Promise<FileChunk> {
     return toFileChunk(await this.#readFileRequest(path, opts), path);
   }
@@ -3609,6 +3790,7 @@ export class Computer {
       length?: number;
       chunkBytes?: number;
       timeoutMs?: number;
+      noWake?: boolean;
     } & CallOptions = {},
   ): AsyncGenerator<FileChunk> {
     const { chunkBytes } = opts;
@@ -3621,7 +3803,7 @@ export class Computer {
     // instead become a silently ignored length, and a fractional offset would
     // be reported against a number the caller never passed.
     P.rangeHeader(opts.offset, opts.length);
-    const each = { timeoutMs: opts.timeoutMs, signal: opts.signal };
+    const each = { timeoutMs: opts.timeoutMs, noWake: opts.noWake, signal: opts.signal };
     let offset = opts.offset ?? 0;
     let remaining = opts.length;
     let total: number | undefined;
@@ -3826,7 +4008,12 @@ export class Computer {
   async writeFile(
     path: string,
     data: Uint8Array | string | ReadableStream<Uint8Array>,
-    opts: { timeoutMs?: number; contentLength?: number; overwrite?: boolean } & CallOptions = {},
+    opts: {
+      timeoutMs?: number;
+      contentLength?: number;
+      overwrite?: boolean;
+      noWake?: boolean;
+    } & CallOptions = {},
   ): Promise<number | undefined> {
     // Checked, not coerced: a JavaScript caller passing the string "false"
     // would otherwise read as truthy and replace the very file they asked to
@@ -3886,8 +4073,8 @@ export class Computer {
         // the one this method always sent.
         query:
           opts.overwrite === false
-            ? { ...P.filesQuery(path), overwrite: 'false' }
-            : P.filesQuery(path),
+            ? { ...P.filesQuery(path, opts.noWake), overwrite: 'false' }
+            : P.filesQuery(path, opts.noWake),
         raw: bytes,
         headers,
         noTimeout: opts.timeoutMs === 0,
@@ -3895,7 +4082,10 @@ export class Computer {
         signal: opts.signal,
       })
       .catch((err: unknown) => {
-        throw opts.overwrite === false ? createOnlyRefusal(err) : err;
+        // Create-only first: its class claims less (a reason unknown) than the
+        // not-running one, which is the honest answer when both were asked.
+        if (opts.overwrite === false) throw createOnlyRefusal(err);
+        throw opts.noWake === true ? notRunningRefusal(err) : err;
       });
     return count(res?.bytes);
   }
@@ -4308,7 +4498,11 @@ export class Computer {
    * binding that names the revision the computer holds now keeps it. Binding
    * a computer for the first time needs it STOPPED. Pass the `version` a
    * {@link secrets} read answered to change only that list: a 409 if it has
-   * changed since.
+   * changed since. A 409 also answers while a delivery is still in progress or
+   * another operation (a stop, a snapshot, a suspend) holds the computer; those
+   * clear once it finishes. On an image that supports it, new shells and
+   * `exec(…, { desktop: true })` on a running computer see a changed variable
+   * within seconds; programs already running keep what they started with.
    */
   async setSecrets(
     secrets: P.SecretBindingArgs[],
@@ -4321,6 +4515,88 @@ export class Computer {
     });
     if (!P.isRecord(data)) throw new MandalaError(`expected secret bindings from PUT ${path}`);
     return toSecretBindings(data);
+  }
+
+  // --- guest directories ----------------------------------------------
+
+  /**
+   * The names in one guest directory, with their types and regular-file sizes.
+   *
+   * The computer must already be running: a listing never resumes it or
+   * extends its idle timer. BOUNDED, NOT PAGED — a large directory comes back
+   * {@link GuestDirectory.truncated} as an unordered subset with no way to ask
+   * for the rest, so narrow the path. Symbolic links are not followed, and a
+   * path whose final component is one is refused. Linux images with
+   * `/usr/bin/python3` only.
+   */
+  async listDirectory(path: string, opts: CallOptions = {}): Promise<GuestDirectory> {
+    const route = P.filesList(this.id);
+    const data = await this.#t.json('GET', route, {
+      query: P.directoryQuery(path),
+      signal: opts.signal,
+    });
+    return toGuestDirectory(data, 'GET', route);
+  }
+
+  // --- retained history -----------------------------------------------
+
+  /**
+   * One page of the requests sent through this computer's API — input, exec,
+   * window and clipboard calls — as safe metadata, newest first. No command,
+   * output or typed text is kept. Reads work while the computer is stopped or
+   * suspended and never wake it.
+   *
+   * Follow {@link ActivityPage.nextCursor} for older rows. To watch for new
+   * rows and late outcomes, pass {@link ActivityPage.changesCursor} back with
+   * `changes: true`; a page with `gap: true` means that journal could not be
+   * honoured and history should be read afresh. Capture is best effort, and an
+   * accepted background request is not its completion.
+   */
+  async activities(opts: P.ActivitiesArgs & CallOptions = {}): Promise<ActivityPage> {
+    const path = P.computerAction(this.id, 'activities');
+    const data = await this.#t.json('GET', path, {
+      query: P.activitiesQuery(opts),
+      signal: opts.signal,
+    });
+    return toActivityPage(data, 'GET', path);
+  }
+
+  /** One retained activity by id. A missing, expired or out-of-scope one is a {@link NotFoundError}. */
+  async activity(activityId: string, opts: CallOptions = {}): Promise<Activity> {
+    const path = P.activity(this.id, activityId);
+    const data = await this.#t.json('GET', path, { signal: opts.signal });
+    return toActivity(data, `the activity from GET ${path}`);
+  }
+
+  /**
+   * The newest retained result versions linked to one activity — at most
+   * eight, with `more` when there are others. Read one with {@link result}.
+   */
+  async activityResults(activityId: string, opts: CallOptions = {}): Promise<ActivityResults> {
+    const path = P.activityResults(this.id, activityId);
+    const data = await this.#t.json('GET', path, { signal: opts.signal });
+    return toActivityResults(data, 'GET', path);
+  }
+
+  /**
+   * One page of the daemon's observations of this computer — process exits,
+   * starts, stops, suspends, idles — without connecting to the guest or waking
+   * it.
+   *
+   * Omit `since` for a baseline: the answer starts at the current head and
+   * replays nothing. Then pass each page's {@link SignalPage.cursor} as `since`.
+   * An expired or foreign cursor answers a {@link SignalPage.gap} with a new
+   * head: events happened that cannot be replayed. EPHEMERAL — not durable
+   * history, not complete coverage, not proof a task succeeded; the event
+   * socket ({@link events}) and webhooks are the transports to build on.
+   */
+  async signals(opts: P.SignalsArgs & CallOptions = {}): Promise<SignalPage> {
+    const path = P.computerAction(this.id, 'signals');
+    const data = await this.#t.json('GET', path, {
+      query: P.signalsQuery(opts),
+      signal: opts.signal,
+    });
+    return toSignalPage(data, 'GET', path);
   }
 
   // --- the agent loop -------------------------------------------------
@@ -4384,7 +4660,7 @@ export class Computer {
         // state. `agentStream` hands the same facts back as `usage` and `steps`.
         const message = `the agent run failed: ${ev.error}`;
         throw ev.status
-          ? errorForEventStatus(ev.status, message, ev.raw)
+          ? errorForEventStatus(ev.status, message, ev.raw, { method: 'POST' })
           : new MandalaError(message);
       }
     }

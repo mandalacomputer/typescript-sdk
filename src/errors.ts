@@ -120,6 +120,13 @@ export type ErrorMetadata = {
   requestId?: string;
   allow?: string;
   wwwAuthenticate?: string;
+  /**
+   * The HTTP method of the request this answers, upper-case. Set on every error
+   * this SDK builds from a response; what lets {@link isTransient} tell a read
+   * answered 503 (worth asking again) from a change answered 503 (which may or
+   * may not have happened).
+   */
+  method?: string;
 };
 
 const nonblank = (value: unknown): string | undefined =>
@@ -158,6 +165,11 @@ export class APIError extends MandalaError {
   /** The received Allow and WWW-Authenticate headers, when supplied. */
   readonly allow?: string;
   readonly wwwAuthenticate?: string;
+  /**
+   * The method of the request this refused, when this SDK built the error from
+   * a response. `undefined` on one constructed by hand.
+   */
+  readonly method?: string;
   constructor(
     message: string,
     readonly status: number,
@@ -171,6 +183,10 @@ export class APIError extends MandalaError {
     this.requestId = nonblank(metadata.requestId) ?? nonblank(errorRecord(body)?.request_id);
     this.allow = metadata.allow;
     this.wwwAuthenticate = metadata.wwwAuthenticate;
+    this.method =
+      typeof metadata.method === 'string' && metadata.method
+        ? metadata.method.toUpperCase()
+        : undefined;
   }
 }
 
@@ -414,6 +430,26 @@ export class FileExistsError extends ConflictError {
  */
 export class CreateOnlyConflictError extends ConflictError {
   override name = 'CreateOnlyConflictError';
+}
+
+/**
+ * A `noWake` file transfer refused because the computer is not running.
+ *
+ * `readFile(path, { noWake: true })` and `writeFile(..., { noWake: true })`
+ * ask the platform NOT to resume a suspended computer for the transfer. One
+ * that is not running is refused with 409 — today with no `reason`, and with
+ * `reason: "unavailable"` on a platform that classifies it. Without a word, a
+ * bare {@link ConflictError} is what {@link isTransient} calls worth sending
+ * again, and it never clears by waiting: start the computer, or drop `noWake`.
+ * So the request's own context decides what the status alone cannot, the way
+ * {@link CreateOnlyConflictError} is decided. A 409 that DID carry a string
+ * reason keeps the platform's classification instead.
+ *
+ * A subclass of {@link ConflictError}, so `instanceof ConflictError` still
+ * catches it.
+ */
+export class ComputerNotRunningError extends ConflictError {
+  override name = 'ComputerNotRunningError';
 }
 
 /**
@@ -908,12 +944,20 @@ const DESCRIBES_THIS_CONNECTION: ReadonlySet<StatusError> = new Set([
   OriginUnreachableError,
 ]);
 
-export function errorForEventStatus(status: number, message: string, body?: unknown): APIError {
+export function errorForEventStatus(
+  status: number,
+  message: string,
+  body?: unknown,
+  metadata: ErrorMetadata = {},
+): APIError {
   const carried = withoutRefusalReason(body);
-  if (status === 429) return new RateLimitError(message, status, carried);
+  if (status === 429) return new RateLimitError(message, status, carried, undefined, metadata);
   const Cls = BY_STATUS[status] ?? APIError;
-  if (DESCRIBES_THIS_CONNECTION.has(Cls)) return new APIError(message, status, carried);
-  return new Cls(message, status, carried);
+  if (DESCRIBES_THIS_CONNECTION.has(Cls))
+    return new APIError(message, status, carried, undefined, metadata);
+  if (Cls === RangeNotSatisfiableError)
+    return new RangeNotSatisfiableError(message, status, carried, undefined, undefined, metadata);
+  return new (Cls as typeof APIError)(message, status, carried, undefined, metadata);
 }
 
 /**
@@ -1017,7 +1061,12 @@ export function isTransient(err: unknown): boolean {
   // By class as well as by word: a create-only upload whose 409 carried no
   // usable reason has no `reason` at all, and would otherwise fall through to the
   // ConflictError branch below and be called worth sending again.
-  if (err instanceof FileExistsError || err instanceof CreateOnlyConflictError) return false;
+  if (
+    err instanceof FileExistsError ||
+    err instanceof CreateOnlyConflictError ||
+    err instanceof ComputerNotRunningError
+  )
+    return false;
   // A lost RESPONSE is not a request that never left, and only one of the two
   // is safe to replay blind. Same shape as the line above and the same reason:
   // a subclass of a branch below that would otherwise say yes (OPL-3855). It
@@ -1051,6 +1100,16 @@ export function isTransient(err: unknown): boolean {
   // conclusion was that neither client had to give anything up, because the
   // disagreement was never about a status. It was two questions wearing one
   // name.
+  //
+  // A 503 is the platform's "ask again shortly" for a READ, and for a change it
+  // is an unknown outcome: the platform answers a failure after the request was
+  // sent with the same status, so a create, a command or a delete answered 503
+  // may already have happened. Only a read is safe to replay blind, and the
+  // method is what says which this was. An error built by hand carries no
+  // method and keeps the answer this predicate always gave it.
+  if (err instanceof UnavailableError && err.method !== undefined) {
+    return err.method === 'GET' || err.method === 'HEAD';
+  }
   return (
     err instanceof ConflictError ||
     err instanceof RateLimitError ||

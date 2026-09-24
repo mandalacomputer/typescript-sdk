@@ -318,6 +318,8 @@ async function exerciseEverything(client: Client): Promise<void> {
   await c.scroll(1, 2, { direction: 'up' });
   await c.scroll(undefined, undefined, { direction: 'right', modifiers: ['shift'] });
   await c.type('hi');
+  await c.paste('Café — 東京');
+  await c.paste('ls', { shortcut: 'ctrl+shift+v' });
   await c.key('ctrl', 'c');
   await c.holdKey(['shift'], 1);
   await c.wait(1);
@@ -370,6 +372,18 @@ async function exerciseEverything(client: Client): Promise<void> {
   await c.readFilePart('/home/user/out.txt', { offset: -16 });
   for await (const _ of c.readFileChunks('/home/user/out.txt')) break;
   await c.writeFile('/home/user/in.txt', 'hello');
+  // noWake on both halves of a transfer: a stopped computer is refused rather
+  // than resumed (the dashboard always sends it).
+  await c.readFile('/home/user/out.txt', { noWake: true });
+  await c.writeFile('/home/user/in.txt', 'hello', { noWake: true });
+  await c.listDirectory('/home/user/Desktop');
+  // Retained history, both pagings, and the passive signals.
+  await c.activities();
+  await c.activities({ cursor: 'chg-1', changes: true });
+  await c.activity('act_0123456789abcdef0123456789abcdef');
+  await c.activityResults('act_0123456789abcdef0123456789abcdef');
+  await c.signals();
+  await c.signals({ since: 'sig-1', limit: 10 });
   // Create-only: sent only when asked for (OPL-4994).
   await c.writeFile('/home/user/new.txt', 'hello', { overwrite: false });
 
@@ -470,9 +484,31 @@ async function exerciseEverything(client: Client): Promise<void> {
     version: bound.version,
   });
 
+  // The account's secret store (OPL-4984): both scopes on the reads, every
+  // field on the writes, and the revision the delete requires.
+  await client.secrets.list();
+  await client.secrets.list({ workspaceId: 'ws-1' });
+  const stored = await client.secrets.create({
+    name: 'OPENAI_API_KEY',
+    value: 'sk-test',
+    workspaceId: 'ws-1',
+  });
+  await client.secrets.get(stored.id, { workspaceId: 'ws-1' });
+  await client.secrets.replace(stored.id, {
+    value: 'sk-test-2',
+    revisionId: stored.revisionId,
+    workspaceId: 'ws-1',
+  });
+  await client.secrets.delete(stored.id, { revisionId: stored.revisionId, workspaceId: 'ws-1' });
+
   // Last, and both shapes: the purge is what `expect` binds, and a delete that
   // keeps the snapshots sends neither key.
   await (await client.computers.get('vm-2')).delete({ deleteSnapshots: true, expect: 'abc123' });
+  await (await client.computers.get('vm-3')).delete({
+    deleteSnapshots: true,
+    expect: 'abc123',
+    detailed: true,
+  });
   await c.delete();
 }
 

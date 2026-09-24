@@ -801,6 +801,112 @@ export const SSH_ACCESS = {
   error: null,
 };
 
+/** One secret in the account's store, as `GET secrets/:id` answers it: never a value (OPL-4984). */
+export const SECRET = {
+  id: 'csec-0123456789abcdef',
+  name: 'OPENAI_API_KEY',
+  workspace_id: null,
+  revision_id: 'csr-0123456789abcdef01234567',
+  created_at: '2026-09-16T12:00:00.000Z',
+  updated_at: '2026-09-16T12:00:00.000Z',
+  last_used_at: null,
+};
+
+/** One scope's secrets, as `GET secrets` answers. */
+export const SECRET_LIST = {
+  secrets: [SECRET],
+  delivery: true,
+  limits: {
+    name_max_chars: 60,
+    value_max_bytes: 4096,
+    active_per_account: 100,
+    created_per_account: 1000,
+  },
+};
+
+/** A guest directory listing, as `GET computers/:id/files/list` answers. */
+export const DIRECTORY = {
+  path: '/home/user/Desktop',
+  entries: [
+    { name: 'notes.txt', type: 'file', size_bytes: 12 },
+    { name: 'photos', type: 'directory' },
+  ],
+  truncated: false,
+  skipped: 0,
+};
+
+/** One retained activity. */
+export const ACTIVITY = {
+  activity_id: 'act_0123456789abcdef0123456789abcdef',
+  account_id: 'acc-1',
+  computer_id: 'vm-1',
+  workspace_id: null,
+  channel: 'api',
+  route: 'exec',
+  action: 'exec',
+  state: 'exited',
+  received_at: '2026-09-16T12:00:00.000Z',
+  observed_at: '2026-09-16T12:00:01.000Z',
+  revision: 1,
+  has_results: true,
+  exit_code: 0,
+};
+
+/** One page of activity history. */
+export const ACTIVITY_PAGE = {
+  items: [ACTIVITY],
+  next_cursor: null,
+  changes_cursor: 'chg-1',
+  gap: false,
+  health: {
+    recording_started_at: '2026-09-01T00:00:00.000Z',
+    earliest_retained_at: '2026-09-16T12:00:00.000Z',
+    count_truncated: false,
+    age_truncated: false,
+    capture: 'available',
+    completeness: 'best-effort',
+    gap_at: null,
+    recovered_at: null,
+  },
+};
+
+/** An activity's result versions. */
+export const ACTIVITY_RESULTS = {
+  activity_id: ACTIVITY.activity_id,
+  revision: 1,
+  more: false,
+  items: [
+    {
+      id: 'res_0123456789abcdef0123456789abcdef',
+      kind: 'synchronous-output',
+      association: 'synchronous_exec_response',
+      availability: 'unavailable',
+    },
+  ],
+};
+
+/** A baseline page of platform signals. */
+export const SIGNAL_PAGE = {
+  computer: 'vm-1',
+  from: 'sig-0',
+  cursor: 'sig-1',
+  events: [
+    {
+      seq: 1,
+      cursor: 'sig-1',
+      at: '2026-09-16T12:00:00.000Z',
+      computer: 'vm-1',
+      source: 'daemon',
+      type: 'process.exited',
+      data: { pid: 42, exit_code: 0 },
+    },
+  ],
+  more: false,
+  baseline: false,
+  supported: ['process.exited', 'computer.started'],
+  retention: 'ephemeral',
+};
+
 export const anyRoute: Responder = (call) => {
   const { path, method } = call;
   const get = method === 'GET';
@@ -896,13 +1002,25 @@ export const anyRoute: Responder = (call) => {
   if (path === '/ssh-keys') return json(get ? [SSH_KEY] : SSH_KEY, get ? {} : { status: 201 });
   if (/^\/ssh-keys\/[^/]+$/.test(path)) return new Response(null, { status: 204 });
   if (path.endsWith('/ssh')) return json(SSH_ACCESS);
+  // The account's store and a computer's bindings share a last segment, and
+  // answer different shapes: a store listing is an envelope, a create a 201.
+  if (path === '/secrets') return json(get ? SECRET_LIST : SECRET, get ? {} : { status: 201 });
+  if (/^\/secrets\/[^/]+$/.test(path)) return json(method === 'DELETE' ? { ok: true } : SECRET);
   if (path.endsWith('/secrets')) return json(SECRET_BINDINGS);
+  if (path.endsWith('/files/list')) return json(DIRECTORY);
+  if (path.endsWith('/activities')) return json(ACTIVITY_PAGE);
+  if (/\/activities\/[^/]+\/results$/.test(path)) return json(ACTIVITY_RESULTS);
+  if (/\/activities\/[^/]+$/.test(path)) return json(ACTIVITY);
+  if (path.endsWith('/signals')) return json(SIGNAL_PAGE);
   if (path === '/moves') return json({ moves: [MOVE_DONE] });
   if (path.endsWith('/move')) return json(MOVE_STARTED, { status: 202 });
   if (path === '/computers') return json(get ? [COMPUTER] : COMPUTER);
   // endsWith, because the recorder's paths keep the computer id: the real
   // route is /computers/:id/input, and an exact '/input' match never fired.
-  if (path.endsWith('/input')) return json({});
+  if (path.endsWith('/input'))
+    return json(
+      isRecord(call.body) && call.body.action === 'type' ? { ok: true, mechanism: 'physical' } : {},
+    );
   return json(COMPUTER);
 };
 

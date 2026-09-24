@@ -10,7 +10,14 @@
  */
 
 import { MandalaError, ValidationError } from './errors.js';
-import { isExecutionId, isRecord, MOVES, SECRET_ENV, SECRET_FILE } from './paths.js';
+import {
+  isExecutionId,
+  isRecord,
+  MOVES,
+  SECRET_ENV,
+  SECRET_FILE,
+  SECRET_REVISION,
+} from './paths.js';
 
 /**
  * A string from a payload, with a fallback for an absent one.
@@ -1564,6 +1571,20 @@ export type Snapshot = {
    */
   orphaned: boolean;
   /**
+   * `true` when the platform could not establish whether the source computer
+   * exists (absent otherwise) — so {@link orphaned} is false because nobody could say, not because
+   * the computer was seen. The snapshot's bytes may still be reachable.
+   */
+  computerUnreachable?: boolean;
+  /**
+   * Whether the source computer's CURRENT host holds a usable copy, which is
+   * what a restore needs. `false` for a copy left on a host the computer has
+   * since moved away from — a clone still works whenever the snapshot itself is
+   * reachable. `undefined` when the platform did not say (an older platform, or
+   * an {@link unreachable} placeholder).
+   */
+  restoreAvailable?: boolean;
+  /**
    * True for a placeholder the platform appended for a snapshot it could not
    * reach during a partial listing.
    *
@@ -1941,6 +1962,9 @@ export function toSnapshot(d: Record<string, unknown>): Snapshot {
     capturing: d.state === CAPTURING,
     memory: d.kind === 'memory',
     orphaned: said(d.orphaned),
+    // Present only when the platform said, so an older shape stays an older shape.
+    ...(said(d.computer_unreachable) ? { computerUnreachable: true } : {}),
+    ...(typeof d.restore_available === 'boolean' ? { restoreAvailable: d.restore_available } : {}),
     unreachable: snapshotUnreachable(d),
     os: str(d.os),
     template: str(d.template),
@@ -2066,9 +2090,24 @@ export function toMove(d: Record<string, unknown>): Move {
  * a decision that was never about it.
  */
 export type Holdings = {
+  /**
+   * Physical snapshot copies across the whole fleet — the same id on two hosts
+   * counts twice — including captures in flight and unfinished deletions.
+   */
   count: number;
   sizeBytes: number;
+  /** Pass back as `expect` to a purging delete; a changed inventory is refused before anything is deleted. */
   fingerprint: string;
+  /**
+   * Whether the source computer is present now. Bound into the fingerprint; a
+   * snapshot-only cleanup confirmation should require `false`. `undefined` when
+   * the platform did not say.
+   */
+  computerPresent?: boolean;
+  /** Captures in flight. A purge is refused while any remain. `undefined` when not said. */
+  capturing?: number;
+  /** Copies with unfinished deletion work. `undefined` when not said. */
+  deleting?: number;
   raw: Record<string, unknown>;
 };
 
@@ -2077,7 +2116,95 @@ export function toHoldings(d: Record<string, unknown>): Holdings {
     count: num(d.count),
     sizeBytes: num(d.size_bytes),
     fingerprint: str(d.fingerprint),
+    ...(typeof d.computer_present === 'boolean' ? { computerPresent: d.computer_present } : {}),
+    ...(count(d.capturing) === undefined ? {} : { capturing: count(d.capturing) }),
+    ...(count(d.deleting) === undefined ? {} : { deleting: count(d.deleting) }),
     raw: { ...d },
+  };
+}
+
+/**
+ * What a purging delete did to each snapshot copy it selected.
+ *
+ * Counts of PHYSICAL copies: the same snapshot id on two hosts is two.
+ */
+export type SnapshotPurge = {
+  /** Copies the confirmation selected. */
+  selected: number;
+  /** Selected copies confirmed absent afterwards. */
+  confirmed: number;
+  /** Still listed with a deleting intent — an outcome not yet known. */
+  queued: number;
+  /** Whose deletion was refused. */
+  failed: number;
+  /** With an unknown outcome, including requests never sent after a transport failure. */
+  unknown: number;
+  /** Selected copies still visible afterwards; `null` when the final inventory could not be read. */
+  remaining: number | null;
+  /** New copies the request did not select, which need new consent; `null` when unknown. */
+  unselected: number | null;
+  /** Every selected copy was confirmed absent. Says nothing about later imports. */
+  complete: boolean;
+};
+
+/**
+ * Everything `DELETE computers/:id` answered, for the caller who purged.
+ *
+ * A 202 is PENDING, not done, and `ok: false` arrives as a success status: the
+ * computer can be gone while its snapshot copies are still queued, refused or
+ * unknown. Read {@link computerDeleted} and {@link purge} even when nothing
+ * was thrown.
+ */
+export type DeleteResult = {
+  /**
+   * Whether the requested selected-copy cleanup completed. `false` arrives on a
+   * success status — the platform answers 202 while work remains queued.
+   */
+  ok: boolean;
+  /** Copies confirmed deleted; `undefined` when the platform did not say. */
+  snapshotsDeleted: number | undefined;
+  /**
+   * For a purge: `true` records a confirmed deletion (not that the computer
+   * stays absent), `false` unconfirmed or seen present again, `null` unknown.
+   * `undefined` when the answer did not carry it.
+   */
+  computerDeleted: boolean | null | undefined;
+  /** The platform's account of a partial, queued, refused or unknown outcome. */
+  error: string | undefined;
+  purge: SnapshotPurge | undefined;
+  raw: Record<string, unknown>;
+};
+
+function nullableCount(v: unknown): number | null {
+  return count(v) ?? null;
+}
+
+export function toDeleteResult(d: unknown): DeleteResult {
+  const r = isRecord(d) ? d : {};
+  const p = isRecord(r.purge) ? r.purge : undefined;
+  return {
+    // TRUE only: an answer that did not say the cleanup completed has not said so.
+    ok: r.ok === true,
+    snapshotsDeleted: count(r.snapshots_deleted),
+    computerDeleted:
+      typeof r.computer_deleted === 'boolean' || r.computer_deleted === null
+        ? r.computer_deleted
+        : undefined,
+    error: typeof r.error === 'string' && r.error ? r.error : undefined,
+    purge:
+      p === undefined
+        ? undefined
+        : {
+            selected: num(p.selected),
+            confirmed: num(p.confirmed),
+            queued: num(p.queued),
+            failed: num(p.failed),
+            unknown: num(p.unknown),
+            remaining: nullableCount(p.remaining),
+            unselected: nullableCount(p.unselected),
+            complete: p.complete === true,
+          },
+    raw: { ...r },
   };
 }
 
@@ -2902,9 +3029,11 @@ export type WebhookDelivery = {
   /** The HTTP status of the newest attempt. Absent when it got no answer. */
   lastStatus?: number;
   /**
-   * One line about the newest failure: `timeout`, `dns`, `refused`, `tls`,
-   * `redirect`, `address refused`, or `status NNN`. Absent after a success and
-   * before any attempt.
+   * One line about the newest failure — for example `timeout`, `dns`,
+   * `refused`, `reset`, `unreachable`, `tls`, `redirect`, `address refused` or
+   * `status NNN`. AN OPEN SET: other values are possible, so show it rather
+   * than switch on it. A `dropped` delivery says why it was dropped. Absent
+   * after a success and before any attempt.
    */
   lastError?: string;
   /** When the 2xx came back. */
@@ -3023,9 +3152,10 @@ export function toSshAccess(d: Record<string, unknown>): SshAccess {
  * One secret a computer is bound to, as the platform records it.
  *
  * `revisionId` is the revision last delivered to the computer: every start and
- * restart delivers the secret's latest value and moves it there, and a secret
- * bound as a file is replaced on a running computer as soon as its value is.
- * Exactly one of `env` and `file` is set.
+ * restart delivers the secret's latest value and moves it there, and so does a
+ * replaced value that reaches the running computer live — sent asynchronously
+ * and best effort, so read {@link Computer.secretsPending} rather than assume
+ * it landed. Exactly one of `env` and `file` is set.
  */
 export type SecretBinding = {
   secretId: string;
@@ -3086,4 +3216,523 @@ export function toSecretBindings(d: Record<string, unknown>): SecretBindings {
     version: d.version,
     raw: { ...d },
   };
+}
+
+/**
+ * The receipt that a computer's bound secrets reached its desktop session.
+ *
+ * `generation` is the delivering start it is for: a receipt behind
+ * {@link Computer.secretsGeneration} is from an earlier start, whose successor
+ * did not land.
+ */
+export type SecretsApplied = {
+  generation: number;
+  /** RFC 3339: when the values reached the desktop session. */
+  appliedAt: string;
+  /** Secret id to the revision id that was delivered, for every binding. */
+  revisions: Record<string, string>;
+};
+
+/** A receipt, or `undefined` when the record carries none or one this client cannot read. */
+export function toSecretsApplied(d: unknown): SecretsApplied | undefined {
+  if (!isRecord(d)) return undefined;
+  const generation = d.generation;
+  if (typeof generation !== 'number' || !Number.isInteger(generation) || generation < 0) {
+    return undefined;
+  }
+  if (typeof d.applied_at !== 'string' || !isRecord(d.revisions)) return undefined;
+  const revisions: Record<string, string> = Object.create(null);
+  for (const [id, rev] of Object.entries(d.revisions)) {
+    if (typeof rev !== 'string') return undefined;
+    revisions[id] = rev;
+  }
+  return { generation, appliedAt: d.applied_at, revisions };
+}
+
+// --- the secret store -------------------------------------------------------
+
+/**
+ * One secret in the account's store: its name, scope and revision. NEVER its
+ * value — no route answers one, and this type has nowhere to put it.
+ */
+export type Secret = {
+  /** `csec-` and sixteen hex characters. What a binding names as `secretId`. */
+  id: string;
+  /** Unique within its scope, ignoring ASCII case. */
+  name: string;
+  /** The workspace it belongs to, or `null` for one available account-wide. */
+  workspaceId: string | null;
+  /**
+   * `csr-` and twenty-four hex characters. Moves every time the value is
+   * replaced; a replace or a delete sends back the one it read, and a stale one
+   * is a `ConflictError` that changes nothing.
+   */
+  revisionId: string;
+  createdAt: string;
+  /** The last replace, or the create. */
+  updatedAt: string;
+  /** When it was last delivered to a computer; `null` until it has been. */
+  lastUsedAt: string | null;
+  raw: Record<string, unknown>;
+};
+
+/** One scope's secrets, whether delivery is on, and the store's limits. */
+export type SecretList = {
+  secrets: Secret[];
+  /**
+   * Whether a secret can be bound to a computer and delivered into it on this
+   * platform. While `false`, secrets can be stored but a binding is refused.
+   */
+  delivery: boolean;
+  limits: {
+    /** The longest name, in characters. */
+    nameMaxChars: number;
+    /** The largest value, in bytes of UTF-8. */
+    valueMaxBytes: number;
+    /** How many the account may hold at once, across every workspace. Deleting one frees a place. */
+    activePerAccount: number;
+    /** How many the account may ever create, deleted ones included. Deleting does not free a place. */
+    createdPerAccount: number;
+  };
+  raw: Record<string, unknown>;
+};
+
+/**
+ * Strict, for the reason {@link toSecretBinding} is: the id and the revision
+ * are what the next call sends back, and a replace or delete aimed at an id
+ * or revision this client invented is one the platform never issued. A row
+ * that does not carry both, exactly, refuses the answer rather than reading
+ * as a secret nobody can act on.
+ */
+export function toSecret(d: unknown, what = 'a secret'): Secret {
+  if (!isRecord(d)) throw new MandalaError(`expected ${what} to be an object`);
+  const exact = (v: unknown): v is string => typeof v === 'string' && v !== '' && v === v.trim();
+  if (!exact(d.id)) throw new MandalaError(`expected ${what} to carry its id`);
+  if (typeof d.revision_id !== 'string' || !SECRET_REVISION.test(d.revision_id)) {
+    throw new MandalaError(`expected ${what} to carry a revision_id (csr- and 24 hex characters)`);
+  }
+  if (typeof d.name !== 'string') throw new MandalaError(`expected ${what} to carry its name`);
+  if (d.workspace_id !== null && typeof d.workspace_id !== 'string') {
+    throw new MandalaError(`expected ${what} to carry workspace_id, a string or null`);
+  }
+  return {
+    id: d.id,
+    name: d.name,
+    workspaceId: d.workspace_id,
+    revisionId: d.revision_id,
+    createdAt: str(d.created_at),
+    updatedAt: str(d.updated_at),
+    lastUsedAt: typeof d.last_used_at === 'string' ? d.last_used_at : null,
+    raw: { ...d },
+  };
+}
+
+export function toSecretList(d: unknown, method: string, path: string): SecretList {
+  if (!isRecord(d) || !Array.isArray(d.secrets)) {
+    throw new MandalaError(
+      `expected a JSON object with a secrets array from ${method} ${path}, got: ${`${JSON.stringify(d)}`.slice(0, 200)}`,
+    );
+  }
+  // A listing that cannot say whether binding works is not one to answer
+  // `false` for: that would tell a caller delivery is off when nobody said so.
+  if (typeof d.delivery !== 'boolean') {
+    throw new MandalaError(`expected ${method} ${path} to say whether delivery is on`);
+  }
+  const limits = isRecord(d.limits) ? d.limits : {};
+  const limit = (key: string): number => {
+    const v = count(limits[key]);
+    if (v === undefined)
+      throw new MandalaError(`expected ${method} ${path} to carry limits.${key}`);
+    return v;
+  };
+  return {
+    secrets: d.secrets.map((row, i) => toSecret(row, `secret ${i}`)),
+    delivery: d.delivery,
+    limits: {
+      nameMaxChars: limit('name_max_chars'),
+      valueMaxBytes: limit('value_max_bytes'),
+      activePerAccount: limit('active_per_account'),
+      createdPerAccount: limit('created_per_account'),
+    },
+    raw: { ...d },
+  };
+}
+
+// --- input ------------------------------------------------------------------
+
+/**
+ * What a `type` answered: how the text was typed.
+ *
+ * `physical` for plain ASCII typed as US-layout key events, `unicode` for text
+ * with no ASCII typed by GTK Unicode composition, `mixed` for both, in request
+ * order. Read as an open set — a word this version does not know is kept as
+ * sent. It confirms DISPATCH, not that the application accepted the text:
+ * verify the result. `undefined` when the platform did not say (an older one).
+ */
+export type TypeResult = {
+  mechanism: 'physical' | 'unicode' | 'mixed' | (string & {}) | undefined;
+  raw: Record<string, unknown>;
+};
+
+export function toTypeResult(d: unknown): TypeResult {
+  const r = isRecord(d) ? d : {};
+  return {
+    mechanism: typeof r.mechanism === 'string' && r.mechanism ? r.mechanism : undefined,
+    raw: { ...r },
+  };
+}
+
+// --- guest directories ------------------------------------------------------
+
+/** One name in a guest directory. */
+export type GuestDirectoryEntry = {
+  /** The exact filename. Preserve its Unicode, spaces and punctuation when building a path. */
+  name: string;
+  /**
+   * `file`, `directory`, `symlink`, `special` or `unavailable`. Kept as sent,
+   * so a word this version does not know is not mistaken for one it does.
+   */
+  type: 'file' | 'directory' | 'symlink' | 'special' | 'unavailable' | (string & {});
+  /** A regular file's size, when known. Absent for every other type. */
+  sizeBytes?: number;
+};
+
+/**
+ * A bounded directory listing.
+ *
+ * NOT A PAGE. A large directory comes back {@link truncated}: an unordered
+ * subset with no continuation, so narrow the path instead. Names that cannot
+ * cross this API (control characters, non-UTF-8) are left out and counted in
+ * {@link skipped}.
+ */
+export type GuestDirectory = {
+  path: string;
+  entries: GuestDirectoryEntry[];
+  /** The directory exceeded the bounded listing, and {@link entries} is a partial sample. */
+  truncated: boolean;
+  /** Names omitted because this file API cannot carry them. */
+  skipped: number;
+  raw: Record<string, unknown>;
+};
+
+/**
+ * Strict about the two things a caller acts on: every entry's name, which the
+ * next call builds a path from, and `truncated`, which says whether an absent
+ * name means absent. A listing that cannot say it is complete is refused rather
+ * than read as complete.
+ */
+export function toGuestDirectory(d: unknown, method: string, path: string): GuestDirectory {
+  const where = `${method} ${path}`;
+  if (!isRecord(d) || !Array.isArray(d.entries)) {
+    throw new MandalaError(`expected a directory listing with an entries array from ${where}`);
+  }
+  if (typeof d.truncated !== 'boolean') {
+    throw new MandalaError(`expected ${where} to say whether the listing was truncated`);
+  }
+  const skipped = count(d.skipped);
+  if (skipped === undefined) throw new MandalaError(`expected ${where} to count skipped names`);
+  const entries = d.entries.map((e, i): GuestDirectoryEntry => {
+    if (!isRecord(e) || typeof e.name !== 'string' || !e.name || typeof e.type !== 'string') {
+      throw new MandalaError(
+        `expected directory entry ${i} from ${where} to carry a name and a type`,
+      );
+    }
+    const size = count(e.size_bytes);
+    return size === undefined
+      ? { name: e.name, type: e.type }
+      : { name: e.name, type: e.type, sizeBytes: size };
+  });
+  return { path: str(d.path), entries, truncated: d.truncated, skipped, raw: { ...d } };
+}
+
+// --- activities ---------------------------------------------------------------
+
+/**
+ * One retained, safe summary of a request sent through the computer API.
+ *
+ * Metadata only: no command, output, input text or error prose is kept. The
+ * enumerated fields are kept as sent — read them as open sets.
+ */
+export type Activity = {
+  activityId: string;
+  accountId: string;
+  computerId: string;
+  workspaceId: string | null;
+  /** `api`, `session-api` or `managed-agent`. */
+  channel: string;
+  /** `input`, `exec`, `window` or `clipboard`. */
+  route: string;
+  /** What was asked for — `click`, `type`, `exec`, `background-exec` and so on. */
+  action: string;
+  /** `pending`, `acknowledged`, `exited`, `accepted`, `refused` or `unknown`. */
+  state: string;
+  receivedAt: string;
+  observedAt: string;
+  /** Moves when the row changes, including a late result link. */
+  revision?: number;
+  hasResults?: boolean;
+  dispatchedAt?: string;
+  elapsedMs?: number;
+  /** Why a refused or unknown row is so, as a word — `transport`, `wait-ended` and so on. */
+  reason?: string;
+  httpStatus?: number;
+  exitCode?: number;
+  executionId?: string;
+  raw: Record<string, unknown>;
+};
+
+/** How complete the history is. */
+export type ActivityHealth = {
+  recordingStartedAt: string;
+  earliestRetainedAt: string | null;
+  countTruncated: boolean;
+  ageTruncated: boolean;
+  /** `available` or `degraded`. */
+  capture: string;
+  /** `best-effort`: capture is never promised complete. */
+  completeness: string;
+  gapAt: string | null;
+  recoveredAt: string | null;
+};
+
+/** One page of activity history, newest first, or one page of the change journal. */
+export type ActivityPage = {
+  items: Activity[];
+  /** Pass as `cursor` for the next, older page; `null` at the end. */
+  nextCursor: string | null;
+  /** Pass as `cursor` with `changes: true` to read inserts and final updates since this page. */
+  changesCursor: string;
+  /** The change cursor could not be honoured: refresh history rather than trusting a replay. */
+  gap: boolean;
+  health: ActivityHealth;
+  raw: Record<string, unknown>;
+};
+
+/** One retained result version linked to an activity. */
+export type ActivityResultItem = {
+  /** `res_` and 32 hex characters — what {@link Computer.result} reads. */
+  id: string;
+  /** `background-output` or `synchronous-output`. */
+  kind: string;
+  association: string;
+  /** `available` or `unavailable`. */
+  availability: string;
+  raw: Record<string, unknown>;
+};
+
+/** The newest retained result versions of one activity. */
+export type ActivityResults = {
+  activityId: string;
+  revision: number;
+  /** More versions exist than are listed. */
+  more: boolean;
+  items: ActivityResultItem[];
+  raw: Record<string, unknown>;
+};
+
+const nullableStamp = (v: unknown): string | null => (typeof v === 'string' ? v : null);
+const optionalCount = (v: unknown): number | undefined =>
+  typeof v === 'number' && Number.isFinite(v) ? v : undefined;
+
+export function toActivity(d: unknown, what = 'an activity'): Activity {
+  if (!isRecord(d) || typeof d.activity_id !== 'string' || !d.activity_id) {
+    throw new MandalaError(`expected ${what} to carry its activity_id`);
+  }
+  const out: Activity = {
+    activityId: d.activity_id,
+    accountId: str(d.account_id),
+    computerId: str(d.computer_id),
+    workspaceId: typeof d.workspace_id === 'string' ? d.workspace_id : null,
+    channel: str(d.channel),
+    route: str(d.route),
+    action: str(d.action),
+    state: str(d.state),
+    receivedAt: str(d.received_at),
+    observedAt: str(d.observed_at),
+    raw: { ...d },
+  };
+  const revision = optionalCount(d.revision);
+  if (revision !== undefined) out.revision = revision;
+  if (typeof d.has_results === 'boolean') out.hasResults = d.has_results;
+  if (typeof d.dispatched_at === 'string') out.dispatchedAt = d.dispatched_at;
+  const elapsed = optionalCount(d.elapsed_ms);
+  if (elapsed !== undefined) out.elapsedMs = elapsed;
+  if (typeof d.reason === 'string') out.reason = d.reason;
+  const http = optionalCount(d.http_status);
+  if (http !== undefined) out.httpStatus = http;
+  const exit = optionalCount(d.exit_code);
+  if (exit !== undefined) out.exitCode = exit;
+  if (typeof d.execution_id === 'string') out.executionId = d.execution_id;
+  return out;
+}
+
+/**
+ * A page, strict about what paging depends on: the rows, the cursors and the
+ * gap flag. A page that cannot say whether it has a gap is refused rather than
+ * read as one without.
+ */
+export function toActivityPage(d: unknown, method: string, path: string): ActivityPage {
+  const where = `${method} ${path}`;
+  if (!isRecord(d) || !Array.isArray(d.items)) {
+    throw new MandalaError(`expected an activity page with an items array from ${where}`);
+  }
+  if (typeof d.gap !== 'boolean')
+    throw new MandalaError(`expected ${where} to say whether there is a gap`);
+  if (d.next_cursor !== null && typeof d.next_cursor !== 'string') {
+    throw new MandalaError(`expected ${where} to carry next_cursor, a string or null`);
+  }
+  if (typeof d.changes_cursor !== 'string') {
+    throw new MandalaError(`expected ${where} to carry a changes_cursor`);
+  }
+  const h = isRecord(d.health) ? d.health : {};
+  return {
+    items: d.items.map((row, i) => toActivity(row, `activity ${i} from ${where}`)),
+    nextCursor: d.next_cursor,
+    changesCursor: d.changes_cursor,
+    gap: d.gap,
+    health: {
+      recordingStartedAt: str(h.recording_started_at),
+      earliestRetainedAt: nullableStamp(h.earliest_retained_at),
+      countTruncated: h.count_truncated === true,
+      ageTruncated: h.age_truncated === true,
+      capture: str(h.capture),
+      completeness: str(h.completeness),
+      gapAt: nullableStamp(h.gap_at),
+      recoveredAt: nullableStamp(h.recovered_at),
+    },
+    raw: { ...d },
+  };
+}
+
+export function toActivityResults(d: unknown, method: string, path: string): ActivityResults {
+  const where = `${method} ${path}`;
+  if (!isRecord(d) || !Array.isArray(d.items)) {
+    throw new MandalaError(`expected activity results with an items array from ${where}`);
+  }
+  return {
+    activityId: str(d.activity_id),
+    revision: num(d.revision),
+    more: d.more === true,
+    items: d.items.map((row, i) => {
+      if (!isRecord(row) || typeof row.id !== 'string' || !row.id) {
+        throw new MandalaError(`expected result ${i} from ${where} to carry its id`);
+      }
+      return {
+        id: row.id,
+        kind: str(row.kind),
+        association: str(row.association),
+        availability: str(row.availability),
+        raw: { ...row },
+      };
+    }),
+    raw: { ...d },
+  };
+}
+
+// --- platform signals -----------------------------------------------------------
+
+/**
+ * One daemon observation: a process exit, a start, a stop, a suspend, an idle.
+ *
+ * Ephemeral — not durable history, not complete coverage and not proof a task
+ * succeeded. Never join executions by pid: use `data.execution_id` when present.
+ */
+export type PlatformSignal = {
+  seq: number;
+  /** The checkpoint after this event. */
+  cursor: string;
+  at: string;
+  computer: string;
+  /** `process.exited`, `computer.started`, `computer.stopped`, `computer.suspended` or `computer.idle`. Kept as sent. */
+  type: string;
+  data: Record<string, unknown>;
+  raw: Record<string, unknown>;
+};
+
+/** A reset: events happened that can no longer be replayed. */
+export type PlatformSignalGap = {
+  cursor: string;
+  at: string;
+  /** The oldest cursor still replayable, when the platform said. */
+  oldestCursor?: string;
+  detail: string;
+};
+
+/** One page of signals: a baseline, a replay, or a gap with a new head. */
+export type SignalPage = {
+  computer: string;
+  /** Where this page started — the current head on a baseline or a reset. */
+  from: string;
+  /** Pass as `since` for the next page. Advances past filtered rows too. */
+  cursor: string;
+  events: PlatformSignal[];
+  /** Another eligible event is owed: read again with {@link cursor}. */
+  more: boolean;
+  /** A first read: it starts at the current head and replays nothing. */
+  baseline: boolean;
+  /** Present when the cursor could not be honoured. Anything you were waiting on may already have happened. */
+  gap?: PlatformSignalGap;
+  /** The event types this computer's host emits. */
+  supported: string[];
+  /** `ephemeral`. */
+  retention: string;
+  raw: Record<string, unknown>;
+};
+
+/**
+ * Strict about the cursor and the gap, which are what a replay loop runs on: a
+ * page whose next cursor is missing cannot be continued, and one that cannot say
+ * whether it is a baseline or has more would read as "nothing happened".
+ */
+export function toSignalPage(d: unknown, method: string, path: string): SignalPage {
+  const where = `${method} ${path}`;
+  if (!isRecord(d) || !Array.isArray(d.events)) {
+    throw new MandalaError(`expected a signal page with an events array from ${where}`);
+  }
+  if (typeof d.cursor !== 'string' || !d.cursor) {
+    throw new MandalaError(`expected ${where} to carry the next cursor`);
+  }
+  if (typeof d.more !== 'boolean' || typeof d.baseline !== 'boolean') {
+    throw new MandalaError(
+      `expected ${where} to say whether there is more and whether it is a baseline`,
+    );
+  }
+  const events = d.events.map((e, i): PlatformSignal => {
+    if (!isRecord(e) || typeof e.cursor !== 'string' || typeof e.type !== 'string') {
+      throw new MandalaError(`expected signal ${i} from ${where} to carry a cursor and a type`);
+    }
+    return {
+      seq: num(e.seq),
+      cursor: e.cursor,
+      at: str(e.at),
+      computer: str(e.computer),
+      type: e.type,
+      data: isRecord(e.data) ? { ...e.data } : {},
+      raw: { ...e },
+    };
+  });
+  const page: SignalPage = {
+    computer: str(d.computer),
+    from: str(d.from),
+    cursor: d.cursor,
+    events,
+    more: d.more,
+    baseline: d.baseline,
+    supported: Array.isArray(d.supported)
+      ? d.supported.filter((t): t is string => typeof t === 'string')
+      : [],
+    retention: str(d.retention),
+    raw: { ...d },
+  };
+  if (d.gap !== undefined && d.gap !== null) {
+    if (!isRecord(d.gap)) throw new MandalaError(`expected ${where}'s gap to be an object`);
+    const data = isRecord(d.gap.data) ? d.gap.data : {};
+    page.gap = {
+      cursor: str(d.gap.cursor),
+      at: str(d.gap.at),
+      ...(typeof data.oldest_cursor === 'string' ? { oldestCursor: data.oldest_cursor } : {}),
+      detail: str(data.detail),
+    };
+  }
+  return page;
 }
