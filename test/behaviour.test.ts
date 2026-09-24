@@ -2339,6 +2339,10 @@ describe('files', () => {
     ['JSON with an empty reason', () => json({ reason: '' }, { status: 409 })],
     ['JSON with a blank reason', () => json({ reason: '   ' }, { status: 409 })],
     ['empty JSON object', () => json({}, { status: 409 })],
+    [
+      'JSON whose error text claims existence',
+      () => json({ error: 'a file already exists at that path' }, { status: 409 }),
+    ],
   ])(
     'never calls a create-only 409 with an %s body transient (Codex review)',
     async (_kind, answer) => {

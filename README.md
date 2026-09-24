@@ -1227,7 +1227,8 @@ try {
   await c.writeFile('/home/user/config.toml', 'debug = false\n', { overwrite: false });
 } catch (e) {
   if (!(e instanceof FileExistsError)) throw e;
-  // Something was already there, and this call wrote nothing.
+  // This call wrote nothing. `e.reason === 'exists'` means something was already
+  // there; `undefined` means the refusal's reason is unknown, so do not say it was.
 }
 ```
 

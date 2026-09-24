@@ -664,9 +664,12 @@ function createOnlyRefusal(err: unknown): unknown {
   if (!(err instanceof ConflictError) || err instanceof FileExistsError) return err;
   if (typeof err.reason === 'string' && err.reason.trim() !== '') return err;
   return new FileExistsError(
-    `${err.message} (a create-only upload was refused as a conflict, reason unknown: the 409 ` +
+    // Neutral on purpose, and not the body's own text: a reasonless body whose
+    // `error` says "already exists" would carry the very claim this avoids. The
+    // body is kept on the error for diagnostics.
+    'a create-only upload was refused as a conflict, reason unknown: the 409 ' +
       'carried no reason that could be read, so whether the path is taken was not said; ' +
-      'treat it as final rather than sending the same write again)',
+      'treat it as final rather than sending the same write again',
     err.status,
     err.body,
     err.retryAfterMs,
