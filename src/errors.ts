@@ -382,11 +382,12 @@ export class MoveRequiredError extends ConflictError {
  * overwriting.
  *
  * {@link APIError.reason} is `exists` when the platform's body said so, and
- * `undefined` when the 409 answering a create-only upload could not be read — a
- * body interrupted in flight, empty, or not the platform's JSON. That refusal
- * is raised as this class too, with a message saying the reason was unreadable:
- * on this route a 409 is `exists` or `unsupported`, neither of which clears by
- * waiting. {@link isTransient} answers false to this class either way.
+ * `undefined` when the 409 answering a create-only upload carried no usable
+ * reason — a body interrupted in flight, empty, not the platform's JSON, or
+ * JSON without a non-empty string `reason`. That refusal is raised as this
+ * class too, with a message saying it was a conflict whose reason is unknown
+ * (it does NOT say the path exists), because treating it as final is the safe
+ * reading of a refusal this SDK cannot classify. {@link isTransient} answers false to this class either way.
  */
 export class FileExistsError extends ConflictError {
   override name = 'FileExistsError';
@@ -990,8 +991,8 @@ export function isTransient(err: unknown): boolean {
   // long as the computer is on that host. Checked before the type branch below
   // that would otherwise say yes.
   if (err instanceof MoveRequiredError) return false;
-  // By class as well as by word: a create-only upload whose 409 body could not
-  // be read carries no `reason` at all, and would otherwise fall through to the
+  // By class as well as by word: a create-only upload whose 409 carried no
+  // usable reason has no `reason` at all, and would otherwise fall through to the
   // ConflictError branch below and be called worth sending again.
   if (err instanceof FileExistsError) return false;
   // A lost RESPONSE is not a request that never left, and only one of the two

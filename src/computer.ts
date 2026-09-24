@@ -647,21 +647,26 @@ const SNAPSHOT_POLL_MS = 5_000;
  * A create-only upload's 409, never left looking like a passing conflict.
  *
  * The platform answers a create-only upload's taken path with 409 `exists`,
- * and the transport maps that body to {@link FileExistsError}. But the body can
- * fail to arrive: interrupted in flight, empty, or a proxy's page instead of the
- * platform's JSON. The transport then keeps the status and nothing else, and a
- * bare {@link ConflictError} is what {@link isTransient} calls worth sending
- * again. On this route a 409 is `exists` or `unsupported`, neither of which
- * clears, so the request's own context — create-only — decides here what the
- * status alone cannot. A body that DID arrive keeps its classification.
+ * and the transport maps that body to {@link FileExistsError}. But a 409 can
+ * arrive without a word this SDK can read: the body interrupted in flight,
+ * empty, a proxy's page instead of the platform's JSON, or JSON with no
+ * `reason`, a `reason` that is not a string, or an empty one. The transport
+ * then leaves {@link APIError.reason} undefined, and a bare
+ * {@link ConflictError} is what {@link isTransient} calls worth sending again —
+ * a retry of a refusal that does not clear, and one that could create the file
+ * later if the path were cleared in between. So the request's own context,
+ * create-only, decides here what the status alone cannot: the refusal is final,
+ * and the message says only that it was a conflict whose reason is unknown,
+ * not that the path exists. A 409 that DID carry a string reason keeps the
+ * platform's classification, whatever the word.
  */
 function createOnlyRefusal(err: unknown): unknown {
   if (!(err instanceof ConflictError) || err instanceof FileExistsError) return err;
-  if (err.body !== null && typeof err.body === 'object' && !Array.isArray(err.body)) return err;
+  if (typeof err.reason === 'string' && err.reason !== '') return err;
   return new FileExistsError(
-    `${err.message} (a create-only upload was refused with 409, and the refusal's reason ` +
-      'could not be read; on this route that is a taken path or a host that cannot do ' +
-      'create-only, and neither clears by waiting)',
+    `${err.message} (a create-only upload was refused as a conflict, reason unknown: the 409 ` +
+      'carried no reason that could be read, so whether the path is taken was not said; ' +
+      'treat it as final rather than sending the same write again)',
     err.status,
     err.body,
     err.retryAfterMs,
@@ -3793,9 +3798,10 @@ export class Computer {
    * writes nothing — the file already there is untouched. If an earlier
    * attempt's outcome was unknown (its response was lost), that file may be the
    * one it wrote: read it and compare before choosing another path or
-   * overwriting. A 409 whose body could not be read is raised as
-   * {@link FileExistsError} too, with `reason` undefined, so it is never taken
-   * for a passing conflict. The default, `true`, replaces
+   * overwriting. A 409 that carries no usable reason (a body that could not be
+   * read, or JSON without a string `reason`) is raised as
+   * {@link FileExistsError} too, with `reason` undefined and a message saying
+   * the reason is unknown, so it is never taken for a passing conflict. The default, `true`, replaces
    * whatever is at `path`, as this method always has. Linux computers only: a
    * Windows computer refuses `overwrite: false` with a 400. A host that cannot
    * do create-only yet refuses it with a 409 whose `reason` is `unsupported`,

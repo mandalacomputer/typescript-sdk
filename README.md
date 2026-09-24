@@ -1237,8 +1237,10 @@ Create-only is for Linux computers; a Windows computer refuses it with a 400.
 A host that cannot do it yet answers a `ConflictError` with `reason`
 `"unsupported"`, and one whose support could not be confirmed an
 `UnavailableError`. In every one of those cases this request wrote nothing. A
-409 whose body could not be read is raised as `FileExistsError` too, with
-`reason` undefined, so it is never called transient.
+create-only 409 with no usable reason (a body that could not be read, or JSON
+without a string `reason`) is raised as `FileExistsError` too, with `reason`
+undefined and a message saying the reason is unknown, so it is never called
+transient.
 
 "Nothing written" is about the request that was refused. If an earlier attempt
 lost its response, it may have written the file itself, and the retry then
