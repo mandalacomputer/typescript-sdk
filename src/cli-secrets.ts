@@ -24,25 +24,44 @@ const scope = (workspace: string | undefined): P.SecretScopeArgs =>
 const shown = (s: Secret) => s.raw;
 
 /**
- * The secret a name means in one scope, or `undefined`.
+ * The secret a NAME means in one scope, or `undefined`.
  *
  * The platform keeps names unique ignoring ASCII case, so `token` and `TOKEN`
  * are one secret: an exact match wins, and otherwise the one case-folded match.
- * An id (`csec-…`) is accepted as itself.
+ * Never an id: a name may legally spell another secret's id, and `set` resolving
+ * one as the other would overwrite an unrelated credential.
  */
-async function find(
-  client: Client,
-  nameOrId: string,
-  ws: P.SecretScopeArgs,
-  signal: AbortSignal,
-): Promise<Secret | undefined> {
-  const { secrets } = await client.secrets.list({ ...ws, signal });
-  const byId = secrets.find((s) => s.id === nameOrId);
-  if (byId) return byId;
-  const exact = secrets.find((s) => s.name === nameOrId.trim());
+function byName(secrets: readonly Secret[], name: string): Secret | undefined {
+  const exact = secrets.find((s) => s.name === name.trim());
   if (exact) return exact;
   const fold = (v: string) => v.trim().replace(/[A-Z]/g, (c) => c.toLowerCase());
-  return secrets.find((s) => fold(s.name) === fold(nameOrId));
+  return secrets.find((s) => fold(s.name) === fold(name));
+}
+
+async function scopeRows(
+  client: Client,
+  ws: P.SecretScopeArgs,
+  signal: AbortSignal,
+): Promise<Secret[]> {
+  return (await client.secrets.list({ ...ws, signal })).secrets;
+}
+
+/**
+ * The secret a name OR an id means, for the one command that accepts either.
+ *
+ * A name that spells a different secret's id is ambiguous, and refused: guessing
+ * wrong deletes the wrong credential.
+ */
+function byNameOrId(secrets: readonly Secret[], key: string): Secret | undefined {
+  const named = byName(secrets, key);
+  const identified = secrets.find((s) => s.id === key);
+  if (named && identified && named.id !== identified.id)
+    throw new CliError(
+      'ambiguous_secret',
+      `${JSON.stringify(key)} is the name of ${named.id} and the id of another secret; ` +
+        'nothing was deleted: rename one of them first',
+    );
+  return named ?? identified;
 }
 
 /** `mandala secrets list [--workspace ID]`. */
@@ -103,7 +122,7 @@ export async function secretsSet(
   let created = false;
   let result: Secret | undefined;
   for (let attempt = 1; !result; attempt++) {
-    const current = await find(client, trimmed, ws, signal);
+    const current = byName(await scopeRows(client, ws, signal), trimmed);
     try {
       if (current) {
         result = await client.secrets.replace(
@@ -141,7 +160,7 @@ export async function secretsRemove(
   P.secretScopeQuery(ws);
   let removed: Secret | undefined;
   for (let attempt = 1; !removed; attempt++) {
-    const current = await find(client, nameOrId, ws, signal);
+    const current = byNameOrId(await scopeRows(client, ws, signal), nameOrId);
     if (!current)
       throw new CliError('not_found', `no secret named ${JSON.stringify(nameOrId)} in this scope`);
     try {

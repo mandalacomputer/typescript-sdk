@@ -1226,8 +1226,18 @@ and never comes back out**: no call returns one, so keep your own copy.
 
 ```ts
 const s = await client.secrets.create({ name: 'OPENAI_API_KEY', value: key });
-await c.setSecrets([{ secretId: s.id, env: 'OPENAI_API_KEY' }]);   // or { file: 'openai' }
-await c.restart();                                                  // delivers it
+
+// Bind at create, and the first start delivers it…
+const c = await client.computers.create({
+  template: 'base',
+  secrets: [{ secretId: s.id, env: 'OPENAI_API_KEY' }],             // or { file: 'openai' }
+});
+
+// …or bind an existing computer, which must be STOPPED for its first binding,
+// and then START it. A restart is refused on a stopped bound computer.
+await other.stop();
+await other.setSecrets([{ secretId: s.id, env: 'OPENAI_API_KEY' }]);
+await other.start();
 
 const { secrets, delivery, limits } = await client.secrets.list();  // names, never values
 const fresh = await client.secrets.get(s.id);

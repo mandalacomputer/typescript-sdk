@@ -1,6 +1,6 @@
 /** The account's secret store and its CLI (OPL-4984, OPL-5026). */
 
-import { Readable } from 'node:stream';
+import { PassThrough, Readable } from 'node:stream';
 import { describe, expect, it } from 'vitest';
 import { main } from '../src/cli.js';
 import type { CliIO } from '../src/cli-runtime.js';
@@ -192,7 +192,22 @@ const storeRoutes =
     return inner();
   };
 
-async function cli(args: string[], respond: Responder, stdin: string | null) {
+/** A terminal that delivers these chunks, one read each, with raw mode recorded. */
+const terminal = (chunks: Uint8Array[]) => {
+  const modes: boolean[] = [];
+  const stream = Object.assign(new PassThrough({ objectMode: true }), {
+    isTTY: true,
+    setRawMode: (mode: boolean) => modes.push(mode),
+  });
+  for (const c of chunks) stream.write(Buffer.from(c));
+  return { stream, modes };
+};
+
+async function cli(
+  args: string[],
+  respond: Responder,
+  stdin: string | Uint8Array | null | CliIO['stdin'],
+) {
   const rec = recorder(respond);
   let out = '';
   let err = '';
@@ -201,7 +216,9 @@ async function cli(args: string[], respond: Responder, stdin: string | null) {
     stdin:
       stdin === null
         ? Object.assign(Readable.from([]), { isTTY: true })
-        : Object.assign(Readable.from([Buffer.from(stdin)]), { isTTY: false }),
+        : typeof stdin === 'string' || stdin instanceof Uint8Array
+          ? Object.assign(Readable.from([Buffer.from(stdin)]), { isTTY: false })
+          : stdin,
     stdout: {
       write: ((s: unknown) => {
         out += s;
@@ -323,5 +340,106 @@ describe('mandala secrets', () => {
     expect(code).not.toBe(0);
     expect(rec.calls.filter((x) => x.method === 'DELETE')).toHaveLength(1);
     expect(new PermissionDeniedError('x', 403)).not.toBeInstanceOf(ConflictError);
+  });
+});
+
+describe('mandala secrets: which secret a word means', () => {
+  // A name may legally spell another secret's id.
+  const other = { ...SECRET, id: 'csec-00000000000000bb', name: 'OTHER' };
+  const impostor = { ...SECRET, id: 'csec-00000000000000cc', name: other.id };
+
+  it('set resolves by name only, never by id — with a matching name', async () => {
+    const store = { rows: [{ ...other }, { ...impostor }] };
+    const { code, rec } = await cli(['secrets', 'set', other.id], storeRoutes(store), VALUE);
+    expect(code).toBe(0);
+    const put = rec.calls.find((x) => x.method === 'PUT');
+    expect(put?.path).toBe(`/secrets/${impostor.id}`);
+    expect(rec.calls.some((x) => x.path === `/secrets/${other.id}`)).toBe(false);
+  });
+
+  it('set resolves by name only, never by id — without a matching name', async () => {
+    const store = { rows: [{ ...other }] };
+    const { code, rec } = await cli(['secrets', 'set', other.id], storeRoutes(store), VALUE);
+    expect(code).toBe(0);
+    // A new secret of that name, and the one whose id it spells is untouched.
+    expect(rec.calls.find((x) => x.method === 'POST')?.body).toEqual({
+      name: other.id,
+      value: VALUE,
+    });
+    expect(rec.calls.some((x) => x.method === 'PUT')).toBe(false);
+  });
+
+  it('rm refuses a word that is one secret’s name and another’s id', async () => {
+    const store = { rows: [{ ...other }, { ...impostor }] };
+    const { code, err, out, rec } = await cli(
+      ['secrets', 'rm', other.id, '--json'],
+      storeRoutes(store),
+      null,
+    );
+    expect(code).not.toBe(0);
+    expect(out + err).toMatch(/ambiguous_secret/);
+    expect(rec.calls.some((x) => x.method === 'DELETE')).toBe(false);
+    expect(store.rows).toHaveLength(2);
+  });
+
+  it('rm accepts an id when no name collides, and a name', async () => {
+    const byId = { rows: [{ ...other }] };
+    const a = await cli(['secrets', 'rm', other.id], storeRoutes(byId), null);
+    expect(a.code).toBe(0);
+    expect(byId.rows).toEqual([]);
+    const byName = { rows: [{ ...other }] };
+    const b = await cli(['secrets', 'rm', 'other'], storeRoutes(byName), null);
+    expect(b.code).toBe(0);
+    expect(byName.rows).toEqual([]);
+  });
+});
+
+describe('mandala secrets set: the value’s encoding', () => {
+  const e = new TextEncoder().encode('é'); // two bytes
+
+  it('joins a multibyte character a terminal split across two reads', async () => {
+    const store: Store = { rows: [] };
+    const { stream, modes } = terminal([
+      new TextEncoder().encode('caf'),
+      e.slice(0, 1),
+      e.slice(1),
+      new TextEncoder().encode('\r'),
+    ]);
+    const { code, rec, out } = await cli(['secrets', 'set', 'T'], storeRoutes(store), stream);
+    expect(code).toBe(0);
+    expect(rec.calls.find((x) => x.method === 'POST')?.body).toEqual({ name: 'T', value: 'café' });
+    expect(modes).toEqual([true, false]);
+    expect(out).not.toContain('café');
+  });
+
+  it('refuses malformed UTF-8 at a terminal, before any request', async () => {
+    const { stream, modes } = terminal([
+      new Uint8Array([0x61, 0xff, 0x62]),
+      new TextEncoder().encode('\r'),
+    ]);
+    const { code, rec, err, out } = await cli(
+      ['secrets', 'set', 'T', '--json'],
+      storeRoutes({ rows: [] }),
+      stream,
+    );
+    expect(code).not.toBe(0);
+    expect(out + err).toMatch(/invalid_input/);
+    expect(rec.calls).toEqual([]);
+    expect(modes).toEqual([true, false]);
+  });
+
+  it('refuses a character left half-typed at Enter', async () => {
+    const { stream } = terminal([e.slice(0, 1), new TextEncoder().encode('\r')]);
+    const { code, rec } = await cli(['secrets', 'set', 'T'], storeRoutes({ rows: [] }), stream);
+    expect(code).not.toBe(0);
+    expect(rec.calls).toEqual([]);
+  });
+
+  it('refuses malformed UTF-8 piped on stdin, before any request', async () => {
+    for (const bytes of [new Uint8Array([0x61, 0xff]), e.slice(0, 1)]) {
+      const { code, rec } = await cli(['secrets', 'set', 'T'], storeRoutes({ rows: [] }), bytes);
+      expect(code).not.toBe(0);
+      expect(rec.calls).toEqual([]);
+    }
   });
 });

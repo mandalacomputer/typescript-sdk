@@ -2001,7 +2001,10 @@ export class Secrets {
    *
    * ```ts
    * const s = await client.secrets.create({ name: 'OPENAI_API_KEY', value: key });
+   * // A first binding needs the computer stopped; start it to deliver.
+   * await computer.stop();
    * await computer.setSecrets([{ secretId: s.id, env: 'OPENAI_API_KEY' }]);
+   * await computer.start();
    * ```
    *
    * A name already taken in the scope is a {@link ConflictError}; replace that

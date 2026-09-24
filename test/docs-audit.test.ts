@@ -12,8 +12,10 @@ import {
   ComputerNotRunningError,
   ConflictError,
   FileExistsError,
+  type Holdings,
   isTransient,
   MandalaError,
+  type Snapshot,
   UnavailableError,
   ValidationError,
 } from '../src/index.js';
@@ -126,7 +128,7 @@ describe('snapshots and holdings', () => {
     );
     const [a, b, d] = await c.snapshots.list();
     expect([a?.restoreAvailable, a?.computerUnreachable]).toEqual([false, true]);
-    expect([b?.restoreAvailable, b?.computerUnreachable]).toEqual([true, false]);
+    expect([b?.restoreAvailable, b?.computerUnreachable]).toEqual([true, undefined]);
     expect(d?.restoreAvailable).toBeUndefined();
   });
 
@@ -395,5 +397,41 @@ describe('the routes that had no method', () => {
     expect(rec.calls.at(-1)?.query).toEqual({ since: 'old', limit: '5' });
     expect(reset.gap?.cursor).toBe('sig-9');
     await expect(vm.signals({ limit: 101 })).rejects.toBeInstanceOf(ValidationError);
+  });
+});
+
+describe('additive fields stay additive', () => {
+  it('still accepts the shapes callers built before this change', () => {
+    // Compile-time: these are the pre-OPL-5026 shapes, and `tsc` checks this file.
+    const held: Holdings = { count: 0, sizeBytes: 0, fingerprint: 'fp', raw: {} };
+    const snap: Snapshot = {
+      id: 'snap-1',
+      computerId: 'vm-1',
+      computerName: '',
+      name: '',
+      kind: 'disk',
+      state: 'durable',
+      sizeBytes: 0,
+      createdAt: '',
+      incremental: false,
+      auto: false,
+      durable: true,
+      capturing: false,
+      memory: false,
+      orphaned: false,
+      unreachable: false,
+      os: 'linux',
+      template: 'base',
+      cpu: 1,
+      ramMb: 1024,
+      diskGb: 10,
+      resolution: '1280x800x24',
+      raw: {},
+    };
+    expect([held.computerPresent, snap.restoreAvailable, snap.computerUnreachable]).toEqual([
+      undefined,
+      undefined,
+      undefined,
+    ]);
   });
 });

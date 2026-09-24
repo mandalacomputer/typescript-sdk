@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import process from 'node:process';
+import { TextDecoder } from 'node:util';
 import { CliError } from './cli-options.js';
 import type { SshRuntime } from './cli-ssh.js';
 import { resolveCredentials } from './credentials.js';
@@ -46,6 +47,11 @@ export function runtime(overrides: Partial<CliIO> = {}): CliIO {
 }
 
 export async function readInput(io: CliIO, signal: AbortSignal): Promise<string> {
+  return Buffer.from(await readInputBytes(io, signal)).toString('utf8');
+}
+
+/** Everything piped on stdin, as the bytes that arrived. */
+async function readInputBytes(io: CliIO, signal: AbortSignal): Promise<Uint8Array> {
   if (io.stdin.isTTY)
     throw new CliError('invalid_arguments', 'pipe input on stdin or provide a file / -c command');
   const chunks: Uint8Array[] = [];
@@ -58,7 +64,7 @@ export async function readInput(io: CliIO, signal: AbortSignal): Promise<string>
       chunks.push(typeof chunk === 'string' ? Buffer.from(chunk) : chunk);
     }
     signal.throwIfAborted();
-    return Buffer.concat(chunks).toString('utf8');
+    return Buffer.concat(chunks);
   } finally {
     signal.removeEventListener('abort', abort);
   }
@@ -83,7 +89,12 @@ export async function readSecretValue(
   signal: AbortSignal,
 ): Promise<string> {
   if (!io.stdin.isTTY) {
-    const text = await readInput(io, signal);
+    // Fatal, not replacing: a malformed byte stored as U+FFFD is a credential
+    // silently changed into one that does not work, reported as a success.
+    const text = decodeSecret(
+      new TextDecoder('utf-8', { fatal: true }),
+      await readInputBytes(io, signal),
+    );
     return text.endsWith('\r\n')
       ? text.slice(0, -2)
       : text.endsWith('\n')
@@ -100,6 +111,10 @@ export async function readSecretValue(
   const setRawMode = stdin.setRawMode.bind(stdin);
   setRawMode(true);
   let value = '';
+  // ONE decoder across every chunk, streaming: a terminal may deliver a
+  // multibyte character split between two reads, and decoding each read on its
+  // own turns both halves into U+FFFD.
+  const decoder = new TextDecoder('utf-8', { fatal: true });
   try {
     return await new Promise<string>((resolve, reject) => {
       const done = (fn: () => void) => {
@@ -109,9 +124,24 @@ export async function readSecretValue(
       };
       const onAbort = () => done(() => reject(signal.reason));
       const onData = (chunk: string | Uint8Array) => {
-        const text = typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8');
+        let text: string;
+        try {
+          text = typeof chunk === 'string' ? chunk : decodeSecret(decoder, chunk, true);
+        } catch (error) {
+          return done(() => reject(error));
+        }
         for (const ch of text) {
-          if (ch === '\r' || ch === '\n' || ch === '\u0004') return done(() => resolve(value));
+          if (ch === '\r' || ch === '\n' || ch === '\u0004') {
+            // A character left half-received at Enter is malformed input too.
+            return done(() => {
+              try {
+                decodeSecret(decoder, new Uint8Array());
+                resolve(value);
+              } catch (error) {
+                reject(error);
+              }
+            });
+          }
           if (ch === '\u0003')
             return done(() => reject(new CliError('cancelled', 'Cancelled', undefined, 130)));
           if (ch === '\u007f' || ch === '\b') value = [...value].slice(0, -1).join('');
@@ -128,5 +158,14 @@ export async function readSecretValue(
     setRawMode(false);
     stdin.pause();
     io.stderr.write('\n');
+  }
+}
+
+/** Decode, refusing malformed UTF-8 with a message that never quotes the bytes. */
+function decodeSecret(decoder: TextDecoder, bytes: Uint8Array, stream = false): string {
+  try {
+    return decoder.decode(bytes, { stream });
+  } catch {
+    throw new CliError('invalid_input', 'the value is not valid UTF-8; nothing was sent');
   }
 }

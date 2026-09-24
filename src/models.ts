@@ -1571,11 +1571,11 @@ export type Snapshot = {
    */
   orphaned: boolean;
   /**
-   * True when the platform could not establish whether the source computer
-   * exists — so {@link orphaned} is false because nobody could say, not because
+   * `true` when the platform could not establish whether the source computer
+   * exists (absent otherwise) — so {@link orphaned} is false because nobody could say, not because
    * the computer was seen. The snapshot's bytes may still be reachable.
    */
-  computerUnreachable: boolean;
+  computerUnreachable?: boolean;
   /**
    * Whether the source computer's CURRENT host holds a usable copy, which is
    * what a restore needs. `false` for a copy left on a host the computer has
@@ -1583,7 +1583,7 @@ export type Snapshot = {
    * reachable. `undefined` when the platform did not say (an older platform, or
    * an {@link unreachable} placeholder).
    */
-  restoreAvailable: boolean | undefined;
+  restoreAvailable?: boolean;
   /**
    * True for a placeholder the platform appended for a snapshot it could not
    * reach during a partial listing.
@@ -1962,8 +1962,9 @@ export function toSnapshot(d: Record<string, unknown>): Snapshot {
     capturing: d.state === CAPTURING,
     memory: d.kind === 'memory',
     orphaned: said(d.orphaned),
-    computerUnreachable: said(d.computer_unreachable),
-    restoreAvailable: typeof d.restore_available === 'boolean' ? d.restore_available : undefined,
+    // Present only when the platform said, so an older shape stays an older shape.
+    ...(said(d.computer_unreachable) ? { computerUnreachable: true } : {}),
+    ...(typeof d.restore_available === 'boolean' ? { restoreAvailable: d.restore_available } : {}),
     unreachable: snapshotUnreachable(d),
     os: str(d.os),
     template: str(d.template),
@@ -2102,11 +2103,11 @@ export type Holdings = {
    * snapshot-only cleanup confirmation should require `false`. `undefined` when
    * the platform did not say.
    */
-  computerPresent: boolean | undefined;
+  computerPresent?: boolean;
   /** Captures in flight. A purge is refused while any remain. `undefined` when not said. */
-  capturing: number | undefined;
+  capturing?: number;
   /** Copies with unfinished deletion work. `undefined` when not said. */
-  deleting: number | undefined;
+  deleting?: number;
   raw: Record<string, unknown>;
 };
 
@@ -2115,9 +2116,9 @@ export function toHoldings(d: Record<string, unknown>): Holdings {
     count: num(d.count),
     sizeBytes: num(d.size_bytes),
     fingerprint: str(d.fingerprint),
-    computerPresent: typeof d.computer_present === 'boolean' ? d.computer_present : undefined,
-    capturing: count(d.capturing),
-    deleting: count(d.deleting),
+    ...(typeof d.computer_present === 'boolean' ? { computerPresent: d.computer_present } : {}),
+    ...(count(d.capturing) === undefined ? {} : { capturing: count(d.capturing) }),
+    ...(count(d.deleting) === undefined ? {} : { deleting: count(d.deleting) }),
     raw: { ...d },
   };
 }
