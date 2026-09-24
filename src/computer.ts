@@ -650,7 +650,7 @@ const SNAPSHOT_POLL_MS = 5_000;
  * and the transport maps that body to {@link FileExistsError}. But a 409 can
  * arrive without a word this SDK can read: the body interrupted in flight,
  * empty, a proxy's page instead of the platform's JSON, or JSON with no
- * `reason`, a `reason` that is not a string, or an empty one. The transport
+ * `reason`, a `reason` that is not a string, or a blank one. The transport
  * then leaves {@link APIError.reason} undefined, and a bare
  * {@link ConflictError} is what {@link isTransient} calls worth sending again —
  * a retry of a refusal that does not clear, and one that could create the file
@@ -662,7 +662,7 @@ const SNAPSHOT_POLL_MS = 5_000;
  */
 function createOnlyRefusal(err: unknown): unknown {
   if (!(err instanceof ConflictError) || err instanceof FileExistsError) return err;
-  if (typeof err.reason === 'string' && err.reason !== '') return err;
+  if (typeof err.reason === 'string' && err.reason.trim() !== '') return err;
   return new FileExistsError(
     `${err.message} (a create-only upload was refused as a conflict, reason unknown: the 409 ` +
       'carried no reason that could be read, so whether the path is taken was not said; ' +

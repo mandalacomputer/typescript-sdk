@@ -2337,6 +2337,7 @@ describe('files', () => {
     ['JSON with no reason', () => json({ error: 'conflict' }, { status: 409 })],
     ['JSON with a numeric reason', () => json({ reason: 5 }, { status: 409 })],
     ['JSON with an empty reason', () => json({ reason: '' }, { status: 409 })],
+    ['JSON with a blank reason', () => json({ reason: '   ' }, { status: 409 })],
     ['empty JSON object', () => json({}, { status: 409 })],
   ])(
     'never calls a create-only 409 with an %s body transient (Codex review)',
@@ -2350,8 +2351,8 @@ describe('files', () => {
         .catch((e) => e);
       expect(err).toBeInstanceOf(FileExistsError);
       expect(err).toMatchObject({ status: 409 });
-      // No usable word: absent, or the empty string the body carried.
-      expect((err as APIError).reason || undefined).toBeUndefined();
+      // No usable word: absent, or the blank string the body carried.
+      expect(((err as APIError).reason ?? '').trim()).toBe('');
       expect((err as Error).message).toContain('refused as a conflict, reason unknown');
       expect((err as Error).message).not.toContain('already exists');
       expect(isTransient(err)).toBe(false);

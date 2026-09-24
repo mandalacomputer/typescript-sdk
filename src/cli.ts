@@ -965,13 +965,15 @@ const cmdScp: LegacyCommands['scp'] = async (srcArg, dstArg, io, signal, opts = 
     } catch (error) {
       if (error instanceof FileExistsError) {
         // Only THIS upload is known to have written nothing: an earlier attempt
-        // whose answer was lost may have written the file itself.
-        const said =
-          error.reason === 'exists'
-            ? `${remote.target}:${path} already exists`
-            : `${error.message} — ${remote.target}:${path}`;
+        // whose answer was lost may have written the file itself. The code says
+        // `exists` only when the platform did; a refusal with no usable reason is
+        // a `conflict`, reason unknown, and claims nothing about the path.
+        const exists = error.reason === 'exists';
+        const said = exists
+          ? `${remote.target}:${path} already exists`
+          : `${error.message} — ${remote.target}:${path}`;
         throw new CliError(
-          'exists',
+          exists ? 'exists' : 'conflict',
           `${said}; this upload wrote nothing. If an earlier attempt's outcome was unknown, ` +
             'the file may be yours: read it and compare before choosing another path or ' +
             'dropping --no-overwrite to replace it.',

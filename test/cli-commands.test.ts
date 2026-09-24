@@ -1866,6 +1866,24 @@ describe('legacy JSON modes', () => {
     );
   });
 
+  it('never calls a create-only conflict with no usable reason `exists` in scp', async () => {
+    const path = join(await tempDir(), 'upload.bin');
+    await writeFile(path, Uint8Array.from([1, 2]));
+    const h = harness((call) =>
+      call.path === '/computers' ? json([COMPUTER]) : json({ error: 'conflict' }, { status: 409 }),
+    );
+    const result = await h.run(['scp', '--no-overwrite', path, `${COMPUTER.name}:/tmp/out.bin`]);
+    expect(result.code).toBe(1);
+    expect(result.frames[0]).toMatchObject({
+      ok: false,
+      error: {
+        code: 'conflict',
+        message: expect.stringContaining('refused as a conflict, reason unknown'),
+      },
+    });
+    expect(JSON.stringify(result.frames[0])).not.toContain('already exists');
+  });
+
   it('refuses scp --no-overwrite on a download before any request', async () => {
     const path = join(await tempDir(), 'copy.bin');
     const h = harness(guestFile(Uint8Array.from([1])));

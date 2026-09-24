@@ -384,10 +384,11 @@ export class MoveRequiredError extends ConflictError {
  * {@link APIError.reason} is `exists` when the platform's body said so, and
  * `undefined` when the 409 answering a create-only upload carried no usable
  * reason — a body interrupted in flight, empty, not the platform's JSON, or
- * JSON without a non-empty string `reason`. That refusal is raised as this
+ * JSON without a non-blank string `reason`. That refusal is raised as this
  * class too, with a message saying it was a conflict whose reason is unknown
  * (it does NOT say the path exists), because treating it as final is the safe
- * reading of a refusal this SDK cannot classify. {@link isTransient} answers false to this class either way.
+ * reading of a refusal this SDK cannot classify. Test `reason === 'exists'`,
+ * not the class, before telling anyone the path is taken. {@link isTransient} answers false to this class either way.
  */
 export class FileExistsError extends ConflictError {
   override name = 'FileExistsError';
