@@ -340,7 +340,7 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
   ],
 
   // The file body is the file, raw — there are no named fields to mirror.
-  ['PUT computers/:id/files', ['query:path', 'query:no_wake']],
+  ['PUT computers/:id/files', ['query:path', 'query:no_wake', 'query:overwrite']],
   ['GET computers/:id/files', ['query:path', 'query:no_wake', 'header:Range']],
   ['GET computers/:id/files/list', ['query:path']],
 
@@ -409,6 +409,10 @@ export const UNIMPLEMENTED_PARAMETERS: ReadonlySet<string> = new Set([
   // File transfers cannot yet opt out of waking a suspended computer.
   'GET computers/:id/files  query:no_wake',
   'PUT computers/:id/files  query:no_wake',
+  // OPL-4994: `overwrite=false` makes an upload create-only, refused with 409
+  // `exists` rather than replacing a file already at the path.
+  // Listed to stay in step with the surface; not yet sent.
+  'PUT computers/:id/files  query:overwrite',
   // `keys: ['ctrl', 'c']` is sent instead. The chord-as-one-string form cannot
   // express a key whose own name contains the separator.
   'POST computers/:id/input  body:key',
