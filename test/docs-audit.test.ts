@@ -11,6 +11,7 @@ import {
   Client,
   ComputerNotRunningError,
   ConflictError,
+  CreateOnlyConflictError,
   FileExistsError,
   type Holdings,
   isTransient,
@@ -282,6 +283,21 @@ describe('noWake transfers', () => {
       .catch((e: unknown) => e);
     expect(taken).toBeInstanceOf(FileExistsError);
   });
+
+  it('answers a reasonless 409 to a create-only noWake upload as CreateOnlyConflictError', async () => {
+    // Parity with the Python client: the class that claims nothing about the
+    // path OR the computer's state, not FileExistsError and not ComputerNotRunningError.
+    const { client: c } = client(refused({ error: 'conflict' }));
+    const vm = await c.computers.get('vm-1');
+    const err = await vm
+      .writeFile('/tmp/a', 'x', { noWake: true, overwrite: false })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(CreateOnlyConflictError);
+    expect(err).not.toBeInstanceOf(ComputerNotRunningError);
+    expect(err).not.toBeInstanceOf(FileExistsError);
+    expect((err as APIError).reason).toBeUndefined();
+    expect(isTransient(err)).toBe(false);
+  });
 });
 
 describe('refusal words and the 503 on a change', () => {
@@ -309,6 +325,13 @@ describe('refusal words and the 503 on a change', () => {
       expect(isTransient(at(m))).toBe(false);
     // One built by hand has no method and keeps its old answer.
     expect(isTransient(new UnavailableError('x', 503))).toBe(true);
+    // A word that clears cannot make a change answered 503 transient: the
+    // outcome is still unknown. It still does on a read.
+    for (const reason of ['contention', 'starting']) {
+      const on = (method: string) => errorForStatus(503, 'x', { error: 'x', reason }, { method });
+      for (const m of ['POST', 'PUT', 'PATCH', 'DELETE']) expect(isTransient(on(m))).toBe(false);
+      expect(isTransient(on('GET'))).toBe(true);
+    }
   });
 
   it('records the method on every error it builds from a response', async () => {

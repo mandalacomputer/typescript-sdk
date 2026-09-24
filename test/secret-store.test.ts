@@ -397,6 +397,32 @@ describe('mandala secrets: which secret a word means', () => {
 describe('mandala secrets set: the value’s encoding', () => {
   const e = new TextEncoder().encode('é'); // two bytes
 
+  // A leading U+FEFF is part of the value, not a byte-order mark to strip:
+  // stripping it would store a different secret than the one given.
+  const BOM = '\uFEFF';
+  const bom = new TextEncoder().encode(`${BOM}test-token`);
+
+  it('keeps a leading U+FEFF piped on stdin', async () => {
+    const { code, rec } = await cli(['secrets', 'set', 'T'], storeRoutes({ rows: [] }), bom);
+    expect(code).toBe(0);
+    expect(rec.calls.find((x) => x.method === 'POST')?.body).toEqual({
+      name: 'T',
+      value: `${BOM}test-token`,
+    });
+  });
+
+  it('keeps a leading U+FEFF typed at a terminal, whole or split across reads', async () => {
+    for (const chunks of [[bom], [bom.slice(0, 1), bom.slice(1, 2), bom.slice(2)]]) {
+      const { stream } = terminal([...chunks, new TextEncoder().encode('\r')]);
+      const { code, rec } = await cli(['secrets', 'set', 'T'], storeRoutes({ rows: [] }), stream);
+      expect(code).toBe(0);
+      expect(rec.calls.find((x) => x.method === 'POST')?.body).toEqual({
+        name: 'T',
+        value: `${BOM}test-token`,
+      });
+    }
+  });
+
   it('joins a multibyte character a terminal split across two reads', async () => {
     const store: Store = { rows: [] };
     const { stream, modes } = terminal([

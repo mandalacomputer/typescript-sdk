@@ -92,7 +92,7 @@ export async function readSecretValue(
     // Fatal, not replacing: a malformed byte stored as U+FFFD is a credential
     // silently changed into one that does not work, reported as a success.
     const text = decodeSecret(
-      new TextDecoder('utf-8', { fatal: true }),
+      new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }),
       await readInputBytes(io, signal),
     );
     return text.endsWith('\r\n')
@@ -114,7 +114,7 @@ export async function readSecretValue(
   // ONE decoder across every chunk, streaming: a terminal may deliver a
   // multibyte character split between two reads, and decoding each read on its
   // own turns both halves into U+FFFD.
-  const decoder = new TextDecoder('utf-8', { fatal: true });
+  const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
   try {
     return await new Promise<string>((resolve, reject) => {
       const done = (fn: () => void) => {
