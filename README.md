@@ -1219,6 +1219,25 @@ says it wrote, or `undefined` if it did not say. Every transfer takes a
 `timeoutMs` for the one request, since a big file can legitimately outlive the
 default 60 seconds; `0` disables the deadline for that transfer.
 
+An upload replaces whatever is at the path. Pass `overwrite: false` to create
+the file only if nothing is there:
+
+```ts
+try {
+  await c.writeFile('/home/user/config.toml', 'debug = false\n', { overwrite: false });
+} catch (e) {
+  if (!(e instanceof FileExistsError)) throw e;
+  // Something was already there, and it is untouched: nothing was written.
+}
+```
+
+A path that is taken is refused with `FileExistsError` — a `ConflictError`
+whose `reason` is `"exists"`, and not transient: waiting does not change it.
+Create-only is for Linux computers; a Windows computer refuses it with a 400.
+A host that cannot do it yet answers a `ConflictError` with `reason`
+`"unsupported"`, and one whose support could not be confirmed an
+`UnavailableError`. In every one of those cases nothing was written.
+
 #### Files bigger than one request
 
 One transfer moves at most **64 MiB** — the bytes cross the guest agent in
@@ -2707,6 +2726,14 @@ A download is paged and written chunk by chunk, so it is not bounded by the
 64 MiB a single transfer moves and never holds the file in memory —
 `mandala scp vm:/home/user/build.tar .` is the copy the SDK's `readFileChunks`
 exists for. A failure part-way leaves what arrived on disk, as scp and curl do.
+
+An upload replaces a file already at the guest path. `--no-overwrite` makes it
+create-only: a path that is taken fails with the error code `exists` and
+nothing is written. It applies to uploads only, and is refused on a download.
+
+```sh
+npx --package=mandala-computer mandala scp --no-overwrite ./app.env my-computer:/home/user/.env
+```
 
 Both take a computer's name or its id and use the shared credential/profile selection.
 

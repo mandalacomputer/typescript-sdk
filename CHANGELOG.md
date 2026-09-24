@@ -7,6 +7,17 @@ project is pre-1.0, so a minor version may carry a behaviour change.
 The reasoning behind a change lives in its commit message rather than here.
 This is the summary you read to decide whether to upgrade.
 
+## [Unreleased]
+
+### Added
+
+- **Create-only uploads.** `computer.writeFile(path, data, { overwrite: false })`
+  writes the file only if nothing is at `path`. A path that is taken is refused
+  with the new `FileExistsError` — a `ConflictError` whose `reason` is
+  `"exists"`, which `isTransient` calls permanent — and nothing is written.
+  The default is unchanged: an upload replaces the file. Linux computers only.
+  The CLI gains `scp --no-overwrite` for uploads.
+
 ## [0.5.0] — 2026-09-23
 
 ### Added

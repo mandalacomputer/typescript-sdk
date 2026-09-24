@@ -370,6 +370,8 @@ async function exerciseEverything(client: Client): Promise<void> {
   await c.readFilePart('/home/user/out.txt', { offset: -16 });
   for await (const _ of c.readFileChunks('/home/user/out.txt')) break;
   await c.writeFile('/home/user/in.txt', 'hello');
+  // Create-only: sent only when asked for (OPL-4994).
+  await c.writeFile('/home/user/new.txt', 'hello', { overwrite: false });
 
   await c.snapshot();
   await c.snapshot({ memory: true, name: 'before-upgrade' });

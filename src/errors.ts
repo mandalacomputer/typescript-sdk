@@ -4,8 +4,9 @@
  * The distinctions here are the ones a caller has to act on and cannot infer
  * from prose. A 400 never clears and retrying it burns a request. A 409 is the
  * one that is not uniform: most of them are a passing moment and worth
- * retrying, and one is a decision about the size that was asked for — see
- * {@link ConflictError} and {@link MoveRequiredError}.
+ * retrying, and two are decisions — the size that was asked for, and a
+ * create-only upload onto a path that is taken — see {@link ConflictError},
+ * {@link MoveRequiredError} and {@link FileExistsError}.
  * A 402 is a plan limit, which no amount of waiting fixes and which the account
  * holder — not the code — has to resolve.
  *
@@ -135,8 +136,8 @@ export class APIError extends MandalaError {
   readonly retryAfterMs?: number;
   /**
    * The platform's own word for what KIND of refusal this is, where it sent one
-   * (platform OPL-3898): `contention`, `starting`, `unavailable` or
-   * `unsupported`. `undefined` for most errors, and always will be — the
+   * (platform OPL-3898): `contention`, `starting`, `unavailable`,
+   * `unsupported`, `revoked` or `exists`. `undefined` for most errors, and always will be — the
    * platform is explicit that an absent value means unclassified rather than
    * "none of the four", which is what makes it safe to classify more later.
    *
@@ -199,7 +200,21 @@ const REASON_CLEARS: ReadonlySet<string> = new Set(['contention', 'starting']);
  * keep the two apart: 401 means present a credential again, 403 means the role
  * changed and signing in again will not help.
  */
-const REASON_PERMANENT: ReadonlySet<string> = new Set(['unavailable', 'unsupported', 'revoked']);
+/**
+ * `exists` is a create-only upload (`writeFile(..., { overwrite: false })`)
+ * refused because something is already at the path (platform OPL-4994). Nothing
+ * was written, and the same request answers the same way until whatever is there
+ * is moved or the caller agrees to replace it — so it is permanent, and has to be
+ * said: without it this would be an ordinary {@link ConflictError}, which
+ * {@link isTransient} calls worth sending again. {@link FileExistsError} is the
+ * class it arrives as.
+ */
+const REASON_PERMANENT: ReadonlySet<string> = new Set([
+  'unavailable',
+  'unsupported',
+  'revoked',
+  'exists',
+]);
 
 /**
  * The platform's one-word classification off a refusal body, or `undefined`.
@@ -343,6 +358,25 @@ export class MoveRequiredError extends ConflictError {
   ) {
     super(message, status, body, retryAfterMs, metadata);
   }
+}
+
+/**
+ * The 409 a create-only upload gets when the path is already taken.
+ *
+ * `writeFile(path, data, { overwrite: false })` asks the platform to create the
+ * file only if nothing is at `path`. When something is, the answer is 409 with
+ * `reason: "exists"` and NOTHING was written — the file that was there is
+ * untouched. Its own class for the reason {@link MoveRequiredError} has one: it
+ * is a {@link ConflictError} by status and the opposite of one by nature. A
+ * conflict clears by waiting; this clears only when the caller decides — pick
+ * another path, or send the write again without `overwrite: false` to replace
+ * the file on purpose. {@link isTransient} says no to it.
+ *
+ * A subclass, so `catch (e) { if (e instanceof ConflictError) }` written before
+ * this existed still catches it.
+ */
+export class FileExistsError extends ConflictError {
+  override name = 'FileExistsError';
 }
 
 /**
@@ -740,6 +774,10 @@ export function errorForStatus(
         headers.retryAfterMs,
         headers,
       );
+    // The create-only upload whose path was taken. Told apart by the word the
+    // platform put on the body rather than by the sentence, which is prose.
+    if (refusalReason(body) === 'exists')
+      return new FileExistsError(message, status, body, headers.retryAfterMs, headers);
   }
   if (Cls === RangeNotSatisfiableError) {
     return new RangeNotSatisfiableError(

@@ -10,6 +10,7 @@ import {
   Client,
   ConflictError,
   type FileChunk,
+  FileExistsError,
   GatewayTimeoutError,
   isTransient,
   MandalaError,
@@ -2266,6 +2267,67 @@ describe('files', () => {
     expect(rec.last().raw && new TextDecoder().decode(rec.last().raw)).toBe('hello');
     expect(rec.last().query.path).toBe('/tmp/a.txt');
     expect(written).toBe(5);
+  });
+
+  it('sends overwrite=false only for a create-only write (OPL-4994)', async () => {
+    const { rec, client: c } = client(anyRoute);
+    const computer = await c.computers.get('vm-1');
+    // The default is the request this method always sent: no overwrite at all.
+    await computer.writeFile('/tmp/a.txt', 'hello');
+    expect(rec.last().query).toEqual({ path: '/tmp/a.txt' });
+    await computer.writeFile('/tmp/a.txt', 'hello', { overwrite: true });
+    expect(rec.last().query).toEqual({ path: '/tmp/a.txt' });
+    await computer.writeFile('/tmp/a.txt', 'hello', { overwrite: false });
+    expect(rec.last().method).toBe('PUT');
+    expect(rec.last().query).toEqual({ path: '/tmp/a.txt', overwrite: 'false' });
+    expect(rec.last().raw && new TextDecoder().decode(rec.last().raw)).toBe('hello');
+  });
+
+  it('refuses an overwrite that is not a boolean before sending', async () => {
+    const { rec, client: c } = client(anyRoute);
+    const computer = await c.computers.get('vm-1');
+    const before = rec.calls.length;
+    await expect(
+      computer.writeFile('/tmp/a.txt', 'hello', { overwrite: 'false' as unknown as boolean }),
+    ).rejects.toBeInstanceOf(ValidationError);
+    expect(rec.calls.length).toBe(before);
+  });
+
+  it('raises FileExistsError when a create-only path is taken, and calls it permanent', async () => {
+    const { client: c } = client((call) =>
+      call.method === 'PUT' && call.path === '/computers/vm-1/files'
+        ? json({ error: 'a file already exists at /tmp/a.txt', reason: 'exists' }, { status: 409 })
+        : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    const err = await computer
+      .writeFile('/tmp/a.txt', 'hello', { overwrite: false })
+      .catch((e) => e);
+    expect(err).toBeInstanceOf(FileExistsError);
+    // Still a ConflictError, so a handler written before the class existed catches it.
+    expect(err).toBeInstanceOf(ConflictError);
+    expect(err).toMatchObject({ status: 409, reason: 'exists', name: 'FileExistsError' });
+    expect((err as Error).message).toContain('already exists');
+    // A plain ConflictError would be transient; this is a decision, not a moment.
+    expect(isTransient(err)).toBe(false);
+  });
+
+  it('leaves the other create-only refusals as the words they are', async () => {
+    for (const [status, reason, cls] of [
+      [409, 'unsupported', ConflictError],
+      [409, 'some-future-word', ConflictError],
+    ] as const) {
+      const { client: c } = client((call) =>
+        call.method === 'PUT' ? json({ error: 'refused', reason }, { status }) : anyRoute(call),
+      );
+      const computer = await c.computers.get('vm-1');
+      const err = await computer
+        .writeFile('/tmp/a.txt', 'hello', { overwrite: false })
+        .catch((e) => e);
+      expect(err).toBeInstanceOf(cls);
+      expect(err).not.toBeInstanceOf(FileExistsError);
+      expect((err as APIError).reason).toBe(reason);
+    }
   });
 
   it('reads bytes back, and text on request', async () => {

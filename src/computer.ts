@@ -19,10 +19,10 @@ import {
   verifyArtifact,
 } from './artifacts.js';
 import {
-  // TYPE-ONLY, both of them, and kept rather than dropped. Every reference to
+  // TYPE-ONLY, all of them, and kept rather than dropped. Every reference to
   // either in this file is a `{@link}` in a doc comment — `APIError.reason` on
-  // the two clipboard methods, `isTransient` on the retry advice beside them —
-  // so as values they are dead, and `verbatimModuleSyntax` was emitting a
+  // the two clipboard methods, `isTransient` on the retry advice beside them,
+  // `FileExistsError` on writeFile's create-only option — so as values they are dead, and `verbatimModuleSyntax` was emitting a
   // runtime import for two bindings nothing calls. Deleting them instead would
   // cost the links: `{@link}` resolves through a type import and not through
   // nothing, and the alternative is qualifying every target by module path.
@@ -31,6 +31,7 @@ import {
   type APIError,
   ConnectionError,
   errorForEventStatus,
+  type FileExistsError,
   type isTransient,
   MandalaError,
   NotFoundError,
@@ -3759,6 +3760,16 @@ export class Computer {
    * `timeoutMs` extends the client's per-request deadline for this one
    * transfer, as on {@link readFile}; `0` disables it.
    *
+   * `overwrite: false` makes the write create-only: the file is written only if
+   * nothing is at `path` yet. When something is, the platform refuses with
+   * {@link FileExistsError} (a 409 whose `reason` is `exists`) and nothing is
+   * written — the file already there is untouched. The default, `true`, replaces
+   * whatever is at `path`, as this method always has. Linux computers only: a
+   * Windows computer refuses `overwrite: false` with a 400. A host that cannot
+   * do create-only yet refuses it with a 409 whose `reason` is `unsupported`,
+   * and one whose support could not be confirmed with a 503; in both cases
+   * nothing was sent to the guest.
+   *
    * @returns how many bytes the platform says it wrote, or `undefined` if it
    * did not say. Not defaulted to what was sent: that would turn "it did not
    * say" into the affirmative claim that everything landed, which is the one
@@ -3768,8 +3779,14 @@ export class Computer {
   async writeFile(
     path: string,
     data: Uint8Array | string | ReadableStream<Uint8Array>,
-    opts: { timeoutMs?: number; contentLength?: number } & CallOptions = {},
+    opts: { timeoutMs?: number; contentLength?: number; overwrite?: boolean } & CallOptions = {},
   ): Promise<number | undefined> {
+    // Checked, not coerced: a JavaScript caller passing the string "false"
+    // would otherwise read as truthy and replace the very file they asked to
+    // keep.
+    if (opts.overwrite !== undefined && typeof opts.overwrite !== 'boolean') {
+      throw new ValidationError(`overwrite must be true or false (got ${String(opts.overwrite)})`);
+    }
     const bytes = typeof data === 'string' ? new TextEncoder().encode(data) : data;
     // Validated before the header is formed: String(NaN) is "NaN", and Node
     // fetch then rejects the request as a connection failure rather than a
@@ -3819,7 +3836,13 @@ export class Computer {
       'PUT',
       P.computerAction(this.id, 'files'),
       {
-        query: P.filesQuery(path),
+        // Sent only to ask for create-only. Absent means replace, which is what
+        // every platform version does, so the default request is byte for byte
+        // the one this method always sent.
+        query:
+          opts.overwrite === false
+            ? { ...P.filesQuery(path), overwrite: 'false' }
+            : P.filesQuery(path),
         raw: bytes,
         headers,
         noTimeout: opts.timeoutMs === 0,
