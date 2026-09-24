@@ -1867,12 +1867,12 @@ describe('legacy JSON modes', () => {
   });
 
   it.each([
-    ['the platform JSON', () => json({ error: 'a file already exists' }, { status: 409 }), true],
-    ['an empty body', () => new Response('', { status: 409 }), false],
-    ['a proxy page', () => new Response('<html>conflict</html>', { status: 409 }), false],
+    ['reasonless JSON', () => json({ error: 'a file already exists' }, { status: 409 })],
+    ['an empty body', () => new Response('', { status: 409 })],
+    ['a proxy page', () => new Response('<html>conflict</html>', { status: 409 })],
   ])(
     'never calls a create-only conflict with no usable reason `exists` in scp (%s)',
-    async (_kind, answer, structured) => {
+    async (_kind, answer) => {
       const path = join(await tempDir(), 'upload.bin');
       await writeFile(path, Uint8Array.from([1, 2]));
       const h = harness((call) => (call.path === '/computers' ? json([COMPUTER]) : answer()));
@@ -1887,12 +1887,9 @@ describe('legacy JSON modes', () => {
       });
       const said = JSON.stringify(result.frames[0]);
       expect(said).not.toContain('already exists');
-      if (structured) {
-        expect(said).toContain('this upload wrote nothing');
-      } else {
-        expect(said).not.toContain('wrote nothing');
-        expect(said).toContain('whether this upload wrote anything is unconfirmed');
-      }
+      // Even the JSON one: a reasonless 409 does not prove the write never landed.
+      expect(said).not.toContain('wrote nothing');
+      expect(said).toContain('whether this upload wrote anything is unconfirmed');
     },
   );
 

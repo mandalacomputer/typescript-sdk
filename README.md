@@ -2740,9 +2740,8 @@ exists for. A failure part-way leaves what arrived on disk, as scp and curl do.
 An upload replaces a file already at the guest path. `--no-overwrite` makes it
 create-only: a path that is taken fails with the error code `exists` and
 that upload writes nothing. A create-only refusal whose reason could not be read
-fails with the code `conflict` instead, says the reason is unknown, and says
-this upload wrote nothing only when the refusal was the platform's JSON;
-otherwise the upload's outcome is reported as unconfirmed. It applies to uploads only, and is refused on a
+fails with the code `conflict` instead, says the reason is unknown, and reports
+the upload's outcome as unconfirmed: read the remote path before trying again. It applies to uploads only, and is refused on a
 download.
 
 ```sh

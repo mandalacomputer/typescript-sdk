@@ -975,19 +975,15 @@ const cmdScp: LegacyCommands['scp'] = async (srcArg, dstArg, io, signal, opts = 
         );
       }
       if (error instanceof CreateOnlyConflictError) {
-        // No usable reason, so nothing here says the path is taken. And only a
-        // refusal the platform wrote out (a JSON object) says this upload wrote
-        // nothing; an empty, cut-off or proxy body leaves that unconfirmed.
-        const structured =
-          error.body !== null && typeof error.body === 'object' && !Array.isArray(error.body);
-        const outcome = structured
-          ? 'this upload wrote nothing'
-          : 'whether this upload wrote anything is unconfirmed';
+        // No usable reason, so nothing here says the path is taken, nor that
+        // this upload wrote nothing: without the platform's word, a 409 (JSON
+        // or not) may come from a hop that had already forwarded the write.
         throw new CliError(
           'conflict',
           `${remote.target}:${path}: the create-only upload was refused as a conflict, reason ` +
-            `unknown; ${outcome}. Do not send the same upload again blind: read the remote path ` +
-            'to see what is there before choosing another path or dropping --no-overwrite.',
+            'unknown; whether this upload wrote anything is unconfirmed. Do not send the same ' +
+            'upload again blind: read the remote path to see what is there before choosing ' +
+            'another path or dropping --no-overwrite.',
           { status: error.status, reason: error.reason },
         );
       }
