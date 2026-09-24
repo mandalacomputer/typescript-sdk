@@ -139,6 +139,13 @@ export const ALLOWED: ReadonlySet<string> = new Set(
       // A computer's secret bindings, read and replaced whole (OPL-4963).
       ['GET', 'computers/:id/secrets'],
       ['PUT', 'computers/:id/secrets'],
+
+      // The account's secret store (OPL-4984).
+      ['GET', 'secrets'],
+      ['POST', 'secrets'],
+      ['GET', 'secrets/:id'],
+      ['PUT', 'secrets/:id'],
+      ['DELETE', 'secrets/:id'],
     ] as Route[]
   ).map(([m, p]) => `${m} ${p}`),
 );
@@ -164,6 +171,12 @@ export const UNIMPLEMENTED: ReadonlySet<string> = new Set([
   'GET computers/:id/activities/:activity/results',
   // Passive platform signals have no client convenience method yet.
   'GET computers/:id/signals',
+  // The account's secret store (OPL-4984); no client method yet.
+  'GET secrets',
+  'POST secrets',
+  'GET secrets/:id',
+  'PUT secrets/:id',
+  'DELETE secrets/:id',
 ]);
 
 /**
@@ -388,6 +401,13 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
   // The replace takes the whole list and the version it was read at.
   ['GET computers/:id/secrets', []],
   ['PUT computers/:id/secrets', ['body:secrets', 'body:version']],
+
+  // The account's secret store (OPL-4984).
+  ['GET secrets', ['query:workspace_id']],
+  ['POST secrets', ['body:name', 'body:value', 'body:workspace_id']],
+  ['GET secrets/:id', ['query:workspace_id']],
+  ['PUT secrets/:id', ['body:revision_id', 'body:value', 'body:workspace_id']],
+  ['DELETE secrets/:id', ['query:revision_id', 'query:workspace_id']],
 ]);
 
 /**
