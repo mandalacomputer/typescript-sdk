@@ -36,6 +36,7 @@ import { CliError } from './cli-options.js';
 import { redact } from './cli-output.js';
 import { type CliIO, runtime } from './cli-runtime.js';
 import type { Computer } from './computer.js';
+import { CreateOnlyConflictError, FileExistsError } from './errors.js';
 
 /**
  * The whole guest-side scrollback is smaller than this; anything bigger in one
@@ -898,12 +899,17 @@ export async function download(
   return written;
 }
 
-const cmdScp: LegacyCommands['scp'] = async (srcArg, dstArg, io, signal) => {
+const cmdScp: LegacyCommands['scp'] = async (srcArg, dstArg, io, signal, opts = {}) => {
   const src = remoteSide(srcArg);
   const dst = remoteSide(dstArg);
   if ((src === undefined) === (dst === undefined)) {
     die('exactly one side must be a computer, spelled <computer>:/path');
   }
+  const overwrite = opts.overwrite ?? true;
+  // The flag is the platform's create-only upload. A download writes a LOCAL
+  // file, which that option says nothing about, and quietly ignoring the flag
+  // there would replace a file the caller asked to keep.
+  if (src && !overwrite) die('--no-overwrite applies to an upload, not a download');
 
   const client = io.createClient();
 
@@ -947,11 +953,42 @@ const cmdScp: LegacyCommands['scp'] = async (srcArg, dstArg, io, signal) => {
     // Streamed rather than `readFile`'d: a guest-bound copy of a large file is
     // the same 2 GB the download path already refuses to hold as one Buffer.
     const body = Readable.toWeb(fh.createReadStream()) as ReadableStream<Uint8Array>;
-    const written = await computer.writeFile(path, body, {
-      timeoutMs: SCP_TRANSFER_TIMEOUT_MS,
-      contentLength: info.size,
-      signal,
-    });
+    let written: number | undefined;
+    try {
+      written = await computer.writeFile(path, body, {
+        timeoutMs: SCP_TRANSFER_TIMEOUT_MS,
+        contentLength: info.size,
+        // Only when asked: absent is the replace every platform version does.
+        ...(overwrite ? {} : { overwrite: false }),
+        signal,
+      });
+    } catch (error) {
+      if (error instanceof FileExistsError) {
+        // Only THIS upload is known to have written nothing: an earlier attempt
+        // whose answer was lost may have written the file itself.
+        throw new CliError(
+          'exists',
+          `${remote.target}:${path} already exists; this upload wrote nothing. If an earlier ` +
+            "attempt's outcome was unknown, the file may be yours: read it and compare before " +
+            'choosing another path or dropping --no-overwrite to replace it.',
+          { status: error.status, reason: error.reason },
+        );
+      }
+      if (error instanceof CreateOnlyConflictError) {
+        // No usable reason, so nothing here says the path is taken, nor that
+        // this upload wrote nothing: without the platform's word, a 409 (JSON
+        // or not) may come from a hop that had already forwarded the write.
+        throw new CliError(
+          'conflict',
+          `${remote.target}:${path}: the create-only upload was refused as a conflict, reason ` +
+            'unknown; whether this upload wrote anything is unconfirmed. Do not send the same ' +
+            'upload again blind: read the remote path to see what is there before choosing ' +
+            'another path or dropping --no-overwrite.',
+          { status: error.status, reason: error.reason },
+        );
+      }
+      throw error;
+    }
     // What the platform said, or what was sent — labelled as which, since a
     // platform that does not report a count is not evidence that everything
     // landed.

@@ -1821,6 +1821,89 @@ describe('legacy JSON modes', () => {
       accounting: '3 bytes sent',
     });
   });
+
+  it('sends overwrite=false for scp --no-overwrite, and nothing otherwise (OPL-4994)', async () => {
+    const path = join(await tempDir(), 'upload.bin');
+    await writeFile(path, Uint8Array.from([1, 2]));
+    const h = harness((call) =>
+      call.path === '/computers' ? json([COMPUTER]) : json({ bytes: 2 }),
+    );
+    expect((await h.run(['scp', path, `${COMPUTER.name}:/tmp/out.bin`])).code).toBe(0);
+    expect(h.rec.last().query).toEqual({ path: '/tmp/out.bin' });
+    const result = await h.run(['scp', '--no-overwrite', path, `${COMPUTER.name}:/tmp/out.bin`]);
+    expect(result.code).toBe(0);
+    expect(h.rec.last().method).toBe('PUT');
+    expect(h.rec.last().query).toEqual({ path: '/tmp/out.bin', overwrite: 'false' });
+  });
+
+  it('says plainly that scp --no-overwrite found the guest path taken', async () => {
+    const path = join(await tempDir(), 'upload.bin');
+    await writeFile(path, Uint8Array.from([1, 2]));
+    const h = harness((call) =>
+      call.path === '/computers'
+        ? json([COMPUTER])
+        : json({ error: 'a file already exists at that path', reason: 'exists' }, { status: 409 }),
+    );
+    const result = await h.run(['scp', '--no-overwrite', path, `${COMPUTER.name}:/tmp/out.bin`]);
+    expect(result.code).toBe(1);
+    expect(result.frames[0]).toMatchObject({
+      ok: false,
+      error: {
+        code: 'exists',
+        message: expect.stringContaining(`${COMPUTER.name}:/tmp/out.bin already exists`),
+        details: { status: 409, reason: 'exists' },
+      },
+    });
+    const human = await h.run(
+      ['scp', '--no-overwrite', path, `${COMPUTER.name}:/tmp/out.bin`],
+      false,
+    );
+    expect(human.code).toBe(1);
+    expect(human.err).toContain('this upload wrote nothing');
+    // A retry after a lost answer meets its own file; only THIS attempt is known.
+    expect(human.err).toContain(
+      "If an earlier attempt's outcome was unknown, the file may be yours: read it and compare",
+    );
+  });
+
+  it.each([
+    ['reasonless JSON', () => json({ error: 'a file already exists' }, { status: 409 })],
+    ['an empty body', () => new Response('', { status: 409 })],
+    ['a proxy page', () => new Response('<html>conflict</html>', { status: 409 })],
+  ])(
+    'never calls a create-only conflict with no usable reason `exists` in scp (%s)',
+    async (_kind, answer) => {
+      const path = join(await tempDir(), 'upload.bin');
+      await writeFile(path, Uint8Array.from([1, 2]));
+      const h = harness((call) => (call.path === '/computers' ? json([COMPUTER]) : answer()));
+      const result = await h.run(['scp', '--no-overwrite', path, `${COMPUTER.name}:/tmp/out.bin`]);
+      expect(result.code).toBe(1);
+      expect(result.frames[0]).toMatchObject({
+        ok: false,
+        error: {
+          code: 'conflict',
+          message: expect.stringContaining('refused as a conflict, reason unknown'),
+        },
+      });
+      const said = JSON.stringify(result.frames[0]);
+      expect(said).not.toContain('already exists');
+      // Even the JSON one: a reasonless 409 does not prove the write never landed.
+      expect(said).not.toContain('wrote nothing');
+      expect(said).toContain('whether this upload wrote anything is unconfirmed');
+    },
+  );
+
+  it('refuses scp --no-overwrite on a download before any request', async () => {
+    const path = join(await tempDir(), 'copy.bin');
+    const h = harness(guestFile(Uint8Array.from([1])));
+    const result = await h.run(['scp', '--no-overwrite', `${COMPUTER.name}:/tmp/in.bin`, path]);
+    expect(result.code).toBe(1);
+    expect(result.frames[0].error).toMatchObject({
+      code: 'invalid_arguments',
+      message: '--no-overwrite applies to an upload, not a download',
+    });
+    expect(h.rec.calls).toEqual([]);
+  });
 });
 
 describe('wait options and signal cleanup', () => {

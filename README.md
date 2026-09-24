@@ -1219,6 +1219,35 @@ says it wrote, or `undefined` if it did not say. Every transfer takes a
 `timeoutMs` for the one request, since a big file can legitimately outlive the
 default 60 seconds; `0` disables the deadline for that transfer.
 
+An upload replaces whatever is at the path. Pass `overwrite: false` to create
+the file only if nothing is there:
+
+```ts
+try {
+  await c.writeFile('/home/user/config.toml', 'debug = false\n', { overwrite: false });
+} catch (e) {
+  if (!(e instanceof FileExistsError)) throw e;
+  // Something was already there, and this call wrote nothing.
+}
+```
+
+A path that is taken is refused with `FileExistsError` — a `ConflictError`
+whose `reason` is `"exists"`, and not transient: waiting does not change it.
+Create-only is for Linux computers; a Windows computer refuses it with a 400.
+A host that cannot do it yet answers a `ConflictError` with `reason`
+`"unsupported"`, and one whose support could not be confirmed an
+`UnavailableError`. In every one of those cases this request wrote nothing. A
+create-only 409 with no usable reason (a body that could not be read, or JSON
+without a string `reason`) is raised as `CreateOnlyConflictError`, a
+`ConflictError` with `reason` undefined that is not transient either. It does
+not say the path is taken: read the path to find out what is there before
+deciding.
+
+"Nothing written" is about the request that was refused. If an earlier attempt
+lost its response, it may have written the file itself, and the retry then
+meets that file: read it and compare before choosing another path or
+overwriting.
+
 #### Files bigger than one request
 
 One transfer moves at most **64 MiB** — the bytes cross the guest agent in
@@ -2707,6 +2736,17 @@ A download is paged and written chunk by chunk, so it is not bounded by the
 64 MiB a single transfer moves and never holds the file in memory —
 `mandala scp vm:/home/user/build.tar .` is the copy the SDK's `readFileChunks`
 exists for. A failure part-way leaves what arrived on disk, as scp and curl do.
+
+An upload replaces a file already at the guest path. `--no-overwrite` makes it
+create-only: a path that is taken fails with the error code `exists` and
+that upload writes nothing. A create-only refusal whose reason could not be read
+fails with the code `conflict` instead, says the reason is unknown, and reports
+the upload's outcome as unconfirmed: read the remote path before trying again. It applies to uploads only, and is refused on a
+download.
+
+```sh
+npx --package=mandala-computer mandala scp --no-overwrite ./app.env my-computer:/home/user/.env
+```
 
 Both take a computer's name or its id and use the shared credential/profile selection.
 

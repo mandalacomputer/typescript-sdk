@@ -18,6 +18,8 @@
 import {
   APIError,
   ConnectionError,
+  CreateOnlyConflictError,
+  FileExistsError,
   MoveRequiredError,
   OriginTLSError,
   RateLimitError,
@@ -137,7 +139,12 @@ export type WaitOptions = {
  */
 export const isTransientForPoll = (err: unknown): boolean => {
   if (!(err instanceof APIError) && !(err instanceof ConnectionError)) return false;
-  if (err instanceof MoveRequiredError) return false;
+  if (
+    err instanceof MoveRequiredError ||
+    err instanceof FileExistsError ||
+    err instanceof CreateOnlyConflictError
+  )
+    return false;
   if (err instanceof OriginTLSError) return false;
   if (err instanceof APIError) {
     if (err.status === 524) return false;

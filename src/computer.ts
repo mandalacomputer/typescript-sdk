@@ -29,8 +29,11 @@ import {
   // The inline modifier rather than a second import statement, matching the
   // `./agent.js` line above.
   type APIError,
+  ConflictError,
   ConnectionError,
+  CreateOnlyConflictError,
   errorForEventStatus,
+  FileExistsError,
   type isTransient,
   MandalaError,
   NotFoundError,
@@ -640,6 +643,44 @@ const captureTimeoutText = (w: {
  */
 const SNAPSHOT_WAIT_MS = 1_800_000;
 const SNAPSHOT_POLL_MS = 5_000;
+
+/**
+ * A create-only upload's 409, never left looking like a passing conflict.
+ *
+ * The platform answers a create-only upload's taken path with 409 `exists`,
+ * and the transport maps that body to {@link FileExistsError}. But a 409 can
+ * arrive without a word this SDK can read: the body interrupted in flight,
+ * empty, a proxy's page instead of the platform's JSON, or JSON with no
+ * `reason`, a `reason` that is not a string, or a blank one. A bare
+ * {@link ConflictError} is what {@link isTransient} calls worth sending again —
+ * a retry of a refusal that was not said to clear, and one that could create
+ * the file later if the path were cleared in between. So the request's own
+ * context, create-only, decides here what the status alone cannot: the refusal
+ * is a {@link CreateOnlyConflictError}, final, with a message that says only
+ * that it was a conflict whose reason is unknown. A 409 that DID carry a
+ * string reason keeps the platform's classification, whatever the word.
+ */
+function createOnlyRefusal(err: unknown): unknown {
+  if (!(err instanceof ConflictError) || err instanceof FileExistsError) return err;
+  if (err instanceof CreateOnlyConflictError) return err;
+  if (typeof err.reason === 'string' && err.reason.trim() !== '') return err;
+  const refusal = new CreateOnlyConflictError(
+    // Neutral on purpose, and not the body's own text: a reasonless body whose
+    // `error` says "already exists" would carry the very claim this avoids. The
+    // body is kept on the error for diagnostics.
+    'a create-only upload was refused as a conflict, reason unknown: the 409 ' +
+      'carried no reason that could be read, so whether the path is taken was not said; ' +
+      'treat it as final rather than sending the same write again',
+    err.status,
+    err.body,
+    err.retryAfterMs,
+    { requestId: err.requestId, allow: err.allow, wwwAuthenticate: err.wwwAuthenticate },
+  );
+  // The constructor reads the body again, and would keep a blank word. Unknown
+  // is `undefined`, as documented on CreateOnlyConflictError.
+  (refusal as { reason?: string }).reason = undefined;
+  return refusal;
+}
 
 export class Computer {
   #t: Transport;
@@ -3759,6 +3800,23 @@ export class Computer {
    * `timeoutMs` extends the client's per-request deadline for this one
    * transfer, as on {@link readFile}; `0` disables it.
    *
+   * `overwrite: false` makes the write create-only: the file is written only if
+   * nothing is at `path` yet. When something is, the platform refuses with
+   * {@link FileExistsError} (a 409 whose `reason` is `exists`) and this request
+   * writes nothing — the file already there is untouched. If an earlier
+   * attempt's outcome was unknown (its response was lost), that file may be the
+   * one it wrote: read it and compare before choosing another path or
+   * overwriting. A 409 that carries no usable reason (a body that could not be
+   * read, or JSON without a string `reason`) is raised as
+   * {@link CreateOnlyConflictError}, with `reason` undefined and a message
+   * saying the reason is unknown: final, and not a claim that the path is
+   * taken. The default, `true`, replaces
+   * whatever is at `path`, as this method always has. Linux computers only: a
+   * Windows computer refuses `overwrite: false` with a 400. A host that cannot
+   * do create-only yet refuses it with a 409 whose `reason` is `unsupported`,
+   * and one whose support could not be confirmed with a 503; in both cases
+   * nothing was sent to the guest.
+   *
    * @returns how many bytes the platform says it wrote, or `undefined` if it
    * did not say. Not defaulted to what was sent: that would turn "it did not
    * say" into the affirmative claim that everything landed, which is the one
@@ -3768,8 +3826,14 @@ export class Computer {
   async writeFile(
     path: string,
     data: Uint8Array | string | ReadableStream<Uint8Array>,
-    opts: { timeoutMs?: number; contentLength?: number } & CallOptions = {},
+    opts: { timeoutMs?: number; contentLength?: number; overwrite?: boolean } & CallOptions = {},
   ): Promise<number | undefined> {
+    // Checked, not coerced: a JavaScript caller passing the string "false"
+    // would otherwise read as truthy and replace the very file they asked to
+    // keep.
+    if (opts.overwrite !== undefined && typeof opts.overwrite !== 'boolean') {
+      throw new ValidationError(`overwrite must be true or false (got ${String(opts.overwrite)})`);
+    }
     const bytes = typeof data === 'string' ? new TextEncoder().encode(data) : data;
     // Validated before the header is formed: String(NaN) is "NaN", and Node
     // fetch then rejects the request as a connection failure rather than a
@@ -3815,18 +3879,24 @@ export class Computer {
       }
       headers = { 'Content-Length': String(opts.contentLength) };
     }
-    const res = await this.#t.json<{ bytes?: number } | undefined>(
-      'PUT',
-      P.computerAction(this.id, 'files'),
-      {
-        query: P.filesQuery(path),
+    const res = await this.#t
+      .json<{ bytes?: number } | undefined>('PUT', P.computerAction(this.id, 'files'), {
+        // Sent only to ask for create-only. Absent means replace, which is what
+        // every platform version does, so the default request is byte for byte
+        // the one this method always sent.
+        query:
+          opts.overwrite === false
+            ? { ...P.filesQuery(path), overwrite: 'false' }
+            : P.filesQuery(path),
         raw: bytes,
         headers,
         noTimeout: opts.timeoutMs === 0,
         minTimeoutMs: opts.timeoutMs,
         signal: opts.signal,
-      },
-    );
+      })
+      .catch((err: unknown) => {
+        throw opts.overwrite === false ? createOnlyRefusal(err) : err;
+      });
     return count(res?.bytes);
   }
 

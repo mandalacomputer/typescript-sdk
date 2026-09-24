@@ -30,6 +30,7 @@ export type LegacyCommands = {
     destination: string,
     io: CliIO,
     signal: AbortSignal,
+    opts?: { overwrite?: boolean },
   ) => Promise<{
     source: string;
     destination: string;
@@ -438,7 +439,9 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
     if (path === 'webhooks create') P.webhookCreateBody({ ...hook, url: target });
     if (path === 'webhooks update') P.webhookUpdateBody(hook);
     if (path === 'scp') {
-      const result = await legacy.scp(target, args[1]!, io, signal);
+      const result = await legacy.scp(target, args[1]!, io, signal, {
+        overwrite: !b('no-overwrite'),
+      });
       if (json) return output.result(result);
       output.diagnostic(
         `${result.source} -> ${result.destination} (${result.accounting ?? `${result.bytes} bytes`})`,

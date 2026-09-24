@@ -109,6 +109,8 @@ export {
   ConflictError,
   ConnectionError,
   ConnectionInterruptedError,
+  CreateOnlyConflictError,
+  FileExistsError,
   GatewayTimeoutError,
   isTransient,
   MandalaError,

@@ -331,7 +331,12 @@ export const COMMANDS: readonly Command[] = [
     [flag('session', 'Terminal session name (default main)', { alias: 's' })],
     'unsupported',
   ),
-  command('scp', 'Copy one file; exactly one side is computer:/path', ['src', 'dst']),
+  command(
+    'scp',
+    'Copy one file; exactly one side is computer:/path',
+    ['src', 'dst'],
+    [bool('no-overwrite', 'Upload only: create the guest file, refusing if something is there')],
+  ),
   command('manifest', 'Print the machine-readable command contract'),
   {
     ...command('completion', 'Print a shell completion script; does not install it', ['shell']),
