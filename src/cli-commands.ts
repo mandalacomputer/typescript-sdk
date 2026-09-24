@@ -6,6 +6,7 @@ import { manifest } from './cli-manifest.js';
 import { CliError, help, type Parsed, parseArgs } from './cli-options.js';
 import { errorInfo, Output, redact } from './cli-output.js';
 import { type CliIO, documentInput, readInput } from './cli-runtime.js';
+import { secretsList, secretsRemove, secretsSet } from './cli-secrets.js';
 import {
   defaultSshRuntime,
   sshAccessCommand,
@@ -663,6 +664,12 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
         return output.result(raw(await client.webhooks.test(target, call)));
       case 'webhooks deliveries':
         return output.result((await client.webhooks.deliveries(target, call)).map(raw));
+      case 'secrets list':
+        return await secretsList(client, io, output, s('workspace'), signal);
+      case 'secrets set':
+        return await secretsSet(client, io, output, target, s('workspace'), signal);
+      case 'secrets rm':
+        return await secretsRemove(client, io, output, target, s('workspace'), signal);
       case 'ssh':
         return await sshSetup(client, io, output, ssh, target, s('key'), signal);
       case 'ssh-key list':

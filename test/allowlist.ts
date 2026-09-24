@@ -151,11 +151,13 @@ export const ALLOWED: ReadonlySet<string> = new Set(
 );
 
 /**
- * Routes the platform exposes that this SDK cannot yet call.
+ * Routes the platform exposes that this SDK deliberately does not wrap, each
+ * with its reason.
  *
- * Closing one means deleting its line from here, which is the point: the
- * alternative is a set of routes nobody is tracking, on a surface whose whole
- * design is that it is enumerable.
+ * Only routes that are intentionally not exposed belong here — not ones that
+ * are merely unwritten (OPL-5026 closed the last of those). Adding one means
+ * saying why here, which is the point: the alternative is a set of routes
+ * nobody is tracking, on a surface whose whole design is that it is enumerable.
  */
 export const UNIMPLEMENTED: ReadonlySet<string> = new Set([
   // The OpenAI-shaped door onto the agent loop. Deliberately not wrapped: a
@@ -163,20 +165,6 @@ export const UNIMPLEMENTED: ReadonlySet<string> = new Set([
   // here, and a second, worse OpenAI client inside this SDK would be a
   // maintenance obligation with no user.
   'POST chat/completions',
-  // The SDK can read and write files, but has no directory-listing method yet.
-  'GET computers/:id/files/list',
-  // Retained API history has no SDK convenience methods yet.
-  'GET computers/:id/activities',
-  'GET computers/:id/activities/:activity',
-  'GET computers/:id/activities/:activity/results',
-  // Passive platform signals have no client convenience method yet.
-  'GET computers/:id/signals',
-  // The account's secret store (OPL-4984); no client method yet.
-  'GET secrets',
-  'POST secrets',
-  'GET secrets/:id',
-  'PUT secrets/:id',
-  'DELETE secrets/:id',
 ]);
 
 /**
@@ -411,7 +399,7 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
 ]);
 
 /**
- * Parameters the SDK does not yet send or deliberately omits.
+ * Parameters the SDK deliberately omits.
  *
  * The input parameters are alternate spellings of something it does send. The
  * input route accepts Anthropic's computer-use vocabulary alongside this API's own, so a
@@ -420,15 +408,11 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
  * consistently is the point; sending both would be two ways for the same call
  * to mean different things.
  *
- * File transfers also have an option this SDK does not expose yet.
  * Parameters of a route in UNIMPLEMENTED are not listed here — a route nobody
  * calls sends none of its parameters, and repeating all six of chat/completions'
  * would say nothing the route's own line does not.
  */
 export const UNIMPLEMENTED_PARAMETERS: ReadonlySet<string> = new Set([
-  // File transfers cannot yet opt out of waking a suspended computer.
-  'GET computers/:id/files  query:no_wake',
-  'PUT computers/:id/files  query:no_wake',
   // `keys: ['ctrl', 'c']` is sent instead. The chord-as-one-string form cannot
   // express a key whose own name contains the separator.
   'POST computers/:id/input  body:key',
@@ -463,9 +447,14 @@ export function patternFor(path: string): string {
       prev === 'snapshots' ||
       prev === 'builds' ||
       prev === 'webhooks' ||
-      prev === 'ssh-keys'
+      prev === 'ssh-keys' ||
+      // The account's store, and only there: `computers/:id/secrets` is a
+      // literal at the end of a computer's path and has nothing after it.
+      (prev === 'secrets' && out.length === 1)
     )
       out.push(':id');
+    else if (out.length === 3 && out[0] === 'computers' && prev === 'activities')
+      out.push(':activity');
     else if (prev === 'exec') out.push(':pid');
     else if (prev === 'executions') out.push(':executionId');
     else if (out.length === 3 && out[0] === 'computers' && prev === 'results')
@@ -500,6 +489,7 @@ const PATH_PARAMETERS: ReadonlySet<string> = new Set([
   ':resultId',
   ':artifactId',
   ':window',
+  ':activity',
   ':namespace',
   ':name',
 ]);

@@ -54,6 +54,7 @@ const computers = flag('computer', 'Computer ID filter; repeat for several', {
   repeatable: true,
   conflicts: ['all-computers'],
 });
+const secretScope = flag('workspace', 'Workspace ID (default: the account-wide secrets)');
 const command = (
   path: string,
   description: string,
@@ -275,6 +276,19 @@ export const COMMANDS: readonly Command[] = [
   command('webhooks rotate', 'Rotate the secret; prints the new secret once', ['id']),
   command('webhooks test', 'Queue a test delivery; inspect deliveries for its outcome', ['id']),
   command('webhooks deliveries', 'List delivery attempts', ['id']),
+  command(
+    'secrets list',
+    'List stored secrets by name, id and revision (never values)',
+    [],
+    [secretScope],
+  ),
+  command(
+    'secrets set',
+    'Create or replace a secret; the value is read from stdin or a hidden prompt, never argv',
+    ['name'],
+    [secretScope],
+  ),
+  command('secrets rm', 'Delete a secret by name or id', ['name'], [secretScope]),
   command(
     'agent run',
     'Run an agent with MANDALA_MODEL_KEY',

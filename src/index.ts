@@ -24,6 +24,7 @@ import {
   Builds,
   Computers,
   Moves,
+  Secrets,
   Sizes,
   Snapshots,
   SshKeys,
@@ -48,6 +49,7 @@ export class Client {
   readonly builds: Builds;
   readonly computers: Computers;
   readonly moves: Moves;
+  readonly secrets: Secrets;
   readonly snapshots: Snapshots;
   readonly sshKeys: SshKeys;
   readonly templates: Templates;
@@ -66,6 +68,7 @@ export class Client {
     this.builds = new Builds(this.#t);
     this.computers = new Computers(this.#t);
     this.moves = new Moves(this.#t);
+    this.secrets = new Secrets(this.#t);
     this.snapshots = new Snapshots(this.#t);
     this.sshKeys = new SshKeys(this.#t);
     this.templates = new Templates(this.#t);
@@ -106,6 +109,7 @@ export type { ErrorMetadata } from './errors.js';
 export {
   APIError,
   AuthenticationError,
+  ComputerNotRunningError,
   ConflictError,
   ConnectionError,
   ConnectionInterruptedError,
@@ -164,28 +168,44 @@ export type {
   AccountQuota,
   AccountRemaining,
   AccountUsage,
+  Activity,
+  ActivityHealth,
+  ActivityPage,
+  ActivityResultItem,
+  ActivityResults,
   BackgroundExec,
   BuildProgress,
   BuildStep,
   ComputerUsage,
+  DeleteResult,
   ExecResult,
+  GuestDirectory,
+  GuestDirectoryEntry,
   GuestWindow,
   Holdings,
   Move,
+  PlatformSignal,
+  PlatformSignalGap,
   Point,
   PublishedTemplate,
   Retention,
   RetiredTemplates,
   Schedule,
+  Secret,
   SecretBinding,
   SecretBindings,
+  SecretList,
+  SecretsApplied,
+  SignalPage,
   Size,
   Snapshot,
+  SnapshotPurge,
   SshAccess,
   SshKey,
   Template,
   TemplateBuild,
   TemplateCheck,
+  TypeResult,
   UsagePeriod,
   UsageReport,
   UsageTotals,
@@ -196,12 +216,19 @@ export type {
   WindowResult,
 } from './models.js';
 export type {
+  ActivitiesArgs,
   ComputerState,
   CreateArgs,
   ExecArgs,
   MoveArgs,
+  PasteShortcut,
   ScrollDirection,
   SecretBindingArgs,
+  SecretCreateArgs,
+  SecretDeleteArgs,
+  SecretReplaceArgs,
+  SecretScopeArgs,
+  SignalsArgs,
   SshKeyAddArgs,
   UpdateArgs,
   WebhookCreateArgs,
@@ -210,9 +237,13 @@ export type {
 } from './paths.js';
 export {
   COMPUTER_STATES,
+  PASTE_MAX_BYTES,
   SCROLL_DIRECTIONS,
   SECRET_BINDINGS_MAX,
   SECRET_FILES_MAX,
+  SECRET_NAME_MAX_CHARS,
+  SECRET_VALUE_MAX_BYTES,
+  TYPE_MAX_CHARS,
   WEBHOOK_COMPUTERS_MAX,
   WEBHOOK_DESCRIPTION_MAX,
   WINDOW_ACTIONS,
@@ -229,6 +260,7 @@ export {
   Builds,
   Computers,
   Moves,
+  Secrets,
   Sizes,
   Snapshots,
   SshKeys,

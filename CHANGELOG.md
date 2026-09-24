@@ -25,6 +25,47 @@ This is the summary you read to decide whether to upgrade.
   The default is unchanged: an upload replaces the file. Linux computers only.
   The CLI gains `scp --no-overwrite` for uploads: error code `exists` for a
   taken path, and `conflict` for a refusal whose reason could not be read.
+- **The account's secret store.** `client.secrets.list()`, `create()`,
+  `get()`, `replace()` and `delete()` over `GET/POST /secrets` and
+  `GET/PUT/DELETE /secrets/{id}`, with `workspaceId` for a workspace's secrets.
+  Values are write-only: every answer is a `Secret` — name, scope,
+  `revisionId`, never a value. `replace` and `delete` send back the revision a
+  read answered, and `delete` requires it. The CLI gains `mandala secrets list`,
+  `mandala secrets set NAME` (value from stdin or a hidden prompt, never argv;
+  creates or replaces, re-reading a moved revision) and `mandala secrets rm NAME`.
+- **A computer's secret state.** `computer.secretBindings`,
+  `secretsGeneration`, `secretsApplied` (the delivery receipt), `secretsError`
+  and `secretsPending` — `true`, `false`, or `null` when the platform could not
+  check, which is unknown and never false.
+- **`computer.paste(text, { shortcut })`**, the `paste` input action: clipboard
+  plus Ctrl+V (or Ctrl+Shift+V), up to 8192 bytes.
+- **`computer.listDirectory(path)`**, `activities()`, `activity()`,
+  `activityResults()` and `signals()` — the directory listing, retained API
+  history and passive platform signals, which had no method.
+- **`noWake: true`** on every file read and write: refuse rather than resume a
+  computer that is not running. A reasonless 409 under it is the new
+  `ComputerNotRunningError`, which `isTransient` calls final.
+- **`computer.delete({ ..., detailed: true })`** answers the whole
+  `DeleteResult` — `ok`, `computerDeleted` and the per-copy `purge` counts —
+  since a purge still queued answers 202 with `ok: false` and does not throw.
+- `Snapshot.restoreAvailable` and `computerUnreachable`; `Holdings`
+  `computerPresent`, `capturing` and `deleting`; `APIError.method`.
+
+### Changed
+
+- **`isTransient` no longer calls a 503 on a change transient.** The platform
+  answers a failure after the request was sent with 503 too, so a create,
+  command or delete answered 503 may already have happened. An
+  `UnavailableError` is transient only for GET and HEAD (one built by hand,
+  with no `method`, keeps the old answer). Nothing in the SDK retried a change
+  on 503 before; this is the answer an embedder's own retry loop gets.
+- **`computer.type()` returns `{ mechanism }`** — `physical`, `unicode` or
+  `mixed` — instead of nothing, and refuses empty text or more than 400
+  characters before sending. Its docs no longer claim unmappable characters are
+  skipped: the platform refuses unsupported text before typing anything.
+- Docs: `WebhookDelivery.lastError` is an open set; `memoryDroppedReason` can
+  be `"capture unrecorded"`; a replaced secret value reaches a running computer
+  asynchronously and best effort, not "as soon as" or "within seconds".
 
 ## [0.5.0] — 2026-09-23
 

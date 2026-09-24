@@ -17,6 +17,7 @@
 
 import {
   APIError,
+  ComputerNotRunningError,
   ConnectionError,
   CreateOnlyConflictError,
   FileExistsError,
@@ -142,7 +143,8 @@ export const isTransientForPoll = (err: unknown): boolean => {
   if (
     err instanceof MoveRequiredError ||
     err instanceof FileExistsError ||
-    err instanceof CreateOnlyConflictError
+    err instanceof CreateOnlyConflictError ||
+    err instanceof ComputerNotRunningError
   )
     return false;
   if (err instanceof OriginTLSError) return false;

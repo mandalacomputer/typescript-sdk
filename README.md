@@ -410,7 +410,8 @@ await c.mouseDown(100, 200);
 await c.mouseUp(400, 300);
 await c.scroll(640, 400, { direction: 'down', amount: 3 });
 await c.scroll(640, 400, { direction: 'right', modifiers: ['shift'] });
-await c.type('hello');
+const { mechanism } = await c.type('hello');  // 'physical' | 'unicode' | 'mixed'
+await c.paste('Café — 東京 😀');               // clipboard + Ctrl+V; { shortcut: 'ctrl+shift+v' } for terminals
 await c.key('ctrl', 'c');                     // X11 keysyms work too: Page_Down, BackSpace
 await c.key(['ctrl', 'c'], { signal });       // the same chord, cancellable
 await c.holdKey(['shift'], 1.5);
@@ -425,6 +426,18 @@ would say so. Modifiers are a positional on the clicks and an option on
 `scroll`, and the wrong spelling of either is refused rather than sent with
 nothing held down. A `drag` with no `from` starts where the pointer is, and is
 refused if nothing has placed it yet.
+
+`type` takes 1 to 400 characters. Plain ASCII is typed as key events, about
+12 ms a character; text with anything else in it is typed whole by a guest
+helper using GTK Unicode composition, which works in supported Chromium GTK3 and
+Xfce Terminal setups on Linux X11 and is **refused**, not typed partially,
+elsewhere (Firefox, GTK4, Windows, Wayland). Unsupported text is refused before
+a key is pressed; bare CR and other control characters are refused too. The
+answer's `mechanism` says how it was typed. It confirms dispatch, not that the
+application accepted the text, so check the result — and a failure part-way can
+leave partial text, so look before retrying. For long text, `paste` writes the
+clipboard (up to 8192 bytes) and presses the shortcut; it replaces the clipboard
+and leaves it replaced, and a success likewise means delivered, not inserted.
 
 ### Screenshots, and the one flag a drive loop needs
 
@@ -1192,6 +1205,10 @@ for (const row of rows) {
 }
 ```
 
+`lastError` is one line for a person — `timeout`, `dns`, `refused`, `reset`,
+`unreachable`, `tls`, `redirect`, `address refused`, `status 503` and so on —
+and an **open set**: show it, do not switch on it.
+
 `cursor` on every delivery — and on the event body itself — is the bridge back
 to the stream: a job woken by `process.exited` that wants everything since can
 open the socket with `since:` that cursor. `file.changed` never arrives here; it
@@ -1199,6 +1216,68 @@ exists only because a socket nominated a tree, and a subscription has nothing to
 nominate against. Every paid plan allows ten subscriptions; the eleventh is a
 `ConflictError` naming the cap. Deleting one drops its pending deliveries with
 it.
+
+### Secrets
+
+The account keeps named values — API keys, tokens, kubeconfigs — that computers
+are bound to and receive at start, as an environment variable in the desktop
+session or as a file under `/run/mandala-secrets/user/files`. **A value goes in
+and never comes back out**: no call returns one, so keep your own copy.
+
+```ts
+const s = await client.secrets.create({ name: 'OPENAI_API_KEY', value: key });
+await c.setSecrets([{ secretId: s.id, env: 'OPENAI_API_KEY' }]);   // or { file: 'openai' }
+await c.restart();                                                  // delivers it
+
+const { secrets, delivery, limits } = await client.secrets.list();  // names, never values
+const fresh = await client.secrets.get(s.id);
+await client.secrets.replace(s.id, { value: rotated, revisionId: fresh.revisionId });
+await client.secrets.delete(s.id, { revisionId: (await client.secrets.get(s.id)).revisionId });
+```
+
+Omit `workspaceId` for the account-wide secrets, or pass one for a workspace's; a
+key confined to a workspace works there. `revisionId` moves on every replace,
+and `replace` and `delete` send back the one they read: a stale one is a
+`ConflictError` that changed nothing, so read again and decide. `delete`
+requires it. Reads need the member role and writes the owner role.
+
+A replaced value reaches a running computer bound to it as a file, and — on an
+image that supports it — one bound as a variable for new shells and
+`exec(…, { desktop: true })`; programs already running keep the old value until
+a restart. That is best effort and the answer does not wait for it, so read the
+computer:
+
+```ts
+await c.refresh();
+c.secretBindings;     // [{ secretId, revisionId, env } | { secretId, revisionId, file }]
+c.secretsPending;     // true: restart to deliver · false · null: could not be checked
+c.secretsApplied;     // { generation, appliedAt, revisions } — the delivery receipt
+c.secretsError;       // why the last delivering start was stopped
+```
+
+`secretsPending` is `null` when the platform could not check — unknown, never
+false — and absent on a computer with nothing bound and nothing pending.
+Deleting a secret does not recall a value already delivered, and a computer
+still bound to it cannot start again until the binding is removed.
+
+### Retained history and platform signals
+
+```ts
+const page = await c.activities();                 // newest first, safe metadata only
+const older = page.nextCursor && (await c.activities({ cursor: page.nextCursor }));
+const since = await c.activities({ cursor: page.changesCursor, changes: true });
+if (since.gap) { /* the journal could not be honoured: read history afresh */ }
+
+let sig = await c.signals();                        // a baseline: starts at the head
+sig = await c.signals({ since: sig.cursor });       // then replay from each cursor
+if (sig.gap) { /* events happened that can no longer be replayed */ }
+```
+
+`activities` are the requests sent through this computer's API — input, exec,
+window, clipboard — kept for up to seven days with no command, output or typed
+text. `signals` are the daemon's ephemeral observations: process exits, starts,
+stops, suspends. Neither wakes the computer, neither is complete coverage, and
+an accepted background request is not its completion.
 
 ### Files
 
@@ -1210,7 +1289,20 @@ const text = await c.readTextFile('/home/user/out.txt');
 
 Paths are absolute, inside the guest. There is no shell and no working directory
 behind a transfer, so a relative path is refused before the request is made.
-Works while the computer is running or suspended.
+Works while the computer is running or suspended — a suspended one is resumed
+for it. Pass `noWake: true` to any read or write to refuse instead of resuming:
+a computer that is not running is then a `ComputerNotRunningError`, a
+`ConflictError` that `isTransient` calls final, since only starting it helps.
+
+```ts
+const dir = await c.listDirectory('/home/user/Desktop');
+for (const e of dir.entries) console.log(e.type, e.name, e.sizeBytes ?? '');
+if (dir.truncated) console.warn('partial, unordered sample — list a narrower path');
+```
+
+`listDirectory` is bounded, not paged: a large directory comes back `truncated`
+with no way to ask for the rest. It never resumes a computer, does not follow
+symbolic links, and counts names this API cannot carry in `skipped`.
 
 `writeFile` takes a string, bytes, or a `ReadableStream` — so a large local
 file goes up as the request body rather than living as one Buffer first; pass
@@ -1925,7 +2017,11 @@ also how you keep something past the window.
 
 `restore` is refused on an orphaned snapshot — one whose computer is gone. Clone
 is what works there, because a restore puts the disk back on a source that no
-longer exists.
+longer exists. `restoreAvailable` says whether the computer's *current* host
+holds a usable copy — `false` for a copy left behind on a host the computer has
+moved away from, which can still be cloned — and `computerUnreachable` means
+nobody could say whether the computer exists, so `orphaned` being false is not
+news that it does.
 
 ### Deleting, and the purge interlock
 
@@ -1941,6 +2037,18 @@ console.log(`${held.count} snapshots, ${(held.sizeBytes / 1e9).toFixed(2)} GB`);
 
 await c.delete({ deleteSnapshots: true, expect: held.fingerprint });
 ```
+
+A purge can finish in part. The platform answers 202 with `ok: false` while
+copies are still queued, and that is not an exception — so ask for the whole
+answer and read it:
+
+```ts
+const res = await c.delete({ deleteSnapshots: true, expect: held.fingerprint, detailed: true });
+if (!res.ok) console.warn(res.error, res.purge);   // queued, failed, unknown, remaining
+```
+
+A 409 means part of it was refused and a 503 that the outcome is unknown; neither
+is replayed for you. Read `holdings()` again before retrying.
 
 The fingerprint names that exact set, and the purge is refused unless it still
 does — so a capture that finished between your decision and the call cannot be
@@ -2202,10 +2310,14 @@ import {
   ConflictError,       //     409 — right request, wrong moment. `err.reason` says
                        //           whether retrying it helps
   MoveRequiredError,   //       409 — …except this one: the size needs a new host
+  FileExistsError,     //       409 `exists` — a create-only upload's path is taken
+  CreateOnlyConflictError,//    409 — a create-only upload refused, reason unreadable
+  ComputerNotRunningError,//    409 — a noWake transfer on a computer not running
   TooLargeError,       //     413 — more file than one request moves
   RangeNotSatisfiableError,// 416 — that range names no byte the file has
   RateLimitError,      //     429 — retry after retryAfterMs when present
-  UnavailableError,    //     503 — a listing would have been short
+  UnavailableError,    //     503 — could not answer now. A READ can be asked again;
+                       //           a CHANGE may or may not have happened
   GatewayTimeoutError, //     504/524 — a proxy gave up; work may carry on
   OriginResponseError, //     520 — it answered, unreadably; work may have happened
   OriginUnreachableError,//   521-523 — a proxy could not reach it. NOT in
@@ -2294,12 +2406,16 @@ acted on.
 for it, and it is the part a program is allowed to depend on — `err.message` is
 prose and is rewritten. For ordinary request refusals, `contention` and `starting` clear on their
 own, `unavailable` means the computer is not running and only starting it helps,
-`unsupported` means this computer cannot do it at all, and `revoked` is about the
+`unsupported` means this computer cannot do it at all, `exists` means a
+create-only upload found its path taken, and `revoked` is about the
 caller rather than the computer — the authority the request arrived with no
 longer holds, so sending it again unchanged is refused the same way (a 401 means
 present a credential again; a 403 means the role changed and signing in again
 will not help). `isTransient` reads it before it looks at the type, which is how
 a clipboard call against a stopped computer stopped being told to retry.
+`starting` covers the guest agent's two-minute boot window after a start, a
+restart or a reboot inside the guest; an agent still silent after that is a 502,
+whose outcome is unknown and which `isTransient` does not call transient.
 
 **Absent means no classification was given**, and so does a word you do not
 recognise — not every refusal has one, and the platform reserves the right to
@@ -2352,9 +2468,16 @@ That predicate is exported, so its caller may be wrapping a `create`. Several
 of these statuses leave the outcome unknown, which is how one computer becomes
 two; TLS failures require a configuration fix before retrying.
 Its default retryable classes are `ConflictError`, `RateLimitError`,
-`UnavailableError` and `ConnectionError`. It excludes `MoveRequiredError` and
+`UnavailableError` and `ConnectionError`. It excludes `MoveRequiredError`,
+`FileExistsError`, `CreateOnlyConflictError`, `ComputerNotRunningError` and
 `ConnectionInterruptedError` (including request timeouts), and honors recognized
 API error reasons that identify temporary or permanent failures.
+
+**A 503 is transient only for a read.** The platform answers a failure after a
+request was sent with the same 503, so a create, a command or a delete answered
+503 may already have happened. Every error this SDK builds carries `err.method`,
+and `isTransient` calls an `UnavailableError` transient only when that was GET
+or HEAD. Read the current state before sending a change again.
 
 The wait helpers do not ask it. They replay idempotent reads under a deadline
 you set, so they can ride out 502, 504 and 520-523. They stop on 524 (a proxy
@@ -2365,7 +2488,7 @@ cannot safely recommend replaying for an arbitrary operation.
 
 ## The `mandala` CLI
 
-The same package provides commands for computers, templates, snapshots, webhooks,
+The same package provides commands for computers, templates, snapshots, webhooks, secrets,
 account quota, historical usage, and agent runs. The CLI requires Node 22+;
 importing the SDK does not import the CLI or its terminal dependencies.
 Use `npx mandala` from a project with the package
@@ -2568,7 +2691,7 @@ forces power off. `computers delete` keeps snapshots unless you pass both
 `--delete-snapshots` and `--expect FINGERPRINT`. Obtain and inspect the fingerprint
 with `snapshots holdings`; the CLI never selects a purge fingerprint for you.
 
-### Templates, snapshots, and webhooks
+### Templates, snapshots, webhooks, and secrets
 
 ```sh
 mandala templates list
@@ -2582,6 +2705,9 @@ mandala snapshots create workbench --name before-upgrade
 mandala snapshots schedule set workbench --hour 4 --minute 30 --tz UTC
 mandala webhooks create https://hooks.example.com/mandala --event computer.ready --json
 mandala webhooks deliveries whk-example --json
+mandala secrets list --workspace ws-example
+printf %s "$OPENAI_API_KEY" | mandala secrets set OPENAI_API_KEY
+mandala secrets rm OPENAI_API_KEY
 ```
 
 Template validate, publish, and build read a file, or `-` for piped stdin. Build
@@ -2607,6 +2733,14 @@ to change delivery state. Create and rotate print the newly returned signing
 secret **once** in the result, with a reminder on stderr. Save that result: get
 and list do not return the secret. `webhooks test` queues a delivery; inspect
 `webhooks deliveries` to learn whether it was delivered.
+
+`secrets set NAME` reads the value from stdin (less one trailing newline) or,
+at a terminal, from a prompt with echo off — **never from the command line**,
+where it would sit in shell history and process listings. It creates the secret,
+or replaces the one of that name (ASCII case ignored, as the platform ignores
+it) against the revision it read, re-reading a few times if another writer moved
+it first. `secrets rm` takes a name or an id. `secrets list` prints names, ids
+and revisions; no command prints a value. All three take `--workspace`.
 
 ### Agent runs and cancellation
 

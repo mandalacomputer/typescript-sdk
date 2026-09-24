@@ -954,6 +954,7 @@ export class Transport {
       }
     }
     const error = errorForStatus(resp.status, message, body, {
+      method,
       requestId: resp.headers.get('x-request-id') ?? undefined,
       allow: resp.headers.get('allow') ?? undefined,
       wwwAuthenticate: resp.headers.get('www-authenticate') ?? undefined,

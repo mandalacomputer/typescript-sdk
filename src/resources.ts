@@ -15,6 +15,8 @@ import type {
   PublishedTemplate,
   Retention,
   RetiredTemplates,
+  Secret,
+  SecretList,
   Size,
   Snapshot,
   SshKey,
@@ -39,6 +41,8 @@ import {
   toPublishedTemplate,
   toRetention,
   toRetiredTemplates,
+  toSecret,
+  toSecretList,
   toSize,
   toSnapshot,
   toSshKey,
@@ -1949,5 +1953,116 @@ export class SshKeys {
   /** Remove one key. Computers stop accepting it once they receive the new list. */
   async remove(keyId: string, opts: CallOptions = {}): Promise<void> {
     await this.#t.json('DELETE', P.sshKey(keyId), { signal: opts.signal });
+  }
+}
+
+/**
+ * The account's secret store (platform OPL-4984): named values that computers
+ * are bound to with {@link Computer.setSecrets}, and delivered into at start.
+ *
+ * VALUES ARE WRITE-ONLY. They go in with {@link create} and {@link replace}
+ * and no route ever returns one — every answer here is the name, the scope and
+ * the `revisionId`. Keep your own copy if you need it again.
+ *
+ * Scopes: omit `workspaceId` for the account-wide secrets, which a computer in
+ * any workspace may be bound to, or name a workspace. An API key confined to a
+ * workspace works in that workspace, and naming any other scope is a
+ * {@link PermissionDeniedError}. Reads need the `member` role; writes need
+ * `owner`.
+ *
+ * `revisionId` is optimistic concurrency. {@link replace} and {@link delete}
+ * send back the revision a read answered, and a stale one is a
+ * {@link ConflictError} with nothing changed: read again and decide. Neither is
+ * retried by this SDK — a 503 answer to a write means it may or may not have
+ * happened, so read the secret before sending it again.
+ */
+export class Secrets {
+  #t: Transport;
+
+  /** @internal */
+  constructor(transport: Transport) {
+    this.#t = transport;
+  }
+
+  /**
+   * The secrets in one scope, whether delivery is on here, and the store's
+   * limits. Names, ids and revisions only.
+   */
+  async list(opts: P.SecretScopeArgs & CallOptions = {}): Promise<SecretList> {
+    const data = await this.#t.json('GET', P.SECRETS, {
+      query: P.secretScopeQuery(opts),
+      signal: opts.signal,
+    });
+    return toSecretList(data, 'GET', P.SECRETS);
+  }
+
+  /**
+   * Store a value under a name. The answer is the secret without its value.
+   *
+   * ```ts
+   * const s = await client.secrets.create({ name: 'OPENAI_API_KEY', value: key });
+   * await computer.setSecrets([{ secretId: s.id, env: 'OPENAI_API_KEY' }]);
+   * ```
+   *
+   * A name already taken in the scope is a {@link ConflictError}; replace that
+   * secret instead. Two limits are answered 400 ({@link APIError}): how many the
+   * account holds at once, and how many it may ever create — {@link list}
+   * reports both.
+   */
+  async create(args: P.SecretCreateArgs, opts: CallOptions = {}): Promise<Secret> {
+    const data = await this.#t.json('POST', P.SECRETS, {
+      body: P.secretCreateBody(args),
+      signal: opts.signal,
+    });
+    return toSecret(data, `the secret from POST ${P.SECRETS}`);
+  }
+
+  /** One secret's name, scope and current `revisionId`, without its value. */
+  async get(secretId: string, opts: P.SecretScopeArgs & CallOptions = {}): Promise<Secret> {
+    const path = P.secret(secretId);
+    const data = await this.#t.json('GET', path, {
+      query: P.secretScopeQuery(opts),
+      signal: opts.signal,
+    });
+    return toSecret(data, `the secret from GET ${path}`);
+  }
+
+  /**
+   * Replace the value, moving `revisionId`. Send the revision you read: if it
+   * has moved since, the answer is a {@link ConflictError} and nothing changed.
+   *
+   * A computer bound to it gets the new value at its next start or restart.
+   * A running one bound as a FILE, and one bound as a variable on an image
+   * that supports it, is also sent the value live — asynchronously and on a
+   * best-effort basis, so the answer does not say whether that landed; read
+   * {@link Computer.secretsPending} to find out.
+   */
+  async replace(
+    secretId: string,
+    args: P.SecretReplaceArgs,
+    opts: CallOptions = {},
+  ): Promise<Secret> {
+    const path = P.secret(secretId);
+    const data = await this.#t.json('PUT', path, {
+      body: P.secretReplaceBody(args),
+      signal: opts.signal,
+    });
+    return toSecret(data, `the secret from PUT ${path}`);
+  }
+
+  /**
+   * Delete it. `revisionId` is REQUIRED, and a stale one is a
+   * {@link ConflictError} with nothing deleted.
+   *
+   * Deleting does not recall a value already delivered, and is not refused
+   * while computers are bound to it — but a computer still bound cannot be
+   * given its secrets again: its next start is refused, and a restart stops it.
+   * Remove the binding with {@link Computer.setSecrets} first.
+   */
+  async delete(secretId: string, args: P.SecretDeleteArgs, opts: CallOptions = {}): Promise<void> {
+    await this.#t.json('DELETE', P.secret(secretId), {
+      query: P.secretDeleteQuery(args),
+      signal: opts.signal,
+    });
   }
 }

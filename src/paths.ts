@@ -73,6 +73,13 @@ export const WEBHOOKS = 'webhooks';
  * once SSH is switched on there.
  */
 export const SSH_KEYS = 'ssh-keys';
+/**
+ * The account's secret store (platform OPL-4984): named values a computer can
+ * be bound to with `PUT computers/:id/secrets`. Account-scoped, or confined to
+ * one workspace with `workspace_id`. Values go in and never come back out: no
+ * route answers one.
+ */
+export const SECRETS = 'secrets';
 
 /**
  * One id, in a path, refused when it is empty.
@@ -179,6 +186,8 @@ type ComputerAction =
   | 'schedule'
   | 'ssh'
   | 'secrets'
+  | 'activities'
+  | 'signals'
   | 'agent';
 
 export const computerAction = (id: string, action: ComputerAction): string =>
@@ -464,6 +473,7 @@ export function computerState(v: ComputerState | undefined): ComputerState | und
 export const build = (id: string): string => `${BUILDS}/${pathId(id, 'build id')}`;
 export const sshKey = (id: string): string => `${SSH_KEYS}/${pathId(id, 'ssh key id')}`;
 export const webhook = (id: string): string => `${WEBHOOKS}/${pathId(id, 'webhook id')}`;
+export const secret = (id: string): string => `${SECRETS}/${pathId(id, 'secret id')}`;
 export const webhookAction = (id: string, action: 'rotate' | 'test' | 'deliveries'): string =>
   `${webhook(id)}/${action}`;
 
@@ -555,7 +565,7 @@ export type CreateArgs = {
   /** Boot it immediately. True by default. */
   start?: boolean;
   /**
-   * Secrets from the account (Settings → Secrets) to deliver into the desktop
+   * Secrets from the account (`client.secrets`) to deliver into the desktop
    * session each time the computer starts: each as an environment variable
    * (`env`) or as a file under `/run/mandala-secrets/user/files` (`file`).
    * Linux only, and only on a template whose image can receive them.
@@ -576,8 +586,10 @@ export type SecretBindingArgs = {
   /**
    * The file the value is published as, `/run/mandala-secrets/user/files/<file>`:
    * lowercase letters, digits, `-` and `_`, starting with a letter, at most 48
-   * characters. For what a program reads from a path. A file may hold any bytes,
-   * and a replaced value reaches a running computer's file within seconds.
+   * characters. For what a program reads from a path. A file may hold any bytes.
+   * A replaced value is also sent to a running computer's file — asynchronously
+   * and best effort, so a computer may hold the old value until its next start
+   * or restart.
    */
   file?: string;
   revisionId?: string;
@@ -1181,9 +1193,83 @@ function absoluteGuestPath(path: string, what: string): string {
  * one (a UNC share like `\\server\share\f.txt`, or the `\\?\` form). What
  * stays refused is the drive-relative `C:notes.txt` and anything rootless.
  */
-export function filesQuery(path: string): Query {
+export function filesQuery(path: string, noWake?: boolean): Query {
   absoluteGuestPath(path, 'guest path');
+  if (noWake !== undefined && typeof noWake !== 'boolean') {
+    throw new ValidationError(`noWake must be true or false (got ${String(noWake)})`);
+  }
+  // `1` is the one value the platform accepts; anything else is a 400. Absent
+  // is the default, which resumes a suspended computer for the transfer.
+  return noWake ? { path, no_wake: '1' } : { path };
+}
+
+/** A computer's guest directory listing. */
+export const filesList = (id: string): string => `${computer(id)}/files/list`;
+
+/** The query for `GET computers/:id/files/list`. */
+export function directoryQuery(path: string): Query {
+  absoluteGuestPath(path, 'guest directory');
   return { path };
+}
+
+/** One retained activity, or its result versions. */
+export const activity = (id: string, activityId: string): string =>
+  `${computer(id)}/activities/${pathId(activityId, 'activity id')}`;
+export const activityResults = (id: string, activityId: string): string =>
+  `${activity(id, activityId)}/results`;
+
+/** What one page of activity history asks for. */
+export type ActivitiesArgs = {
+  /** `nextCursor` from the previous page for older rows, or `changesCursor` with `changes`. */
+  cursor?: string;
+  /** Read the change journal instead of history. Requires a changes `cursor`. */
+  changes?: boolean;
+};
+
+export function activitiesQuery(args: ActivitiesArgs = {}): Query {
+  if (!isRecord(args)) throw new ValidationError(`options must be an object (got ${typeof args})`);
+  const q: Query = {};
+  if (args.cursor !== undefined) {
+    const c = requireString(args.cursor, 'cursor');
+    if (!c || c.length > 2048) throw new ValidationError('cursor must be 1 to 2048 characters');
+    q.cursor = c;
+  }
+  if (flag(args.changes, 'changes')) {
+    if (q.cursor === undefined) {
+      throw new ValidationError(
+        'changes needs a cursor: the changesCursor a history page answered',
+      );
+    }
+    q.changes = '1';
+  }
+  return q;
+}
+
+/** What one page of platform signals asks for. */
+export type SignalsArgs = {
+  /** The `cursor` of the previous page. Omitted, the read is a baseline at the current head. */
+  since?: string;
+  /** At most this many events, 1 to 100. The platform's default is 50. */
+  limit?: number;
+};
+
+export function signalsQuery(args: SignalsArgs = {}): Query {
+  if (!isRecord(args)) throw new ValidationError(`options must be an object (got ${typeof args})`);
+  const q: Query = {};
+  if (args.since !== undefined) {
+    const c = requireString(args.since, 'since');
+    // An empty one is the platform's baseline too; sent as absent so the two
+    // spellings of "from now" are one request.
+    if (c.length > 2048) throw new ValidationError('since must be at most 2048 characters');
+    if (c) q.since = c;
+  }
+  if (args.limit !== undefined) {
+    if (!Number.isInteger(args.limit) || args.limit < 1 || args.limit > 100) {
+      throw new ValidationError(`limit must be a whole number from 1 to 100 (got ${args.limit})`);
+    }
+    q.limit = args.limit;
+  }
+  return q;
 }
 
 /** One byte position or count, refused when it is not a whole number of bytes. */
@@ -1488,13 +1574,54 @@ export function scrollBody(args: {
   return body;
 }
 
-export const typeBody = (text: string): Json => ({
-  action: 'type',
+/** The most a single `type` may carry, in Unicode characters (code points). */
+export const TYPE_MAX_CHARS = 400;
+/** The most a single `paste` may carry, in UTF-8 bytes. */
+export const PASTE_MAX_BYTES = 8192;
+
+export const typeBody = (text: string): Json => {
   // Checked the way {@link clipboardBody} checks its own text, which is the
   // builder immediately beside this one: the two send a string to the same
   // guest and only one of them refused a non-string locally.
-  text: requireString(text, 'type() text'),
-});
+  const t = requireString(text, 'type() text');
+  const chars = [...t].length;
+  if (chars < 1 || chars > TYPE_MAX_CHARS) {
+    throw new ValidationError(
+      `type() text must be 1 to ${TYPE_MAX_CHARS} characters (got ${chars}); ` +
+        'split longer text, or use paste() for fast insertion',
+    );
+  }
+  return { action: 'type', text: t };
+};
+
+/** The two shortcuts a paste may send. `ctrl+shift+v` is for terminals that need it. */
+export type PasteShortcut = 'ctrl+v' | 'ctrl+shift+v';
+
+/**
+ * The body for a `paste`: the text goes onto the desktop clipboard and the
+ * shortcut is pressed. The shortcut is sent as `keys` — this SDK's one spelling
+ * of a chord — and only when it is not the default.
+ */
+export function pasteBody(text: string, shortcut?: PasteShortcut): Json {
+  const t = requireString(text, 'paste() text');
+  const bytes = new TextEncoder().encode(t).length;
+  if (bytes < 1 || bytes > PASTE_MAX_BYTES) {
+    throw new ValidationError(
+      `paste() text must be 1 to ${PASTE_MAX_BYTES} bytes of UTF-8 (got ${bytes})`,
+    );
+  }
+  if (t.includes('\0')) throw new ValidationError('paste() text must not contain NUL');
+  if (/\p{Surrogate}/u.test(t)) throw new ValidationError('paste() text must be valid UTF-8');
+  const body: Json = { action: 'paste', text: t };
+  if (shortcut === undefined || shortcut === 'ctrl+v') return body;
+  if (shortcut !== 'ctrl+shift+v') {
+    throw new ValidationError(
+      `paste() shortcut must be 'ctrl+v' or 'ctrl+shift+v' (got ${String(shortcut)})`,
+    );
+  }
+  body.keys = ['ctrl', 'shift', 'v'];
+  return body;
+}
 
 /**
  * The chord itself, refused when it is not a list of key names.
@@ -2092,4 +2219,161 @@ export function sshAccessBody(enabled: boolean): Json {
     throw new ValidationError(`enabled must be a boolean (got ${typeof enabled})`);
   }
   return { enabled };
+}
+
+// --- the secret store -----------------------------------------------------
+
+/** The longest secret name, in characters (code points), and the largest value, in UTF-8 bytes. */
+export const SECRET_NAME_MAX_CHARS = 60;
+export const SECRET_VALUE_MAX_BYTES = 4096;
+/** `csr-` and twenty-four hex characters: what a replace or a delete sends back. */
+export const SECRET_REVISION = /^csr-[0-9a-f]{24}$/;
+
+/** Which scope a secret-store call means. Omit it for the account-wide secrets. */
+export type SecretScopeArgs = {
+  /**
+   * The workspace the secret belongs to. Omitted, the scope is the account-wide
+   * one — except under an API key confined to a workspace, where it is that
+   * workspace and naming any other is a `PermissionDeniedError`.
+   */
+  workspaceId?: string;
+};
+
+/** What `POST secrets` takes. */
+export type SecretCreateArgs = SecretScopeArgs & {
+  /** Up to 60 characters, no control characters. Unique within its scope, ignoring ASCII case. */
+  name: string;
+  /** The value, as text: 1 to 4096 bytes of UTF-8. Write-only — no route ever returns it. */
+  value: string;
+};
+
+/** What `PUT secrets/:id` takes. */
+export type SecretReplaceArgs = SecretScopeArgs & {
+  /** The new value: 1 to 4096 bytes of UTF-8. */
+  value: string;
+  /** The `revisionId` a read of this secret answered. A stale one is a `ConflictError`. */
+  revisionId: string;
+};
+
+/** What `DELETE secrets/:id` takes. `revisionId` is required. */
+export type SecretDeleteArgs = SecretScopeArgs & {
+  /** The `revisionId` a read of this secret answered. A stale one is a `ConflictError`. */
+  revisionId: string;
+};
+
+/**
+ * The scope, refused when it is a string the platform would refuse.
+ *
+ * `''` in particular: the platform keeps "absent" (the account-wide scope) and
+ * a workspace id apart, and refuses an empty one rather than reading it as
+ * absent, so a caller who meant the account scope is told here instead.
+ */
+function secretScope(workspaceId: unknown): string | undefined {
+  if (workspaceId === undefined) return undefined;
+  const ws = requireString(workspaceId, 'workspaceId');
+  if (!ws.trim() || ws !== ws.trim()) {
+    throw new ValidationError(
+      'workspaceId must be a workspace id, with no spaces around it; omit it for the account-wide secrets',
+    );
+  }
+  return ws;
+}
+
+/**
+ * A value, checked without ever being quoted.
+ *
+ * Every message here names the rule and never the value: an error is logged,
+ * shown to a model and pasted into issues, and a secret that leaked through the
+ * refusal of its own write would be the worst place for one to leak.
+ */
+function secretValue(value: unknown): string {
+  if (typeof value !== 'string') {
+    throw new ValidationError(
+      `value must be a string, not ${value === null ? 'null' : typeof value}`,
+    );
+  }
+  // A lone surrogate has no UTF-8 spelling; the platform refuses it rather than
+  // store U+FFFD in its place, and so does this.
+  // A well-formed pair is one code point under the `u` flag and does not match.
+  if (/\p{Surrogate}/u.test(value)) {
+    throw new ValidationError('value must be valid UTF-8 text (it contains a lone surrogate)');
+  }
+  const bytes = new TextEncoder().encode(value).length;
+  if (bytes < 1 || bytes > SECRET_VALUE_MAX_BYTES) {
+    throw new ValidationError(
+      `value must be 1 to ${SECRET_VALUE_MAX_BYTES} bytes of UTF-8 (got ${bytes} bytes)`,
+    );
+  }
+  return value;
+}
+
+/** A secret's name as the platform stores it: trimmed, 1–60 code points, no control characters. */
+export function secretName(name: unknown): string {
+  const trimmed = requireString(name, 'name').trim();
+  const length = [...trimmed].length;
+  if (length < 1 || length > SECRET_NAME_MAX_CHARS || /\p{Cc}/u.test(trimmed)) {
+    throw new ValidationError(
+      `name must be 1 to ${SECRET_NAME_MAX_CHARS} characters with no control characters`,
+    );
+  }
+  return trimmed;
+}
+
+function secretRevision(revisionId: unknown): string {
+  const rev = requireString(revisionId, 'revisionId');
+  if (!SECRET_REVISION.test(rev)) {
+    throw new ValidationError(
+      `revisionId must be the revision id a read of this secret answered (csr- and 24 hex characters), got ${JSON.stringify(rev.slice(0, 40))}`,
+    );
+  }
+  return rev;
+}
+
+/** The query for `GET secrets` and `GET secrets/:id`. */
+export function secretScopeQuery(args: SecretScopeArgs = {}): Record<string, string> {
+  if (!isRecord(args)) throw new ValidationError(`options must be an object (got ${typeof args})`);
+  const ws = secretScope(args.workspaceId);
+  return ws === undefined ? {} : { workspace_id: ws };
+}
+
+/** The body for `POST secrets`. */
+export function secretCreateBody(args: SecretCreateArgs): Json {
+  if (!isRecord(args)) {
+    throw new ValidationError(
+      `secret arguments must be an object with a name and a value (got ${typeof args})`,
+    );
+  }
+  return omitUndefined({
+    name: secretName(args.name),
+    value: secretValue(args.value),
+    workspace_id: secretScope(args.workspaceId),
+  });
+}
+
+/** The body for `PUT secrets/:id`. */
+export function secretReplaceBody(args: SecretReplaceArgs): Json {
+  if (!isRecord(args)) {
+    throw new ValidationError(
+      `secret arguments must be an object with a value and a revisionId (got ${typeof args})`,
+    );
+  }
+  return omitUndefined({
+    value: secretValue(args.value),
+    revision_id: secretRevision(args.revisionId),
+    workspace_id: secretScope(args.workspaceId),
+  });
+}
+
+/** The query for `DELETE secrets/:id`: the revision is required, and a stale one deletes nothing. */
+export function secretDeleteQuery(args: SecretDeleteArgs): Record<string, string> {
+  if (!isRecord(args)) {
+    throw new ValidationError(
+      `delete needs { revisionId }: the revision id a read of this secret answered (got ${typeof args})`,
+    );
+  }
+  const ws = secretScope(args.workspaceId);
+  return {
+    revision_id: secretRevision(args.revisionId),
+    ...(ws === undefined ? {} : { workspace_id: ws }),
+  };
 }
