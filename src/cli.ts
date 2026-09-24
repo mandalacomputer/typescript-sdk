@@ -964,10 +964,17 @@ const cmdScp: LegacyCommands['scp'] = async (srcArg, dstArg, io, signal, opts = 
       });
     } catch (error) {
       if (error instanceof FileExistsError) {
+        // Only THIS upload is known to have written nothing: an earlier attempt
+        // whose answer was lost may have written the file itself.
+        const said =
+          error.reason === 'exists'
+            ? `${remote.target}:${path} already exists`
+            : `${error.message} — ${remote.target}:${path}`;
         throw new CliError(
           'exists',
-          `${remote.target}:${path} already exists, and --no-overwrite left it untouched; ` +
-            'nothing was written. Drop --no-overwrite to replace it.',
+          `${said}; this upload wrote nothing. If an earlier attempt's outcome was unknown, ` +
+            'the file may be yours: read it and compare before choosing another path or ' +
+            'dropping --no-overwrite to replace it.',
           { status: error.status, reason: error.reason },
         );
       }

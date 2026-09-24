@@ -1859,7 +1859,11 @@ describe('legacy JSON modes', () => {
       false,
     );
     expect(human.code).toBe(1);
-    expect(human.err).toContain('nothing was written. Drop --no-overwrite to replace it.');
+    expect(human.err).toContain('this upload wrote nothing');
+    // A retry after a lost answer meets its own file; only THIS attempt is known.
+    expect(human.err).toContain(
+      "If an earlier attempt's outcome was unknown, the file may be yours: read it and compare",
+    );
   });
 
   it('refuses scp --no-overwrite on a download before any request', async () => {

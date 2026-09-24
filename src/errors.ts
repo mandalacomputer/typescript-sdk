@@ -365,7 +365,7 @@ export class MoveRequiredError extends ConflictError {
  *
  * `writeFile(path, data, { overwrite: false })` asks the platform to create the
  * file only if nothing is at `path`. When something is, the answer is 409 with
- * `reason: "exists"` and NOTHING was written — the file that was there is
+ * `reason: "exists"` and this request wrote NOTHING — the file that was there is
  * untouched. Its own class for the reason {@link MoveRequiredError} has one: it
  * is a {@link ConflictError} by status and the opposite of one by nature. A
  * conflict clears by waiting; this clears only when the caller decides — pick
@@ -374,6 +374,19 @@ export class MoveRequiredError extends ConflictError {
  *
  * A subclass, so `catch (e) { if (e instanceof ConflictError) }` written before
  * this existed still catches it.
+ *
+ * "Nothing written" is about THIS request. A create-only upload whose earlier
+ * attempt lost its response may well have written the file itself, and the
+ * retry then meets its own file here. If an earlier attempt's outcome was
+ * unknown, read the file and compare before choosing another path or
+ * overwriting.
+ *
+ * {@link APIError.reason} is `exists` when the platform's body said so, and
+ * `undefined` when the 409 answering a create-only upload could not be read — a
+ * body interrupted in flight, empty, or not the platform's JSON. That refusal
+ * is raised as this class too, with a message saying the reason was unreadable:
+ * on this route a 409 is `exists` or `unsupported`, neither of which clears by
+ * waiting. {@link isTransient} answers false to this class either way.
  */
 export class FileExistsError extends ConflictError {
   override name = 'FileExistsError';
@@ -977,6 +990,10 @@ export function isTransient(err: unknown): boolean {
   // long as the computer is on that host. Checked before the type branch below
   // that would otherwise say yes.
   if (err instanceof MoveRequiredError) return false;
+  // By class as well as by word: a create-only upload whose 409 body could not
+  // be read carries no `reason` at all, and would otherwise fall through to the
+  // ConflictError branch below and be called worth sending again.
+  if (err instanceof FileExistsError) return false;
   // A lost RESPONSE is not a request that never left, and only one of the two
   // is safe to replay blind. Same shape as the line above and the same reason:
   // a subclass of a branch below that would otherwise say yes (OPL-3855). It

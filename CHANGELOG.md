@@ -14,7 +14,11 @@ This is the summary you read to decide whether to upgrade.
 - **Create-only uploads.** `computer.writeFile(path, data, { overwrite: false })`
   writes the file only if nothing is at `path`. A path that is taken is refused
   with the new `FileExistsError` — a `ConflictError` whose `reason` is
-  `"exists"`, which `isTransient` calls permanent — and nothing is written.
+  `"exists"`, which `isTransient` calls permanent — and that request writes
+  nothing. A create-only upload's 409 whose body could not be read is raised as
+  `FileExistsError` too, never as a transient conflict. If an earlier attempt's
+  outcome was unknown, the file may be yours: read it and compare before
+  choosing another path or overwriting.
   The default is unchanged: an upload replaces the file. Linux computers only.
   The CLI gains `scp --no-overwrite` for uploads.
 

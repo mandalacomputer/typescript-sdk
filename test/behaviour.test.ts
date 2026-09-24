@@ -2312,6 +2312,55 @@ describe('files', () => {
     expect(isTransient(err)).toBe(false);
   });
 
+  it.each([
+    [
+      'interrupted',
+      () =>
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode('{"error":'));
+            },
+            pull(controller) {
+              controller.error(
+                new TypeError('terminated', {
+                  cause: Object.assign(new Error('closed'), { code: 'ECONNRESET' }),
+                }),
+              );
+            },
+          }),
+          { status: 409 },
+        ),
+    ],
+    ['empty', () => new Response('', { status: 409 })],
+    ['not JSON', () => new Response('<html>conflict</html>', { status: 409 })],
+  ])(
+    'never calls a create-only 409 with an %s body transient (Codex review)',
+    async (_kind, answer) => {
+      const { client: c } = client((call) =>
+        call.method === 'PUT' && call.path === '/computers/vm-1/files' ? answer() : anyRoute(call),
+      );
+      const computer = await c.computers.get('vm-1');
+      const err = await computer
+        .writeFile('/tmp/a.txt', 'hello', { overwrite: false })
+        .catch((e) => e);
+      expect(err).toBeInstanceOf(FileExistsError);
+      expect(err).toMatchObject({ status: 409, reason: undefined });
+      expect((err as Error).message).toContain('reason could not be read');
+      expect(isTransient(err)).toBe(false);
+    },
+  );
+
+  it('leaves an unreadable 409 on an ordinary upload as it was', async () => {
+    const { client: c } = client((call) =>
+      call.method === 'PUT' ? new Response('', { status: 409 }) : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    const err = await computer.writeFile('/tmp/a.txt', 'hello').catch((e) => e);
+    expect(err).toBeInstanceOf(ConflictError);
+    expect(err).not.toBeInstanceOf(FileExistsError);
+  });
+
   it('leaves the other create-only refusals as the words they are', async () => {
     for (const [status, reason, cls] of [
       [409, 'unsupported', ConflictError],

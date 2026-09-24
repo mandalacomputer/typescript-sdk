@@ -19,19 +19,20 @@ import {
   verifyArtifact,
 } from './artifacts.js';
 import {
-  // TYPE-ONLY, all of them, and kept rather than dropped. Every reference to
+  // TYPE-ONLY, both of them, and kept rather than dropped. Every reference to
   // either in this file is a `{@link}` in a doc comment — `APIError.reason` on
-  // the two clipboard methods, `isTransient` on the retry advice beside them,
-  // `FileExistsError` on writeFile's create-only option — so as values they are dead, and `verbatimModuleSyntax` was emitting a
+  // the two clipboard methods, `isTransient` on the retry advice beside them —
+  // so as values they are dead, and `verbatimModuleSyntax` was emitting a
   // runtime import for two bindings nothing calls. Deleting them instead would
   // cost the links: `{@link}` resolves through a type import and not through
   // nothing, and the alternative is qualifying every target by module path.
   // The inline modifier rather than a second import statement, matching the
   // `./agent.js` line above.
   type APIError,
+  ConflictError,
   ConnectionError,
   errorForEventStatus,
-  type FileExistsError,
+  FileExistsError,
   type isTransient,
   MandalaError,
   NotFoundError,
@@ -641,6 +642,32 @@ const captureTimeoutText = (w: {
  */
 const SNAPSHOT_WAIT_MS = 1_800_000;
 const SNAPSHOT_POLL_MS = 5_000;
+
+/**
+ * A create-only upload's 409, never left looking like a passing conflict.
+ *
+ * The platform answers a create-only upload's taken path with 409 `exists`,
+ * and the transport maps that body to {@link FileExistsError}. But the body can
+ * fail to arrive: interrupted in flight, empty, or a proxy's page instead of the
+ * platform's JSON. The transport then keeps the status and nothing else, and a
+ * bare {@link ConflictError} is what {@link isTransient} calls worth sending
+ * again. On this route a 409 is `exists` or `unsupported`, neither of which
+ * clears, so the request's own context — create-only — decides here what the
+ * status alone cannot. A body that DID arrive keeps its classification.
+ */
+function createOnlyRefusal(err: unknown): unknown {
+  if (!(err instanceof ConflictError) || err instanceof FileExistsError) return err;
+  if (err.body !== null && typeof err.body === 'object' && !Array.isArray(err.body)) return err;
+  return new FileExistsError(
+    `${err.message} (a create-only upload was refused with 409, and the refusal's reason ` +
+      'could not be read; on this route that is a taken path or a host that cannot do ' +
+      'create-only, and neither clears by waiting)',
+    err.status,
+    err.body,
+    err.retryAfterMs,
+    { requestId: err.requestId, allow: err.allow, wwwAuthenticate: err.wwwAuthenticate },
+  );
+}
 
 export class Computer {
   #t: Transport;
@@ -3762,8 +3789,13 @@ export class Computer {
    *
    * `overwrite: false` makes the write create-only: the file is written only if
    * nothing is at `path` yet. When something is, the platform refuses with
-   * {@link FileExistsError} (a 409 whose `reason` is `exists`) and nothing is
-   * written — the file already there is untouched. The default, `true`, replaces
+   * {@link FileExistsError} (a 409 whose `reason` is `exists`) and this request
+   * writes nothing — the file already there is untouched. If an earlier
+   * attempt's outcome was unknown (its response was lost), that file may be the
+   * one it wrote: read it and compare before choosing another path or
+   * overwriting. A 409 whose body could not be read is raised as
+   * {@link FileExistsError} too, with `reason` undefined, so it is never taken
+   * for a passing conflict. The default, `true`, replaces
    * whatever is at `path`, as this method always has. Linux computers only: a
    * Windows computer refuses `overwrite: false` with a 400. A host that cannot
    * do create-only yet refuses it with a 409 whose `reason` is `unsupported`,
@@ -3832,10 +3864,8 @@ export class Computer {
       }
       headers = { 'Content-Length': String(opts.contentLength) };
     }
-    const res = await this.#t.json<{ bytes?: number } | undefined>(
-      'PUT',
-      P.computerAction(this.id, 'files'),
-      {
+    const res = await this.#t
+      .json<{ bytes?: number } | undefined>('PUT', P.computerAction(this.id, 'files'), {
         // Sent only to ask for create-only. Absent means replace, which is what
         // every platform version does, so the default request is byte for byte
         // the one this method always sent.
@@ -3848,8 +3878,10 @@ export class Computer {
         noTimeout: opts.timeoutMs === 0,
         minTimeoutMs: opts.timeoutMs,
         signal: opts.signal,
-      },
-    );
+      })
+      .catch((err: unknown) => {
+        throw opts.overwrite === false ? createOnlyRefusal(err) : err;
+      });
     return count(res?.bytes);
   }
 

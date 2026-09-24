@@ -1227,7 +1227,7 @@ try {
   await c.writeFile('/home/user/config.toml', 'debug = false\n', { overwrite: false });
 } catch (e) {
   if (!(e instanceof FileExistsError)) throw e;
-  // Something was already there, and it is untouched: nothing was written.
+  // Something was already there, and this call wrote nothing.
 }
 ```
 
@@ -1236,7 +1236,14 @@ whose `reason` is `"exists"`, and not transient: waiting does not change it.
 Create-only is for Linux computers; a Windows computer refuses it with a 400.
 A host that cannot do it yet answers a `ConflictError` with `reason`
 `"unsupported"`, and one whose support could not be confirmed an
-`UnavailableError`. In every one of those cases nothing was written.
+`UnavailableError`. In every one of those cases this request wrote nothing. A
+409 whose body could not be read is raised as `FileExistsError` too, with
+`reason` undefined, so it is never called transient.
+
+"Nothing written" is about the request that was refused. If an earlier attempt
+lost its response, it may have written the file itself, and the retry then
+meets that file: read it and compare before choosing another path or
+overwriting.
 
 #### Files bigger than one request
 
@@ -2729,7 +2736,8 @@ exists for. A failure part-way leaves what arrived on disk, as scp and curl do.
 
 An upload replaces a file already at the guest path. `--no-overwrite` makes it
 create-only: a path that is taken fails with the error code `exists` and
-nothing is written. It applies to uploads only, and is refused on a download.
+that upload writes nothing. It applies to uploads only, and is refused on a
+download.
 
 ```sh
 npx --package=mandala-computer mandala scp --no-overwrite ./app.env my-computer:/home/user/.env
