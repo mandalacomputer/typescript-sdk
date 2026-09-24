@@ -2355,8 +2355,7 @@ describe('files', () => {
         .catch((e) => e);
       expect(err).toBeInstanceOf(FileExistsError);
       expect(err).toMatchObject({ status: 409 });
-      // No usable word: absent, or the blank string the body carried.
-      expect(((err as APIError).reason ?? '').trim()).toBe('');
+      expect((err as APIError).reason).toBeUndefined();
       expect((err as Error).message).toContain('refused as a conflict, reason unknown');
       expect((err as Error).message).not.toContain('already exists');
       expect(isTransient(err)).toBe(false);

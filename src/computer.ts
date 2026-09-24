@@ -663,7 +663,7 @@ const SNAPSHOT_POLL_MS = 5_000;
 function createOnlyRefusal(err: unknown): unknown {
   if (!(err instanceof ConflictError) || err instanceof FileExistsError) return err;
   if (typeof err.reason === 'string' && err.reason.trim() !== '') return err;
-  return new FileExistsError(
+  const refusal = new FileExistsError(
     // Neutral on purpose, and not the body's own text: a reasonless body whose
     // `error` says "already exists" would carry the very claim this avoids. The
     // body is kept on the error for diagnostics.
@@ -675,6 +675,10 @@ function createOnlyRefusal(err: unknown): unknown {
     err.retryAfterMs,
     { requestId: err.requestId, allow: err.allow, wwwAuthenticate: err.wwwAuthenticate },
   );
+  // The constructor reads the body again, and would keep a blank word. Unknown
+  // is `undefined` here, as documented on FileExistsError.
+  (refusal as { reason?: string }).reason = undefined;
+  return refusal;
 }
 
 export class Computer {
