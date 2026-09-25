@@ -3736,3 +3736,150 @@ export function toSignalPage(d: unknown, method: string, path: string): SignalPa
   }
   return page;
 }
+
+// --- API keys and whoami ------------------------------------------------------
+
+/**
+ * One API key, as the platform lists it: never the key itself.
+ *
+ * The raw key is on {@link ApiKeyCreated} and nowhere else, answered once by
+ * the mint. {@link prefix} is what the Credentials page shows beside it, for
+ * telling keys apart, and cannot be used to authenticate.
+ */
+export type ApiKey = {
+  /** `key-` and twelve hex characters. What {@link ApiKeys.revoke} takes. */
+  id: string;
+  /** The label it was minted with; `null` when it has none. */
+  name: string | null;
+  /** The first characters of the key and an ellipsis, for display only. `oauth` for a Connected app's key. */
+  prefix: string;
+  createdAt: string;
+  /** When it last authenticated a request; `null` until it has. */
+  lastUsedAt: string | null;
+  /** The workspace it is confined to, or `null` for one that acts on the whole account. */
+  workspaceId: string | null;
+  workspaceName: string | null;
+  /**
+   * Whether it may list, mint and revoke keys. Only a dashboard session turns
+   * this on, and a key minted over the API never has it.
+   */
+  manageKeys: boolean;
+  raw: Record<string, unknown>;
+};
+
+/** {@link ApiKey} with the one thing only the mint answers. */
+export type ApiKeyCreated = ApiKey & {
+  /**
+   * The key: `com_` and 48 hex characters. SHOWN HERE AND NEVER AGAIN — store
+   * it now. Named `key` because `raw` is the wire object on every type here.
+   */
+  key: string;
+};
+
+const nullableText = (v: unknown, what: string): string | null => {
+  if (v === null || v === undefined) return null;
+  if (typeof v !== 'string') throw new MandalaError(`expected ${what} to be a string or null`);
+  return v;
+};
+
+/**
+ * Strict on the two fields a caller acts on: the id is what a revoke sends
+ * back, and `manage_keys` is a permission — a key this client cannot say
+ * whether it holds is not one to report as holding none.
+ */
+export function toApiKey(d: unknown, what = 'an API key'): ApiKey {
+  if (!isRecord(d)) throw new MandalaError(`expected ${what} to be an object`);
+  if (typeof d.id !== 'string' || !d.id || d.id !== d.id.trim()) {
+    throw new MandalaError(`expected ${what} to carry its id`);
+  }
+  if (typeof d.manage_keys !== 'boolean') {
+    throw new MandalaError(`expected ${what} to say whether it manages keys (manage_keys)`);
+  }
+  return {
+    id: d.id,
+    name: nullableText(d.name, `${what}'s name`),
+    prefix: str(d.prefix),
+    createdAt: str(d.created_at),
+    lastUsedAt: stamp(d.last_used_at) ?? null,
+    workspaceId: nullableText(d.workspace_id, `${what}'s workspace_id`),
+    workspaceName: nullableText(d.workspace_name, `${what}'s workspace_name`),
+    manageKeys: d.manage_keys,
+    raw: { ...d },
+  };
+}
+
+/**
+ * The mint's answer, refused when the key is not in it — for the reason
+ * {@link toWebhookCreated} refuses a subscription without its secret: shown
+ * once, so an answer without it is a key nobody can ever use, reported as made.
+ */
+export function toApiKeyCreated(d: unknown, method: string, path: string): ApiKeyCreated {
+  const key = toApiKey(d, `the API key from ${method} ${path}`);
+  const secret = (d as Record<string, unknown>).raw;
+  if (typeof secret !== 'string' || !secret.startsWith('com_')) {
+    throw new MandalaError(
+      `expected the new key from ${method} ${path}: the platform answers it once, and it is not here`,
+    );
+  }
+  return { ...key, key: secret };
+}
+
+/** The role a credential acts with. An open set: show one this client does not know rather than refuse it. */
+export type Role = 'owner' | 'member' | 'viewer' | (string & {});
+
+/** Who a credential is: {@link Account.whoami}. */
+export type Whoami = {
+  /** The person the key was issued to. */
+  user: { id: string; email: string; name: string | null };
+  /** The account it acts on. `status` is `active` or `suspended`; a suspended account can still ask this. */
+  account: { id: string; name: string | null; plan: string; status: string };
+  /** The role it acts with, as it is NOW — not as it was when the key was minted. */
+  role: Role;
+  /** The workspace it is confined to, or `null` for a key that acts on the whole account. */
+  workspace: { id: string; name: string; createdAt: string } | null;
+  /**
+   * The key itself. `null` is possible but not expected. On a Connected app's
+   * access token this is the app's hidden key: `prefix` is `oauth`, and `name`
+   * the app's name.
+   */
+  key: ApiKey | null;
+  raw: Record<string, unknown>;
+};
+
+export function toWhoami(d: unknown, method: string, path: string): Whoami {
+  const where = `${method} ${path}`;
+  if (!isRecord(d) || !isRecord(d.user) || !isRecord(d.account)) {
+    throw new MandalaError(`expected a user and an account from ${where}`);
+  }
+  const { user, account } = d;
+  if (typeof user.id !== 'string' || !user.id) {
+    throw new MandalaError(`expected the user from ${where} to carry its id`);
+  }
+  if (typeof account.id !== 'string' || !account.id) {
+    throw new MandalaError(`expected the account from ${where} to carry its id`);
+  }
+  if (typeof d.role !== 'string' || !d.role) {
+    throw new MandalaError(`expected ${where} to name the role`);
+  }
+  let workspace: Whoami['workspace'] = null;
+  if (d.workspace !== null && d.workspace !== undefined) {
+    const ws = d.workspace;
+    if (!isRecord(ws) || typeof ws.id !== 'string' || !ws.id) {
+      throw new MandalaError(`expected the workspace from ${where} to be null or carry its id`);
+    }
+    workspace = { id: ws.id, name: str(ws.name), createdAt: str(ws.created_at) };
+  }
+  return {
+    user: { id: user.id, email: str(user.email), name: nullableText(user.name, "the user's name") },
+    account: {
+      id: account.id,
+      name: nullableText(account.name, "the account's name"),
+      plan: str(account.plan),
+      status: str(account.status),
+    },
+    role: d.role,
+    workspace,
+    key: d.key === null || d.key === undefined ? null : toApiKey(d.key, `the key from ${where}`),
+    raw: { ...d },
+  };
+}

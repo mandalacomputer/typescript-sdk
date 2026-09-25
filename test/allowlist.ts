@@ -151,6 +151,12 @@ export const ALLOWED: ReadonlySet<string> = new Set(
       ['GET', 'workspaces'],
       ['GET', 'workspaces/:id'],
       ['GET', 'workspaces/:id/members'],
+
+      // Who the credential is, and the holder's own API keys (OPL-5053).
+      ['GET', 'whoami'],
+      ['GET', 'api-keys'],
+      ['POST', 'api-keys'],
+      ['DELETE', 'api-keys/:id'],
     ] as Route[]
   ).map(([m, p]) => `${m} ${p}`),
 );
@@ -414,6 +420,12 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
   ['GET workspaces', []],
   ['GET workspaces/:id', []],
   ['GET workspaces/:id/members', []],
+
+  // Who the credential is, and the holder's own API keys (OPL-5053).
+  ['GET whoami', []],
+  ['GET api-keys', []],
+  ['POST api-keys', ['body:manage_keys', 'body:name', 'body:workspace_id']],
+  ['DELETE api-keys/:id', []],
 ]);
 
 /**
@@ -438,6 +450,10 @@ export const UNIMPLEMENTED_PARAMETERS: ReadonlySet<string> = new Set([
   'GET computers/:id/screenshot  query:quality',
   'GET computers/:id/screenshot  query:region',
   'GET computers/:id/screenshot  query:scale',
+  // `manage_keys: true` is refused from every API key (403): the permission is
+  // granted only from a dashboard session, and false is the default. There is
+  // nothing for this SDK to send.
+  'POST api-keys  body:manage_keys',
   // `keys: ['ctrl', 'c']` is sent instead. The chord-as-one-string form cannot
   // express a key whose own name contains the separator.
   'POST computers/:id/input  body:key',
@@ -473,6 +489,7 @@ export function patternFor(path: string): string {
       prev === 'builds' ||
       prev === 'webhooks' ||
       prev === 'ssh-keys' ||
+      prev === 'api-keys' ||
       // The account's store, and only there: `computers/:id/secrets` is a
       // literal at the end of a computer's path and has nothing after it.
       (prev === 'secrets' && out.length === 1)

@@ -223,6 +223,118 @@ export async function saveCredentials(
   options: { signal?: AbortSignal; lockTimeoutMs?: number } = {},
 ): Promise<SavedCredentials> {
   if (profile !== undefined) validateProfileName(profile);
+  return rewriteLocked(
+    options,
+    (old, file) => {
+      const name = profile ?? old?.default_profile ?? 'default';
+      const profiles: Record<string, CredentialProfile> = Object.assign(
+        Object.create(null),
+        old?.profiles,
+      );
+      profiles[name] = entry;
+      return {
+        next: { version: 1, default_profile: old?.default_profile ?? name, profiles },
+        result: { profile: name, path: file, saved: true as const },
+      };
+    },
+    (committed) => new CredentialSaveError(committed),
+  );
+}
+
+/** What {@link removeCredentials} did. */
+export type RemovedCredentials = {
+  /** The profile asked for: the named one, or the default. */
+  profile: string;
+  /** False when the store held no such profile; nothing was written then. */
+  removed: boolean;
+  path: string;
+  /** The removed profile's key id, which still authenticates until it is revoked. */
+  keyId?: string;
+  /**
+   * The default profile afterwards: unchanged, or — when the default itself was
+   * removed and others remain — the first of them by name. `null` when no
+   * profile remains, and the store file is gone.
+   */
+  defaultProfile: string | null;
+};
+
+/** The failure of a removal, told apart from a login's save: there is no key to revoke here. */
+export class CredentialRemoveError extends CredentialsError {
+  constructor(readonly committed: boolean) {
+    super(
+      'credential_remove_failed',
+      committed
+        ? 'The profile was removed, but durable persistence could not be confirmed. Check ~/.mandala/credentials.json.'
+        : 'Could not remove the profile; the credentials file was not changed.',
+    );
+  }
+}
+
+/**
+ * Remove one profile from the store — `mandala logout` — under the same lock
+ * and checks as a save.
+ *
+ * The key stays valid on the platform: this forgets it on this machine and
+ * does nothing else. A default that is removed while other profiles remain is
+ * replaced by the first of them by name, as the store has to name one; the
+ * last profile removed takes the file with it, because the store's own schema
+ * has no spelling for an empty one.
+ */
+export async function removeCredentials(
+  profile?: string,
+  options: { signal?: AbortSignal; lockTimeoutMs?: number } = {},
+): Promise<RemovedCredentials> {
+  if (profile !== undefined) validateProfileName(profile);
+  return rewriteLocked<RemovedCredentials>(
+    options,
+    (old, file) => {
+      const name = profile ?? old?.default_profile ?? 'default';
+      if (!old || !Object.hasOwn(old.profiles, name)) {
+        return {
+          result: {
+            profile: name,
+            removed: false,
+            path: file,
+            defaultProfile: old?.default_profile ?? null,
+          },
+        };
+      }
+      const keyId = old.profiles[name]!.key_id;
+      const profiles: Record<string, CredentialProfile> = Object.assign(
+        Object.create(null),
+        old.profiles,
+      );
+      delete profiles[name];
+      const left = Object.keys(profiles).sort();
+      if (!left.length) {
+        return {
+          next: null,
+          result: { profile: name, removed: true, path: file, keyId, defaultProfile: null },
+        };
+      }
+      const defaultProfile = old.default_profile === name ? left[0]! : old.default_profile;
+      return {
+        next: { version: 1, default_profile: defaultProfile, profiles },
+        result: { profile: name, removed: true, path: file, keyId, defaultProfile },
+      };
+    },
+    (committed) => new CredentialRemoveError(committed),
+  );
+}
+
+/**
+ * The store's one writer: take the lock, read, compute the next store, and
+ * replace the file with it (or remove it, for `next: null`), checking at every
+ * step that nothing moved underneath. `next` absent writes nothing.
+ */
+async function rewriteLocked<T>(
+  options: { signal?: AbortSignal; lockTimeoutMs?: number },
+  compute: (
+    old: CredentialsFile | undefined,
+    file: string,
+  ) => { next?: CredentialsFile | null; result: T },
+  failure: (committed: boolean) => CredentialsError,
+): Promise<T> {
   const lockTimeoutMs = options.lockTimeoutMs ?? 5000;
   if (!Number.isFinite(lockTimeoutMs) || lockTimeoutMs < 0 || lockTimeoutMs > 30_000)
     credentialError('invalid_lock_timeout');
@@ -230,6 +342,7 @@ export async function saveCredentials(
   signal?.throwIfAborted();
   const dir = openDirectory(true)!;
   const lock = path.join(dir.name, '.credentials.lock');
+  const store = path.join(dir.name, 'credentials.json');
   let lockFd: number | undefined;
   let lockInfo: Stats | undefined;
   let temp: string | undefined;
@@ -277,43 +390,41 @@ export async function saveCredentials(
       }
     }
     const old = readDirectory(dir);
-    const name = profile ?? old?.default_profile ?? 'default';
-    const profiles: Record<string, CredentialProfile> = Object.assign(
-      Object.create(null),
-      old?.profiles,
-    );
-    profiles[name] = entry;
-    const file: CredentialsFile = {
-      version: 1,
-      default_profile: old?.default_profile ?? name,
-      profiles,
-    };
-    validateCredentials(file);
-    const bytes = Buffer.from(`${JSON.stringify(file, null, 2)}\n`);
-    if (bytes.length > MAX_CREDENTIAL_BYTES) credentialError('file_too_large');
+    const { next, result } = compute(old, store);
+    if (next === undefined) return result;
+    let bytes: Buffer | undefined;
+    if (next !== null) {
+      validateCredentials(next);
+      bytes = Buffer.from(`${JSON.stringify(next, null, 2)}\n`);
+      if (bytes.length > MAX_CREDENTIAL_BYTES) credentialError('file_too_large');
+      signal?.throwIfAborted();
+      checkDirectory(dir);
+      temp = path.join(dir.name, `.credentials-${randomUUID()}.tmp`);
+      tempFd = fs.openSync(
+        temp,
+        fs.constants.O_WRONLY |
+          fs.constants.O_CREAT |
+          fs.constants.O_EXCL |
+          fs.constants.O_NOFOLLOW,
+        0o600,
+      );
+      tempInfo = fs.fstatSync(tempFd);
+      fs.fchmodSync(tempFd, 0o600);
+      tempInfo = fs.fstatSync(tempFd);
+      protection(tempInfo, false);
+      fs.writeFileSync(tempFd, bytes);
+      fs.fsyncSync(tempFd);
+    }
     signal?.throwIfAborted();
     checkDirectory(dir);
-    temp = path.join(dir.name, `.credentials-${randomUUID()}.tmp`);
-    tempFd = fs.openSync(
-      temp,
-      fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW,
-      0o600,
-    );
-    tempInfo = fs.fstatSync(tempFd);
-    fs.fchmodSync(tempFd, 0o600);
-    tempInfo = fs.fstatSync(tempFd);
-    protection(tempInfo, false);
-    fs.writeFileSync(tempFd, bytes);
-    fs.fsyncSync(tempFd);
-    signal?.throwIfAborted();
-    checkDirectory(dir);
-    if (!same(fs.lstatSync(temp), tempInfo) || !same(fs.lstatSync(lock), lockInfo!))
+    if ((temp && !same(fs.lstatSync(temp), tempInfo!)) || !same(fs.lstatSync(lock), lockInfo!))
       credentialError('unsafe_file');
     // The old store was validated under the lock. Verify it still names the same complete state.
     const latest = readDirectory(dir);
     if (JSON.stringify(latest) !== JSON.stringify(old)) credentialError('unsafe_file');
     signal?.throwIfAborted();
-    fs.renameSync(temp, path.join(dir.name, 'credentials.json'));
+    if (temp) fs.renameSync(temp, store);
+    else fs.unlinkSync(store);
     committed = true;
     // After rename cancellation reports saved state; it must never remove the new store.
     checkDirectory(dir);
@@ -322,11 +433,11 @@ export async function saveCredentials(
     } catch (error) {
       if (!['EINVAL', 'ENOTSUP'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error;
     }
-    return { profile: name, path: path.join(dir.name, 'credentials.json'), saved: true };
+    return result;
   } catch (error) {
     if (!committed && signal?.aborted) throw signal.reason;
     if (error instanceof CredentialsError && !committed) throw error;
-    throw new CredentialSaveError(committed);
+    throw failure(committed);
   } finally {
     for (const fd of [tempFd, lockFd, dir.fd]) {
       if (fd !== undefined) {

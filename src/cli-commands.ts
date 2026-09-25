@@ -1,6 +1,13 @@
 import { writeFile } from 'node:fs/promises';
 import process from 'node:process';
 import { completion } from './cli-completion.js';
+import {
+  apiKeysCreate,
+  apiKeysList,
+  apiKeysRevoke,
+  logoutCommand,
+  whoamiCommand,
+} from './cli-keys.js';
 import { loginCommand } from './cli-login.js';
 import { manifest } from './cli-manifest.js';
 import { CliError, help, type Parsed, parseArgs } from './cli-options.js';
@@ -26,13 +33,14 @@ import {
 import type { Computer } from './computer.js';
 import { CredentialSaveError } from './credentials.js';
 import { MandalaError, NotFoundError, ValidationError } from './errors.js';
-import type {
-  AccountQuota,
-  BuildProgress,
-  Client,
-  GuestDirectory,
-  Listing,
-  UsageReport,
+import {
+  type AccountQuota,
+  type BuildProgress,
+  type Client,
+  type GuestDirectory,
+  type Listing,
+  type UsageReport,
+  VERSION,
 } from './index.js';
 import * as P from './paths.js';
 import { checkWait } from './wait.js';
@@ -338,6 +346,11 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
       output.emitJson(manifest());
       return 0;
     }
+    if (path === 'version') {
+      if (json) return output.result({ name: 'mandala', version: VERSION });
+      io.stdout.write(`mandala ${VERSION}\n`);
+      return 0;
+    }
     if (path === 'completion') {
       const script = completion(args[0]!);
       if (json) return output.result({ shell: args[0], script });
@@ -362,6 +375,11 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
         output,
         signal,
       );
+    }
+    if (path === 'logout') {
+      process.on('SIGINT', cancel);
+      process.on('SIGTERM', cancel);
+      return await logoutCommand(f.profile as string | undefined, io, output, signal);
     }
     if (path === 'terminal') {
       if (json)
@@ -531,6 +549,20 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
         io.stdout.write(`${redact(accountText(quota), io.env, io.secrets)}\n`);
         return 0;
       }
+      case 'whoami':
+        return await whoamiCommand(client, io, output, signal);
+      case 'api-keys list':
+        return await apiKeysList(client, io, output, signal);
+      case 'api-keys create':
+        return await apiKeysCreate(
+          client,
+          io,
+          output,
+          { name: s('name'), workspace: s('workspace') },
+          signal,
+        );
+      case 'api-keys revoke':
+        return await apiKeysRevoke(client, output, target, signal);
       case 'usage': {
         const report = await client.usage.read(usageWindow);
         checkUsageReport(report.raw);

@@ -41,7 +41,7 @@ export function manifest() {
       ...(c.passthrough ? { passthrough: { unless: c.passthrough.unless } } : {}),
       flags: [...GLOBAL_FLAGS, ...c.flags],
       json_mode: c.jsonMode ?? 'finite',
-      requires_credentials: !['manifest', 'completion'].includes(c.path),
+      requires_credentials: !['manifest', 'completion', 'version', 'logout'].includes(c.path),
     })),
   };
 }
