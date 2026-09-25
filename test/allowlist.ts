@@ -146,6 +146,11 @@ export const ALLOWED: ReadonlySet<string> = new Set(
       ['GET', 'secrets/:id'],
       ['PUT', 'secrets/:id'],
       ['DELETE', 'secrets/:id'],
+
+      // The account's workspaces, read only (OPL-5057).
+      ['GET', 'workspaces'],
+      ['GET', 'workspaces/:id'],
+      ['GET', 'workspaces/:id/members'],
     ] as Route[]
   ).map(([m, p]) => `${m} ${p}`),
 );
@@ -165,6 +170,11 @@ export const UNIMPLEMENTED: ReadonlySet<string> = new Set([
   // here, and a second, worse OpenAI client inside this SDK would be a
   // maintenance obligation with no user.
   'POST chat/completions',
+  // The account's workspaces, read only (OPL-5057). Listed to stay in step
+  // with the surface; no client method yet.
+  'GET workspaces',
+  'GET workspaces/:id',
+  'GET workspaces/:id/members',
 ]);
 
 /**
@@ -399,6 +409,11 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
   ['GET secrets/:id', ['query:workspace_id']],
   ['PUT secrets/:id', ['body:revision_id', 'body:value', 'body:workspace_id']],
   ['DELETE secrets/:id', ['query:revision_id', 'query:workspace_id']],
+
+  // The account's workspaces, read only (OPL-5057). None takes a parameter.
+  ['GET workspaces', []],
+  ['GET workspaces/:id', []],
+  ['GET workspaces/:id/members', []],
 ]);
 
 /**
