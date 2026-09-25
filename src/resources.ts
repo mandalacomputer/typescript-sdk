@@ -11,6 +11,8 @@ import {
 } from './errors.js';
 import type {
   AccountQuota,
+  ApiKey,
+  ApiKeyCreated,
   BuildProgress,
   Move,
   PublishedTemplate,
@@ -28,6 +30,7 @@ import type {
   Webhook,
   WebhookCreated,
   WebhookDelivery,
+  Whoami,
 } from './models.js';
 import {
   belongsToComputer,
@@ -37,6 +40,8 @@ import {
   isUnreachableStub,
   str,
   toAccountQuota,
+  toApiKey,
+  toApiKeyCreated,
   toBuildProgress,
   toMove,
   toPublishedTemplate,
@@ -54,6 +59,7 @@ import {
   toWebhook,
   toWebhookCreated,
   toWebhookDelivery,
+  toWhoami,
   unmatchableRows,
 } from './models.js';
 import * as P from './paths.js';
@@ -1695,7 +1701,7 @@ export class Sizes {
   }
 }
 
-/** Instantaneous account-wide quota. Historical metering is on {@link Usage}. */
+/** Instantaneous account-wide quota, and who the credential is. Historical metering is on {@link Usage}. */
 export class Account {
   #t: Transport;
 
@@ -1711,6 +1717,19 @@ export class Account {
    */
   async read(opts: CallOptions = {}): Promise<AccountQuota> {
     return toAccountQuota(await this.#t.json('GET', P.ACCOUNT, { signal: opts.signal }));
+  }
+
+  /**
+   * Who this client's credential is: the person it was issued to, the account
+   * and role it acts with (the role as it is now), the workspace it is
+   * confined to, and the key itself — whether it can manage keys included.
+   *
+   * Needs no permission and any role, and a suspended account can ask it:
+   * `account.status` is how such a caller finds out why nothing else works.
+   */
+  async whoami(opts: CallOptions = {}): Promise<Whoami> {
+    const data = await this.#t.json('GET', P.WHOAMI, { signal: opts.signal });
+    return toWhoami(data, 'GET', P.WHOAMI);
   }
 }
 
@@ -2143,4 +2162,66 @@ function namedSecret(secrets: readonly Secret[], name: string): Secret | undefin
   const fold = (text: string) => text.replace(/[A-Z]/g, (c) => c.toLowerCase());
   const wanted = fold(name);
   return secrets.find((s) => fold(s.name) === wanted);
+}
+
+/**
+ * The API keys of the person this key belongs to (platform OPL-5053).
+ *
+ * EVERY CALL HERE NEEDS THE KEY'S "MANAGE KEYS" PERMISSION. It is off for
+ * every key until its holder turns it on from a signed-in dashboard session
+ * (Credentials, "Manage keys"), and nothing a key can call turns it on —
+ * without it each method is a {@link PermissionDeniedError} whose message
+ * says so. A key minted here never has the permission, so a leaked key that
+ * manages keys cannot mint a family of keys that do.
+ *
+ * Reach: the holder's own keys on the account this key acts on — never
+ * another person's, which answer like an id that does not exist. A key
+ * confined to a workspace sees, mints and revokes only keys confined to that
+ * same workspace. Listing needs the viewer role; minting and revoking need
+ * member.
+ */
+export class ApiKeys {
+  #t: Transport;
+
+  /** @internal */
+  constructor(transport: Transport) {
+    this.#t = transport;
+  }
+
+  /** The keys this key may reach, newest first. Never a raw key. */
+  async list(opts: CallOptions = {}): Promise<ApiKey[]> {
+    const data = await this.#t.jsonArray('GET', P.API_KEYS, { signal: opts.signal });
+    return data.map((row, i) => toApiKey(row, `API key ${i}`));
+  }
+
+  /**
+   * Mint a key. The answer carries it ONCE, as {@link ApiKeyCreated.key}:
+   * store it before doing anything else.
+   *
+   * ```ts
+   * const ci = await client.apiKeys.create({ name: 'ci' });
+   * await vault.put('mandala-ci', ci.key);
+   * ```
+   *
+   * Not retried on a 503: a mint that may already have happened is a key
+   * nobody holds, so list and revoke rather than send it again. An account
+   * holds at most 1000 keys, and the one past that is a 400.
+   */
+  async create(args: P.ApiKeyCreateArgs = {}, opts: CallOptions = {}): Promise<ApiKeyCreated> {
+    const data = await this.#t.json('POST', P.API_KEYS, {
+      body: P.apiKeyCreateBody(args),
+      signal: opts.signal,
+    });
+    return toApiKeyCreated(data, 'POST', P.API_KEYS);
+  }
+
+  /**
+   * Revoke one key. It is refused from its next request. A key may revoke
+   * itself, and the call that does so is the last one it makes. An id out of
+   * this key's reach is a {@link NotFoundError}, the same as one that does not
+   * exist.
+   */
+  async revoke(keyId: string, opts: CallOptions = {}): Promise<void> {
+    await this.#t.json('DELETE', P.apiKey(keyId), { signal: opts.signal });
+  }
 }

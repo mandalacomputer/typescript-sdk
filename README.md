@@ -2128,6 +2128,49 @@ The read creates no reservation, promises no later operation will fit, and is
 not a check of host capacity. Read again for a fresh observation; pass
 `{ signal }` to cancel through the normal transport.
 
+### Who you are, and API keys
+
+`client.account.whoami()` answers who the client's credential is: the person
+it was issued to, the account and role it acts with (the role as it is now,
+not as it was when the key was minted), the workspace it is confined to, and
+the key itself. It needs no permission and any role, and a suspended account
+can ask it — `account.status` is how such a caller finds out why nothing else
+works.
+
+```ts
+const who = await client.account.whoami();
+console.log(who.user.email, who.account.name, who.role);
+console.log(who.workspace ? `confined to ${who.workspace.name}` : 'account-wide');
+console.log(who.key?.manageKeys ? 'can manage keys' : 'cannot manage keys');
+```
+
+`client.apiKeys` lists, mints and revokes the keys of the person the key
+belongs to, on the account it acts on:
+
+```ts
+const keys = await client.apiKeys.list(); // newest first; never a raw key
+const ci = await client.apiKeys.create({ name: 'ci' });
+await vault.put('mandala-ci', ci.key); // shown ONCE: store it now
+await client.apiKeys.revoke(ci.id);
+```
+
+**Every `apiKeys` call needs the calling key's "Manage keys" permission.** It
+is off for every key until its holder turns it on in a signed-in dashboard
+session (**Credentials** in the dashboard, the **Manage keys** checkbox), and no API
+call turns it on. Without it each call is a `PermissionDeniedError` whose
+message says exactly that. A key minted here never has the permission — asking
+for one is refused, so the SDK has no option for it — which keeps a leaked key
+that manages keys from minting a family of keys that survive its revocation.
+
+Reach follows the key: its holder's own keys only (anybody else's answers like
+an id that does not exist, `NotFoundError`), and a key confined to a workspace
+lists, mints and revokes only keys confined to that same workspace. Omitting
+`workspaceId` on `create` mints into the caller's own scope; a workspace-scoped
+key naming any other scope is a `PermissionDeniedError`. Listing needs the
+viewer role, minting and revoking the member role. A key may revoke itself; the
+call that does so is the last it makes. A mint answered 503 is not retried: it
+may have happened, so list and revoke rather than send it again.
+
 ### Usage
 
 What the account has spent, in the same figures the dashboard shows and the
@@ -2550,6 +2593,16 @@ saved state. A lock timeout never steals another writer's lock. If an abandoned
 no writer is active before manually removing that owned regular lock file.
 Never remove an unfamiliar or unsafe lock path merely because a login timed out.
 
+`mandala logout [--profile name]` forgets one saved profile: the one `--profile`
+or `MANDALA_PROFILE` names, else the default. It changes only this machine, under
+the same lock as a login, and needs no network. **The key it held stays valid**
+until it is revoked — under Credentials in the dashboard, or with
+`mandala api-keys revoke <id>` from a key that can manage keys — and logout prints
+its id for that. Removing the default while other profiles remain makes the first
+of them by name the default, and says so; removing the last one removes the file.
+A profile that is not saved is an error (`not_logged_in`) and writes nothing. An
+API key in `MANDALA_API_KEY` is untouched and still authenticates every command.
+
 `login --json` puts the URL/code and progress on stderr. Its final stdout envelope
 contains only `profile`, `base_url`, `account`, `scope`, and `saved: true`. It does
 not return the device secret, API key, or full credentials file.
@@ -2558,8 +2611,9 @@ not return the device secret, API key, or full credentials file.
 
 `mandala --help`, `mandala computers --help`, and
 `mandala computers exec --help` show progressively narrower help. Every command
-accepts `--help` (`-h`), `--json`, and `--profile`. Help, manifest, and completion need neither
-credentials nor network access and never prompt for input.
+accepts `--help` (`-h`), `--json`, and `--profile`. Help, `version` (also
+`mandala --version`), manifest, and completion need neither credentials nor
+network access and never prompt for input; `logout` needs no network.
 
 | Command group | Available commands |
 | --- | --- |
@@ -2568,10 +2622,11 @@ credentials nor network access and never prompt for input.
 | `snapshots` | `list`, `create`, `restore`, `clone`, `delete`, `holdings`, `schedule get`, `schedule set`, `schedule clear`, `retention` |
 | `webhooks` | `list`, `create`, `get`, `update`, `delete`, `rotate`, `test`, `deliveries` |
 | `secrets` | `list`, `set`, `rm` |
+| `api-keys` | `list`, `create`, `revoke` |
 | `files` | `list`, `upload`, `download` |
 | `agent` | `run` |
 | `ssh-key` | `list`, `add`, `rm` |
-| Top-level commands | `login`, `account`, `usage`, `ssh`, `ssh-access`, `ssh-config`, `terminal`, `scp`, `manifest`, `completion` |
+| Top-level commands | `login`, `logout`, `whoami`, `version`, `account`, `usage`, `ssh`, `ssh-access`, `ssh-config`, `terminal`, `scp`, `manifest`, `completion` |
 
 Command-specific flags follow the command name. Flags with values accept
 `--name value` or `--name=value`; boolean flags take no value. Repeat only flags
@@ -2601,6 +2656,25 @@ mandala completion fish
 Each command prints a script to stdout. Save or source it according to your shell's
 completion setup; the CLI does not edit shell files or install completions.
 `--json` returns the script as `data.script` alongside `data.shell`.
+
+### Who you are, and API keys
+
+```sh
+mandala whoami                      # person, account, role, workspace, key
+mandala api-keys list               # your keys this key can reach; never the keys
+mandala api-keys create --name ci   # prints the new key, once, alone on stdout
+mandala api-keys create --name ci --workspace wsp-...
+mandala api-keys revoke key-...
+```
+
+`whoami` needs no permission. The three `api-keys` commands need the calling
+key's **Manage keys** permission, which only a signed-in dashboard session turns
+on; without it they fail with the platform's own sentence, which names the page
+and the checkbox (`--json`: `error.code` `permission_denied`, status 403). A key
+minted from the CLI never has the permission. `create` prints only the key on
+stdout, so `KEY=$(mandala api-keys create --name ci)` captures it, and writes
+what it made and the warning to stderr; `--json` answers the platform's object,
+with the key under `raw`. It is shown once.
 
 ### Account quota and historical usage
 

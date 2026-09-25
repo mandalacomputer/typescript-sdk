@@ -79,6 +79,15 @@ export const COMMANDS: readonly Command[] = [
       flag('base-url', 'Explicit login API base (default: MANDALA_BASE_URL or public API)'),
     ],
   ),
+  command(
+    'logout',
+    'Forget a saved profile on this machine (default: the default profile); its key stays valid until revoked',
+  ),
+  command(
+    'whoami',
+    'Show who the credential is: person, account, role, workspace and key; needs no permission',
+  ),
+  command('version', 'Print the CLI version (also: mandala --version)'),
   command('account', 'Read instantaneous account-wide quota and advisory headroom'),
   command(
     'usage',
@@ -316,6 +325,25 @@ export const COMMANDS: readonly Command[] = [
   ),
   command('secrets rm', 'Delete a secret by name or id', ['name'], [secretScope]),
   command(
+    'api-keys list',
+    "List your API keys this key can reach (never the keys themselves); needs the key's Manage keys permission",
+  ),
+  command(
+    'api-keys create',
+    'Mint an API key and print it once; needs Manage keys, and the new key never has it',
+    [],
+    [
+      flag('name', 'Label for the key (up to 60 characters)'),
+      flag(
+        'workspace',
+        "Confine the key to this workspace ID (default: the calling key's own scope)",
+      ),
+    ],
+  ),
+  command('api-keys revoke', 'Revoke an API key by id; it is refused from its next request', [
+    'id',
+  ]),
+  command(
     'files list',
     'List one guest directory: names, types and file sizes (bounded, not paged)',
     ['computer', 'path'],
@@ -465,6 +493,13 @@ export function parseArgs(argv: string[]): Parsed {
       positional = true;
       continue;
     }
+    // `--version` is the conventional spelling, and only before a command: after
+    // one it is `templates get`'s own `--version`, a template version.
+    if (!parsed.command && !parsed.path && arg === '--version') {
+      parsed.path = 'version';
+      parsed.command = COMMANDS.find((c) => c.path === 'version');
+      continue;
+    }
     if (!positional && arg.startsWith('-') && arg !== '-') {
       const [spelling, ...tail] = arg.split('=');
       const flags = [...GLOBAL_FLAGS, ...(parsed.command?.flags ?? [])];
@@ -580,5 +615,5 @@ function usageError(c: Command | undefined, message: string): CliError {
 export function help(path = ''): string {
   const matches = COMMANDS.filter((c) => !path || c.path === path || c.path.startsWith(`${path} `));
   const exact = matches.length === 1 ? matches[0] : undefined;
-  return `mandala — cloud computers from your terminal\n\n${matches.map((c) => `  ${usage(c)}\n    ${c.description}`).join('\n')}\n\n${[...GLOBAL_FLAGS, ...(exact?.flags ?? [])].map((f) => `  --${f.name}${f.alias ? `, -${f.alias}` : ''}${f.type === 'boolean' ? '' : ` <${f.type}>`}${f.required ? ' (required)' : ''}  ${f.description}`).join('\n')}\n\nMANDALA_API_KEY authenticates requests; MANDALA_BASE_URL optionally selects a server.\nMANDALA_MODEL_KEY is required for agent run. No credentials are needed for help, manifest or completion.\n${path.startsWith('ssh') ? `\nmandala ssh: our options go before <computer> (with --setup, --key and --json may follow it);\neverything after it goes to ssh unchanged. It never falls back to mandala terminal.\nMANDALA_SSH_GATEWAY=host[:port] (default ssh.mandala.computer:2222) and\nMANDALA_SSH_GATEWAY_KNOWN_HOSTS (a known_hosts line, or file, pinning that gateway's key)\npoint the SSH commands at another gateway.\n` : ''}`;
+  return `mandala — cloud computers from your terminal\n\n${matches.map((c) => `  ${usage(c)}\n    ${c.description}`).join('\n')}\n\n${[...GLOBAL_FLAGS, ...(exact?.flags ?? [])].map((f) => `  --${f.name}${f.alias ? `, -${f.alias}` : ''}${f.type === 'boolean' ? '' : ` <${f.type}>`}${f.required ? ' (required)' : ''}  ${f.description}`).join('\n')}\n\nMANDALA_API_KEY authenticates requests; MANDALA_BASE_URL optionally selects a server.\nMANDALA_MODEL_KEY is required for agent run. No credentials are needed for help, version, manifest, completion or logout.\n${path.startsWith('ssh') ? `\nmandala ssh: our options go before <computer> (with --setup, --key and --json may follow it);\neverything after it goes to ssh unchanged. It never falls back to mandala terminal.\nMANDALA_SSH_GATEWAY=host[:port] (default ssh.mandala.computer:2222) and\nMANDALA_SSH_GATEWAY_KNOWN_HOSTS (a known_hosts line, or file, pinning that gateway's key)\npoint the SSH commands at another gateway.\n` : ''}`;
 }

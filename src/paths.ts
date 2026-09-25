@@ -80,6 +80,18 @@ export const SSH_KEYS = 'ssh-keys';
  * route answers one.
  */
 export const SECRETS = 'secrets';
+/**
+ * Who the credential is (platform OPL-5053): the person, the account and role
+ * it acts with, the workspace it is confined to, and the key itself. Needs no
+ * permission, and answers a suspended account too.
+ */
+export const WHOAMI = 'whoami';
+/**
+ * The holder's own API keys (platform OPL-5053). Every verb needs the key's
+ * opt-in "Manage keys" permission, which only a dashboard session can turn on;
+ * without it the platform answers 403 with a sentence that says so.
+ */
+export const API_KEYS = 'api-keys';
 
 /**
  * One id, in a path, refused when it is empty.
@@ -474,6 +486,7 @@ export const build = (id: string): string => `${BUILDS}/${pathId(id, 'build id')
 export const sshKey = (id: string): string => `${SSH_KEYS}/${pathId(id, 'ssh key id')}`;
 export const webhook = (id: string): string => `${WEBHOOKS}/${pathId(id, 'webhook id')}`;
 export const secret = (id: string): string => `${SECRETS}/${pathId(id, 'secret id')}`;
+export const apiKey = (id: string): string => `${API_KEYS}/${pathId(id, 'API key id')}`;
 export const webhookAction = (id: string, action: 'rotate' | 'test' | 'deliveries'): string =>
   `${webhook(id)}/${action}`;
 
@@ -2376,4 +2389,45 @@ export function secretDeleteQuery(args: SecretDeleteArgs): Record<string, string
     revision_id: secretRevision(args.revisionId),
     ...(ws === undefined ? {} : { workspace_id: ws }),
   };
+}
+
+// --- API keys ---------------------------------------------------------------
+
+/**
+ * What `POST api-keys` takes.
+ *
+ * There is no way to ask for a key that can itself manage keys: the platform
+ * refuses that from every API key (403), and grants it only from a dashboard
+ * session. So the body never carries `manage_keys`, and every key minted here
+ * comes back with `manageKeys: false`.
+ */
+export type ApiKeyCreateArgs = {
+  /** A label for the Credentials page; trimmed, and cut to 60 characters by the platform. */
+  name?: string;
+  /**
+   * Confine the new key to one workspace of this account. Omitted, an
+   * account-wide caller mints an account-wide key, and a caller confined to a
+   * workspace mints into that same workspace — naming any other is a
+   * `PermissionDeniedError`, since a key may not mint anything wider than
+   * itself.
+   */
+  workspaceId?: string;
+};
+
+/** The body for `POST api-keys`. */
+export function apiKeyCreateBody(args: ApiKeyCreateArgs = {}): Json {
+  if (!isRecord(args)) throw new ValidationError(`options must be an object (got ${typeof args})`);
+  let workspaceId: string | undefined;
+  if (args.workspaceId !== undefined) {
+    workspaceId = requireString(args.workspaceId, 'workspaceId');
+    // As for the secret store: the platform keeps "absent" and a workspace id
+    // apart, and `''` is neither — it would be refused as no such workspace.
+    if (!workspaceId.trim() || workspaceId !== workspaceId.trim()) {
+      throw new ValidationError(
+        'workspaceId must be a workspace id, with no spaces around it; omit it for an account-wide key',
+      );
+    }
+  }
+  if (args.name !== undefined) requireString(args.name, 'name');
+  return omitUndefined({ name: args.name, workspace_id: workspaceId });
 }

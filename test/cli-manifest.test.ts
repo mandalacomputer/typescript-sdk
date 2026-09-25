@@ -18,6 +18,9 @@ import {
 
 const expectedCommands = [
   'login',
+  'logout',
+  'whoami',
+  'version',
   'account',
   'usage',
   'computers list',
@@ -63,6 +66,9 @@ const expectedCommands = [
   'secrets list',
   'secrets set',
   'secrets rm',
+  'api-keys list',
+  'api-keys create',
+  'api-keys revoke',
   'files list',
   'files upload',
   'files download',

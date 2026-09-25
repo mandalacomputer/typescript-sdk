@@ -504,6 +504,13 @@ async function exerciseEverything(client: Client): Promise<void> {
   // The upsert by name: a read of the scope, then the create or replace it picks.
   await client.secrets.set({ name: 'OPENAI_API_KEY', value: 'sk-test-3', workspaceId: 'ws-1' });
 
+  // Who the credential is, and the holder's keys (OPL-5053): the mint with
+  // every field it sends, and the revoke of what it minted.
+  await client.account.whoami();
+  await client.apiKeys.list();
+  const minted = await client.apiKeys.create({ name: 'ci', workspaceId: 'wsp-1' });
+  await client.apiKeys.revoke(minted.id);
+
   // Last, and both shapes: the purge is what `expect` binds, and a delete that
   // keeps the snapshots sends neither key.
   await (await client.computers.get('vm-2')).delete({ deleteSnapshots: true, expect: 'abc123' });

@@ -21,6 +21,7 @@
 
 import {
   Account,
+  ApiKeys,
   Builds,
   Computers,
   Moves,
@@ -46,6 +47,7 @@ export type ClientOptions = TransportOptions;
  */
 export class Client {
   readonly account: Account;
+  readonly apiKeys: ApiKeys;
   readonly builds: Builds;
   readonly computers: Computers;
   readonly moves: Moves;
@@ -65,6 +67,7 @@ export class Client {
   constructor(opts: ClientOptions = {}) {
     this.#t = new Transport(opts);
     this.account = new Account(this.#t);
+    this.apiKeys = new ApiKeys(this.#t);
     this.builds = new Builds(this.#t);
     this.computers = new Computers(this.#t);
     this.moves = new Moves(this.#t);
@@ -173,6 +176,8 @@ export type {
   ActivityPage,
   ActivityResultItem,
   ActivityResults,
+  ApiKey,
+  ApiKeyCreated,
   BackgroundExec,
   BuildProgress,
   BuildStep,
@@ -190,6 +195,7 @@ export type {
   PublishedTemplate,
   Retention,
   RetiredTemplates,
+  Role,
   Schedule,
   Secret,
   SecretBinding,
@@ -213,10 +219,12 @@ export type {
   Webhook,
   WebhookCreated,
   WebhookDelivery,
+  Whoami,
   WindowResult,
 } from './models.js';
 export type {
   ActivitiesArgs,
+  ApiKeyCreateArgs,
   ComputerState,
   CreateArgs,
   ExecArgs,
@@ -257,6 +265,7 @@ export type {
 } from './resources.js';
 export {
   Account,
+  ApiKeys,
   Builds,
   Computers,
   Moves,

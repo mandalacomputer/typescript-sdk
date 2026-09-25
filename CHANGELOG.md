@@ -16,6 +16,17 @@ name.
 
 ### Added
 
+- **`client.apiKeys.list()`, `create({ name, workspaceId })` and
+  `revoke(id)`**, and **`client.account.whoami()`**, over the platform's new
+  `GET whoami` and `GET|POST api-keys`, `DELETE api-keys/{id}`. The key
+  routes need the calling key's opt-in "Manage keys" permission, granted only
+  from a dashboard session; without it they are a `PermissionDeniedError`
+  carrying the platform's sentence. A minted key is answered once, as
+  `ApiKeyCreated.key`, and never has the permission itself.
+- **CLI: `whoami`, `api-keys list | create | revoke`, `logout` and
+  `--version`** (also `version`). `logout` forgets one saved profile on this
+  machine and prints the id of the key it held, which stays valid until
+  revoked; `api-keys create` prints only the new key on stdout.
 - **A Homebrew formula for the CLI**, in `packaging/homebrew/`, for
   `brew install mandalacomputer/tap/mandala` once the tap repository exists. It
   installs this package's npm tarball against Homebrew's `node`, with bash, zsh

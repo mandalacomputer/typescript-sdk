@@ -773,6 +773,35 @@ export const SSH_KEY = {
   last_used_at: null,
 };
 
+/** One API key, as `GET api-keys` lists it (OPL-5053): never the raw key. */
+export const API_KEY = {
+  id: 'key-a1b2c3d4e5f6',
+  name: 'ci',
+  prefix: 'com_1a2b3c4d…',
+  created_at: '2026-09-20T08:00:00.000Z',
+  last_used_at: '2026-09-25T14:05:00.000Z',
+  workspace_id: null,
+  workspace_name: null,
+  manage_keys: false,
+};
+
+/** The mint's 201: the key, and the raw secret once. */
+export const API_KEY_CREATED = {
+  ...API_KEY,
+  id: 'key-0f1e2d3c4b5a',
+  last_used_at: null,
+  raw: `com_${'ab'.repeat(24)}`,
+};
+
+/** `GET whoami` for an account-wide key that manages keys. */
+export const WHOAMI = {
+  user: { id: 'usr-1', email: 'dana@example.com', name: 'Dana' },
+  account: { id: 'acc-1', name: 'Acme', plan: 'team', status: 'active' },
+  role: 'owner',
+  workspace: null,
+  key: { ...API_KEY, id: 'key-000000000001', name: 'laptop', manage_keys: true },
+};
+
 /** A computer with SSH on, one key, everything delivered. */
 /** A computer's secret bindings, as `GET computers/:id/secrets` answers (OPL-4963, OPL-4944). */
 export const SECRET_BINDINGS = {
@@ -999,6 +1028,10 @@ export const anyRoute: Responder = (call) => {
   if (path.endsWith('/webhooks/whk-1/test')) return json(WEBHOOK_DELIVERY, { status: 202 });
   if (path.endsWith('/webhooks/whk-1/deliveries')) return json([WEBHOOK_DELIVERY]);
   if (/^\/webhooks\/[^/]+$/.test(path)) return json(method === 'DELETE' ? { ok: true } : WEBHOOK);
+  if (path === '/whoami') return json(WHOAMI);
+  if (path === '/api-keys')
+    return json(get ? [API_KEY] : API_KEY_CREATED, get ? {} : { status: 201 });
+  if (/^\/api-keys\/[^/]+$/.test(path)) return json({ ok: true });
   if (path === '/ssh-keys') return json(get ? [SSH_KEY] : SSH_KEY, get ? {} : { status: 201 });
   if (/^\/ssh-keys\/[^/]+$/.test(path)) return new Response(null, { status: 204 });
   if (path.endsWith('/ssh')) return json(SSH_ACCESS);
