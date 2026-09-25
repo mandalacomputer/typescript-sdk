@@ -7,7 +7,13 @@ project is pre-1.0, so a minor version may carry a behaviour change.
 The reasoning behind a change lives in its commit message rather than here.
 This is the summary you read to decide whether to upgrade.
 
-## [Unreleased]
+## [0.6.0] — 2026-09-25
+
+Two behaviour changes to read before upgrading, both under **Changed**: a 503
+on a change is no longer transient, and `computer.type()` now returns a value
+and refuses empty or over-long text before sending. A create-only upload's
+refusals arrive as two new `ConflictError` subclasses, `FileExistsError` and
+`CreateOnlyConflictError`; `noWake`'s reasonless 409 as `ComputerNotRunningError`.
 
 ### Added
 
@@ -220,5 +226,6 @@ No effect on the published surface, listed because it is most of the window.
 - Several parser fixes landed before that scanner was retired, each ported
   to and from the MCP server's byte-identical copy.
 
+[0.6.0]: https://github.com/mandalacomputer/typescript-sdk/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/mandalacomputer/typescript-sdk/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/mandalacomputer/typescript-sdk/compare/v0.3.0...v0.4.0
