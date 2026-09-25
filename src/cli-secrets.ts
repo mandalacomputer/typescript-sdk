@@ -52,16 +52,143 @@ async function scopeRows(
  * A name that spells a different secret's id is ambiguous, and refused: guessing
  * wrong deletes the wrong credential.
  */
-function byNameOrId(secrets: readonly Secret[], key: string): Secret | undefined {
+function byNameOrId(
+  secrets: readonly Secret[],
+  key: string,
+  unchanged = 'nothing was deleted',
+  shownAs = JSON.stringify(key),
+): Secret | undefined {
   const named = byName(secrets, key);
   const identified = secrets.find((s) => s.id === key);
   if (named && identified && named.id !== identified.id)
     throw new CliError(
       'ambiguous_secret',
-      `${JSON.stringify(key)} is the name of ${named.id} and the id of another secret; ` +
-        'nothing was deleted: rename one of them first',
+      `${shownAs} is the name of ${named.id} and the id of another secret; ` +
+        `${unchanged}: rename one of them first`,
     );
   return named ?? identified;
+}
+
+/** A secret id: `csec-` and sixteen hex characters. */
+const SECRET_ID = /^csec-[0-9a-f]{16}$/;
+
+/** One `--secret` or `--secret-file` on `computers create`, as typed. */
+export type BindingSpec = {
+  flag: '--secret' | '--secret-file';
+  /** A secret's name or id. */
+  key: string;
+  /** The variable or file it is published as; absent means the secret's own name. */
+  target?: string;
+  /**
+   * How an error names this binding. Never the whole of `key` once an `=` was
+   * typed: see {@link bindingSpecs}.
+   */
+  label: string;
+};
+
+/**
+ * The `--secret SECRET[=VAR]` and `--secret-file SECRET[=FILE]` values, split
+ * and checked before any request.
+ *
+ * Split at the LAST `=`, since neither a variable nor a file name can hold one
+ * and a secret's name can. Nothing after the FIRST `=` is ever quoted back: the
+ * likely mistake is `--secret NAME=<the value itself>`, an error is the last
+ * place that should print it, and a value can hold `=` itself (Base64 padding,
+ * say), which the last-`=` split would move into the key. So once an `=` was
+ * typed, an error names the binding by its flag, its position and the text
+ * before the first `=` alone.
+ */
+export function bindingSpecs(
+  envs: readonly string[] = [],
+  files: readonly string[] = [],
+): BindingSpec[] {
+  const split = (flag: BindingSpec['flag'], typed: string, index: number): BindingSpec => {
+    const at = typed.lastIndexOf('=');
+    const key = (at < 0 ? typed : typed.slice(0, at)).trim();
+    const label =
+      at < 0
+        ? `${flag} ${JSON.stringify(key)}`
+        : `${flag} #${index + 1} (${JSON.stringify(`${typed.slice(0, typed.indexOf('=')).trim()}=…`)})`;
+    if (!key) throw new CliError('invalid_arguments', `${flag} needs a secret name or id`);
+    if (at < 0) return { flag, key, label };
+    const target = typed.slice(at + 1);
+    const [pattern, rule] =
+      flag === '--secret'
+        ? [P.SECRET_ENV, 'letters, digits and underscores, not starting with a digit, at most 64']
+        : [P.SECRET_FILE, 'lowercase letters, digits, - and _, starting with a letter, at most 48'];
+    if (!pattern.test(target))
+      throw new CliError(
+        'invalid_arguments',
+        `${label}: what follows = must be ${rule} characters. ` +
+          `It names where the value goes, never the value: store that with mandala secrets set`,
+      );
+    return { flag, key, target, label };
+  };
+  return [
+    ...envs.map((typed, i) => split('--secret', typed, i)),
+    ...files.map((typed, i) => split('--secret-file', typed, i)),
+  ];
+}
+
+/**
+ * The bindings a create sends, each secret found by name or id in the default
+ * scope — the account-wide one, or the workspace an API key is confined to.
+ *
+ * An id that listing does not hold is sent as it is, for a secret in a scope
+ * the listing did not cover; the platform refuses one it cannot bind, and the
+ * create with it. A name it does not hold is refused here.
+ *
+ * Two bindings of one secret, or into one variable or file, are refused here
+ * too, by label: the SDK's own check would quote a typed target, which may be
+ * a value typed after `=` by mistake.
+ */
+export async function secretBindings(
+  client: Client,
+  specs: readonly BindingSpec[],
+  signal: AbortSignal,
+): Promise<P.SecretBindingArgs[]> {
+  if (!specs.length) return [];
+  const list = await client.secrets.list({ signal });
+  if (!list.delivery)
+    throw new CliError(
+      'unsupported',
+      'Delivery is off on this platform: secrets can be stored but not bound; nothing was created',
+    );
+  const seen = new Map<string, string>();
+  const once = (slot: string, label: string, what: string) => {
+    const first = seen.get(slot);
+    if (first !== undefined)
+      throw new CliError(
+        'invalid_arguments',
+        `${label} binds ${what} ${first} already binds; nothing was created`,
+      );
+    seen.set(slot, label);
+  };
+  return specs.map(({ flag, key, target, label }) => {
+    const found = byNameOrId(list.secrets, key, 'nothing was created', label);
+    if (!found && !SECRET_ID.test(key))
+      throw new CliError(
+        'not_found',
+        `${label}: no secret by that name or id in this scope; nothing was created`,
+      );
+    const as = target ?? found?.name;
+    const env = flag === '--secret';
+    if (as === undefined)
+      throw new CliError(
+        'invalid_arguments',
+        `${flag} ${key}: say what to bind it as, ${key}=${env ? 'VAR' : 'FILE'}`,
+      );
+    if (target === undefined && !(env ? P.SECRET_ENV : P.SECRET_FILE).test(as))
+      throw new CliError(
+        'invalid_arguments',
+        `${flag} ${JSON.stringify(key)}: its name cannot be ${env ? 'a variable' : 'a file'} name as it is; ` +
+          `name one: ${flag} ${JSON.stringify(`${key}=${env ? 'VAR' : 'FILE'}`)}`,
+      );
+    const secretId = found?.id ?? key;
+    once(`id:${secretId}`, label, 'the secret');
+    once(env ? `env:${as}` : `file:${as}`, label, env ? 'the variable' : 'the file');
+    return env ? { secretId, env: as } : { secretId, file: as };
+  });
 }
 
 /** `mandala secrets list [--workspace ID]`. */

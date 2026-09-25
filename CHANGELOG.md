@@ -16,6 +16,19 @@ name.
 
 ### Added
 
+- **CLI: `files list`, `files upload`, `files download`.** A guest directory's
+  entries, and one file in or out, with the computer named on its own rather
+  than spelled `computer:/path`. Upload and download are `scp`'s two halves,
+  `--no-overwrite` included, and report the same result.
+- **CLI: `computers rename`, `computers resize` and `computers view`.** Resize
+  takes `--cpu`, `--ram-mb` and `--disk-gb` and needs the computer stopped.
+  View opens the computer's dashboard page and prints its URL (`--no-open` only
+  prints it).
+- **CLI: `computers create --secret SECRET[=VAR]` and
+  `--secret-file SECRET[=FILE]`**, repeatable, bind stored secrets at create,
+  found by name or id. The variable or file defaults to the secret's name. An
+  error never quotes what follows the first `=`, where a value typed by mistake
+  would be, and a secret or a target bound twice fails before the create.
 - **`client.secrets.set({ name, value, workspaceId })`**: create the name, or
   replace its value if the scope already holds it — the upsert Python and both
   CLIs already had. Names match ignoring ASCII case, as the platform keeps them

@@ -29,6 +29,9 @@ const expectedCommands = [
   'computers restart',
   'computers delete',
   'computers clone',
+  'computers rename',
+  'computers resize',
+  'computers view',
   'computers screenshot',
   'computers exec',
   'computers wait',
@@ -60,6 +63,9 @@ const expectedCommands = [
   'secrets list',
   'secrets set',
   'secrets rm',
+  'files list',
+  'files upload',
+  'files download',
   'agent run',
   'ssh',
   'ssh-key list',
@@ -139,6 +145,16 @@ describe('one command inventory', () => {
       { name: 'path', required: false, type: 'string' },
     ]);
     expect(tree.commands.find((c) => c.path.join(' ') === 'agent run')?.json_mode).toBe('ndjson');
+    expect(tree.commands.find((c) => c.path.join(' ') === 'files download')?.arguments).toEqual([
+      { name: 'computer', required: true, type: 'string' },
+      { name: 'path', required: true, type: 'string' },
+      { name: 'dest', required: false, type: 'string' },
+    ]);
+    const create = tree.commands.find((c) => c.path.join(' ') === 'computers create')!;
+    expect(create.flags.filter((f) => f.name.startsWith('secret'))).toMatchObject([
+      { name: 'secret', repeatable: true },
+      { name: 'secret-file', repeatable: true },
+    ]);
     expect(tree.commands.find((c) => c.path[0] === 'completion')?.arguments[0]).toMatchObject({
       choices: ['bash', 'zsh', 'fish'],
     });

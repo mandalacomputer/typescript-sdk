@@ -910,26 +910,47 @@ const cmdScp: LegacyCommands['scp'] = async (srcArg, dstArg, io, signal, opts = 
   // file, which that option says nothing about, and quietly ignoring the flag
   // there would replace a file the caller asked to keep.
   if (src && !overwrite) die('--no-overwrite applies to an upload, not a download');
-
-  const client = io.createClient();
-
   if (src) {
     if (!src.path) die(`say which file: ${src.target}:/absolute/path`);
-    const computer = await resolveComputer(client, src.target, signal);
-    let local = dstArg;
-    // A directory destination takes the source's own basename, like scp.
-    const info = await stat(local).catch(() => undefined);
-    if (info?.isDirectory()) {
-      const name = guestBasename(src.path);
-      if (!name) die(`say which file: ${src.target}:${src.path}`);
-      local = join(local, name);
-    }
-    const size = await download(computer, src.path, local, signal);
-    return { source: srcArg, destination: local, bytes: size, confirmed: true };
+    return copyOut(src.target, src.path, dstArg, io, signal);
   }
-
   const remote = dst!;
   if (!remote.path) die(`say where in the guest: ${remote.target}:/absolute/path`);
+  return copyIn(remote.target, srcArg, remote.path, io, signal, opts);
+};
+
+/**
+ * One guest file to a local path — `scp <computer>:<path> <local>` and
+ * `files download`. A local directory takes the guest file's own name, like scp.
+ */
+const copyOut: LegacyCommands['download'] = async (target, guestPath, dest, io, signal) => {
+  const computer = await resolveComputer(io.createClient(), target, signal);
+  let local = dest;
+  const info = await stat(local).catch(() => undefined);
+  if (info?.isDirectory()) {
+    const name = guestBasename(guestPath);
+    if (!name) die(`say which file: ${target}:${guestPath}`);
+    local = join(local, name);
+  }
+  const size = await download(computer, guestPath, local, signal);
+  return { source: `${target}:${guestPath}`, destination: local, bytes: size, confirmed: true };
+};
+
+/**
+ * One local file into the guest — `scp <local> <computer>:<path>` and
+ * `files upload`. A guest path ending in a separator takes the local file's name.
+ */
+const copyIn: LegacyCommands['upload'] = async (
+  target,
+  srcArg,
+  guestPath,
+  io,
+  signal,
+  opts = {},
+) => {
+  const overwrite = opts.overwrite ?? true;
+  const client = io.createClient();
+  const remote = { target, path: guestPath };
   const path = guestDestination(remote.path, srcArg);
   if (!(await stat(srcArg).catch(() => undefined))?.isFile()) die(`${srcArg} is not a file`);
   // Resolved before anything local is opened. The other order built the read
@@ -1019,7 +1040,12 @@ export async function main(
   argv: string[] = process.argv.slice(2),
   overrides: Partial<CliIO> = {},
 ): Promise<number> {
-  return runCli(argv, runtime(overrides), { terminal: cmdTerminal, scp: cmdScp });
+  return runCli(argv, runtime(overrides), {
+    terminal: cmdTerminal,
+    scp: cmdScp,
+    upload: copyIn,
+    download: copyOut,
+  });
 }
 
 // Guarded so importing this module — which the tests do, for remoteSide — does

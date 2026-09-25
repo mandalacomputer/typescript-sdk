@@ -2563,10 +2563,12 @@ credentials nor network access and never prompt for input.
 
 | Command group | Available commands |
 | --- | --- |
-| `computers` | `list`, `create`, `get`, `start`, `stop`, `suspend`, `restart`, `delete`, `clone`, `screenshot`, `exec`, `wait` |
+| `computers` | `list`, `create`, `get`, `start`, `stop`, `suspend`, `restart`, `delete`, `clone`, `rename`, `resize`, `view`, `screenshot`, `exec`, `wait` |
 | `templates` | `list`, `get`, `validate`, `publish`, `build`, `watch`, `retire` |
 | `snapshots` | `list`, `create`, `restore`, `clone`, `delete`, `holdings`, `schedule get`, `schedule set`, `schedule clear`, `retention` |
 | `webhooks` | `list`, `create`, `get`, `update`, `delete`, `rotate`, `test`, `deliveries` |
+| `secrets` | `list`, `set`, `rm` |
+| `files` | `list`, `upload`, `download` |
 | `agent` | `run` |
 | `ssh-key` | `list`, `add`, `rm` |
 | Top-level commands | `login`, `account`, `usage`, `ssh`, `ssh-access`, `ssh-config`, `terminal`, `scp`, `manifest`, `completion` |
@@ -2664,12 +2666,16 @@ Listing filters and webhook filters that say `--computer` take IDs.
 ```sh
 mandala computers list --json
 mandala computers create --name workbench --template base --cpu 2 --ram-mb 4096 --disk-gb 40
+mandala computers create --name agent --secret OPENAI_API_KEY --secret-file GH_TOKEN=gh
 mandala computers wait workbench --until guest --timeout-ms 180000 --poll-ms 2000
 mandala computers get workbench
 mandala computers screenshot workbench -o screen.png --fresh
 mandala computers exec workbench -c 'uname -a' --timeout 60
 printf 'pwd\nls -la\n' | mandala computers exec workbench
 mandala computers exec workbench -c 'make build' --cwd /home/user/project --background --json
+mandala computers rename workbench build-box
+mandala computers stop build-box && mandala computers resize build-box --cpu 4 --ram-mb 8192
+mandala computers view build-box
 ```
 
 Create starts the computer by default; `--no-start` leaves it stopped. It returns
@@ -2680,6 +2686,21 @@ desktop (at once for one with none bound). The default is `running`. `--timeout-
 `--poll-ms` controls its polling interval; neither changes the initial computer
 lookup's request budget. The SDK also provides [`computers.launch()`](#use) for
 creating and waiting in one call.
+
+`--secret SECRET[=VAR]` binds a secret from the store (`mandala secrets set`)
+as an environment variable in the computer's desktop session, and
+`--secret-file SECRET[=FILE]` as the file `/run/mandala-secrets/user/files/FILE`.
+`SECRET` is a name or an id in the default scope, and `VAR` or `FILE` defaults
+to the secret's name. Both repeat. The part after the last `=` names where the
+value goes, never the value itself; the value only ever goes in through
+`secrets set`. So an error never quotes anything after the first `=`: it names
+the binding by flag, position and the text before that `=`. Two bindings of
+one secret, or into one variable or file, fail before anything is created. An
+id the default scope does not list, such as one of a
+workspace's secrets, is sent as it is and needs its `=VAR` or `=FILE`. A name
+that matches nothing fails before anything is created. The secrets reach the
+desktop a few seconds after the computer runs: `computers wait --until secrets`
+waits for them.
 
 `--size` selects a named size and cannot be combined with `--template`, `--cpu`,
 `--ram-mb`, `--disk-gb`, or `--template-transfer`. A preparation token is accepted
@@ -2708,6 +2729,14 @@ Screenshot always writes the image bytes to the required `-o`/`--output` file.
 Its JSON result reports `{ "path": "screen.png", "bytes": 12345 }`; it never
 embeds or JSON-encodes the image. `--width` scales the requested image, and
 `--fresh` requests a new capture.
+
+`computers rename COMPUTER NAME` changes only the label. `computers resize`
+takes any of `--cpu`, `--ram-mb` and `--disk-gb`, and needs the computer
+stopped; disks grow only. A size its host cannot run fails with the error code
+`move_required`; the SDK's `computer.relocate()` is the move it offers.
+`computers view` opens the computer's page in the dashboard, beside the API
+the CLI talks to, and prints its URL; `--no-open` only prints it. The page uses
+your browser's own dashboard sign-in, so the URL carries no credential.
 
 Lifecycle commands act on the specified computer. `computers stop --force`
 forces power off. `computers delete` keeps snapshots unless you pass both
@@ -2923,7 +2952,24 @@ download.
 npx --package=mandala-computer mandala scp --no-overwrite ./app.env my-computer:/home/user/.env
 ```
 
-Both take a computer's name or its id and use the shared credential/profile selection.
+The `files` commands do the same with the computer named on its own, so a
+name holding a colon, or one letter long, still works:
+
+```sh
+mandala files list my-computer /home/user
+mandala files upload my-computer ./setup.sh /tmp/            # a trailing / keeps the file name
+mandala files upload --no-overwrite my-computer ./app.env /home/user/.env
+mandala files download my-computer /var/log/app.log         # into the current directory
+mandala files download my-computer /var/log/app.log ./logs/
+```
+
+`files upload` and `files download` behave exactly as `scp`'s two directions
+and report the same result. `files list` names each entry's type and a regular
+file's size; the computer must be running. The listing is bounded rather than
+paged: a larger directory prints part of itself and says so on stderr (with
+`--json`, `truncated: true`), so list a narrower path.
+
+All of them take a computer's name or its id and use the shared credential/profile selection.
 
 ### SSH access
 

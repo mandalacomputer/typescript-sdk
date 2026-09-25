@@ -5,8 +5,14 @@ import { loginCommand } from './cli-login.js';
 import { manifest } from './cli-manifest.js';
 import { CliError, help, type Parsed, parseArgs } from './cli-options.js';
 import { errorInfo, Output, redact, snakeKeys } from './cli-output.js';
-import { type CliIO, documentInput, readInput } from './cli-runtime.js';
-import { secretsList, secretsRemove, secretsSet } from './cli-secrets.js';
+import { type CliIO, documentInput, openBrowser, readInput } from './cli-runtime.js';
+import {
+  bindingSpecs,
+  secretBindings,
+  secretsList,
+  secretsRemove,
+  secretsSet,
+} from './cli-secrets.js';
 import {
   defaultSshRuntime,
   sshAccessCommand,
@@ -20,9 +26,25 @@ import {
 import type { Computer } from './computer.js';
 import { CredentialSaveError } from './credentials.js';
 import { MandalaError, NotFoundError, ValidationError } from './errors.js';
-import type { AccountQuota, BuildProgress, Client, Listing, UsageReport } from './index.js';
+import type {
+  AccountQuota,
+  BuildProgress,
+  Client,
+  GuestDirectory,
+  Listing,
+  UsageReport,
+} from './index.js';
 import * as P from './paths.js';
 import { checkWait } from './wait.js';
+
+/** What one file copy reports: `scp`, `files upload` and `files download` alike. */
+export type CopyResult = {
+  source: string;
+  destination: string;
+  bytes: number;
+  confirmed: boolean;
+  accounting?: string;
+};
 
 export type LegacyCommands = {
   terminal: (computer: string, session: string, io: CliIO) => Promise<number>;
@@ -32,13 +54,24 @@ export type LegacyCommands = {
     io: CliIO,
     signal: AbortSignal,
     opts?: { overwrite?: boolean },
-  ) => Promise<{
-    source: string;
-    destination: string;
-    bytes: number;
-    confirmed: boolean;
-    accounting?: string;
-  }>;
+  ) => Promise<CopyResult>;
+  /** One local file to a guest path: scp's upload half, with the computer named apart. */
+  upload: (
+    computer: string,
+    local: string,
+    guestPath: string,
+    io: CliIO,
+    signal: AbortSignal,
+    opts?: { overwrite?: boolean },
+  ) => Promise<CopyResult>;
+  /** One guest file to a local path: scp's download half, with the computer named apart. */
+  download: (
+    computer: string,
+    guestPath: string,
+    local: string,
+    io: CliIO,
+    signal: AbortSignal,
+  ) => Promise<CopyResult>;
 };
 
 export async function resolveComputer(
@@ -136,6 +169,29 @@ function accountText(q: AccountQuota): string {
     `Per-computer maxima: ${q.perComputer.maxVcpu} vCPU; ${q.perComputer.maxRamMb} MiB RAM; ${q.perComputer.maxDiskGb} GiB disk`,
     `Windows capability: ${q.capabilities.windows ? 'yes' : 'no'}`,
   ].join('\n');
+}
+
+/**
+ * The dashboard page for one computer, beside the API the client talks to: the
+ * base URL less its `/api/v1`, or its origin when it does not end in one.
+ */
+export function dashboardUrl(baseUrl: string, id: string): string {
+  const url = new URL(baseUrl);
+  const prefix = url.pathname.replace(/\/+$/, '');
+  url.pathname = `${prefix.endsWith('/api/v1') ? prefix.slice(0, -'/api/v1'.length) : ''}/computers/${encodeURIComponent(id)}`;
+  url.search = '';
+  url.hash = '';
+  return url.href;
+}
+
+/** `files list` for a person: one line per entry, directories marked with a `/`. */
+function directoryText(dir: GuestDirectory): string {
+  return dir.entries
+    .map(
+      (e) =>
+        `${e.type.padEnd(11)} ${e.sizeBytes === undefined ? '-'.padStart(12) : String(e.sizeBytes).padStart(12)}  ${e.name}${e.type === 'directory' ? '/' : ''}\n`,
+    )
+    .join('');
 }
 
 function checkUsageReport(d: Record<string, unknown>): void {
@@ -367,7 +423,18 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
       resolution: s('resolution'),
       start: !b('no-start'),
     };
+    // Split and checked here; each is found by name or id only once the rest
+    // of the create has passed, just before it is sent.
+    const bindings = bindingSpecs(many('secret'), many('secret-file'));
     if (path === 'computers create') P.createBody(create);
+    const resize = { cpu: n('cpu'), ramMb: n('ram-mb'), diskGb: n('disk-gb') };
+    if (path === 'computers resize') {
+      if (resize.cpu === undefined && resize.ramMb === undefined && resize.diskGb === undefined)
+        throw new CliError('invalid_arguments', 'say what to change: --cpu, --ram-mb or --disk-gb');
+      P.updateBody(resize);
+    }
+    if (path === 'computers rename') P.updateBody({ name: args[1]! });
+    if (path === 'files list') P.directoryQuery(args[1]!);
     const deletion = { deleteSnapshots: b('delete-snapshots'), expect: s('expect'), signal };
     if (path === 'computers delete') {
       P.deleteQuery(deletion);
@@ -439,10 +506,14 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
     };
     if (path === 'webhooks create') P.webhookCreateBody({ ...hook, url: target });
     if (path === 'webhooks update') P.webhookUpdateBody(hook);
-    if (path === 'scp') {
-      const result = await legacy.scp(target, args[1]!, io, signal, {
-        overwrite: !b('no-overwrite'),
-      });
+    if (path === 'scp' || path === 'files upload' || path === 'files download') {
+      const overwrite = { overwrite: !b('no-overwrite') };
+      const result =
+        path === 'scp'
+          ? await legacy.scp(target, args[1]!, io, signal, overwrite)
+          : path === 'files upload'
+            ? await legacy.upload(target, args[1]!, args[2]!, io, signal, overwrite)
+            : await legacy.download(target, args[1]!, args[2] ?? '.', io, signal);
       if (json) return output.result(result);
       output.diagnostic(
         `${result.source} -> ${result.destination} (${result.accounting ?? `${result.bytes} bytes`})`,
@@ -482,8 +553,14 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
           incomplete: listing.incomplete,
         });
       }
-      case 'computers create':
-        return output.result(computerData(await client.computers.create(create, call)));
+      case 'computers create': {
+        const secrets = await secretBindings(client, bindings, signal);
+        return output.result(
+          computerData(
+            await client.computers.create(secrets.length ? { ...create, secrets } : create, call),
+          ),
+        );
+      }
       case 'computers get':
         return output.result(computerData(await (await computer()).refresh(call)));
       case 'computers start':
@@ -500,6 +577,27 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
         return output.result(computerData(await (await computer()).restart(call)));
       case 'computers clone':
         return output.result(computerData(await (await computer()).clone(s('name'), call)));
+      case 'computers rename':
+        return output.result(computerData(await (await computer()).rename(args[1]!, call)));
+      case 'computers resize':
+        return output.result(computerData(await (await computer()).update(resize, call)));
+      case 'computers view': {
+        const c = await computer();
+        const url = dashboardUrl(client.baseUrl, c.id);
+        let opened = false;
+        if (!b('no-open')) {
+          try {
+            opened = await (io.openBrowser ?? openBrowser)(url);
+          } catch {
+            /* The URL is printed either way. */
+          }
+        }
+        if (json) return output.result({ id: c.id, name: c.name, url, opened });
+        io.stdout.write(`${url}\n`);
+        if (!b('no-open') && !opened)
+          output.diagnostic('mandala: no browser could be opened; the URL is above.');
+        return 0;
+      }
       case 'computers delete': {
         const c = await computer();
         const snapshotsDeleted = await c.delete(deletion);
@@ -675,6 +773,21 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
         return await secretsSet(client, io, output, target, s('workspace'), signal);
       case 'secrets rm':
         return await secretsRemove(client, io, output, target, s('workspace'), signal);
+      case 'files list': {
+        const dir = await (await computer()).listDirectory(args[1]!, call);
+        const { raw: _raw, ...data } = dir;
+        if (json) return output.result(snakeKeys(data));
+        io.stdout.write(redact(directoryText(dir), io.env, io.secrets) as string);
+        if (dir.truncated)
+          output.diagnostic(
+            'mandala: this directory is larger than one listing: the entries above are an unordered part of it; list a narrower path',
+          );
+        if (dir.skipped)
+          output.diagnostic(
+            `mandala: ${dir.skipped} name${dir.skipped === 1 ? '' : 's'} could not be shown (control characters or not UTF-8)`,
+          );
+        return 0;
+      }
       case 'ssh':
         return await sshSetup(client, io, output, ssh, target, s('key'), signal);
       case 'ssh-key list':
