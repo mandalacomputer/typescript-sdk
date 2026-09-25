@@ -104,11 +104,13 @@ returns when its guest agent answers. Guest readiness does not guarantee that
 the visible desktop has finished logging in. It accepts every `create()` option;
 `start: false` is sent unchanged to create, then launch starts the computer after
 its disk is ready. An already admitted start is waited on, and failed starts are
-reported without retrying them.
+reported without retrying them. With `secrets` bound, it also waits until they
+have reached the desktop, so the first command on the returned computer sees
+them; a delivery that failed throws, naming why.
 
 Pass `{ timeoutMs: 600_000, signal }` as the second argument for a larger build or
 cancellation. The default readiness budget is 180,000 milliseconds, beginning
-after create returns. Disk, running and guest waits share the remaining budget,
+after create returns. Disk, running, guest and secrets waits share the remaining budget,
 including elapsed start work. Create and start retain their usual transport
 deadlines, so this is not a total wall-clock limit on launch. `pollMs` defaults
 to 3,000 for all stages.
@@ -1226,9 +1228,11 @@ and never comes back out**: no call returns one, so keep your own copy.
 
 ```ts
 const s = await client.secrets.create({ name: 'OPENAI_API_KEY', value: key });
+// Or create-or-replace by name, when either will do:
+await client.secrets.set({ name: 'OPENAI_API_KEY', value: key });
 
-// Bind at create, and the first start delivers it…
-const c = await client.computers.create({
+// Bind at create, and the first start delivers it. launch() waits for it to land…
+const c = await client.computers.launch({
   template: 'base',
   secrets: [{ secretId: s.id, env: 'OPENAI_API_KEY' }],             // or { file: 'openai' }
 });
@@ -1238,6 +1242,7 @@ const c = await client.computers.create({
 await other.stop();
 await other.setSecrets([{ secretId: s.id, env: 'OPENAI_API_KEY' }]);
 await other.start();
+await other.waitForSecrets();   // running comes a few seconds before the values land
 
 const { secrets, delivery, limits } = await client.secrets.list();  // names, never values
 const fresh = await client.secrets.get(s.id);
@@ -1263,7 +1268,13 @@ c.secretBindings;     // [{ secretId, revisionId, env } | { secretId, revisionId
 c.secretsPending;     // true: restart to deliver · false · null: could not be checked
 c.secretsApplied;     // { generation, appliedAt, revisions } — the delivery receipt
 c.secretsError;       // why the last delivering start was stopped
+c.secretsDelivering;  // true while values are on their way in; waitForSecrets() waits on it
 ```
+
+`secrets.set` reads the scope and then creates the name or replaces it with the
+revision it read, matching names the way the platform keeps them unique
+(ignoring ASCII case). A conflict between the read and the write is read again,
+up to three times; a 503, whose outcome is unknown, is never sent again.
 
 `secretsPending` is `null` when the platform could not check — unknown, never
 false — and absent on a computer with nothing bound and nothing pending.
@@ -2566,10 +2577,10 @@ marked repeatable, such as `--env`, `--event`, and webhook `--computer` filters.
 Use `--` before a positional argument beginning with a dash. Unknown commands,
 unknown flags, and conflicting arguments fail instead of being ignored.
 
-`mandala manifest` prints a JSON command tree by default. Its `schemaVersion` is
-`1`; each entry in `commands` describes the command's `path` array, its
+`mandala manifest` prints a JSON command tree by default. Its `schema_version` is
+`2`; each entry in `commands` describes the command's `path` array, its
 `arguments` (each marked `required` or not), `flags` with types and constraints,
-and `jsonMode` (`finite`, `ndjson`, or `unsupported`). `ssh` also carries
+`json_mode` (`finite`, `ndjson`, or `unsupported`) and `requires_credentials`. `ssh` also carries
 `passthrough`: everything after its computer goes to `ssh` unless `--setup` came first. Flags with aliases, choices, repetition, or conflicts
 carry those properties. Conditional SDK requirements also appear in command help
 and the sections below. The manifest reports `terminal` and `ssh` as unsupported in
@@ -2610,7 +2621,7 @@ Check `complete.computers` and `complete.snapshots` independently. An incomplete
 group has explicit `null` consumption and remaining fields, and human output
 labels them `unknown`. A complete empty inventory has numeric zeros; a zero plan
 ceiling is a real limit. Usage above a ceiling stays visible even when remaining
-headroom is zero. `observedAt` is the observation time, and `advisory: true` means
+headroom is zero. `observed_at` is the observation time, and `advisory: true` means
 headroom is not a reservation or host-capacity guarantee and can change immediately.
 This read performs no lifecycle actions.
 
@@ -2630,11 +2641,12 @@ Check `degraded` and `unmetered` before using the numbers: both mean totals may 
 too small. A degraded read can recover on retry; retrying alone does not recover
 unmetered usage. `breakdown: false` means computer details were withheld for the
 credential, even though account totals are present. It differs from a complete
-empty breakdown. `reportedThrough` identifies the last UTC day settled for billing;
+empty breakdown. `reported_through` identifies the last UTC day settled for billing;
 the CLI emits `null` when none of the window has settled.
 
-Both commands return one finite JSON envelope with the typed SDK's camelCase
-fields in `data`, excluding the SDK's duplicate `raw` payload. Partial reports
+Both commands return one finite JSON envelope with the typed SDK's fields in
+`data`, spelled in the API's snake_case (`observed_at`, `per_computer`,
+`reported_through`) and excluding the SDK's duplicate `raw` payload. Partial reports
 remain successful reads with their completeness fields intact. Failed or malformed
 reads return an error and exit nonzero. Human output explains the same caveats
 before the figures. These reads support the usual cancellation and redaction rules.
@@ -2662,8 +2674,9 @@ mandala computers exec workbench -c 'make build' --cwd /home/user/project --back
 
 Create starts the computer by default; `--no-start` leaves it stopped. It returns
 after provisioning responds. Use `computers wait` for readiness: `built` waits
-for the disk copy, `running` waits for the VM, and `guest` waits for the guest
-agent. The default is `running`. `--timeout-ms` bounds the readiness wait and
+for the disk copy, `running` waits for the VM, `guest` waits for the guest
+agent, and `secrets` waits until a computer's bound secrets have reached its
+desktop (at once for one with none bound). The default is `running`. `--timeout-ms` bounds the readiness wait and
 `--poll-ms` controls its polling interval; neither changes the initial computer
 lookup's request budget. The SDK also provides [`computers.launch()`](#use) for
 creating and waiting in one call.
@@ -2682,9 +2695,9 @@ be combined with `--background`. `--cwd`, repeatable `--env NAME=VALUE`, and
 
 Without `--json`, foreground exec writes the guest's stdout and stderr bytes to
 the corresponding local streams. With `--json`, both are inside the result:
-`stdoutBase64` and `stderrBase64` preserve bytes; `stdoutText` and `stderrText`
-provide UTF-8 decoding. Foreground results also include `exitCode`, `timedOut`,
-`outTruncated`, `errTruncated`, `truncated`, and `ok`. Truncation is reported even
+`stdout_base64` and `stderr_base64` preserve bytes; `stdout_text` and `stderr_text`
+provide UTF-8 decoding. Foreground results also include `exit_code`, `timed_out`,
+`out_truncated`, `err_truncated`, `truncated`, and `ok`. Truncation is reported even
 when the remote command exits zero; success does not mean all output was captured.
 Background exec returns a handle including `pid`, `running`, output, and available
 execution metadata. Starting it successfully does not mean the command has
@@ -2780,31 +2793,49 @@ An interactive `terminal` session passes Ctrl-C to the guest terminal instead.
 
 `--json` puts machine output on stdout and diagnostics on stderr. Finite commands
 emit one newline-terminated JSON object. A successful screenshot, for example,
-has this version 1 envelope:
+has this version 2 envelope:
 
 ```json
-{"schemaVersion":1,"command":"computers screenshot","ok":true,"data":{"path":"screen.png","bytes":12345},"exitCode":0}
+{"schema_version":2,"command":"computers screenshot","ok":true,"data":{"path":"screen.png","bytes":12345},"exit_code":0}
 ```
 
 A request or CLI error uses `error` instead of `data`:
 
 ```json
-{"schemaVersion":1,"command":"terminal","ok":false,"error":{"code":"unsupported_mode","message":"Interactive terminal does not support --json; use computers exec for machine-readable output"},"exitCode":1}
+{"schema_version":2,"command":"terminal","ok":false,"error":{"code":"unsupported_mode","message":"Interactive terminal does not support --json; use computers exec for machine-readable output"},"exit_code":1}
 ```
+
+**Every key is snake_case**, the envelope's own included, which is what version
+2 changed: version 1 wrote `schemaVersion` and `exitCode`, and camelCase fields
+in `account`, `usage`, `exec` and agent results.
 
 `command` is the space-separated command path, without operands. It is empty
 when argument parsing fails before an invocation is established. `error` always
-has string `code` and `message` fields, and may include numeric HTTP `status` or
-command-specific `details`. CLI codes include `invalid_arguments`,
-`ambiguous_computer`, `missing_credentials`, `unsupported_mode`, and `cancelled`;
-SDK failures use their error-class names, such as `AuthenticationError`.
+has string `code` and `message` fields, and may include numeric HTTP `status`,
+the platform's own `reason` word, command-specific `details`, or — for a
+mistyped command — its full `usage`, which human output prints under the message.
+
+**`code` is always one snake_case word naming the kind of failure**, never a
+class name, and the words are the same in `mandala-py`. For the CLI's own
+checks: `invalid_arguments`, `ambiguous_computer`, `missing_credentials`,
+`unsupported_mode`, `cancelled`, `io_error` (with `details.errno`), and
+command-specific words such as `exists`. For an API refusal, by HTTP status:
+`unauthenticated` (401), `plan_limit` (402), `permission_denied` (403),
+`not_found` (404), `method_not_allowed` (405), `conflict` (409, or the more
+specific `exists`, `move_required` or `not_running`), `too_large` (413),
+`range_not_satisfiable` (416), `rate_limited` (429), `unavailable` (503),
+`gateway_timeout` (504), `origin_unreachable`, `origin_tls` and `origin_error`
+(the edge could not reach, verify or read the platform), and `api_error` for
+any other status. Otherwise `connection_failed`, `connection_interrupted`,
+`timeout`, or `failed`.
 
 `ok` reflects the process exit status. A remote nonzero exec result or invalid
-template document keeps its `data` with `ok: false` and a nonzero `exitCode`.
+template document keeps its `data` with `ok: false` and a nonzero `exit_code`.
 Consumers should distinguish an unsuccessful result from a request that raised
-an `error` and tolerate additional fields within version 1. Resource payloads
-retain their API field names. Account, usage, exec, and agent results use the SDK's
-camelCase fields described above. Computer results omit desktop credentials.
+an `error` and tolerate additional fields within version 2. Resource payloads
+retain their API field names; what the CLI decodes itself (account, usage, exec
+and agent results) is spelled the same way. Computer results omit desktop
+credentials.
 
 Computer, template, and snapshot listings return `data.items` and
 `data.incomplete`. `null` means complete; any number, **including zero**, means
@@ -2813,18 +2844,18 @@ partial server response; the CLI preserves the shortfall instead of presenting
 it as a complete inventory.
 
 `agent run --json` and `templates watch --json` emit **NDJSON**: one JSON frame
-per line. Every frame has `schemaVersion`, `command`, `type`, an ISO-8601 UTC
+per line. Every frame has `schema_version`, `command`, `type`, an ISO-8601 UTC
 `timestamp` recorded by the CLI, and `data`. Agent frame types are `step`, `text`,
 `done`, and `error`; build frame types are `progress`, `done`, and `error`.
 For example:
 
 ```jsonl
-{"schemaVersion":1,"command":"agent run","type":"step","timestamp":"2026-09-16T12:00:00.000Z","data":{"n":1,"tool":"computer","action":"left_click","detail":"clicked"}}
-{"schemaVersion":1,"command":"agent run","type":"done","timestamp":"2026-09-16T12:00:01.000Z","data":{"steps":1,"stop":"end_turn","finished":true,"text":"Done","usage":{"inputTokens":100,"outputTokens":20,"cacheReadTokens":0,"cacheWriteTokens":0},"exitCode":0}}
+{"schema_version":2,"command":"agent run","type":"step","timestamp":"2026-09-16T12:00:00.000Z","data":{"n":1,"tool":"computer","action":"left_click","detail":"clicked"}}
+{"schema_version":2,"command":"agent run","type":"done","timestamp":"2026-09-16T12:00:01.000Z","data":{"steps":1,"stop":"end_turn","finished":true,"text":"Done","usage":{"input_tokens":100,"output_tokens":20,"cache_read_tokens":0,"cache_write_tokens":0},"exit_code":0}}
 ```
 
-A terminal `done` frame includes `data.exitCode` and the final result. A terminal
-`error` frame contains `data.error` and `data.exitCode`. Require a terminal frame
+A terminal `done` frame includes `data.exit_code` and the final result. A terminal
+`error` frame contains `data.error` and `data.exit_code`. Require a terminal frame
 and check its exit status; progress alone is not success. Argument parsing errors
 use the finite error envelope even for a requested streaming command. After
 successful parsing, streaming-command failures use an `error` frame.

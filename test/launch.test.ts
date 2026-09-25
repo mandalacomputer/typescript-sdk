@@ -496,3 +496,153 @@ it('honours Retry-After and transient build reads before starting an unreserved 
   expect(rec.calls.filter((call) => call.path.endsWith('/start'))).toHaveLength(1);
   expect(rec.calls[0]!.body).toEqual({ start: false });
 });
+
+// --- secrets (OPL-5048) -----------------------------------------------------
+
+const BINDING = { secret_id: 'csec-0123456789abcdef', revision_id: 'csr-1', env: 'TOKEN' };
+const RECEIPT = { generation: 1, applied_at: '2026-09-25T00:00:00Z', revisions: {} };
+const bound = (delivering: boolean | undefined, extra: Record<string, unknown> = {}) => ({
+  ...computer(),
+  secrets: [BINDING],
+  secrets_generation: 1,
+  ...(delivering === undefined ? {} : { secrets_delivering: delivering }),
+  ...extra,
+});
+
+describe('launch with secrets bound', () => {
+  it('waits for the secrets to land before returning, sharing the budget', async () => {
+    const waited = vi.spyOn(Computer.prototype, 'waitForSecrets');
+    let gets = 0;
+    const rec = recorder((call) => {
+      if (call.path.endsWith('/exec')) return json(guest);
+      if (call.method === 'POST') return json(bound(true), { status: 201 });
+      gets++;
+      return json(gets < 3 ? bound(true) : bound(false, { secrets_applied: RECEIPT }));
+    });
+    const client = new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: rec.fetch });
+    const c = await client.computers.launch(
+      { secrets: [{ secretId: BINDING.secret_id, env: 'TOKEN' }] },
+      { pollMs: 1 },
+    );
+    expect(c.secretsDelivering).toBe(false);
+    expect(rec.routes()).toEqual([
+      ['POST', 'computers'],
+      ['GET', 'computers/launch-42'],
+      ['POST', 'computers/launch-42/exec'],
+      ['GET', 'computers/launch-42'],
+      ['GET', 'computers/launch-42'],
+    ]);
+    expect(rec.calls[0]!.body).toMatchObject({ start: true, secrets: [{ env: 'TOKEN' }] });
+    expect(waited).toHaveBeenCalledOnce();
+    expect(waited.mock.calls[0]![0]!.timeoutMs).toBeLessThanOrEqual(180_000);
+  });
+
+  it('waits on a binding the record reports even when the create named none', async () => {
+    let gets = 0;
+    const rec = recorder((call) => {
+      if (call.path.endsWith('/exec')) return json(guest);
+      if (call.method === 'POST') return json(bound(true), { status: 201 });
+      gets++;
+      return json(gets < 3 ? bound(true) : bound(false));
+    });
+    const client = new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: rec.fetch });
+    await client.computers.launch({}, { pollMs: 1 });
+    expect(rec.calls.filter((c) => c.method === 'GET')).toHaveLength(3);
+  });
+
+  it('throws, naming why and the computer, when the delivery failed', async () => {
+    const rec = recorder((call) => {
+      if (call.path.endsWith('/exec')) return json(guest);
+      if (call.method === 'POST') return json(bound(true), { status: 201 });
+      if (rec.calls.filter((c) => c.method === 'GET').length === 1) return json(bound(true));
+      return json({
+        ...bound(false, { secrets_error: 'a secret could not be read' }),
+        status: 'stopped',
+        running_ram_mb: 0,
+      });
+    });
+    const client = new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: rec.fetch });
+    const error = await client.computers.launch({}, { pollMs: 1 }).catch((e) => e);
+    expect(error).toBeInstanceOf(MandalaError);
+    expect(error).not.toBeInstanceOf(TimeoutError);
+    expect(error.message).toBe(
+      "launch of launch-42 failed: launch-42's secrets were not delivered: a secret could not " +
+        'be read. The platform stopped it; call start() to try again',
+    );
+    expect(rec.calls.some((c) => c.method === 'DELETE')).toBe(false);
+  });
+
+  it('adds no request for a computer with nothing bound', async () => {
+    const waited = vi.spyOn(Computer.prototype, 'waitForSecrets');
+    const rec = recorder((call) => json(call.path.endsWith('/exec') ? guest : computer()));
+    const client = new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: rec.fetch });
+    await client.computers.launch();
+    expect(waited).not.toHaveBeenCalled();
+    expect(rec.calls).toHaveLength(3);
+  });
+});
+
+describe('waitForSecrets', () => {
+  const handle = (respond: (n: number) => unknown) => {
+    let n = 0;
+    const rec = recorder(() => json(respond(++n)));
+    const client = new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: rec.fetch });
+    return { rec, get: () => client.computers.get('launch-42') };
+  };
+
+  it('reads again before answering, even when the handle already says delivered', async () => {
+    const { rec, get } = handle((n) => (n === 1 ? bound(false) : bound(true)));
+    const c = await get();
+    const error = await c.waitForSecrets({ timeoutMs: 5, pollMs: 1 }).catch((e) => e);
+    expect(error).toBeInstanceOf(TimeoutError);
+    expect(error.message).toBe("launch-42's secrets were still being delivered after 5ms");
+    expect(rec.calls.length).toBeGreaterThan(1);
+  });
+
+  it('answers at once for a computer with nothing bound', async () => {
+    const { rec, get } = handle(() => computer());
+    const c = await get();
+    await c.waitForSecrets();
+    expect(rec.calls).toHaveLength(2);
+  });
+
+  it('refuses a stopped computer with no start under way, rather than waiting', async () => {
+    const { get } = handle(() => ({ ...bound(false), status: 'stopped', running_ram_mb: 0 }));
+    const c = await get();
+    await expect(c.waitForSecrets()).rejects.toThrow(
+      'launch-42 is "stopped", and secrets are delivered only as it starts: call start()',
+    );
+  });
+
+  it('waits through a start that is admitted but not yet booted', async () => {
+    const { get } = handle((n) =>
+      n <= 2 ? { ...bound(false), status: 'stopped', running_ram_mb: 1024 } : bound(false),
+    );
+    const c = await get();
+    await c.waitForSecrets({ pollMs: 1 });
+    expect(c.status).toBe('running');
+  });
+
+  it('reads the receipt on a platform that predates secrets_delivering', async () => {
+    const { rec, get } = handle((n) =>
+      n <= 2 ? bound(undefined) : bound(undefined, { secrets_applied: RECEIPT }),
+    );
+    const c = await get();
+    await c.waitForSecrets({ pollMs: 1 });
+    expect(rec.calls).toHaveLength(3);
+    expect(c.secretsDelivering).toBeUndefined();
+  });
+
+  it('rides out a host that cannot be reached', async () => {
+    let n = 0;
+    const rec = recorder(() => {
+      n++;
+      if (n === 2) return json({ error: 'host unreachable' }, { status: 503 });
+      return json(n === 1 ? bound(true) : bound(false));
+    });
+    const client = new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: rec.fetch });
+    const c = await client.computers.get('launch-42');
+    await c.waitForSecrets({ pollMs: 1 });
+    expect(rec.calls).toHaveLength(3);
+  });
+});

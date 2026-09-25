@@ -2,6 +2,7 @@
 
 import { Computer, EphemeralComputer, strandedText } from './computer.js';
 import {
+  ConflictError,
   MandalaError,
   NotFoundError,
   suppressing,
@@ -255,10 +256,14 @@ export class Computers {
    * An admitted start is waited on, and a failed start is never retried.
    *
    * `timeoutMs` defaults to 180,000 and is one readiness budget beginning after
-   * create returns. Disk, running and guest waits share the remaining time;
+   * create returns. Disk, running, guest and secrets waits share the remaining time;
    * elapsed start work also consumes it. Create and start keep their usual
    * transport deadlines, so this is not a total wall-clock limit on launch.
    * `pollMs` defaults to 3,000 for every stage. `signal` cancels all stages.
+   *
+   * A computer with secrets bound is also waited on until they have reached
+   * its desktop ({@link Computer.waitForSecrets}), so a command run on the
+   * returned computer sees them; a delivery that failed throws, naming why.
    *
    * The returned computer is persistent. Failure never deletes it. SDK errors
    * after creation retain their type and include its id; cancellation retains
@@ -320,6 +325,13 @@ export class Computers {
       }
       await computer.waitUntilRunning({ timeoutMs: remaining(), pollMs, signal });
       await computer.waitForGuest({ timeoutMs: remaining(), pollMs, signal });
+      // A bound computer's guest answers seconds before its secrets land, and
+      // a command run in between sees them unset. Asked of the record as well
+      // as the arguments, so a binding the record reports is waited on too.
+      const bound = computer.raw.secrets;
+      if ((args.secrets?.length ?? 0) > 0 || (Array.isArray(bound) && bound.length > 0)) {
+        await computer.waitForSecrets({ timeoutMs: remaining(), pollMs, signal });
+      }
       signal?.throwIfAborted();
       return computer;
     } catch (err) {
@@ -2068,4 +2080,60 @@ export class Secrets {
       signal: opts.signal,
     });
   }
+
+  /**
+   * Create `name` in the scope, or replace its value if it exists.
+   *
+   * The one call to reach for when the caller means "this name should hold
+   * this value" and does not care which. It reads the scope, then creates or
+   * replaces with the `revisionId` it read. Names are trimmed as the platform
+   * trims them, and match the way it keeps them unique: ignoring ASCII case.
+   *
+   * ```ts
+   * await client.secrets.set({ name: 'OPENAI_API_KEY', value: key });
+   * ```
+   *
+   * If the name is created, or its revision moves, between the read and the
+   * write — a {@link ConflictError} — it reads again and tries again, up to
+   * three times, and then throws. So a concurrent writer
+   * is overwritten, never silently lost track of. Any other failure is thrown
+   * at once; in particular a 503, whose outcome is unknown, is never sent again.
+   */
+  async set(args: P.SecretCreateArgs, opts: CallOptions = {}): Promise<Secret> {
+    // Everything checked before the first request, the read included, and the
+    // name normalized the way the platform stores it, so a padded name finds
+    // the secret it created last time.
+    const name = P.secretCreateBody(args).name as string;
+    const scope = args.workspaceId === undefined ? {} : { workspaceId: args.workspaceId };
+    for (let attempt = 0; ; attempt++) {
+      const { secrets } = await this.list({ ...scope, signal: opts.signal });
+      const found = namedSecret(secrets, name);
+      try {
+        return found
+          ? await this.replace(
+              found.id,
+              { value: args.value, revisionId: found.revisionId, ...scope },
+              opts,
+            )
+          : await this.create({ name, value: args.value, ...scope }, opts);
+      } catch (err) {
+        if (!(err instanceof ConflictError) || attempt >= SECRET_SET_RETRIES) throw err;
+      }
+    }
+  }
+}
+
+/** How many times {@link Secrets.set} reads again after a conflict. */
+const SECRET_SET_RETRIES = 3;
+
+/**
+ * The secret called `name` in a listing of one scope, or `undefined`.
+ *
+ * Ignoring ASCII case and nothing else, because that is how the platform keeps
+ * names unique in a scope: `openai_api_key` is taken when `OPENAI_API_KEY` is.
+ */
+function namedSecret(secrets: readonly Secret[], name: string): Secret | undefined {
+  const fold = (text: string) => text.replace(/[A-Z]/g, (c) => c.toLowerCase());
+  const wanted = fold(name);
+  return secrets.find((s) => fold(s.name) === wanted);
 }

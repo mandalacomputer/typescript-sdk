@@ -65,7 +65,7 @@ const command = (
 
 export const GLOBAL_FLAGS: readonly Flag[] = [
   flag('profile', 'Local credential profile (after explicit/environment API keys)'),
-  bool('json', 'Emit version 1 JSON; streaming commands emit NDJSON'),
+  bool('json', 'Emit version 2 JSON (snake_case); streaming commands emit NDJSON'),
   bool('help', 'Show help without credentials or network', { alias: 'h' }),
 ];
 
@@ -169,8 +169,8 @@ export const COMMANDS: readonly Command[] = [
     'Wait for a computer',
     ['computer'],
     [
-      flag('until', 'Readiness condition (default running)', {
-        choices: ['built', 'running', 'guest'],
+      flag('until', 'Readiness condition (default running; secrets: bound secrets delivered)', {
+        choices: ['built', 'running', 'guest', 'secrets'],
       }),
       ...waits,
     ],
@@ -365,6 +365,11 @@ export class CliError extends Error {
     public readonly details?: unknown,
     /** The process exit status, when it is not 1. */
     public readonly exitCode?: number,
+    /**
+     * The command's full usage, for a mistake in how it was typed: printed
+     * under the message, so the fix is on the screen rather than behind --help.
+     */
+    public readonly usage?: string,
   ) {
     super(message);
     this.name = 'CliError';
@@ -408,7 +413,7 @@ export function parseArgs(argv: string[]): Parsed {
       const [spelling, ...tail] = arg.split('=');
       const flags = [...GLOBAL_FLAGS, ...(parsed.command?.flags ?? [])];
       const spec = flags.find((f) => spelling === `--${f.name}` || spelling === `-${f.alias}`);
-      if (!spec) throw new CliError('invalid_arguments', `unknown option ${spelling}`);
+      if (!spec) throw usageError(parsed.command, `unknown option ${spelling}`);
       if (parsed.flags[spec.name] !== undefined && !spec.repeatable)
         throw new CliError('invalid_arguments', `--${spec.name} may only be supplied once`);
       let value: string | number | boolean = true;
@@ -464,33 +469,51 @@ export function parseArgs(argv: string[]): Parsed {
       `choose a command${parsed.path ? ` under ${parsed.path}` : ''}; use --help`,
     );
   const required = c.args.filter((a) => !a.endsWith('?')).length;
-  if (
-    parsed.args.length < required ||
-    parsed.args.length > c.args.length ||
-    parsed.args.some((a) => !a.trim())
-  )
-    throw new CliError(
-      'invalid_arguments',
-      c.path === 'terminal' && parsed.args.length > 1
-        ? 'mandala terminal takes one computer and runs no command'
-        : usage(c),
+  const named = (a: string) => (a.endsWith('?') ? `[${a.slice(0, -1)}]` : `<${a}>`);
+  if (c.path === 'terminal' && parsed.args.length > 1)
+    throw usageError(c, 'mandala terminal takes one computer and runs no command');
+  if (parsed.args.length > c.args.length) {
+    const extra = parsed.args.slice(c.args.length).map((a) => JSON.stringify(a));
+    throw usageError(
+      c,
+      `unexpected argument${extra.length > 1 ? 's' : ''} ${extra.join(' ')}: mandala ${c.path} ` +
+        (c.args.length
+          ? `takes ${c.args.map(named).join(' ')} and nothing more (quote a value that has spaces in it)`
+          : 'takes no arguments'),
     );
+  }
+  if (parsed.args.length < required)
+    throw usageError(
+      c,
+      `missing ${c.args.slice(parsed.args.length, required).map(named).join(' ')}`,
+    );
+  const blank = parsed.args.findIndex((a) => !a.trim());
+  if (blank >= 0) throw usageError(c, `${named(c.args[blank]!)} is blank`);
   c.args.forEach((name, i) => {
     const bare = name.replace(/\?$/, '');
     const choices = c.argumentChoices?.[bare];
     if (choices && i < parsed.args.length && !choices.includes(parsed.args[i]!))
-      throw new CliError('invalid_arguments', `${bare} must be one of: ${choices.join(', ')}`);
+      throw usageError(c, `${bare} must be one of: ${choices.join(', ')}`);
   });
   for (const f of c.flags) {
     if (f.required && parsed.flags[f.name] === undefined)
-      throw new CliError('invalid_arguments', `${usage(c)} requires --${f.name}`);
+      throw usageError(c, `${usage(c)} requires --${f.name}`);
     if (parsed.flags[f.name] !== undefined)
       for (const conflict of f.conflicts ?? []) {
         if (parsed.flags[conflict] !== undefined)
-          throw new CliError('invalid_arguments', `--${f.name} conflicts with --${conflict}`);
+          throw usageError(c, `--${f.name} conflicts with --${conflict}`);
       }
   }
   return parsed;
+}
+
+/**
+ * A mistake in how a command was typed, carrying that command's full usage —
+ * the usage line, what it does and every flag — rather than the one line that
+ * used to be the whole message. Without a command there is nothing to show.
+ */
+function usageError(c: Command | undefined, message: string): CliError {
+  return new CliError('invalid_arguments', message, undefined, undefined, c && help(c.path));
 }
 
 export function help(path = ''): string {

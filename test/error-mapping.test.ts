@@ -525,7 +525,7 @@ it('keeps concurrent request IDs distinct and the CLI error envelope unchanged',
   ]);
   expect(errors.map((error) => error.requestId)).toEqual(['/computers', '/sizes']);
   expect(errorInfo(errors[0])).toEqual({
-    code: 'MethodNotAllowedError',
+    code: 'method_not_allowed',
     message: 'method not allowed',
     status: 405,
   });

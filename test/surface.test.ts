@@ -265,12 +265,13 @@ async function exerciseEverything(client: Client): Promise<void> {
   const scratch = await client.computers.ephemeral({ template: 'base' });
   await scratch[Symbol.asyncDispose]();
   await c.refresh();
-  // The three readiness waits, which poll routes the calls around them already
-  // reach: `GET computers/:id` for the first two, and a `POST computers/:id/exec`
-  // probe for the guest.
+  // The four readiness waits, which poll routes the calls around them already
+  // reach: `GET computers/:id` for all but the guest, and a
+  // `POST computers/:id/exec` probe for the guest.
   await c.waitUntilBuilt();
   await c.waitUntilRunning();
   await c.waitForGuest();
+  await c.waitForSecrets();
   await c.start();
   await c.start({ resumeOnly: true });
   await c.stop();
@@ -500,6 +501,8 @@ async function exerciseEverything(client: Client): Promise<void> {
     workspaceId: 'ws-1',
   });
   await client.secrets.delete(stored.id, { revisionId: stored.revisionId, workspaceId: 'ws-1' });
+  // The upsert by name: a read of the scope, then the create or replace it picks.
+  await client.secrets.set({ name: 'OPENAI_API_KEY', value: 'sk-test-3', workspaceId: 'ws-1' });
 
   // Last, and both shapes: the purge is what `expect` binds, and a delete that
   // keeps the snapshots sends neither key.

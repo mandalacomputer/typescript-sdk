@@ -567,3 +567,73 @@ describe('no failure of the secret store carries the value', () => {
     });
   }
 });
+
+describe('secrets.set: create or replace by name (OPL-5048)', () => {
+  it('creates a name the scope does not hold, under the trimmed name', async () => {
+    const store: Store = { rows: [] };
+    const { rec, client: c } = client(storeRoutes(store));
+    const made = await c.secrets.set({ name: '  GITHUB_TOKEN ', value: VALUE });
+    expect(made.name).toBe('GITHUB_TOKEN');
+    expect(rec.calls.map((x) => [x.method, x.path, x.body])).toEqual([
+      ['GET', '/secrets', undefined],
+      ['POST', '/secrets', { name: 'GITHUB_TOKEN', value: VALUE }],
+    ]);
+  });
+
+  it('replaces the one it holds, matched ignoring ASCII case, with the revision it read', async () => {
+    const store: Store = { rows: [{ ...SECRET }] };
+    const { rec, client: c } = client(storeRoutes(store));
+    await c.secrets.set({ name: 'openai_api_key', value: VALUE, workspaceId: 'ws-1' });
+    expect(rec.calls.map((x) => [x.method, x.path, x.query, x.body])).toEqual([
+      ['GET', '/secrets', { workspace_id: 'ws-1' }, undefined],
+      ['PUT', `/secrets/${ID}`, {}, { value: VALUE, revision_id: REV, workspace_id: 'ws-1' }],
+    ]);
+  });
+
+  it('reads again when the revision moved underneath, and sends the fresh one', async () => {
+    const store: Store = { rows: [{ ...SECRET }] };
+    const { rec, client: c } = client(storeRoutes(store, { conflictOnce: true }));
+    await c.secrets.set({ name: 'OPENAI_API_KEY', value: VALUE });
+    expect(
+      rec.calls.map((x) => [x.method, (x.body as { revision_id?: string })?.revision_id]),
+    ).toEqual([
+      ['GET', undefined],
+      ['PUT', REV],
+      ['GET', undefined],
+      ['PUT', REV2],
+    ]);
+  });
+
+  it('gives up after three reads again, with the conflict', async () => {
+    const { rec, client: c } = client((call) =>
+      call.method === 'GET'
+        ? json(SECRET_LIST)
+        : json({ error: 'This secret changed since you read it.' }, { status: 409 }),
+    );
+    await expect(c.secrets.set({ name: 'OPENAI_API_KEY', value: VALUE })).rejects.toBeInstanceOf(
+      ConflictError,
+    );
+    expect(rec.calls.filter((x) => x.method === 'PUT')).toHaveLength(4);
+  });
+
+  it('never sends a write again after a 503, whose outcome is unknown', async () => {
+    const { rec, client: c } = client((call) =>
+      call.method === 'GET'
+        ? json({ ...SECRET_LIST, secrets: [] })
+        : json({ error: 'the store could not answer' }, { status: 503 }),
+    );
+    await expect(c.secrets.set({ name: 'NEW_ONE', value: VALUE })).rejects.toBeInstanceOf(
+      MandalaError,
+    );
+    expect(rec.calls.filter((x) => x.method === 'POST')).toHaveLength(1);
+  });
+
+  it('refuses what the platform would refuse before reading anything', async () => {
+    const { rec, client: c } = client(() => json(SECRET_LIST));
+    await expect(c.secrets.set({ name: 'X', value: '' })).rejects.toBeInstanceOf(ValidationError);
+    await expect(c.secrets.set({ name: ' ', value: VALUE })).rejects.toBeInstanceOf(
+      ValidationError,
+    );
+    expect(rec.calls).toEqual([]);
+  });
+});

@@ -125,9 +125,9 @@ describe('one command inventory', () => {
     expect(new Set(COMMANDS.map((c) => c.path)).size).toBe(expectedCommands.length);
     const tree = manifest();
     expect(tree.commands.map((c) => c.path.join(' '))).toEqual(expectedCommands);
-    expect(tree.commands.find((c) => c.path[0] === 'terminal')?.jsonMode).toBe('unsupported');
+    expect(tree.commands.find((c) => c.path[0] === 'terminal')?.json_mode).toBe('unsupported');
     expect(tree.commands.find((c) => c.path[0] === 'ssh')).toMatchObject({
-      jsonMode: 'unsupported',
+      json_mode: 'unsupported',
       passthrough: { unless: ['setup'] },
       arguments: [{ name: 'computer', required: true }],
     });
@@ -138,7 +138,7 @@ describe('one command inventory', () => {
     expect(tree.commands.find((c) => c.path.join(' ') === 'ssh-key add')?.arguments).toEqual([
       { name: 'path', required: false, type: 'string' },
     ]);
-    expect(tree.commands.find((c) => c.path.join(' ') === 'agent run')?.jsonMode).toBe('ndjson');
+    expect(tree.commands.find((c) => c.path.join(' ') === 'agent run')?.json_mode).toBe('ndjson');
     expect(tree.commands.find((c) => c.path[0] === 'completion')?.arguments[0]).toMatchObject({
       choices: ['bash', 'zsh', 'fish'],
     });
@@ -147,10 +147,10 @@ describe('one command inventory', () => {
   it('advertises finite account and usage reads without resource selectors', () => {
     const entries = manifest().commands.filter((c) => ['account', 'usage'].includes(c.path[0]!));
     expect(
-      entries.map((c) => ({ path: c.path, arguments: c.arguments, jsonMode: c.jsonMode })),
+      entries.map((c) => ({ path: c.path, arguments: c.arguments, json_mode: c.json_mode })),
     ).toEqual([
-      { path: ['account'], arguments: [], jsonMode: 'finite' },
-      { path: ['usage'], arguments: [], jsonMode: 'finite' },
+      { path: ['account'], arguments: [], json_mode: 'finite' },
+      { path: ['usage'], arguments: [], json_mode: 'finite' },
     ]);
     expect(entries[0]!.flags.map((f) => f.name)).toEqual(['profile', 'json', 'help']);
     expect(entries[1]!.flags.map((f) => f.name)).toEqual(['profile', 'json', 'help', 'from', 'to']);
@@ -229,11 +229,11 @@ describe('offline discovery', () => {
     const wrapped = await offline(['manifest', '--json']);
     expect(JSON.parse(plain.out)).toEqual(manifest());
     expect(JSON.parse(wrapped.out)).toEqual({
-      schemaVersion: 1,
+      schema_version: 2,
       command: 'manifest',
       ok: true,
       data: manifest(),
-      exitCode: 0,
+      exit_code: 0,
     });
   });
 

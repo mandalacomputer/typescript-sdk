@@ -1,8 +1,95 @@
 import { CliError } from './cli-options.js';
 import type { CliIO } from './cli-runtime.js';
-import { APIError, MandalaError, ValidationError } from './errors.js';
+import {
+  APIError,
+  AuthenticationError,
+  ComputerNotRunningError,
+  ConflictError,
+  ConnectionError,
+  ConnectionInterruptedError,
+  CreateOnlyConflictError,
+  FileExistsError,
+  GatewayTimeoutError,
+  MandalaError,
+  MethodNotAllowedError,
+  MoveRequiredError,
+  NotFoundError,
+  OriginResponseError,
+  OriginTLSError,
+  OriginUnreachableError,
+  PermissionDeniedError,
+  PlanLimitError,
+  RangeNotSatisfiableError,
+  RateLimitError,
+  TimeoutError,
+  TooLargeError,
+  UnavailableError,
+  ValidationError,
+} from './errors.js';
 
-export const SCHEMA_VERSION = 1;
+/**
+ * 2 since every key the CLI writes became snake_case, the envelope's own
+ * included: `schemaVersion` and `exitCode` read `schema_version` and `exit_code`.
+ */
+export const SCHEMA_VERSION = 2;
+
+/**
+ * `camelCase` keys to `snake_case`, all the way down: the casing the API
+ * itself answers in, so one `--json` output never mixes the two.
+ *
+ * For what this SDK DECODED — an exec result, a build's progress, an agent
+ * step — and never for an API payload passed through, whose maps may be keyed
+ * by names a person chose. Only a key spelled like a camelCase identifier is
+ * touched: `MY_TOKEN` and `vm-1` come through as they are.
+ */
+export function snakeKeys(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(snakeKeys);
+  if (value && typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype)
+    return Object.fromEntries(
+      Object.entries(value).map(([k, v]) => [
+        /^[a-z][a-zA-Z0-9]*$/.test(k) ? k.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase() : k,
+        snakeKeys(v),
+      ]),
+    );
+  return value;
+}
+
+/**
+ * The `error.code` a failure is reported under: one snake_case word naming
+ * the KIND of failure, the same word in this CLI and in `mandala-py`. Never
+ * a class name — those differ between the two SDKs. `error.status` carries the
+ * HTTP status and `error.reason` the platform's own word, when either exists.
+ * Most specific first: every conflict is a `ConflictError`.
+ */
+const API_CODES: readonly [new (...args: never[]) => APIError, string][] = [
+  [FileExistsError, 'exists'],
+  [CreateOnlyConflictError, 'conflict'],
+  [MoveRequiredError, 'move_required'],
+  [ComputerNotRunningError, 'not_running'],
+  [ConflictError, 'conflict'],
+  [AuthenticationError, 'unauthenticated'],
+  [PlanLimitError, 'plan_limit'],
+  [PermissionDeniedError, 'permission_denied'],
+  [NotFoundError, 'not_found'],
+  [MethodNotAllowedError, 'method_not_allowed'],
+  [TooLargeError, 'too_large'],
+  [RangeNotSatisfiableError, 'range_not_satisfiable'],
+  [RateLimitError, 'rate_limited'],
+  [UnavailableError, 'unavailable'],
+  [GatewayTimeoutError, 'gateway_timeout'],
+  [OriginUnreachableError, 'origin_unreachable'],
+  [OriginTLSError, 'origin_tls'],
+  [OriginResponseError, 'origin_error'],
+];
+
+export function errorCode(error: MandalaError): string {
+  if (error instanceof APIError)
+    return API_CODES.find(([cls]) => error instanceof cls)?.[1] ?? 'api_error';
+  if (error instanceof ConnectionInterruptedError) return 'connection_interrupted';
+  if (error instanceof ConnectionError) return 'connection_failed';
+  if (error instanceof TimeoutError) return 'timeout';
+  return 'failed';
+}
 
 /** Mask credentials even when a remote error or payload repeats their values. */
 export function redact(
@@ -30,30 +117,42 @@ export function errorInfo(error: unknown): {
   code: string;
   message: string;
   status?: number;
+  reason?: string;
   details?: unknown;
+  usage?: string;
 } {
   if (error instanceof CliError)
     return {
       code: error.code,
       message: error.message,
-      ...(error.details === undefined ? {} : { details: error.details }),
+      ...(error.details === undefined ? {} : { details: snakeKeys(error.details) }),
+      ...(error.usage === undefined ? {} : { usage: error.usage }),
     };
   if (error instanceof ValidationError)
     return { code: 'invalid_arguments', message: error.message };
   if (error instanceof APIError)
-    return { code: error.name, message: error.message, status: error.status };
+    return {
+      code: errorCode(error),
+      message: error.message,
+      status: error.status,
+      ...(error.reason === undefined ? {} : { reason: error.reason }),
+    };
   if (error instanceof Error && error.name === 'AbortError')
     return { code: 'cancelled', message: 'Cancelled' };
-  if (error instanceof MandalaError)
-    return {
-      code:
-        typeof (error as { code?: unknown }).code === 'string'
-          ? (error as unknown as { code: string }).code
-          : error.name,
-      message: error.message,
-    };
+  if (error instanceof MandalaError) {
+    // The local stages (credentials, device login) name their own failure, in
+    // the same snake_case.
+    const own = (error as { code?: unknown }).code;
+    return { code: typeof own === 'string' ? own : errorCode(error), message: error.message };
+  }
+  // A system error from the local machine (a file that is not there, a pipe
+  // closed): its errno is kept, but as a detail, so `code` stays a word.
   if (error instanceof Error && typeof (error as { code?: unknown }).code === 'string')
-    return { code: (error as Error & { code: string }).code, message: error.message };
+    return {
+      code: 'io_error',
+      message: error.message,
+      details: { errno: (error as Error & { code: string }).code },
+    };
   return {
     code: 'internal_error',
     message: error instanceof Error ? error.message : String(error),
@@ -74,11 +173,11 @@ export class Output {
   result(data: unknown, exitCode = 0): number {
     if (this.json)
       this.emitJson({
-        schemaVersion: SCHEMA_VERSION,
+        schema_version: SCHEMA_VERSION,
         command: this.command,
         ok: exitCode === 0,
         data,
-        exitCode,
+        exit_code: exitCode,
       });
     else
       this.io.stdout.write(
@@ -90,23 +189,26 @@ export class Output {
   error(error: unknown, exitCode = 1, stream = false): number {
     const info = errorInfo(error);
     if (this.json) {
-      if (stream) this.frame('error', { error: info, exitCode });
+      if (stream) this.frame('error', { error: info, exit_code: exitCode });
       else
         this.emitJson({
-          schemaVersion: SCHEMA_VERSION,
+          schema_version: SCHEMA_VERSION,
           command: this.command,
           ok: false,
           error: info,
-          exitCode,
+          exit_code: exitCode,
         });
-    } else this.diagnostic(`mandala: ${info.message}`);
+    } else {
+      this.diagnostic(`mandala: ${info.message}`);
+      if (info.usage) this.diagnostic(`\n${info.usage.trimEnd()}`);
+    }
     return exitCode;
   }
 
   frame(type: string, data: unknown): void {
     if (this.json)
       this.emitJson({
-        schemaVersion: SCHEMA_VERSION,
+        schema_version: SCHEMA_VERSION,
         command: this.command,
         type,
         timestamp: this.io.now().toISOString(),
