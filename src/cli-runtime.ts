@@ -1,3 +1,4 @@
+import { spawn } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import process from 'node:process';
 import { TextDecoder } from 'node:util';
@@ -25,7 +26,35 @@ export type CliIO = {
   now: () => Date;
   /** The machine the SSH commands run on; the real one unless replaced. */
   ssh?: SshRuntime;
+  /** How `computers view` opens a page; {@link openBrowser} unless replaced. */
+  openBrowser?: (url: string) => Promise<boolean>;
 };
+
+/**
+ * Open a URL in the default browser: one argument, no shell. Resolves false
+ * rather than throwing when it cannot, so the caller's printed URL stays the
+ * way through.
+ */
+export function openBrowser(url: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const command = process.platform === 'darwin' ? 'open' : 'xdg-open';
+    let finished = false;
+    const done = (ok: boolean) => {
+      if (!finished) {
+        finished = true;
+        clearTimeout(timer);
+        resolve(ok);
+      }
+    };
+    const child = spawn(command, [url], { stdio: 'ignore', shell: false });
+    const timer = setTimeout(() => {
+      child.kill();
+      done(false);
+    }, 2000);
+    child.once('error', () => done(false));
+    child.once('exit', (code) => done(code === 0));
+  });
+}
 
 export function runtime(overrides: Partial<CliIO> = {}): CliIO {
   const env = overrides.env ?? process.env;

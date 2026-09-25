@@ -52,16 +52,114 @@ async function scopeRows(
  * A name that spells a different secret's id is ambiguous, and refused: guessing
  * wrong deletes the wrong credential.
  */
-function byNameOrId(secrets: readonly Secret[], key: string): Secret | undefined {
+function byNameOrId(
+  secrets: readonly Secret[],
+  key: string,
+  unchanged = 'nothing was deleted',
+): Secret | undefined {
   const named = byName(secrets, key);
   const identified = secrets.find((s) => s.id === key);
   if (named && identified && named.id !== identified.id)
     throw new CliError(
       'ambiguous_secret',
       `${JSON.stringify(key)} is the name of ${named.id} and the id of another secret; ` +
-        'nothing was deleted: rename one of them first',
+        `${unchanged}: rename one of them first`,
     );
   return named ?? identified;
+}
+
+/** A secret id: `csec-` and sixteen hex characters. */
+const SECRET_ID = /^csec-[0-9a-f]{16}$/;
+
+/** One `--secret` or `--secret-file` on `computers create`, as typed. */
+export type BindingSpec = {
+  flag: '--secret' | '--secret-file';
+  /** A secret's name or id. */
+  key: string;
+  /** The variable or file it is published as; absent means the secret's own name. */
+  target?: string;
+};
+
+/**
+ * The `--secret SECRET[=VAR]` and `--secret-file SECRET[=FILE]` values, split
+ * and checked before any request.
+ *
+ * Split at the LAST `=`, since neither a variable nor a file name can hold one
+ * and a secret's name can. The part after it is never quoted back: the likely
+ * mistake is `--secret NAME=<the value itself>`, and an error is the last place
+ * that should print it.
+ */
+export function bindingSpecs(
+  envs: readonly string[] = [],
+  files: readonly string[] = [],
+): BindingSpec[] {
+  const split = (flag: BindingSpec['flag'], typed: string): BindingSpec => {
+    const at = typed.lastIndexOf('=');
+    const key = (at < 0 ? typed : typed.slice(0, at)).trim();
+    if (!key) throw new CliError('invalid_arguments', `${flag} needs a secret name or id`);
+    if (at < 0) return { flag, key };
+    const target = typed.slice(at + 1);
+    const [pattern, rule] =
+      flag === '--secret'
+        ? [P.SECRET_ENV, 'letters, digits and underscores, not starting with a digit, at most 64']
+        : [P.SECRET_FILE, 'lowercase letters, digits, - and _, starting with a letter, at most 48'];
+    if (!pattern.test(target))
+      throw new CliError(
+        'invalid_arguments',
+        `${flag} ${JSON.stringify(key)}: what follows = must be ${rule} characters. ` +
+          `It names where the value goes, never the value: store that with mandala secrets set`,
+      );
+    return { flag, key, target };
+  };
+  return [
+    ...envs.map((typed) => split('--secret', typed)),
+    ...files.map((typed) => split('--secret-file', typed)),
+  ];
+}
+
+/**
+ * The bindings a create sends, each secret found by name or id in the default
+ * scope — the account-wide one, or the workspace an API key is confined to.
+ *
+ * An id that listing does not hold is sent as it is, for a secret in a scope
+ * the listing did not cover; the platform refuses one it cannot bind, and the
+ * create with it. A name it does not hold is refused here.
+ */
+export async function secretBindings(
+  client: Client,
+  specs: readonly BindingSpec[],
+  signal: AbortSignal,
+): Promise<P.SecretBindingArgs[]> {
+  if (!specs.length) return [];
+  const list = await client.secrets.list({ signal });
+  if (!list.delivery)
+    throw new CliError(
+      'unsupported',
+      'Delivery is off on this platform: secrets can be stored but not bound; nothing was created',
+    );
+  return specs.map(({ flag, key, target }) => {
+    const found = byNameOrId(list.secrets, key, 'nothing was created');
+    if (!found && !SECRET_ID.test(key))
+      throw new CliError(
+        'not_found',
+        `${flag} ${JSON.stringify(key)}: no secret by that name or id in this scope; nothing was created`,
+      );
+    const as = target ?? found?.name;
+    const env = flag === '--secret';
+    if (as === undefined)
+      throw new CliError(
+        'invalid_arguments',
+        `${flag} ${key}: say what to bind it as, ${key}=${env ? 'VAR' : 'FILE'}`,
+      );
+    if (target === undefined && !(env ? P.SECRET_ENV : P.SECRET_FILE).test(as))
+      throw new CliError(
+        'invalid_arguments',
+        `${flag} ${JSON.stringify(key)}: its name cannot be ${env ? 'a variable' : 'a file'} name as it is; ` +
+          `name one: ${flag} ${JSON.stringify(`${key}=${env ? 'VAR' : 'FILE'}`)}`,
+      );
+    const secretId = found?.id ?? key;
+    return env ? { secretId, env: as } : { secretId, file: as };
+  });
 }
 
 /** `mandala secrets list [--workspace ID]`. */

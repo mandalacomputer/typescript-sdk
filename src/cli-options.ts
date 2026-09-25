@@ -119,6 +119,16 @@ export const COMMANDS: readonly Command[] = [
       num('disk-gb', 'Disk in GiB'),
       flag('resolution', 'WIDTHxHEIGHT or WIDTHxHEIGHTxDEPTH'),
       bool('no-start', 'Create without starting'),
+      flag(
+        'secret',
+        'Bind a stored secret as an environment variable: SECRET[=VAR], SECRET a name or id (VAR defaults to its name); repeat for several',
+        { repeatable: true },
+      ),
+      flag(
+        'secret-file',
+        'Bind a stored secret as a file in /run/mandala-secrets/user/files: SECRET[=FILE] (FILE defaults to its name); repeat for several',
+        { repeatable: true },
+      ),
     ],
   ),
   command('computers get', 'Get a computer by name or ID', ['computer']),
@@ -141,6 +151,22 @@ export const COMMANDS: readonly Command[] = [
     ],
   ),
   command('computers clone', 'Clone a computer', ['computer'], [name]),
+  command('computers rename', 'Give a computer a new name; nothing else changes', [
+    'computer',
+    'name',
+  ]),
+  command(
+    'computers resize',
+    'Change vCPU, RAM or disk; the computer must be stopped, and disks grow only',
+    ['computer'],
+    [num('cpu', 'vCPU count'), num('ram-mb', 'RAM in MiB'), num('disk-gb', 'Disk in GiB')],
+  ),
+  command(
+    'computers view',
+    "Open the computer's dashboard page in a browser, and print its URL",
+    ['computer'],
+    [bool('no-open', 'Print the URL without opening a browser')],
+  ),
   command(
     'computers screenshot',
     'Save exact screenshot bytes to a file',
@@ -289,6 +315,22 @@ export const COMMANDS: readonly Command[] = [
     [secretScope],
   ),
   command('secrets rm', 'Delete a secret by name or id', ['name'], [secretScope]),
+  command(
+    'files list',
+    'List one guest directory: names, types and file sizes (bounded, not paged)',
+    ['computer', 'path'],
+  ),
+  command(
+    'files upload',
+    'Copy one local file to an absolute guest path; a path ending in / keeps the file name',
+    ['computer', 'file', 'path'],
+    [bool('no-overwrite', 'Create the guest file, refusing if something is there')],
+  ),
+  command(
+    'files download',
+    'Copy one guest file to a local path (default: the current directory)',
+    ['computer', 'path', 'dest?'],
+  ),
   command(
     'agent run',
     'Run an agent with MANDALA_MODEL_KEY',

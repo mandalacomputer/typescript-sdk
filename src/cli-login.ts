@@ -1,8 +1,7 @@
-import { spawn } from 'node:child_process';
 import os from 'node:os';
 import { CliError } from './cli-options.js';
 import type { Output } from './cli-output.js';
-import type { CliIO } from './cli-runtime.js';
+import { type CliIO, openBrowser } from './cli-runtime.js';
 import {
   CredentialSaveError,
   canonicalBase,
@@ -13,28 +12,6 @@ import {
   trimCredentialWhitespace,
 } from './credentials.js';
 import { deviceLogin, sleepForLogin } from './device-login.js';
-
-/** Open only a validated URL, as one argument without a shell. Failure keeps manual login usable. */
-export function openLoginBrowser(url: string): Promise<boolean> {
-  return new Promise((resolve) => {
-    const command = process.platform === 'darwin' ? 'open' : 'xdg-open';
-    let finished = false;
-    const done = (ok: boolean) => {
-      if (!finished) {
-        finished = true;
-        clearTimeout(timer);
-        resolve(ok);
-      }
-    };
-    const child = spawn(command, [url], { stdio: 'ignore', shell: false });
-    const timer = setTimeout(() => {
-      child.kill();
-      done(false);
-    }, 2000);
-    child.once('error', () => done(false));
-    child.once('exit', (code) => done(code === 0));
-  });
-}
 
 export async function loginCommand(
   profile: string | undefined,
@@ -78,7 +55,7 @@ export async function loginCommand(
         );
         let opened = false;
         try {
-          opened = await (io.login?.openBrowser ?? openLoginBrowser)(verificationUriComplete);
+          opened = await (io.login?.openBrowser ?? openBrowser)(verificationUriComplete);
         } catch {
           /* Keep the already displayed manual URL and code. */
         }

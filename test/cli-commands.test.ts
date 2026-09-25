@@ -7,7 +7,8 @@ import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { main } from '../src/cli.js';
-import type { CliIO } from '../src/cli-runtime.js';
+import { dashboardUrl, type LegacyCommands, runCli } from '../src/cli-commands.js';
+import { type CliIO, runtime } from '../src/cli-runtime.js';
 import { Client } from '../src/index.js';
 import {
   anyRoute,
@@ -16,11 +17,14 @@ import {
   buildEvents,
   type Call,
   COMPUTER,
+  DIRECTORY,
   EXEC_OK,
   guestFile,
   json,
   type Responder,
   recorder,
+  SECRET,
+  SECRET_LIST,
   SNAPSHOT,
   TEMPLATE_CHECK,
   USAGE,
@@ -2281,5 +2285,337 @@ describe('one JSON casing and one error vocabulary (OPL-5048)', () => {
       expect(result.out, args.join(' ')).not.toMatch(camel);
       expect(result.frames[0].schema_version).toBe(2);
     }
+  });
+});
+
+describe('files, rename, resize, view, and secrets bound at create', () => {
+  const OTHER = { ...SECRET, id: 'csec-fedcba9876543210', name: 'gh-token' };
+  const store = (list: unknown = { ...SECRET_LIST, secrets: [SECRET, OTHER] }): Responder => {
+    return (call) =>
+      call.path === '/secrets' && call.method === 'GET' ? json(list) : anyRoute(call);
+  };
+
+  it('binds a stored secret as a variable and another as a file, each found by name', async () => {
+    const h = harness(store());
+    const result = await h.run([
+      'computers',
+      'create',
+      '--secret',
+      'openai_api_key',
+      '--secret-file',
+      'gh-token',
+    ]);
+    expect(result.code).toBe(0);
+    expect(h.rec.routes()).toEqual([
+      ['GET', 'secrets'],
+      ['POST', 'computers'],
+    ]);
+    // The default scope: nothing names a workspace.
+    expect(h.rec.calls[0]!.query).toEqual({});
+    // Matched ignoring ASCII case, and bound under the name the store keeps.
+    expect(h.rec.last().body).toEqual({
+      start: true,
+      secrets: [
+        { secret_id: SECRET.id, env: 'OPENAI_API_KEY' },
+        { secret_id: OTHER.id, file: 'gh-token' },
+      ],
+    });
+  });
+
+  it('binds under the variable or file named after =, and accepts an id', async () => {
+    const h = harness(store());
+    await h.run([
+      'computers',
+      'create',
+      '--secret',
+      `${SECRET.id}=MY_KEY`,
+      '--secret-file',
+      'gh-token=gh',
+    ]);
+    expect(h.rec.last().body).toMatchObject({
+      secrets: [
+        { secret_id: SECRET.id, env: 'MY_KEY' },
+        { secret_id: OTHER.id, file: 'gh' },
+      ],
+    });
+  });
+
+  it('splits at the last =, so a name holding one can still be bound', async () => {
+    const odd = { ...SECRET, name: 'a=b' };
+    const h = harness(store({ ...SECRET_LIST, secrets: [odd] }));
+    await h.run(['computers', 'create', '--secret', 'a=b=AB']);
+    expect(h.rec.last().body).toMatchObject({ secrets: [{ secret_id: odd.id, env: 'AB' }] });
+  });
+
+  it('sends an id the default scope does not list, and only with a name to bind it as', async () => {
+    const unlisted = 'csec-00000000000000aa';
+    const named = harness(store());
+    await named.run(['computers', 'create', '--secret', `${unlisted}=WS_KEY`]);
+    expect(named.rec.last().body).toMatchObject({
+      secrets: [{ secret_id: unlisted, env: 'WS_KEY' }],
+    });
+    const bare = harness(store());
+    const result = await bare.run(['computers', 'create', '--secret', unlisted]);
+    expect(result.code).toBe(1);
+    expect(result.frames[0].error).toMatchObject({
+      code: 'invalid_arguments',
+      message: expect.stringContaining(`${unlisted}=VAR`),
+    });
+    expect(bare.rec.routes()).toEqual([['GET', 'secrets']]);
+  });
+
+  it('refuses a name the store does not hold, and creates nothing', async () => {
+    const h = harness(store());
+    const result = await h.run(['computers', 'create', '--secret', 'NOPE']);
+    expect(result.code).toBe(1);
+    expect(result.frames[0].error).toMatchObject({
+      code: 'not_found',
+      message: expect.stringContaining('nothing was created'),
+    });
+    expect(h.rec.routes()).toEqual([['GET', 'secrets']]);
+  });
+
+  it('refuses a default the name cannot be, and asks for one', async () => {
+    // OPENAI_API_KEY is a fine variable and not a file: files are lowercase.
+    const h = harness(store());
+    const result = await h.run(['computers', 'create', '--secret-file', 'OPENAI_API_KEY']);
+    expect(result.code).toBe(1);
+    expect(result.frames[0].error.message).toContain('OPENAI_API_KEY=FILE');
+    expect(h.rec.routes()).toEqual([['GET', 'secrets']]);
+  });
+
+  it("refuses a secret whose name is another one's id, rather than guess", async () => {
+    const trap = { ...OTHER, name: SECRET.id };
+    const h = harness(store({ ...SECRET_LIST, secrets: [SECRET, trap] }));
+    const result = await h.run(['computers', 'create', '--secret', `${SECRET.id}=X`]);
+    expect(result.frames[0].error).toMatchObject({
+      code: 'ambiguous_secret',
+      message: expect.stringContaining('nothing was created'),
+    });
+    expect(h.rec.routes()).toEqual([['GET', 'secrets']]);
+  });
+
+  it('says delivery is off before creating a computer that could not hold them', async () => {
+    const h = harness(store({ ...SECRET_LIST, delivery: false }));
+    const result = await h.run(['computers', 'create', '--secret', 'OPENAI_API_KEY']);
+    expect(result.frames[0].error).toMatchObject({ code: 'unsupported' });
+    expect(h.rec.routes()).toEqual([['GET', 'secrets']]);
+  });
+
+  it('never quotes what follows =, which may be the value typed by mistake', async () => {
+    const value = 'sk-live-do-not-print-me';
+    const h = harness(store());
+    for (const jsonMode of [true, false]) {
+      const result = await h.run(
+        ['computers', 'create', '--secret', `OPENAI_API_KEY=${value}`],
+        jsonMode,
+      );
+      expect(result.code).toBe(1);
+      expect(result.out + result.err).not.toContain(value);
+      expect(result.out + result.err).toContain('never the value');
+    }
+    expect(h.rec.calls).toEqual([]);
+  });
+
+  it('renames through the resolved id', async () => {
+    const h = harness((call) =>
+      call.method === 'PATCH' ? json({ ...COMPUTER, name: 'build box' }) : anyRoute(call),
+    );
+    const result = await h.run(['computers', 'rename', COMPUTER.name, 'build box']);
+    expect(result.code).toBe(0);
+    expect(h.rec.last()).toMatchObject({
+      method: 'PATCH',
+      path: `/computers/${COMPUTER.id}`,
+      body: { name: 'build box' },
+    });
+    expect(result.frames[0].data).toMatchObject({ id: COMPUTER.id, name: 'build box' });
+  });
+
+  it('resizes only what was named', async () => {
+    const h = harness();
+    const result = await h.run([
+      'computers',
+      'resize',
+      COMPUTER.id,
+      '--cpu',
+      '4',
+      '--disk-gb',
+      '80',
+    ]);
+    expect(result.code).toBe(0);
+    expect(h.rec.last()).toMatchObject({
+      method: 'PATCH',
+      path: `/computers/${COMPUTER.id}`,
+      body: { cpu: 4, disk_gb: 80 },
+    });
+  });
+
+  it("passes a resize's refusal through with its code", async () => {
+    const h = harness((call) =>
+      call.method === 'PATCH'
+        ? json(
+            { error: 'this computer is running; stop it before changing its size' },
+            { status: 409 },
+          )
+        : anyRoute(call),
+    );
+    const result = await h.run(['computers', 'resize', COMPUTER.id, '--ram-mb', '8192']);
+    expect(result.code).toBe(1);
+    expect(result.frames[0].error).toMatchObject({
+      code: 'conflict',
+      status: 409,
+      message: expect.stringContaining('stop it before changing its size'),
+    });
+  });
+
+  it('opens the dashboard page for the resolved id, and prints the URL', async () => {
+    const opened: string[] = [];
+    const h = harness();
+    h.io.openBrowser = async (url) => {
+      opened.push(url);
+      return true;
+    };
+    const result = await h.run(['computers', 'view', COMPUTER.name]);
+    expect(result.code).toBe(0);
+    expect(opened).toEqual([`https://api.test/computers/${COMPUTER.id}`]);
+    expect(result.frames[0].data).toEqual({
+      id: COMPUTER.id,
+      name: COMPUTER.name,
+      url: `https://api.test/computers/${COMPUTER.id}`,
+      opened: true,
+    });
+    // Never a desktop credential: the page asks the browser's own session.
+    expect(result.out).not.toContain('token');
+  });
+
+  it('prints the URL alone with --no-open, and says so when no browser opens', async () => {
+    const opened: string[] = [];
+    const h = harness();
+    h.io.openBrowser = async (url) => {
+      opened.push(url);
+      return false;
+    };
+    const quiet = await h.run(['computers', 'view', COMPUTER.id, '--no-open'], false);
+    expect(quiet.out).toBe(`https://api.test/computers/${COMPUTER.id}\n`);
+    expect(quiet.err).toBe('');
+    expect(opened).toEqual([]);
+    const h2 = harness();
+    h2.io.openBrowser = async () => {
+      throw new Error('no display');
+    };
+    const threw = await h2.run(['computers', 'view', COMPUTER.id], false);
+    expect(threw.code).toBe(0);
+    expect(threw.out).toBe(`https://api.test/computers/${COMPUTER.id}\n`);
+    expect(threw.err).toContain('no browser could be opened');
+  });
+
+  it.each([
+    ['https://app.mandala.computer/api/v1', 'https://app.mandala.computer/computers/vm-1'],
+    ['https://app.mandala.computer/api/v1/', 'https://app.mandala.computer/computers/vm-1'],
+    ['https://example.test/mandala/api/v1', 'https://example.test/mandala/computers/vm-1'],
+    ['http://localhost:3000/elsewhere', 'http://localhost:3000/computers/vm-1'],
+  ])('puts the dashboard beside the API: %s', (base, url) => {
+    expect(dashboardUrl(base, 'vm-1')).toBe(url);
+  });
+
+  it('lists a guest directory, snake_case under --json', async () => {
+    const h = harness();
+    const result = await h.run(['files', 'list', COMPUTER.name, '/home/user/Desktop']);
+    expect(result.code).toBe(0);
+    expect(h.rec.last()).toMatchObject({
+      method: 'GET',
+      path: `/computers/${COMPUTER.id}/files/list`,
+      query: { path: '/home/user/Desktop' },
+    });
+    expect(result.frames[0].data).toEqual(DIRECTORY);
+  });
+
+  it('lists a directory for a person, one line each, and says when it is partial', async () => {
+    const partial = { ...DIRECTORY, truncated: true, skipped: 2 };
+    const h = harness((call) =>
+      call.path.endsWith('/files/list') ? json(partial) : anyRoute(call),
+    );
+    const result = await h.run(['files', 'list', COMPUTER.id, '/home/user/Desktop'], false);
+    expect(result.code).toBe(0);
+    expect(result.out.split('\n')).toEqual([
+      'file                  12  notes.txt',
+      'directory              -  photos/',
+      '',
+    ]);
+    expect(result.err).toContain('unordered part of it');
+    expect(result.err).toContain('2 names could not be shown');
+  });
+
+  it('uploads with files upload, create-only when asked', async () => {
+    const path = join(await tempDir(), 'upload.bin');
+    await writeFile(path, Uint8Array.from([7, 8, 9]));
+    const h = harness((call) =>
+      call.path === '/computers' ? json([COMPUTER]) : json({ bytes: 3 }),
+    );
+    const result = await h.run(['files', 'upload', COMPUTER.name, path, '/tmp/']);
+    expect(result.code).toBe(0);
+    expect(h.rec.last()).toMatchObject({ method: 'PUT', query: { path: '/tmp/upload.bin' } });
+    expect(h.rec.last().raw).toEqual(Uint8Array.from([7, 8, 9]));
+    expect(result.frames[0].data).toEqual({
+      source: path,
+      destination: `${COMPUTER.name}:/tmp/upload.bin`,
+      bytes: 3,
+      confirmed: true,
+      accounting: '3 bytes',
+    });
+    await h.run(['files', 'upload', '--no-overwrite', COMPUTER.name, path, '/tmp/x.bin']);
+    expect(h.rec.last().query).toEqual({ path: '/tmp/x.bin', overwrite: 'false' });
+  });
+
+  it('downloads with files download into a directory under the guest name', async () => {
+    const dir = await tempDir();
+    const h = harness(guestFile(Uint8Array.from([0, 255, 3])));
+    const result = await h.run(['files', 'download', COMPUTER.name, '/tmp/input.bin', dir]);
+    expect(result.code).toBe(0);
+    expect(await readFile(join(dir, 'input.bin'))).toEqual(Buffer.from([0, 255, 3]));
+    expect(result.frames[0].data).toEqual({
+      source: `${COMPUTER.name}:/tmp/input.bin`,
+      destination: join(dir, 'input.bin'),
+      bytes: 3,
+      confirmed: true,
+    });
+  });
+
+  it('downloads into the current directory when no destination is named', async () => {
+    const seen: unknown[] = [];
+    const legacy = {
+      download: async (...args: unknown[]) => {
+        seen.push(args.slice(0, 3));
+        return { source: 's', destination: 'd', bytes: 0, confirmed: true };
+      },
+    } as unknown as LegacyCommands;
+    const h = harness();
+    const code = await runCli(
+      ['files', 'download', 'demo', '/tmp/a.txt', '--json'],
+      runtime(h.io),
+      legacy,
+    );
+    expect(code).toBe(0);
+    expect(seen).toEqual([['demo', '/tmp/a.txt', '.']]);
+  });
+
+  it.each([
+    [['computers', 'resize', 'vm']],
+    [['computers', 'resize', 'vm', '--cpu', '0']],
+    [['computers', 'resize', 'vm', '--disk-gb', '1.5']],
+    [['computers', 'rename', 'vm']],
+    [['computers', 'view', 'vm', 'extra']],
+    [['files', 'list', 'vm', 'relative/path']],
+    [['files', 'list', 'vm']],
+    [['files', 'upload', 'vm', 'local.txt']],
+    [['computers', 'create', '--secret', '=X']],
+    [['computers', 'create', '--secret', 'A=1BAD']],
+    [['computers', 'create', '--secret-file', 'A=Upper']],
+    [['computers', 'create', '--secret', 'A=']],
+  ])('%j makes no requests', async (argv) => {
+    const h = harness();
+    const result = await h.run(argv);
+    expect(result.code).toBe(1);
+    expect(h.rec.calls).toEqual([]);
   });
 });
