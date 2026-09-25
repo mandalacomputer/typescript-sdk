@@ -469,3 +469,101 @@ describe('mandala secrets set: the value’s encoding', () => {
     }
   });
 });
+
+describe('secret names, normalized as the platform normalizes them', () => {
+  /**
+   * A store that trims a name before keeping it and matches names ignoring
+   * ASCII case, as the platform does (normalizeCustomerSecretName, and NOCASE).
+   * A client that looked up the untrimmed name would miss the first row and
+   * create a second secret.
+   */
+  const trimmingStore = (): Responder => {
+    const rows: (typeof SECRET)[] = [];
+    return (call: Call) => {
+      if (call.path === '/secrets' && call.method === 'GET')
+        return json({ ...SECRET_LIST, secrets: rows });
+      if (call.path === '/secrets' && call.method === 'POST') {
+        const name = String((call.body as { name: unknown }).name).trim();
+        if (rows.some((r) => r.name.toLowerCase() === name.toLowerCase()))
+          return json(
+            { error: 'A secret with this name already exists in this scope.' },
+            { status: 409 },
+          );
+        const row = { ...SECRET, name };
+        rows.push(row);
+        return json(row, { status: 201 });
+      }
+      const row = rows.find((r) => call.path === `/secrets/${r.id}`);
+      if (!row) return json({ error: 'No such secret.' }, { status: 404 });
+      row.revision_id = REV2;
+      return json(row);
+    };
+  };
+
+  it('sets a padded name twice as one create and then one replace', async () => {
+    const store = trimmingStore();
+    const first = await cli(['secrets', 'set', ' TOKEN '], store, VALUE);
+    const second = await cli(['secrets', 'set', '  token\t'], store, VALUE);
+    expect([first.code, second.code]).toEqual([0, 0]);
+    const writes = [...first.rec.calls, ...second.rec.calls].filter((x) => x.method !== 'GET');
+    expect(writes.map((x) => [x.method, x.path, x.body])).toEqual([
+      ['POST', '/secrets', { name: 'TOKEN', value: VALUE }],
+      ['PUT', `/secrets/${ID}`, { value: VALUE, revision_id: REV }],
+    ]);
+  });
+
+  it('creates through the SDK under the trimmed name', async () => {
+    const { rec, client: c } = client(trimmingStore());
+    await c.secrets.create({ name: ' X ', value: VALUE });
+    expect(rec.calls.at(-1)?.body).toEqual({ name: 'X', value: VALUE });
+  });
+});
+
+describe('no failure of the secret store carries the value', () => {
+  const failing = (fetch: typeof globalThis.fetch) =>
+    new Client({ apiKey: 'com_test', baseUrl: BASE, fetch });
+  const offline = failing(async () => {
+    throw new TypeError('fetch failed');
+  });
+  const html500 = failing(
+    async () => new Response('<html><body>oops</body></html>', { status: 500 }),
+  );
+
+  const cases: [string, () => Promise<unknown>][] = [
+    ['a lone surrogate', () => offline.secrets.create({ name: 'A', value: `${VALUE}\ud800` })],
+    [
+      'a value over 4096 bytes',
+      () => offline.secrets.create({ name: 'A', value: `${VALUE}${'x'.repeat(5000)}` }),
+    ],
+    [
+      'a boxed String',
+      () => offline.secrets.create({ name: 'A', value: new String(VALUE) as unknown as string }),
+    ],
+    ['a bad revision', () => offline.secrets.replace(ID, { value: VALUE, revisionId: 'bad' })],
+    ['a fetch that throws', () => offline.secrets.create({ name: 'A', value: VALUE })],
+    [
+      'a fetch that throws, on a replace',
+      () => offline.secrets.replace(ID, { value: VALUE, revisionId: REV }),
+    ],
+    ['an HTML 500', () => html500.secrets.create({ name: 'A', value: VALUE })],
+    [
+      'an HTML 500, on a replace',
+      () => html500.secrets.replace(ID, { value: VALUE, revisionId: REV }),
+    ],
+  ];
+
+  for (const [what, call] of cases) {
+    it(`on ${what}`, async () => {
+      const err = await call().then(
+        () => {
+          throw new Error('expected a failure');
+        },
+        (e: unknown) => e as Error,
+      );
+      expect(err).toBeInstanceOf(Error);
+      for (const text of [err.message, String(err.stack), JSON.stringify(err), String(err)]) {
+        expect(text).not.toContain(VALUE);
+      }
+    });
+  }
+});
