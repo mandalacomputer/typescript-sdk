@@ -4,7 +4,7 @@ import { completion } from './cli-completion.js';
 import { loginCommand } from './cli-login.js';
 import { manifest } from './cli-manifest.js';
 import { CliError, help, type Parsed, parseArgs } from './cli-options.js';
-import { errorInfo, Output, redact } from './cli-output.js';
+import { errorInfo, Output, redact, snakeKeys } from './cli-output.js';
 import { type CliIO, documentInput, readInput } from './cli-runtime.js';
 import { secretsList, secretsRemove, secretsSet } from './cli-secrets.js';
 import {
@@ -455,7 +455,8 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
       case 'account': {
         const quota = await client.account.read(call);
         const { raw: _raw, ...data } = quota;
-        if (json) return output.result(data);
+        // The decoded fields only, spelled back in the API's snake_case.
+        if (json) return output.result(snakeKeys(data));
         io.stdout.write(`${redact(accountText(quota), io.env, io.secrets)}\n`);
         return 0;
       }
@@ -464,7 +465,9 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
         checkUsageReport(report.raw);
         const { raw: _raw, ...data } = report;
         if (json)
-          return output.result({ ...data, reportedThrough: report.reportedThrough ?? null });
+          return output.result(
+            snakeKeys({ ...data, reportedThrough: report.reportedThrough ?? null }),
+          );
         io.stdout.write(`${redact(usageText(report), io.env, io.secrets)}\n`);
         return 0;
       }
@@ -503,7 +506,7 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
         return output.result({
           id: c.id,
           deleted: true,
-          snapshotsDeleted: snapshotsDeleted ?? null,
+          snapshots_deleted: snapshotsDeleted ?? null,
         });
       }
       case 'computers screenshot': {
@@ -539,11 +542,11 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
         const { stdout, stderr, raw: _raw, ...fields } = result;
         if (json || b('background'))
           return output.result(
-            {
+            snakeKeys({
               ...fields,
               stdoutBase64: Buffer.from(stdout).toString('base64'),
               stderrBase64: Buffer.from(stderr).toString('base64'),
-            },
+            }),
             code,
           );
         io.stdout.write(stdout);
@@ -562,7 +565,9 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
             ? await c.waitUntilBuilt(wait)
             : s('until') === 'guest'
               ? await c.waitForGuest(wait)
-              : await c.waitUntilRunning(wait);
+              : s('until') === 'secrets'
+                ? await c.waitForSecrets(wait)
+                : await c.waitUntilRunning(wait);
         return output.result(computerData(result));
       }
       case 'templates list': {
@@ -592,12 +597,12 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
         let last: BuildProgress | undefined;
         for await (const progress of client.builds.events(target, call)) {
           last = progress;
-          output.frame('progress', progress);
+          output.frame('progress', snakeKeys(progress));
         }
         if (!last?.done)
           throw new CliError('incomplete_stream', 'Build stream ended without a final result');
         const code = last.status === 'succeeded' ? 0 : 1;
-        output.frame('done', { ...last, exitCode: code });
+        output.frame('done', snakeKeys({ ...last, exitCode: code }));
         return code;
       }
       case 'snapshots list': {
@@ -703,10 +708,10 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
           if (event.type === 'done') {
             const code = event.result.finished ? 0 : 1;
             const { raw: _raw, ...summary } = event.result;
-            output.frame('done', { ...summary, exitCode: code });
+            output.frame('done', snakeKeys({ ...summary, exitCode: code }));
             return code;
           }
-          output.frame(event.type, event.type === 'step' ? event.step : event.text);
+          output.frame(event.type, event.type === 'step' ? snakeKeys(event.step) : event.text);
         }
         throw new CliError('incomplete_stream', 'Agent stream ended without a result');
       }

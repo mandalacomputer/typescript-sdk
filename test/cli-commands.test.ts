@@ -14,6 +14,7 @@ import {
   BASE,
   BUILD_PROGRESS,
   buildEvents,
+  type Call,
   COMPUTER,
   EXEC_OK,
   guestFile,
@@ -107,17 +108,17 @@ describe('account and historical usage commands', () => {
     expect(h.rec.last().headers.Authorization).toBe('Bearer com_cli_test');
     expect(result.frames).toHaveLength(1);
     expect(result.frames[0]).toMatchObject({
-      schemaVersion: 1,
+      schema_version: 2,
       command: 'account',
       ok: true,
-      exitCode: 0,
+      exit_code: 0,
       data: {
         scope: 'account',
         advisory: true,
-        observedAt: accountReport().observed_at,
+        observed_at: accountReport().observed_at,
         complete: { computers: true, snapshots: true },
-        usage: { configuredVcpu: 14, runningOrReservedVcpu: 6 },
-        remaining: { configuredVcpu: 10, snapshotStorageBytes: 106300440575 },
+        usage: { configured_vcpu: 14, running_or_reserved_vcpu: 6 },
+        remaining: { configured_vcpu: 10, snapshot_storage_bytes: 106300440575 },
       },
     });
     expect(result.err).toBe('');
@@ -132,19 +133,19 @@ describe('account and historical usage commands', () => {
     expect(h.rec.last().body).toBeUndefined();
     expect(result.frames).toHaveLength(1);
     expect(result.frames[0]).toMatchObject({
-      schemaVersion: 1,
+      schema_version: 2,
       command: 'usage',
       ok: true,
-      exitCode: 0,
+      exit_code: 0,
       data: {
         period: USAGE.period,
         from: USAGE.from,
         to: USAGE.to,
-        usage: { vcpuHours: 25, diskGbMonths: 0.66, computers: [{ id: 'vm-1' }] },
+        usage: { vcpu_hours: 25, disk_gb_months: 0.66, computers: [{ id: 'vm-1' }] },
         degraded: false,
         unmetered: false,
         breakdown: true,
-        reportedThrough: USAGE.reported_through,
+        reported_through: USAGE.reported_through,
       },
     });
     expect(result.err).toBe('');
@@ -170,10 +171,10 @@ describe('account and historical usage commands', () => {
       expect(machine.frames[0].data.complete).toEqual({ computers, snapshots });
       for (const section of ['usage', 'remaining'] as const) {
         for (const [key, value] of Object.entries(machine.frames[0].data[section])) {
-          expect(value === null).toBe(!(key === 'snapshotStorageBytes' ? snapshots : computers));
+          expect(value === null).toBe(!(key === 'snapshot_storage_bytes' ? snapshots : computers));
         }
       }
-      expect(machine.frames[0].data.limits.vcpuPool).toBe(24);
+      expect(machine.frames[0].data.limits.vcpu_pool).toBe(24);
       const human = await harness(() => json(report)).run(['account'], false);
       expect(human.code).toBe(0);
       expect(human.out).toContain(`Computer inventory: ${computers ? 'complete' : 'unknown'}`);
@@ -211,8 +212,8 @@ describe('account and historical usage commands', () => {
       }
       const machine = await harness(() => json(report)).run(['account']);
       expect(machine.code).toBe(0);
-      expect(machine.frames[0].data.usage.configuredVcpu).toBe(state === 'zero' ? 0 : 14);
-      expect(machine.frames[0].data.remaining.configuredVcpu).toBe(state === 'zero' ? 24 : 0);
+      expect(machine.frames[0].data.usage.configured_vcpu).toBe(state === 'zero' ? 0 : 14);
+      expect(machine.frames[0].data.remaining.configured_vcpu).toBe(state === 'zero' ? 24 : 0);
       expect(machine.frames[0].data.plan).toEqual(report.plan);
       const human = await harness(() => json(report)).run(['account'], false);
       expect(human.out).toContain(
@@ -293,7 +294,7 @@ describe('account and historical usage commands', () => {
     expect(result.frames[0]).toMatchObject({
       ok: false,
       error: { code: 'invalid_arguments' },
-      exitCode: 1,
+      exit_code: 1,
     });
     expect(create).not.toHaveBeenCalled();
     expect(h.rec.calls).toEqual([]);
@@ -311,8 +312,8 @@ describe('account and historical usage commands', () => {
     expect(result.frames[0].data).toMatchObject({
       degraded,
       unmetered,
-      reportedThrough: null,
-      usage: { vcpuHours: 25, snapshotGbMonths: 0.13 },
+      reported_through: null,
+      usage: { vcpu_hours: 25, snapshot_gb_months: 0.13 },
     });
     const human = await harness(() => json(report)).run(['usage'], false);
     expect(human.out).toContain('Historical metered usage (account-wide)');
@@ -352,11 +353,11 @@ describe('account and historical usage commands', () => {
       unmetered: false,
       breakdown: true,
       usage: {
-        runHours: 0,
-        vcpuHours: 0,
-        ramGbHours: 0,
-        diskGbMonths: 0,
-        snapshotGbMonths: 0,
+        run_hours: 0,
+        vcpu_hours: 0,
+        ram_gb_hours: 0,
+        disk_gb_months: 0,
+        snapshot_gb_months: 0,
         computers: [],
       },
     });
@@ -423,44 +424,51 @@ describe('account and historical usage commands', () => {
       if (jsonMode) {
         expect(result.frames).toHaveLength(1);
         expect(result.frames[0]).toMatchObject({
-          schemaVersion: 1,
+          schema_version: 2,
           command: 'usage',
           ok: true,
-          exitCode: 0,
+          exit_code: 0,
           data: { breakdown: true },
         });
         expect(result.frames[0].data.usage).toEqual({
-          runHours: 12.5,
-          vcpuHours: 25,
-          ramGbHours: 50,
-          diskGbHours: 480,
-          diskGbMonths: 0.66,
-          snapshotGbHours: 96,
-          snapshotGbMonths: 0.13,
+          run_hours: 12.5,
+          vcpu_hours: 25,
+          ram_gb_hours: 50,
+          disk_gb_hours: 480,
+          disk_gb_months: 0.66,
+          snapshot_gb_hours: 96,
+          snapshot_gb_months: 0.13,
           computers: [
             {
               id: 'named-live',
               name: 'desktop',
-              runHours: 1,
-              vcpuHours: 2,
-              ramGbHours: 4,
+              run_hours: 1,
+              vcpu_hours: 2,
+              ram_gb_hours: 4,
               gone: false,
             },
-            { id: 'unnamed-live', name: '', runHours: 2, vcpuHours: 4, ramGbHours: 8, gone: false },
+            {
+              id: 'unnamed-live',
+              name: '',
+              run_hours: 2,
+              vcpu_hours: 4,
+              ram_gb_hours: 8,
+              gone: false,
+            },
             {
               id: 'named-deleted',
               name: 'former',
-              runHours: 3,
-              vcpuHours: 6,
-              ramGbHours: 12,
+              run_hours: 3,
+              vcpu_hours: 6,
+              ram_gb_hours: 12,
               gone: true,
             },
             {
               id: 'unnamed-deleted',
               name: '',
-              runHours: 6.5,
-              vcpuHours: 13,
-              ramGbHours: 26,
+              run_hours: 6.5,
+              vcpu_hours: 13,
+              ram_gb_hours: 26,
               gone: true,
             },
           ],
@@ -529,11 +537,11 @@ describe('account and historical usage commands', () => {
     if (jsonMode) {
       expect(result.frames).toHaveLength(1);
       expect(result.frames[0]).toMatchObject({
-        schemaVersion: 1,
+        schema_version: 2,
         command: 'usage',
         ok: false,
-        exitCode: 1,
-        error: { code: 'MandalaError', message: expect.stringContaining('Invalid usage report:') },
+        exit_code: 1,
+        error: { code: 'failed', message: expect.stringContaining('Invalid usage report:') },
       });
       expect(result.frames[0]).not.toHaveProperty('data');
       expect(result.err).toBe('');
@@ -698,8 +706,8 @@ describe('account and historical usage commands', () => {
         expect(result.frames[0]).toMatchObject({
           command,
           ok: false,
-          exitCode: 1,
-          error: { code: 'MandalaError' },
+          exit_code: 1,
+          error: { code: 'failed' },
         });
         expect(result.frames[0]).not.toHaveProperty('data');
         expect(h.rec.routes()).toEqual([['GET', command]]);
@@ -717,7 +725,7 @@ describe('account and historical usage commands', () => {
         expect(result.frames[0]).toMatchObject({
           command,
           ok: false,
-          exitCode: 1,
+          exit_code: 1,
           error: { status },
         });
         expect(result.frames[0]).not.toHaveProperty('data');
@@ -741,7 +749,7 @@ describe('account and historical usage commands', () => {
         expect(result.frames[0]).toMatchObject({
           command,
           ok: false,
-          exitCode: 130,
+          exit_code: 130,
           error: { code: 'cancelled' },
         });
         expect(h.rec.routes()).toEqual([['GET', command]]);
@@ -793,10 +801,10 @@ describe('computer commands use distinct SDK requests', () => {
     expect(h.rec.routes()).toEqual([['GET', 'computers']]);
     expect(h.rec.last().query).toEqual({ allow_partial: '1', state: 'lost' });
     expect(result.frames[0]).toMatchObject({
-      schemaVersion: 1,
+      schema_version: 2,
       command: 'computers list',
       ok: true,
-      exitCode: 0,
+      exit_code: 0,
       data: { incomplete: 2, items: [{ id: COMPUTER.id }] },
     });
     expect(result.out).not.toContain('vnc');
@@ -905,7 +913,7 @@ describe('computer commands use distinct SDK requests', () => {
       ['DELETE', `computers/${COMPUTER.id}`],
     ]);
     expect(h.rec.last().query).toEqual({ snapshots: 'delete', expect: 'fingerprint-7' });
-    expect(result.frames[0].data).toEqual({ id: COMPUTER.id, deleted: true, snapshotsDeleted: 3 });
+    expect(result.frames[0].data).toEqual({ id: COMPUTER.id, deleted: true, snapshots_deleted: 3 });
   });
 
   it('writes screenshot bytes exactly and returns a file result', async () => {
@@ -1152,8 +1160,8 @@ describe('exec preserves bytes, input and result semantics', () => {
     expect(result.code).toBe(7);
     expect(result.frames[0]).toMatchObject({
       ok: false,
-      exitCode: 7,
-      data: { exitCode: 7, stdoutBase64: 'AP8=', stderrBase64: 'ZXJyCg==', outTruncated: true },
+      exit_code: 7,
+      data: { exit_code: 7, stdout_base64: 'AP8=', stderr_base64: 'ZXJyCg==', out_truncated: true },
     });
     expect(result.err).toBe('');
   });
@@ -1282,8 +1290,8 @@ globalThis.fetch = async (input) => new Response(JSON.stringify(String(input).en
     expect(result.stderr).toBe('');
     expect(JSON.parse(result.stdout)).toMatchObject({
       ok: false,
-      exitCode: 1,
-      data: { exitCode: 0.5 },
+      exit_code: 1,
+      data: { exit_code: 0.5 },
     });
   }, 40_000);
 });
@@ -1347,10 +1355,10 @@ describe('templates', () => {
     expect(result.code).toBe(0);
     expect(result.frames.map((f) => f.type)).toEqual(['progress', 'progress', 'done']);
     expect(result.frames.at(-1)).toMatchObject({
-      schemaVersion: 1,
+      schema_version: 2,
       command: 'templates watch',
       timestamp: stamp,
-      data: { status: 'succeeded', done: true, exitCode: 0 },
+      data: { status: 'succeeded', done: true, exit_code: 0 },
     });
   });
 
@@ -1681,7 +1689,7 @@ describe('agent streams and cancellation', () => {
       finished: true,
       steps: 1,
       stop: 'end_turn',
-      exitCode: 0,
+      exit_code: 0,
     });
     expect(result.out).not.toContain('model_cli_test');
     expect(result.out).not.toContain('com_cli_test');
@@ -1707,7 +1715,7 @@ describe('agent streams and cancellation', () => {
     expect(result.frames[0].data.error.details).toEqual({
       status: 403,
       steps: [{ n: 1, tool: 'bash', detail: 'wrote file' }],
-      usage: { inputTokens: 51, outputTokens: 17, cacheReadTokens: 12, cacheWriteTokens: 4 },
+      usage: { input_tokens: 51, output_tokens: 17, cache_read_tokens: 12, cache_write_tokens: 4 },
     });
   });
 
@@ -1724,7 +1732,7 @@ describe('agent streams and cancellation', () => {
       );
       const result = await h.run(['agent', 'run', 'work', '--computer', COMPUTER.id]);
       expect(result.code).toBe(1);
-      expect(result.frames[0].data).toMatchObject({ finished: false, stop, exitCode: 1 });
+      expect(result.frames[0].data).toMatchObject({ finished: false, stop, exit_code: 1 });
     },
   );
 
@@ -1786,7 +1794,7 @@ describe('legacy JSON modes', () => {
     expect(JSON.parse(result.out)).toMatchObject({
       ok: false,
       command: 'ssh',
-      exitCode: 2,
+      exit_code: 2,
       error: { code: 'unsupported_mode', message: 'ssh is interactive and has no --json output' },
     });
     expect(h.rec.calls).toEqual([]);
@@ -1940,7 +1948,7 @@ describe('wait options and signal cleanup', () => {
         await vi.advanceTimersByTimeAsync(5);
         const result = await pending;
         expect(result.code).toBe(1);
-        expect(result.frames[0].error).toMatchObject({ code: 'TimeoutError' });
+        expect(result.frames[0].error).toMatchObject({ code: 'timeout' });
         expect(result.frames[0].error.message).toContain('21ms');
       } finally {
         process.emit('SIGINT');
@@ -2150,6 +2158,128 @@ describe('credential-free discovery and profile dispatch', () => {
     } finally {
       lookup.mockRestore();
       vi.unstubAllGlobals();
+    }
+  });
+});
+
+describe('one JSON casing and one error vocabulary (OPL-5048)', () => {
+  it('prints the full usage under a mistyped command, counting the extra argument', async () => {
+    const h = harness();
+    const result = await h.run(['computers', 'exec', 'demo', '-c', 'echo', 'extra-arg'], false);
+    expect(result.code).toBe(1);
+    expect(result.err).toContain(
+      'mandala: 1 argument too many: mandala computers exec takes <computer> and ' +
+        'nothing more (quote a value that has spaces in it)',
+    );
+    expect(result.err).not.toContain('extra-arg');
+    // The whole usage, not the one line that used to be the message.
+    expect(result.err).toContain('  mandala computers exec <computer>\n');
+    expect(result.err).toContain('--command');
+    expect(result.err).toContain('--desktop');
+    expect(h.rec.calls).toEqual([]);
+  });
+
+  it('carries the usage in the JSON error, beside a reason-style code', async () => {
+    const h = harness();
+    const result = await h.run(['computers', 'get']);
+    expect(result.frames).toHaveLength(1);
+    expect(result.frames[0]).toMatchObject({
+      schema_version: 2,
+      ok: false,
+      exit_code: 1,
+      error: {
+        code: 'invalid_arguments',
+        message: 'missing <computer>',
+        usage: expect.stringContaining('mandala computers get <computer>'),
+      },
+    });
+  });
+
+  it('never echoes a secret value typed where secrets set reads stdin', async () => {
+    // The usage error fires before any command has registered a value for
+    // redaction, so the only protection is not quoting operands at all.
+    const token = 'sk-live-0123456789-do-not-echo';
+    for (const jsonMode of [true, false]) {
+      const h = harness();
+      const result = await h.run(['secrets', 'set', 'OPENAI_API_KEY', token], jsonMode);
+      expect(result.code).toBe(1);
+      expect(result.out + result.err).not.toContain(token);
+      expect(result.out + result.err).toContain(
+        '1 argument too many: mandala secrets set takes <name> and nothing more',
+      );
+      expect(h.rec.calls).toEqual([]);
+    }
+    // Nor one that starts with a dash, which the parser reads as an option.
+    const h = harness();
+    const dashed = `-${token}`;
+    const result = await h.run(['secrets', 'set', 'OPENAI_API_KEY', dashed]);
+    expect(result.code).toBe(1);
+    expect(result.out + result.err).not.toContain(token);
+    expect(result.frames[0].error.message).toBe(
+      'unknown option: an argument starts with "-" but is not an option name; put -- before a ' +
+        'value that starts with one',
+    );
+  });
+
+  it('waits for bound secrets with computers wait --until secrets', async () => {
+    let gets = 0;
+    const h = harness(() => {
+      gets++;
+      return json({
+        ...COMPUTER,
+        status: 'running',
+        secrets: [{ secret_id: 'csec-0123456789abcdef', revision_id: 'csr-1', env: 'TOKEN' }],
+        secrets_delivering: gets < 3,
+      });
+    });
+    const result = await h.run([
+      'computers',
+      'wait',
+      COMPUTER.id,
+      '--until',
+      'secrets',
+      '--poll-ms',
+      '1',
+    ]);
+    expect(result.code).toBe(0);
+    expect(result.frames[0].data.secrets_delivering).toBe(false);
+    expect(h.rec.routes().every(([method]) => method === 'GET')).toBe(true);
+  });
+
+  it('names an API refusal by what went wrong, never by a class name', async () => {
+    const h = harness(() => json({ error: 'computer not found' }, { status: 404 }));
+    const result = await h.run(['computers', 'get', 'vm-000000000000']);
+    expect(result.frames[0].error).toEqual({
+      code: 'not_found',
+      message: 'computer not found',
+      status: 404,
+    });
+  });
+
+  it("passes the platform's reason word through beside the code", async () => {
+    const h = harness(() => json({ error: 'not running', reason: 'unavailable' }, { status: 409 }));
+    const result = await h.run(['computers', 'get', 'vm-000000000000']);
+    expect(result.frames[0].error).toMatchObject({
+      code: 'conflict',
+      status: 409,
+      reason: 'unavailable',
+    });
+  });
+
+  it('writes no camelCase key in an envelope or in data the CLI decoded', async () => {
+    const camel = /"[a-z]+[A-Z][A-Za-z0-9]*"\s*:/;
+    for (const [args, respond] of [
+      [['account'], () => json(accountReport())],
+      [['usage'], () => json(USAGE)],
+      [
+        ['computers', 'exec', 'vm-000000000000', '-c', 'true'],
+        (call: Call) => json(call.path.endsWith('/exec') ? EXEC_OK : COMPUTER),
+      ],
+      [['manifest'], anyRoute],
+    ] as [string[], Responder][]) {
+      const result = await harness(respond).run(args);
+      expect(result.out, args.join(' ')).not.toMatch(camel);
+      expect(result.frames[0].schema_version).toBe(2);
     }
   });
 });

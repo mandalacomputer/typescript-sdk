@@ -3,28 +3,28 @@ import { SCHEMA_VERSION } from './cli-output.js';
 
 export function manifest() {
   return {
-    schemaVersion: SCHEMA_VERSION,
+    schema_version: SCHEMA_VERSION,
     name: 'mandala',
     authentication: {
-      apiKey: 'MANDALA_API_KEY',
-      baseUrl: 'MANDALA_BASE_URL',
-      modelKey: 'MANDALA_MODEL_KEY',
+      api_key: 'MANDALA_API_KEY',
+      base_url: 'MANDALA_BASE_URL',
+      model_key: 'MANDALA_MODEL_KEY',
     },
     output: {
       finite: {
-        success: ['schemaVersion', 'command', 'ok', 'data', 'exitCode'],
-        error: ['schemaVersion', 'command', 'ok', 'error', 'exitCode'],
+        success: ['schema_version', 'command', 'ok', 'data', 'exit_code'],
+        error: ['schema_version', 'command', 'ok', 'error', 'exit_code'],
       },
       stream: {
         format: 'ndjson',
-        fields: ['schemaVersion', 'command', 'type', 'timestamp', 'data'],
-        terminalTypes: ['done', 'error'],
+        fields: ['schema_version', 'command', 'type', 'timestamp', 'data'],
+        terminal_types: ['done', 'error'],
       },
       terminal: '--json returns unsupported_mode before connecting',
       ssh: "--json returns unsupported_mode before connecting; with --setup it returns one finite result. Arguments after the computer are passed to ssh unchanged; the process exit is ssh's own (127 when no ssh client is found)",
       scp: 'One finite result with source, destination, and transfer byte accounting',
       screenshot: 'Writes exact image bytes to --output; JSON data contains path and bytes',
-      exec: 'JSON data contains base64 stdout/stderr, decoded text, exitCode and completion flags; process exit follows the remote status (124 on timeout, 1 if unknown)',
+      exec: 'JSON data contains base64 stdout/stderr, decoded text, exit_code and completion flags; process exit follows the remote status (124 on timeout, 1 if unknown)',
     },
     commands: COMMANDS.map((c) => ({
       path: c.path.split(' '),
@@ -40,8 +40,8 @@ export function manifest() {
       }),
       ...(c.passthrough ? { passthrough: { unless: c.passthrough.unless } } : {}),
       flags: [...GLOBAL_FLAGS, ...c.flags],
-      jsonMode: c.jsonMode ?? 'finite',
-      requiresCredentials: !['manifest', 'completion'].includes(c.path),
+      json_mode: c.jsonMode ?? 'finite',
+      requires_credentials: !['manifest', 'completion'].includes(c.path),
     })),
   };
 }

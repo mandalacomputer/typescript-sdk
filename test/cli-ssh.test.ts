@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { afterEach, describe, expect, it } from 'vitest';
 import { main } from '../src/cli.js';
-import { parseArgs } from '../src/cli-options.js';
+import { CliError, parseArgs } from '../src/cli-options.js';
 import type { CliIO } from '../src/cli-runtime.js';
 import {
   configSnippet,
@@ -224,7 +224,12 @@ describe('ssh command-line parsing', () => {
       json: true,
       rest: [],
     });
-    expect(() => parseArgs(['ssh', '--setup', 'dev', 'extra'])).toThrow(/mandala ssh <computer>/);
+    expect(() => parseArgs(['ssh', '--setup', 'dev', 'extra'])).toThrow(
+      /^1 argument too many: mandala ssh takes <computer> and nothing more/,
+    );
+    expect(usageOf(() => parseArgs(['ssh', '--setup', 'dev', 'extra']))).toContain(
+      'mandala ssh <computer> [ssh-args...]',
+    );
     expect(() => parseArgs(['ssh', '--setup', 'dev', '-L', 'x'])).toThrow(/unknown option -L/);
   });
 
@@ -235,12 +240,27 @@ describe('ssh command-line parsing', () => {
       /state must be one of: on, off/,
     );
     expect(() => parseArgs(['ssh-access', 'dev', 'on', 'x'])).toThrow(
-      /mandala ssh-access <computer> \[state\]/,
+      /^1 argument too many: mandala ssh-access takes <computer> \[state\] and nothing more/,
+    );
+    expect(usageOf(() => parseArgs(['ssh-access', 'dev', 'on', 'x']))).toContain(
+      'mandala ssh-access <computer> [state]',
     );
     expect(parseArgs(['ssh-key', 'add']).args).toEqual([]);
-    expect(() => parseArgs(['ssh-key', 'rm'])).toThrow(/ssh-key rm <id>/);
+    expect(() => parseArgs(['ssh-key', 'rm'])).toThrow(/^missing <id>$/);
+    expect(usageOf(() => parseArgs(['ssh-key', 'rm']))).toContain('mandala ssh-key rm <id>');
   });
 });
+
+/** The full usage a parse refusal carries, which a person sees under the message. */
+function usageOf(parse: () => unknown): string | undefined {
+  try {
+    parse();
+  } catch (error) {
+    if (error instanceof CliError) return error.usage;
+    throw error;
+  }
+  throw new Error('expected the parse to be refused');
+}
 
 // --- the gateway and known_hosts -------------------------------------------
 
@@ -607,7 +627,7 @@ describe('mandala ssh', () => {
     expect(asJson.code).toBe(2);
     expect(JSON.parse(asJson.out)).toMatchObject({
       ok: false,
-      exitCode: 2,
+      exit_code: 2,
       error: {
         code: 'unsupported_mode',
         message: 'ssh is interactive and has no --json output',
@@ -707,10 +727,10 @@ describe('mandala ssh --setup', () => {
       expect(r.code).toBe(0);
       expect(writes(r)).toEqual([['PUT', 'computers/vm-1/ssh']]);
       expect(JSON.parse(r.out)).toEqual({
-        schemaVersion: 1,
+        schema_version: 2,
         command: 'ssh',
         ok: true,
-        exitCode: 0,
+        exit_code: 0,
         data: {
           computer: 'vm-1',
           name: 'demo',
@@ -826,11 +846,11 @@ describe('mandala ssh --setup', () => {
       const asJson = await cli(['ssh', '--setup', 'demo', '--json'], { home, respond });
       expect(asJson.code).toBe(1);
       expect(JSON.parse(asJson.out)).toEqual({
-        schemaVersion: 1,
+        schema_version: 2,
         command: 'ssh',
         ok: false,
         error: { code, message },
-        exitCode: 1,
+        exit_code: 1,
       });
     },
   );

@@ -7,6 +7,55 @@ project is pre-1.0, so a minor version may carry a behaviour change.
 The reasoning behind a change lives in its commit message rather than here.
 This is the summary you read to decide whether to upgrade.
 
+## [Unreleased]
+
+One behaviour change to read before upgrading, under **Changed**: the CLI's
+`--json` output is snake_case throughout, envelope included, so its
+`schema_version` is now 2 and `error.code` is a reason word rather than a class
+name.
+
+### Added
+
+- **`client.secrets.set({ name, value, workspaceId })`**: create the name, or
+  replace its value if the scope already holds it — the upsert Python and both
+  CLIs already had. Names match ignoring ASCII case, as the platform keeps them
+  unique; a conflict between the read and the write is read again up to three
+  times, and a 503 is never sent again.
+- **`computer.waitForSecrets()`** and **`computer.secretsDelivering`**. A computer
+  comes back `running`, and its guest answers, a few seconds before its secrets
+  land. The wait polls until the platform's `secrets_delivering` is false (or,
+  on a platform that predates it, until the receipt names the latest delivering
+  start), and throws instead of waiting out its timeout for a delivery that
+  failed or a stopped computer the platform says has no start admitted; a host
+  that does not say is waited on. `expectSecrets: true` tells it secrets are
+  bound, so a read that leaves the bindings out is waited past rather than
+  taken for "nothing bound". The CLI's `computers wait --until secrets` runs it.
+
+### Changed
+
+- **`computers.launch()` waits for bound secrets.** With secrets bound it now
+  returns only once they have reached the desktop, inside the same readiness
+  budget, so the first command on the returned computer sees them. A delivery
+  that failed throws, naming why. A launch with nothing bound makes no extra
+  request.
+- **CLI `--json` is snake_case everywhere** (`schema_version` 2). The envelope
+  reads `schema_version` and `exit_code`; `account`, `usage`, `exec`, agent and
+  build-progress data read like the API (`observed_at`, `per_computer`,
+  `reported_through`, `exit_code`, `stdout_base64`, `input_tokens`, …);
+  `computers delete` reads `snapshots_deleted`; the manifest reads `json_mode`,
+  `requires_credentials` and `terminal_types`.
+- **CLI `error.code` is one reason word**, the same vocabulary as `mandala-py`:
+  `not_found`, `unauthenticated`, `conflict`, `timeout`, … never a class name
+  such as `NotFoundError`. The platform's own `reason` rides beside it, and a
+  local system error reads `io_error` with its errno under `details.errno`.
+  The README lists every code.
+- **A mistyped command prints its full usage** under a message that says what
+  was wrong (`1 argument too many: mandala computers exec takes <computer> and
+  nothing more`), rather than the bare usage line. `--json` carries the same
+  text as `error.usage`. The extra arguments are counted, never quoted, and an
+  unknown option is named only when it is shaped like one: either could be a
+  secret typed where `secrets set` reads stdin.
+
 ## [0.6.0] — 2026-09-25
 
 Two behaviour changes to read before upgrading, both under **Changed**: a 503

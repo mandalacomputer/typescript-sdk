@@ -95,21 +95,21 @@ globalThis.fetch = async (input, init) => {
     expect(historical.stderr).toBe('');
     expect(historical.stdout.trim().split('\n')).toHaveLength(1);
     expect(JSON.parse(historical.stdout)).toMatchObject({
-      schemaVersion: 1,
+      schema_version: 2,
       command: 'usage',
       ok: true,
-      exitCode: 0,
-      data: { usage: { vcpuHours: 25 } },
+      exit_code: 0,
+      data: { usage: { vcpu_hours: 25 } },
     });
     const malformed = run(['account', '--json']);
     expect(malformed.status).toBe(1);
     expect(malformed.stderr).toBe('');
     expect(JSON.parse(malformed.stdout)).toMatchObject({
-      schemaVersion: 1,
+      schema_version: 2,
       command: 'account',
       ok: false,
-      exitCode: 1,
-      error: { code: 'MandalaError' },
+      exit_code: 1,
+      error: { code: 'failed' },
     });
     const invalid = run(['usage', '--to', '2026-08-01', '--json']);
     expect(invalid.status).toBe(1);

@@ -32,20 +32,20 @@ describe('versioned output contract', () => {
     expect(w.output.result({ id: 'vm-7' })).toBe(0);
     expect(w.read()).toEqual({
       stdout:
-        '{"schemaVersion":1,"command":"computers get","ok":true,"data":{"id":"vm-7"},"exitCode":0}\n',
+        '{"schema_version":2,"command":"computers get","ok":true,"data":{"id":"vm-7"},"exit_code":0}\n',
       stderr: '',
     });
   });
 
   it('keeps unsuccessful remote results as data with nonzero status', () => {
     const w = writer();
-    expect(w.output.result({ exitCode: 19 }, 19)).toBe(19);
+    expect(w.output.result({ exit_code: 19 }, 19)).toBe(19);
     expect(JSON.parse(w.read().stdout)).toEqual({
-      schemaVersion: 1,
+      schema_version: 2,
       command: 'computers get',
       ok: false,
-      data: { exitCode: 19 },
-      exitCode: 19,
+      data: { exit_code: 19 },
+      exit_code: 19,
     });
   });
 
@@ -58,11 +58,11 @@ describe('versioned output contract', () => {
     );
     const result = JSON.parse(w.read().stdout);
     expect(result).toEqual({
-      schemaVersion: 1,
+      schema_version: 2,
       command: 'computers get',
       ok: false,
-      error: { code: 'AuthenticationError', message: 'bad [REDACTED] / [REDACTED]', status: 401 },
-      exitCode: 1,
+      error: { code: 'unauthenticated', message: 'bad [REDACTED] / [REDACTED]', status: 401 },
+      exit_code: 1,
     });
     expect(w.read().stderr).toBe('');
   });
@@ -79,20 +79,20 @@ describe('versioned output contract', () => {
         .map((line) => JSON.parse(line)),
     ).toEqual([
       {
-        schemaVersion: 1,
+        schema_version: 2,
         command: 'computers get',
         type: 'step',
         timestamp: '2026-02-03T04:05:06.000Z',
         data: { n: 3 },
       },
       {
-        schemaVersion: 1,
+        schema_version: 2,
         command: 'computers get',
         type: 'error',
         timestamp: '2026-02-03T04:05:06.000Z',
         data: {
           error: { code: 'agent_error', message: 'stopped', details: { steps: 3 } },
-          exitCode: 1,
+          exit_code: 1,
         },
       },
     ]);
@@ -120,7 +120,8 @@ describe('versioned output contract', () => {
       message: 'Cancelled',
     });
     expect(errorInfo(Object.assign(new Error('missing'), { code: 'ENOENT' }))).toEqual({
-      code: 'ENOENT',
+      code: 'io_error',
+      details: { errno: 'ENOENT' },
       message: 'missing',
     });
     expect(errorInfo(new TypeError('bug'))).toEqual({ code: 'internal_error', message: 'bug' });
