@@ -286,7 +286,7 @@ export async function removeCredentials(
 ): Promise<RemovedCredentials> {
   if (profile !== undefined) validateProfileName(profile);
   return rewriteLocked<RemovedCredentials>(
-    options,
+    { ...options, create: false },
     (old, file) => {
       const name = profile ?? old?.default_profile ?? 'default';
       if (!old || !Object.hasOwn(old.profiles, name)) {
@@ -325,10 +325,12 @@ export async function removeCredentials(
 /**
  * The store's one writer: take the lock, read, compute the next store, and
  * replace the file with it (or remove it, for `next: null`), checking at every
- * step that nothing moved underneath. `next` absent writes nothing.
+ * step that nothing moved underneath. `next` absent writes nothing. With
+ * `create: false` a missing ~/.mandala is left missing: the computation sees no
+ * store, and must then write nothing.
  */
 async function rewriteLocked<T>(
-  options: { signal?: AbortSignal; lockTimeoutMs?: number },
+  options: { signal?: AbortSignal; lockTimeoutMs?: number; create?: boolean },
   compute: (
     old: CredentialsFile | undefined,
     file: string,
@@ -340,7 +342,18 @@ async function rewriteLocked<T>(
     credentialError('invalid_lock_timeout');
   const { signal } = options;
   signal?.throwIfAborted();
-  const dir = openDirectory(true)!;
+  const create = options.create ?? true;
+  const dir = openDirectory(create);
+  if (!dir) {
+    // No ~/.mandala: there is no store to change, so the caller's answer is
+    // computed from nothing, and nothing is created on the way to giving it.
+    const { next, result } = compute(
+      undefined,
+      path.join(os.homedir(), '.mandala', 'credentials.json'),
+    );
+    if (next === undefined) return result;
+    throw failure(false);
+  }
   const lock = path.join(dir.name, '.credentials.lock');
   const store = path.join(dir.name, 'credentials.json');
   let lockFd: number | undefined;

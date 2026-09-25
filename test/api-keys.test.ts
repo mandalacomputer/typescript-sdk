@@ -454,6 +454,15 @@ describe('logout', () => {
     expect(none.code).toBe(1);
     expect(none.json.error).toMatchObject({ code: 'not_logged_in' });
     expect(fs.existsSync(store())).toBe(false);
+    // Nothing to remove creates nothing either: no ~/.mandala appears.
+    expect(fs.existsSync(join(home, '.mandala'))).toBe(false);
+    await expect(removeCredentials('work')).resolves.toEqual({
+      profile: 'work',
+      removed: false,
+      path: store(),
+      defaultProfile: null,
+    });
+    expect(fs.existsSync(join(home, '.mandala'))).toBe(false);
 
     await saveCredentials(profile('com_one', 'key-000000000001'), 'home');
     const before = fs.readFileSync(store());
