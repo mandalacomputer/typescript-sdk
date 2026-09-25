@@ -1729,8 +1729,16 @@ export const cursorBody = (): Json => ({ action: 'cursor_position' });
  * `1` rather than `true` because the API accepts both spellings for this flag
  * and its own documentation names this one; every other flag on this surface is
  * a literal wire value too.
+ *
+ * `shape` carries the rest — `format`, `quality`, `region` and `scale` — and
+ * is omitted from the query entirely when empty, so every call that predates
+ * them builds the URL it always did. See {@link ScreenshotShape}.
  */
-export function screenshotQuery(width?: number, fresh?: boolean): Query | undefined {
+export function screenshotQuery(
+  width?: number,
+  fresh?: boolean,
+  shape: ScreenshotShape = {},
+): Query | undefined {
   const query: Query = {};
   if (width !== undefined) {
     // 0 is refused rather than read as "no width": truthiness would silently
@@ -1754,9 +1762,126 @@ export function screenshotQuery(width?: number, fresh?: boolean): Query | undefi
   // fresh: 1 }` is honoured and not a flag taken and ignored. The width is still
   // validated above, so `screenshotQuery(0, true)` is a width error either way.
   if (flag(fresh, 'fresh')) query.fresh = 1;
+  Object.assign(query, screenshotShape(width, shape));
   // Undefined rather than an empty object for the bare call, so the URL this
   // builds is byte-for-byte the one it built before `fresh` existed.
   return Object.keys(query).length ? query : undefined;
+}
+
+/** The encodings a screenshot can be asked for. `jpg` is the API's other spelling of `jpeg`. */
+export const SCREENSHOT_FORMATS = ['png', 'jpeg', 'jpg'] as const;
+export type ScreenshotFormat = (typeof SCREENSHOT_FORMATS)[number];
+
+/**
+ * A rectangle of the screen, in the screen pixels `resolution` reports.
+ *
+ * Origin and size rather than two corners, because that is what a caller
+ * cropping round something it found already holds — a window's geometry is
+ * this shape.
+ */
+export type ScreenshotRegion = { x: number; y: number; width: number; height: number };
+
+/**
+ * What a screenshot can be shaped into besides a width: a crop, a scale and an
+ * encoding, applied by the platform in that order to the same capture a bare
+ * call would return (platform OPL-5051).
+ */
+export type ScreenshotShape = {
+  /**
+   * `png` or `jpeg` (`jpg` is the same). PNG by default, and JPEG by default
+   * when a width is given.
+   */
+  format?: ScreenshotFormat;
+  /** JPEG quality, 1 to 100; the platform uses 72 when it is not given. JPEG only. */
+  quality?: number;
+  /**
+   * Crop to this rectangle of the screen, before any scaling. It has to lie
+   * inside the screen: one that reaches past an edge is refused naming the
+   * screen size, not clipped to a smaller picture than was asked for.
+   */
+  region?: ScreenshotRegion;
+  /** Shrink by this factor, greater than 0 and at most 1. Not with a width. */
+  scale?: number;
+};
+
+/**
+ * The four shaping parameters, checked where the answer is knowable here.
+ *
+ * Only what is cheap and cannot be wrong: the shape of each value, `scale`
+ * beside a width, and `quality` on a picture that will be a PNG. Whether a
+ * region fits the screen is the platform's to say, since it is the one that
+ * knows the screen — and it says so with the size in the message.
+ *
+ * `quality` with a PNG is refused because the platform refuses it (a 400),
+ * and it is decidable from the arguments alone: the answer is a PNG when
+ * `format` says `png`, or when it says nothing and no width was given.
+ */
+function screenshotShape(width: number | undefined, shape: ScreenshotShape): Query {
+  if (!isRecord(shape)) {
+    throw new ValidationError('screenshot options must be an object');
+  }
+  const { format, quality, region, scale } = shape;
+  const query: Query = {};
+  if (format !== undefined) {
+    if (!(SCREENSHOT_FORMATS as readonly unknown[]).includes(format)) {
+      throw new ValidationError(
+        `format must be one of ${SCREENSHOT_FORMATS.join(', ')} (got ${String(format)})`,
+      );
+    }
+    query.format = format;
+  }
+  if (scale !== undefined) {
+    // The same question as a width, answered twice. The platform refuses the
+    // pair rather than picking one, and so does this.
+    if (width !== undefined) {
+      throw new ValidationError(
+        'give a width or a scale, not both: each sets the size of the picture',
+      );
+    }
+    if (typeof scale !== 'number' || !Number.isFinite(scale) || scale <= 0 || scale > 1) {
+      throw new ValidationError(
+        `scale must be a number greater than 0 and at most 1 (got ${String(scale)}); ` +
+          'a screenshot is only ever made smaller',
+      );
+    }
+    query.scale = scale;
+  }
+  if (region !== undefined) query.region = screenshotRegion(region);
+  if (quality !== undefined) {
+    if (!Number.isInteger(quality) || quality < 1 || quality > 100) {
+      throw new ValidationError(`quality must be a whole number from 1 to 100 (got ${quality})`);
+    }
+    const png = format === 'png' || (format === undefined && width === undefined);
+    if (png) {
+      throw new ValidationError(
+        "quality applies to a JPEG only; pass format: 'jpeg' with it" +
+          (format === 'png' ? ' in place of png' : ''),
+      );
+    }
+    query.quality = quality;
+  }
+  return query;
+}
+
+/** A region as the wire spells it, `x,y,width,height`, each a whole number. */
+function screenshotRegion(region: ScreenshotRegion): string {
+  if (!isRecord(region)) {
+    throw new ValidationError('region must be an object with x, y, width and height');
+  }
+  const parts = (['x', 'y', 'width', 'height'] as const).map((k) => {
+    const v = region[k];
+    // Whole, and the size at least 1: the platform reads `region` with an
+    // integer parser, and a fraction — the natural result of dividing a
+    // coordinate by a scale — would be a 400 that could have been named here.
+    const min = k === 'width' || k === 'height' ? 1 : 0;
+    if (!Number.isSafeInteger(v) || v < min) {
+      throw new ValidationError(
+        `region.${k} must be a whole number of at least ${min} (got ${String(v)})`,
+      );
+    }
+    return v;
+  });
+  return parts.join(',');
 }
 
 /**

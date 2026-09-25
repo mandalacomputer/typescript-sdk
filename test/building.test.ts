@@ -475,6 +475,73 @@ describe('filesQuery', () => {
   });
 });
 
+describe('screenshotQuery shaping', () => {
+  it('leaves every call that predates the shape byte-for-byte alone', () => {
+    expect(P.screenshotQuery(undefined, undefined, {})).toBeUndefined();
+    expect(P.screenshotQuery(320, true, {})).toEqual({ w: 320, fresh: 1 });
+  });
+
+  it('spells a region the way the platform reads it', () => {
+    expect(
+      P.screenshotQuery(undefined, false, { region: { x: 0, y: 5, width: 1, height: 2 } }),
+    ).toEqual({ region: '0,5,1,2' });
+    for (const bad of [
+      { x: -1, y: 0, width: 1, height: 1 },
+      { x: 0, y: 0, width: 0, height: 1 },
+      { x: 0, y: 0, width: 1, height: 1.5 },
+      { x: 0, y: 0, width: 1 },
+      '0,0,1,1',
+    ]) {
+      expect(() =>
+        P.screenshotQuery(undefined, false, { region: bad as unknown as P.ScreenshotRegion }),
+      ).toThrow(ValidationError);
+    }
+  });
+
+  it('takes a scale in (0, 1], never beside a width', () => {
+    expect(P.screenshotQuery(undefined, false, { scale: 1 })).toEqual({ scale: 1 });
+    expect(P.screenshotQuery(undefined, false, { scale: 0.25 })).toEqual({ scale: 0.25 });
+    for (const bad of [0, -0.5, 1.01, Number.NaN, Number.POSITIVE_INFINITY, '0.5']) {
+      expect(() =>
+        P.screenshotQuery(undefined, false, { scale: bad as unknown as number }),
+      ).toThrow(ValidationError);
+    }
+    expect(() => P.screenshotQuery(320, false, { scale: 0.5 })).toThrow(/not both/);
+  });
+
+  it('takes the three spellings of an encoding and nothing else', () => {
+    for (const format of P.SCREENSHOT_FORMATS) {
+      expect(P.screenshotQuery(undefined, false, { format })).toEqual({ format });
+    }
+    expect(() =>
+      P.screenshotQuery(undefined, false, { format: 'webp' as unknown as P.ScreenshotFormat }),
+    ).toThrow(/format must be one of/);
+  });
+
+  it('takes a quality only where the answer will be a JPEG', () => {
+    // The platform's rule: JPEG when format says so, or when it says nothing
+    // and a width was given.
+    expect(P.screenshotQuery(undefined, false, { format: 'jpeg', quality: 1 })).toEqual({
+      format: 'jpeg',
+      quality: 1,
+    });
+    expect(P.screenshotQuery(undefined, false, { format: 'jpg', quality: 100 })).toEqual({
+      format: 'jpg',
+      quality: 100,
+    });
+    expect(P.screenshotQuery(320, false, { quality: 50 })).toEqual({ w: 320, quality: 50 });
+    expect(() => P.screenshotQuery(undefined, false, { quality: 50 })).toThrow(/JPEG only/);
+    expect(() => P.screenshotQuery(320, false, { format: 'png', quality: 50 })).toThrow(
+      /JPEG only/,
+    );
+    for (const bad of [0, 101, 50.5]) {
+      expect(() => P.screenshotQuery(undefined, false, { format: 'jpeg', quality: bad })).toThrow(
+        /1 to 100/,
+      );
+    }
+  });
+});
+
 describe('screenshotQuery', () => {
   it('distinguishes no width from a zero one', () => {
     // Truthiness silently converted screenshot(0) — the natural result of a

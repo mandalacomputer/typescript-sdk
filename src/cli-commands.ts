@@ -323,6 +323,23 @@ function checkUsageWindow(from?: string, to?: string): void {
   // Default bounds, retention and future-end clamping depend on the API's clock and billing period.
 }
 
+/**
+ * `--region X,Y,WIDTH,HEIGHT`, the wire's own spelling, read into the object
+ * the SDK takes. Only the count and the digits are checked here; the values
+ * are the SDK's to judge, so the CLI and a program say the same thing.
+ */
+function screenshotRegionFlag(v: string | undefined): P.ScreenshotRegion | undefined {
+  if (v === undefined) return undefined;
+  const parts = v.split(',').map((p) => p.trim());
+  if (parts.length !== 4 || !parts.every((p) => /^\d+$/.test(p)))
+    throw new CliError(
+      'invalid_arguments',
+      '--region must be X,Y,WIDTH,HEIGHT in screen pixels, four whole numbers',
+    );
+  const [x, y, width, height] = parts.map(Number) as [number, number, number, number];
+  return { x, y, width, height };
+}
+
 export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands): Promise<number> {
   // Used only if parsing fails before it can return its explicit output mode.
   let output = new Output(io, '', argv.includes('--json'));
@@ -459,7 +476,13 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
       if (s('expect') && !b('delete-snapshots'))
         throw new CliError('invalid_arguments', '--expect requires --delete-snapshots');
     }
-    if (path === 'computers screenshot') P.screenshotQuery(n('width'), b('fresh'));
+    const shot = {
+      region: screenshotRegionFlag(s('region')),
+      scale: n('scale'),
+      format: s('format') as P.ScreenshotFormat | undefined,
+      quality: n('quality'),
+    };
+    if (path === 'computers screenshot') P.screenshotQuery(n('width'), b('fresh'), shot);
     const capture = { memory: b('memory'), name: s('name'), wait: !b('no-wait'), ...wait };
     if (path === 'snapshots create') P.snapshotBody(capture.memory, capture.name);
     const schedule = { enabled: !b('disabled'), hour: n('hour'), minute: n('minute'), tz: s('tz') };
@@ -642,6 +665,7 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
       case 'computers screenshot': {
         const bytes = await (await computer()).screenshot(n('width'), {
           fresh: b('fresh'),
+          ...shot,
           signal,
         });
         await writeFile(s('output')!, bytes, { signal });

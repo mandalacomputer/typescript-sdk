@@ -2893,14 +2893,46 @@ export class Computer {
    * can therefore watch its own machine be suspended out from under it after the
    * host's idle window; anything that drives the desktop — {@link click},
    * {@link type}, {@link exec} — both counts as use and resumes it.
+   *
+   * **Shaping the picture.** `region`, `scale`, `format` and `quality` are a
+   * crop, a smaller image and a cheaper encoding, applied in that order to the
+   * same capture — the cheaper frame to hand a model:
+   *
+   * ```ts
+   * // The top-left quarter of a 1280x800 screen, halved, as a JPEG.
+   * await c.screenshot(undefined, {
+   *   fresh: true,
+   *   region: { x: 0, y: 0, width: 640, height: 400 },
+   *   scale: 0.5,
+   *   format: 'jpeg',
+   *   quality: 60,
+   * });
+   * ```
+   *
+   * A cropped or scaled picture is in its OWN pixel space. To click on
+   * something in it, divide its position by the scale and add the region's `x`
+   * and `y`: in the example above, (100, 50) in the picture is (200, 100) on the
+   * screen. `region` is in screen pixels, before any scaling, and has to lie
+   * inside the screen; `scale` is greater than 0 and at most 1 and is not
+   * given with `width`; `quality` is 1 to 100 and only for a JPEG. The value
+   * checks are made here, before anything is sent, and throw a
+   * {@link ValidationError}; a region past the screen's edge is the platform's
+   * to refuse, with a 400 naming the screen size.
+   *
+   * A suspended computer has only its saved picture, a JPEG, and cannot shape
+   * it: a crop, a scale, `format: 'png'` or a quality is refused with a
+   * {@link ConflictError} whose `reason` is `unavailable` — not transient;
+   * start the computer for a screen that can be shaped. `width` and
+   * `format: 'jpeg'` alone are still answered with the saved picture.
    */
   async screenshot(
     width?: number,
-    opts: { fresh?: boolean } & CallOptions = {},
+    opts: { fresh?: boolean } & P.ScreenshotShape & CallOptions = {},
   ): Promise<Uint8Array> {
+    const { fresh, signal, format, quality, region, scale } = opts;
     const res = await this.#t.bytes('GET', P.computerAction(this.id, 'screenshot'), {
-      query: P.screenshotQuery(width, opts.fresh),
-      signal: opts.signal,
+      query: P.screenshotQuery(width, fresh, { format, quality, region, scale }),
+      signal,
     });
     // A captive portal or a misconfigured proxy answers 200 with an HTML page,
     // and these bytes go straight into an image decoder or a model's context.

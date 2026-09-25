@@ -927,6 +927,74 @@ describe('bytes', () => {
     expect(rec.last().query.w).toBe('320');
     expect(rec.last().query.fresh).toBe('1');
   });
+
+  it('sends a crop, a scale, an encoding and a quality as the platform spells them', async () => {
+    const rec = recorder(anyRoute);
+    const c = await client(rec).computers.get('vm-1');
+    await c.screenshot(undefined, {
+      fresh: true,
+      region: { x: 10, y: 20, width: 300, height: 200 },
+      scale: 0.5,
+      format: 'jpeg',
+      quality: 60,
+    });
+    expect(rec.last().query).toEqual({
+      fresh: '1',
+      region: '10,20,300,200',
+      scale: '0.5',
+      format: 'jpeg',
+      quality: '60',
+    });
+    // A width keeps its own default encoding, and quality rides on it.
+    await c.screenshot(320, { quality: 40 });
+    expect(rec.last().query).toEqual({ w: '320', quality: '40' });
+  });
+
+  it('refuses a shape the platform would refuse, before sending anything', async () => {
+    const rec = recorder(anyRoute);
+    const c = await client(rec).computers.get('vm-1');
+    const sent = rec.calls.length;
+    await expect(c.screenshot(320, { scale: 0.5 })).rejects.toThrow(/width or a scale/);
+    await expect(c.screenshot(undefined, { scale: 0 })).rejects.toThrow(ValidationError);
+    await expect(c.screenshot(undefined, { scale: 1.5 })).rejects.toThrow(/at most 1/);
+    await expect(c.screenshot(undefined, { quality: 60 })).rejects.toThrow(/JPEG only/);
+    await expect(c.screenshot(undefined, { format: 'png', quality: 60 })).rejects.toThrow(
+      /in place of png/,
+    );
+    await expect(
+      c.screenshot(undefined, { region: { x: 0, y: 0, width: 0, height: 10 } }),
+    ).rejects.toThrow(/region.width/);
+    expect(rec.calls.length).toBe(sent);
+  });
+
+  it("surfaces a suspended computer's refusal to shape as the permanent conflict it is", async () => {
+    // A suspended computer has only its saved JPEG, and answers a crop, a
+    // scale, a PNG or a quality with 409 `unavailable`. That is the typed
+    // refusal — a ConflictError with the platform's word on it, not transient,
+    // and not sent again by the SDK's own retries.
+    const rec = recorder((call) =>
+      call.path.endsWith('/screenshot')
+        ? new Response(
+            JSON.stringify({
+              error: 'this computer is suspended and has only its saved desktop picture',
+              reason: 'unavailable',
+            }),
+            { status: 409, headers: { 'content-type': 'application/json' } },
+          )
+        : anyRoute(call),
+    );
+    const c = await client(rec).computers.get('vm-1');
+    const err = await c
+      .screenshot(undefined, { region: { x: 0, y: 0, width: 10, height: 10 } })
+      .then(
+        () => undefined,
+        (e: unknown) => e,
+      );
+    expect(err).toBeInstanceOf(ConflictError);
+    expect((err as ConflictError).reason).toBe('unavailable');
+    expect(isTransient(err)).toBe(false);
+    expect(rec.calls.filter((call) => call.path.endsWith('/screenshot')).length).toBe(1);
+  });
 });
 
 describe('the parameters a drive loop needs', () => {
