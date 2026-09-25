@@ -2417,6 +2417,64 @@ describe('files, rename, resize, view, and secrets bound at create', () => {
     expect(h.rec.calls).toEqual([]);
   });
 
+  it('never quotes a value holding =, which the last-= split would move into the key', async () => {
+    // Base64 padding, an = inside the value, and one whose tail passes as a
+    // variable name so the lookup (not the pattern) is what fails.
+    for (const [typed, secretPart] of [
+      ['OPENAI_API_KEY=c2VjcmV0dmFsdWU=', 'c2VjcmV0dmFsdWU'],
+      ['K=abc=def-ghi', 'abc'],
+      ['OPENAI_API_KEY=sk9livevalue=TAIL', 'sk9livevalue'],
+    ]) {
+      for (const jsonMode of [true, false]) {
+        const h = harness(store());
+        const result = await h.run(['computers', 'create', '--secret', typed!], jsonMode);
+        expect(result.code, typed).toBe(1);
+        const printed = result.out + result.err;
+        expect(printed, typed).not.toContain(secretPart);
+        expect(printed, typed).not.toContain('TAIL');
+        // Still says which one: its flag, its position, what precedes the first =.
+        expect(printed, typed).toContain('--secret #1');
+        expect(printed, typed).toContain(`${typed!.slice(0, typed!.indexOf('='))}=…`);
+        expect(h.rec.routes().filter(([m]) => m === 'POST')).toEqual([]);
+      }
+    }
+  });
+
+  it('refuses two bindings into one variable or file without quoting the target', async () => {
+    for (const argv of [
+      ['--secret', 'openai_api_key=SAMEVALUE1', '--secret', 'gh-token=SAMEVALUE1'],
+      ['--secret-file', 'openai_api_key=samevalue1', '--secret-file', 'gh-token=samevalue1'],
+    ]) {
+      const h = harness(store());
+      const result = await h.run(['computers', 'create', ...argv]);
+      expect(result.code, argv.join(' ')).toBe(1);
+      expect(result.frames[0].error).toMatchObject({
+        code: 'invalid_arguments',
+        message: expect.stringContaining('nothing was created'),
+      });
+      expect((result.out + result.err).toLowerCase()).not.toContain('samevalue1');
+      expect(result.frames[0].error.message).toContain('#2');
+      expect(h.rec.routes()).toEqual([['GET', 'secrets']]);
+    }
+  });
+
+  it('refuses one secret bound twice, before the create is sent', async () => {
+    const h = harness(store());
+    const result = await h.run([
+      'computers',
+      'create',
+      '--secret',
+      'openai_api_key',
+      '--secret-file',
+      `${SECRET.id}=key`,
+    ]);
+    expect(result.frames[0].error).toMatchObject({
+      code: 'invalid_arguments',
+      message: expect.stringContaining('the secret'),
+    });
+    expect(h.rec.routes()).toEqual([['GET', 'secrets']]);
+  });
+
   it('renames through the resolved id', async () => {
     const h = harness((call) =>
       call.method === 'PATCH' ? json({ ...COMPUTER, name: 'build box' }) : anyRoute(call),

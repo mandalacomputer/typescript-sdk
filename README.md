@@ -2693,7 +2693,10 @@ as an environment variable in the computer's desktop session, and
 `SECRET` is a name or an id in the default scope, and `VAR` or `FILE` defaults
 to the secret's name. Both repeat. The part after the last `=` names where the
 value goes, never the value itself; the value only ever goes in through
-`secrets set`. An id the default scope does not list, such as one of a
+`secrets set`. So an error never quotes anything after the first `=`: it names
+the binding by flag, position and the text before that `=`. Two bindings of
+one secret, or into one variable or file, fail before anything is created. An
+id the default scope does not list, such as one of a
 workspace's secrets, is sent as it is and needs its `=VAR` or `=FILE`. A name
 that matches nothing fails before anything is created. The secrets reach the
 desktop a few seconds after the computer runs: `computers wait --until secrets`

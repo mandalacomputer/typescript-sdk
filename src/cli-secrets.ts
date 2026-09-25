@@ -56,13 +56,14 @@ function byNameOrId(
   secrets: readonly Secret[],
   key: string,
   unchanged = 'nothing was deleted',
+  shownAs = JSON.stringify(key),
 ): Secret | undefined {
   const named = byName(secrets, key);
   const identified = secrets.find((s) => s.id === key);
   if (named && identified && named.id !== identified.id)
     throw new CliError(
       'ambiguous_secret',
-      `${JSON.stringify(key)} is the name of ${named.id} and the id of another secret; ` +
+      `${shownAs} is the name of ${named.id} and the id of another secret; ` +
         `${unchanged}: rename one of them first`,
     );
   return named ?? identified;
@@ -78,6 +79,11 @@ export type BindingSpec = {
   key: string;
   /** The variable or file it is published as; absent means the secret's own name. */
   target?: string;
+  /**
+   * How an error names this binding. Never the whole of `key` once an `=` was
+   * typed: see {@link bindingSpecs}.
+   */
+  label: string;
 };
 
 /**
@@ -85,19 +91,26 @@ export type BindingSpec = {
  * and checked before any request.
  *
  * Split at the LAST `=`, since neither a variable nor a file name can hold one
- * and a secret's name can. The part after it is never quoted back: the likely
- * mistake is `--secret NAME=<the value itself>`, and an error is the last place
- * that should print it.
+ * and a secret's name can. Nothing after the FIRST `=` is ever quoted back: the
+ * likely mistake is `--secret NAME=<the value itself>`, an error is the last
+ * place that should print it, and a value can hold `=` itself (Base64 padding,
+ * say), which the last-`=` split would move into the key. So once an `=` was
+ * typed, an error names the binding by its flag, its position and the text
+ * before the first `=` alone.
  */
 export function bindingSpecs(
   envs: readonly string[] = [],
   files: readonly string[] = [],
 ): BindingSpec[] {
-  const split = (flag: BindingSpec['flag'], typed: string): BindingSpec => {
+  const split = (flag: BindingSpec['flag'], typed: string, index: number): BindingSpec => {
     const at = typed.lastIndexOf('=');
     const key = (at < 0 ? typed : typed.slice(0, at)).trim();
+    const label =
+      at < 0
+        ? `${flag} ${JSON.stringify(key)}`
+        : `${flag} #${index + 1} (${JSON.stringify(`${typed.slice(0, typed.indexOf('=')).trim()}=…`)})`;
     if (!key) throw new CliError('invalid_arguments', `${flag} needs a secret name or id`);
-    if (at < 0) return { flag, key };
+    if (at < 0) return { flag, key, label };
     const target = typed.slice(at + 1);
     const [pattern, rule] =
       flag === '--secret'
@@ -106,14 +119,14 @@ export function bindingSpecs(
     if (!pattern.test(target))
       throw new CliError(
         'invalid_arguments',
-        `${flag} ${JSON.stringify(key)}: what follows = must be ${rule} characters. ` +
+        `${label}: what follows = must be ${rule} characters. ` +
           `It names where the value goes, never the value: store that with mandala secrets set`,
       );
-    return { flag, key, target };
+    return { flag, key, target, label };
   };
   return [
-    ...envs.map((typed) => split('--secret', typed)),
-    ...files.map((typed) => split('--secret-file', typed)),
+    ...envs.map((typed, i) => split('--secret', typed, i)),
+    ...files.map((typed, i) => split('--secret-file', typed, i)),
   ];
 }
 
@@ -124,6 +137,10 @@ export function bindingSpecs(
  * An id that listing does not hold is sent as it is, for a secret in a scope
  * the listing did not cover; the platform refuses one it cannot bind, and the
  * create with it. A name it does not hold is refused here.
+ *
+ * Two bindings of one secret, or into one variable or file, are refused here
+ * too, by label: the SDK's own check would quote a typed target, which may be
+ * a value typed after `=` by mistake.
  */
 export async function secretBindings(
   client: Client,
@@ -137,12 +154,22 @@ export async function secretBindings(
       'unsupported',
       'Delivery is off on this platform: secrets can be stored but not bound; nothing was created',
     );
-  return specs.map(({ flag, key, target }) => {
-    const found = byNameOrId(list.secrets, key, 'nothing was created');
+  const seen = new Map<string, string>();
+  const once = (slot: string, label: string, what: string) => {
+    const first = seen.get(slot);
+    if (first !== undefined)
+      throw new CliError(
+        'invalid_arguments',
+        `${label} binds ${what} ${first} already binds; nothing was created`,
+      );
+    seen.set(slot, label);
+  };
+  return specs.map(({ flag, key, target, label }) => {
+    const found = byNameOrId(list.secrets, key, 'nothing was created', label);
     if (!found && !SECRET_ID.test(key))
       throw new CliError(
         'not_found',
-        `${flag} ${JSON.stringify(key)}: no secret by that name or id in this scope; nothing was created`,
+        `${label}: no secret by that name or id in this scope; nothing was created`,
       );
     const as = target ?? found?.name;
     const env = flag === '--secret';
@@ -158,6 +185,8 @@ export async function secretBindings(
           `name one: ${flag} ${JSON.stringify(`${key}=${env ? 'VAR' : 'FILE'}`)}`,
       );
     const secretId = found?.id ?? key;
+    once(`id:${secretId}`, label, 'the secret');
+    once(env ? `env:${as}` : `file:${as}`, label, env ? 'the variable' : 'the file');
     return env ? { secretId, env: as } : { secretId, file: as };
   });
 }
