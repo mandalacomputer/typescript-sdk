@@ -16,6 +16,10 @@ name.
 
 ### Added
 
+- **A Homebrew formula for the CLI**, in `packaging/homebrew/`, for
+  `brew install mandalacomputer/tap/mandala` once the tap repository exists. It
+  installs this package's npm tarball against Homebrew's `node`, with bash, zsh
+  and fish completions. The package itself is unchanged.
 - **CLI: `files list`, `files upload`, `files download`.** A guest directory's
   entries, and one file in or out, with the computer named on its own rather
   than spelled `computer:/path`. Upload and download are `scp`'s two halves,
