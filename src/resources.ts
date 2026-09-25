@@ -330,7 +330,14 @@ export class Computers {
       // as the arguments, so a binding the record reports is waited on too.
       const bound = computer.raw.secrets;
       if ((args.secrets?.length ?? 0) > 0 || (Array.isArray(bound) && bound.length > 0)) {
-        await computer.waitForSecrets({ timeoutMs: remaining(), pollMs, signal });
+        // Told they are bound, so a read that leaves them out is not taken
+        // for "nothing bound" and returned on before anything arrived.
+        await computer.waitForSecrets({
+          timeoutMs: remaining(),
+          pollMs,
+          signal,
+          expectSecrets: true,
+        });
       }
       signal?.throwIfAborted();
       return computer;

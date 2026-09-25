@@ -572,6 +572,50 @@ describe('launch with secrets bound', () => {
     expect(rec.calls.some((c) => c.method === 'DELETE')).toBe(false);
   });
 
+  it('does not take a read that leaves the bindings out for "nothing bound"', async () => {
+    // The group is absent on a computer that holds none, and also on a record
+    // served without its host's answer. Launch knows what it bound.
+    let gets = 0;
+    const { secrets: _left, ...unreported } = bound(false);
+    const rec = recorder((call) => {
+      if (call.path.endsWith('/exec')) return json(guest);
+      if (call.method === 'POST') return json(bound(true), { status: 201 });
+      gets++;
+      if (gets === 1) return json(bound(true));
+      return json(gets < 4 ? unreported : bound(false, { secrets_applied: RECEIPT }));
+    });
+    const client = new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: rec.fetch });
+    const c = await client.computers.launch(
+      { secrets: [{ secretId: BINDING.secret_id, env: 'TOKEN' }] },
+      { pollMs: 1 },
+    );
+    expect(gets).toBe(4);
+    expect(c.secretsApplied?.generation).toBe(1);
+  });
+
+  it('times out saying the bindings went unreported, not that they were delivered', async () => {
+    const { secrets: _left, ...unreported } = bound(false);
+    const rec = recorder((call) => {
+      if (call.path.endsWith('/exec')) return json(guest);
+      if (call.method === 'POST') return json(bound(true), { status: 201 });
+      return json(
+        rec.calls.filter((c) => c.method === 'GET').length === 1 ? bound(true) : unreported,
+      );
+    });
+    const client = new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: rec.fetch });
+    const c = await client.computers.get('launch-42');
+    const error = await c
+      .waitForSecrets({ timeoutMs: 20, pollMs: 1, expectSecrets: true })
+      .catch((e) => e);
+    expect(error).toBeInstanceOf(TimeoutError);
+    expect(error.message).toBe(
+      'launch-42 was read for 20ms without reporting its bindings, so whether its secrets ' +
+        'arrived is unknown',
+    );
+    // Without being told, the same read is the platform saying nothing is bound.
+    await expect(c.waitForSecrets({ pollMs: 1 })).resolves.toBe(c);
+  });
+
   it('adds no request for a computer with nothing bound', async () => {
     const waited = vi.spyOn(Computer.prototype, 'waitForSecrets');
     const rec = recorder((call) => json(call.path.endsWith('/exec') ? guest : computer()));
@@ -618,6 +662,19 @@ describe('waitForSecrets', () => {
     const { get } = handle((n) =>
       n <= 2 ? { ...bound(false), status: 'stopped', running_ram_mb: 1024 } : bound(false),
     );
+    const c = await get();
+    await c.waitForSecrets({ pollMs: 1 });
+    expect(c.status).toBe('running');
+  });
+
+  it('waits, rather than refusing, when the host does not say whether a start is admitted', async () => {
+    // running_ram_mb absent is "cannot tell", not zero: the same three states
+    // waitUntilRunning reads, so a start under way on such a host is waited on.
+    const { get } = handle((n) => {
+      if (n > 2) return bound(false);
+      const { running_ram_mb: _held, ...silent } = { ...bound(false), status: 'stopped' };
+      return silent;
+    });
     const c = await get();
     await c.waitForSecrets({ pollMs: 1 });
     expect(c.status).toBe('running');

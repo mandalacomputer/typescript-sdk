@@ -391,6 +391,20 @@ export function usage(c: Command): string {
   return `mandala ${c.path}${c.args.map((a) => (a.endsWith('?') ? ` [${a.slice(0, -1)}]` : ` <${a}>`)).join('')}${c.passthrough ? ' [ssh-args...]' : ''}`;
 }
 
+/**
+ * The message for an option nobody declared, naming it only when it is shaped
+ * like an option name (`-x`, `--name`).
+ *
+ * Anything else that starts with a dash is as likely to be a value — a key or
+ * a token that happens to begin with one — as a mistyped flag, and it is read
+ * before any command could mark it secret, so it is described and not echoed.
+ */
+function unknownOption(spelling: string): string {
+  if (/^(?:-[A-Za-z0-9]|--[A-Za-z][A-Za-z0-9-]{0,39})$/.test(spelling))
+    return `unknown option ${spelling}`;
+  return 'unknown option: an argument starts with "-" but is not an option name; put -- before a value that starts with one';
+}
+
 export function parseArgs(argv: string[]): Parsed {
   const parsed: Parsed = { path: '', args: [], flags: {}, help: false, json: false, rest: [] };
   let positional = false;
@@ -413,7 +427,7 @@ export function parseArgs(argv: string[]): Parsed {
       const [spelling, ...tail] = arg.split('=');
       const flags = [...GLOBAL_FLAGS, ...(parsed.command?.flags ?? [])];
       const spec = flags.find((f) => spelling === `--${f.name}` || spelling === `-${f.alias}`);
-      if (!spec) throw usageError(parsed.command, `unknown option ${spelling}`);
+      if (!spec) throw usageError(parsed.command, unknownOption(spelling!));
       if (parsed.flags[spec.name] !== undefined && !spec.repeatable)
         throw new CliError('invalid_arguments', `--${spec.name} may only be supplied once`);
       let value: string | number | boolean = true;
@@ -473,10 +487,15 @@ export function parseArgs(argv: string[]): Parsed {
   if (c.path === 'terminal' && parsed.args.length > 1)
     throw usageError(c, 'mandala terminal takes one computer and runs no command');
   if (parsed.args.length > c.args.length) {
-    const extra = parsed.args.slice(c.args.length).map((a) => JSON.stringify(a));
+    // Counted, never quoted. An operand past the last one a command takes is
+    // most often a value typed where a prompt or stdin was meant to read it —
+    // `mandala secrets set NAME "$TOKEN"` — and this fails before any command
+    // has registered a value for redaction, so echoing it would print the
+    // credential into whatever log captures stderr or the JSON error.
+    const extra = parsed.args.length - c.args.length;
     throw usageError(
       c,
-      `unexpected argument${extra.length > 1 ? 's' : ''} ${extra.join(' ')}: mandala ${c.path} ` +
+      `${extra} argument${extra > 1 ? 's' : ''} too many: mandala ${c.path} ` +
         (c.args.length
           ? `takes ${c.args.map(named).join(' ')} and nothing more (quote a value that has spaces in it)`
           : 'takes no arguments'),

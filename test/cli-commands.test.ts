@@ -2163,14 +2163,15 @@ describe('credential-free discovery and profile dispatch', () => {
 });
 
 describe('one JSON casing and one error vocabulary (OPL-5048)', () => {
-  it('prints the full usage under a mistyped command, naming the extra argument', async () => {
+  it('prints the full usage under a mistyped command, counting the extra argument', async () => {
     const h = harness();
     const result = await h.run(['computers', 'exec', 'demo', '-c', 'echo', 'extra-arg'], false);
     expect(result.code).toBe(1);
     expect(result.err).toContain(
-      'mandala: unexpected argument "extra-arg": mandala computers exec takes <computer> and ' +
+      'mandala: 1 argument too many: mandala computers exec takes <computer> and ' +
         'nothing more (quote a value that has spaces in it)',
     );
+    expect(result.err).not.toContain('extra-arg');
     // The whole usage, not the one line that used to be the message.
     expect(result.err).toContain('  mandala computers exec <computer>\n');
     expect(result.err).toContain('--command');
@@ -2192,6 +2193,32 @@ describe('one JSON casing and one error vocabulary (OPL-5048)', () => {
         usage: expect.stringContaining('mandala computers get <computer>'),
       },
     });
+  });
+
+  it('never echoes a secret value typed where secrets set reads stdin', async () => {
+    // The usage error fires before any command has registered a value for
+    // redaction, so the only protection is not quoting operands at all.
+    const token = 'sk-live-0123456789-do-not-echo';
+    for (const jsonMode of [true, false]) {
+      const h = harness();
+      const result = await h.run(['secrets', 'set', 'OPENAI_API_KEY', token], jsonMode);
+      expect(result.code).toBe(1);
+      expect(result.out + result.err).not.toContain(token);
+      expect(result.out + result.err).toContain(
+        '1 argument too many: mandala secrets set takes <name> and nothing more',
+      );
+      expect(h.rec.calls).toEqual([]);
+    }
+    // Nor one that starts with a dash, which the parser reads as an option.
+    const h = harness();
+    const dashed = `-${token}`;
+    const result = await h.run(['secrets', 'set', 'OPENAI_API_KEY', dashed]);
+    expect(result.code).toBe(1);
+    expect(result.out + result.err).not.toContain(token);
+    expect(result.frames[0].error.message).toBe(
+      'unknown option: an argument starts with "-" but is not an option name; put -- before a ' +
+        'value that starts with one',
+    );
   });
 
   it('waits for bound secrets with computers wait --until secrets', async () => {

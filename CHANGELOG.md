@@ -26,8 +26,10 @@ name.
   land. The wait polls until the platform's `secrets_delivering` is false (or,
   on a platform that predates it, until the receipt names the latest delivering
   start), and throws instead of waiting out its timeout for a delivery that
-  failed or a stopped computer with no start under way. The CLI's
-  `computers wait --until secrets` runs it.
+  failed or a stopped computer the platform says has no start admitted; a host
+  that does not say is waited on. `expectSecrets: true` tells it secrets are
+  bound, so a read that leaves the bindings out is waited past rather than
+  taken for "nothing bound". The CLI's `computers wait --until secrets` runs it.
 
 ### Changed
 
@@ -48,9 +50,11 @@ name.
   local system error reads `io_error` with its errno under `details.errno`.
   The README lists every code.
 - **A mistyped command prints its full usage** under a message that says what
-  was wrong (`unexpected argument "extra-arg": mandala computers exec takes
-  <computer> and nothing more`), rather than the bare usage line. `--json`
-  carries the same text as `error.usage`.
+  was wrong (`1 argument too many: mandala computers exec takes <computer> and
+  nothing more`), rather than the bare usage line. `--json` carries the same
+  text as `error.usage`. The extra arguments are counted, never quoted, and an
+  unknown option is named only when it is shaped like one: either could be a
+  secret typed where `secrets set` reads stdin.
 
 ## [0.6.0] — 2026-09-25
 

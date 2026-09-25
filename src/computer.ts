@@ -2446,11 +2446,18 @@ export class Computer {
    *
    * Throws rather than waiting out the timeout when no delivery is coming: a
    * delivery that failed (the host stops the computer, and the error carries
-   * {@link secretsError}), and a computer that is stopped or suspended with no
-   * start under way — `start()` is what delivers its secrets.
+   * {@link secretsError}), and a computer that is stopped or suspended while
+   * the platform says it has admitted no start — `start()` is what delivers
+   * its secrets. A host that does not say whether a start is under way is
+   * waited on, not refused.
+   *
+   * `expectSecrets` is for a caller that knows secrets are bound, such as one
+   * that just created the computer with them. A read that leaves the list of
+   * bindings out then counts as "cannot tell" and is waited past, rather than
+   * as "nothing bound", which would return before anything was delivered.
    */
-  async waitForSecrets(opts: WaitOptions = {}): Promise<this> {
-    const { timeoutMs = 180_000, pollMs = 2_000, signal } = opts;
+  async waitForSecrets(opts: WaitOptions & { expectSecrets?: boolean } = {}): Promise<this> {
+    const { timeoutMs = 180_000, pollMs = 2_000, signal, expectSecrets = false } = opts;
     checkWait(timeoutMs, pollMs);
     const deadline = Date.now() + timeoutMs;
     // No verdict on state read before this call: the handle may be a create's
@@ -2459,6 +2466,7 @@ export class Computer {
     // the LAST read answered, for the timeout sentence, as waitUntilRunning does.
     let observed = false;
     let fresh = false;
+    let state: SecretsState = 'delivering';
     for (;;) {
       let delayMs = pollMs;
       if (Date.now() < deadline) {
@@ -2474,27 +2482,38 @@ export class Computer {
         }
       }
       if (observed) {
-        const state = this.#secretsState();
+        state = this.#secretsState(expectSecrets);
         if (state === 'delivered') return this;
-        if (state !== 'delivering') throw state;
+        if (state instanceof MandalaError) throw state;
       }
       if (Date.now() >= deadline) {
+        const last =
+          state === 'unreported'
+            ? 'it did not report its bindings'
+            : 'its secrets were still being delivered';
         throw new TimeoutError(
           !observed
             ? `${this.id} could not be observed within ${timeoutMs}ms, so whether its secrets ` +
                 'arrived is unknown'
             : fresh
-              ? `${this.id}'s secrets were still being delivered after ${timeoutMs}ms`
+              ? state === 'unreported'
+                ? `${this.id} was read for ${timeoutMs}ms without reporting its bindings, so ` +
+                  'whether its secrets arrived is unknown'
+                : `${this.id}'s secrets were still being delivered after ${timeoutMs}ms`
               : `${this.id} could not be reached for the last part of ${timeoutMs}ms; when it ` +
-                'last answered its secrets were still being delivered',
+                `last answered ${last}`,
         );
       }
       await sleepUntilNextPoll(delayMs, deadline, signal);
     }
   }
 
-  /** Where this computer's secrets are, as {@link waitForSecrets} reads it. */
-  #secretsState(): 'delivered' | 'delivering' | MandalaError {
+  /**
+   * Where this computer's secrets are, as {@link waitForSecrets} reads it.
+   * `unreported` is a read that left the bindings out when the caller knows
+   * some are bound: not an answer either way, so it is waited past.
+   */
+  #secretsState(expectSecrets = false): SecretsState {
     if (this.secretsDelivering === true) return 'delivering';
     const failed = this.secretsError;
     if (failed) {
@@ -2504,12 +2523,18 @@ export class Computer {
       );
     }
     const bound = this.#data.secrets;
+    // The platform leaves the whole group out on a computer that holds none —
+    // and also on a record served without its host's answer. A caller that
+    // knows secrets are bound reads that second case as silence, not "none".
+    if (bound == null && expectSecrets) return 'unreported';
     if (!Array.isArray(bound) || bound.length === 0) return 'delivered';
     if (this.isBuilding) return 'delivering';
     if (!this.#statusIs('running')) {
       // A start admitted but not yet booted reads stopped or suspended; its
-      // delivery is ahead of it. Nothing admitted is nothing coming.
-      if (this.#startAdmitted()) return 'delivering';
+      // delivery is ahead of it. Only the platform saying it has admitted
+      // nothing is nothing coming: a host that did not say is waited on, as
+      // every other wait here reads that silence (see #nothingAdmitted).
+      if (!this.#nothingAdmitted()) return 'delivering';
       return new MandalaError(
         `${this.id} is ${JSON.stringify(this.status)}, and secrets are delivered only as it ` +
           'starts: call start()',
@@ -4917,6 +4942,9 @@ export class Computer {
  * thing on this path that costs money — and the top-level `.message` cannot be
  * that place, because the runtime writes its own generic text over it.
  */
+/** Where a computer's secrets are, as {@link Computer.waitForSecrets} reads it. */
+type SecretsState = 'delivered' | 'delivering' | 'unreported' | MandalaError;
+
 export const strandedText = (id: string, err: unknown): string =>
   `${id} was not deleted at the end of its block and is still billable: ` +
   `${err instanceof Error ? err.message : String(err)}`;

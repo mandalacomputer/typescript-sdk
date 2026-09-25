@@ -225,7 +225,7 @@ describe('ssh command-line parsing', () => {
       rest: [],
     });
     expect(() => parseArgs(['ssh', '--setup', 'dev', 'extra'])).toThrow(
-      /unexpected argument "extra": mandala ssh takes <computer> and nothing more/,
+      /^1 argument too many: mandala ssh takes <computer> and nothing more/,
     );
     expect(usageOf(() => parseArgs(['ssh', '--setup', 'dev', 'extra']))).toContain(
       'mandala ssh <computer> [ssh-args...]',
@@ -240,7 +240,7 @@ describe('ssh command-line parsing', () => {
       /state must be one of: on, off/,
     );
     expect(() => parseArgs(['ssh-access', 'dev', 'on', 'x'])).toThrow(
-      /unexpected argument "x": mandala ssh-access takes <computer> \[state\] and nothing more/,
+      /^1 argument too many: mandala ssh-access takes <computer> \[state\] and nothing more/,
     );
     expect(usageOf(() => parseArgs(['ssh-access', 'dev', 'on', 'x']))).toContain(
       'mandala ssh-access <computer> [state]',
