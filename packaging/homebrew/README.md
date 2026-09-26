@@ -33,7 +33,8 @@ brew audit --strict --online mandalacomputer/tap/mandala
 ## After each npm release
 
 The formula pins one version by its tarball URL and SHA-256, so each release
-needs it moved. Once the new version is on npm:
+needs it moved. This is step 5 of the release checklist in
+[`RELEASING.md`](../../RELEASING.md). Once the new version is on npm:
 
 ```sh
 brew bump-formula-pr --version X.Y.Z mandalacomputer/tap/mandala
