@@ -347,6 +347,76 @@ describe('mandala api-keys', () => {
   });
 });
 
+// A team, user, workspace or key name is whatever someone typed, and every
+// member who runs these commands sees it: OSC 52 would write their clipboard,
+// `ESC [2K` and CR erase the line, and a newline would start a spoofed one.
+describe('names others chose reach the terminal escaped', () => {
+  const OSC52 = 'Acme\u001b]52;c;aGVsbG8=\u0007\u001b[2K\rAccount: Fake';
+  // Every character a terminal acts on, newline aside, found one by one:
+  // written out here rather than borrowed from the code under test.
+  const rawControls = (text: string) =>
+    [...text].filter((c) => {
+      const n = c.codePointAt(0)!;
+      return (
+        (n < 0x20 && n !== 0x0a) ||
+        (n >= 0x7f && n <= 0x9f) ||
+        n === 0x61c ||
+        n === 0x200e ||
+        n === 0x200f ||
+        (n >= 0x202a && n <= 0x202e) ||
+        (n >= 0x2066 && n <= 0x2069)
+      );
+    });
+  const hostile = {
+    ...WHOAMI,
+    user: { ...WHOAMI.user, name: 'Dana\nAccount: Spoofed' },
+    account: { ...WHOAMI.account, name: OSC52 },
+    workspace: { id: 'wsp-1', name: 'ci\u202e', created_at: 'x' },
+    key: { ...WHOAMI.key, name: 'laptop\u009b31m' },
+  };
+
+  it('whoami writes no control or bidi character, and keeps its five lines', async () => {
+    const r = await cli(() => json(hostile)).run(['whoami']);
+    expect(r.code).toBe(0);
+    expect(rawControls(r.out)).toEqual([]);
+    expect(r.out.split('\n')).toEqual([
+      'Dana\\u000aAccount: Spoofed <dana@example.com> (usr-1)',
+      'Account: Acme\\u001b]52;c;aGVsbG8=\\u0007\\u001b[2K\\u000dAccount: Fake (acc-1), plan team, active',
+      'Role: owner',
+      'Scope: workspace ci\\u202e (wsp-1)',
+      'Key: laptop\\u009b31m (key-000000000001, com_1a2b3c4d…); can manage API keys',
+      '',
+    ]);
+  });
+
+  it('whoami --json still carries the real strings', async () => {
+    const r = await cli(() => json(hostile)).run(['whoami', '--json']);
+    expect(r.json.data).toEqual(hostile);
+  });
+
+  it('api-keys list escapes a key and a workspace name', async () => {
+    const key = { ...API_KEY, name: OSC52, workspace_id: 'wsp-1', workspace_name: 'w\u2066s' };
+    const h = cli(() => json([key]));
+    const r = await h.run(['api-keys', 'list']);
+    expect(r.code).toBe(0);
+    expect(rawControls(r.out)).toEqual([]);
+    expect(r.out).toContain('Acme\\u001b]52;c;aGVsbG8=\\u0007\\u001b[2K\\u000dAccount: Fake');
+    expect(r.out).toContain('workspace w\\u2066s (wsp-1)');
+    expect((await h.run(['api-keys', 'list', '--json'])).json.data).toEqual([key]);
+  });
+
+  it('the create diagnostic escapes the name the platform answers with', async () => {
+    const created = { ...API_KEY_CREATED, name: OSC52 };
+    const h = cli(() => json(created, { status: 201 }));
+    const r = await h.run(['api-keys', 'create', '--name', 'x']);
+    expect(r.code).toBe(0);
+    expect(rawControls(r.err)).toEqual([]);
+    expect(r.err).toContain(`Created ${created.id} (Acme\\u001b]52;c;aGVsbG8=\\u0007`);
+    expect(r.out).toBe(`${created.raw}\n`);
+    expect((await h.run(['api-keys', 'create', '--json'])).json.data).toEqual(created);
+  });
+});
+
 describe('mandala --version', () => {
   it.each([[['--version']], [['version']]])('%j prints the package version', async (args) => {
     const h = cli();

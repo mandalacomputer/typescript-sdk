@@ -190,6 +190,25 @@ name.
   output they had, and now print one line on stderr naming `--as` and `--path`
   instead; the line never repeats what followed the `=`.
 
+### Security
+
+- **The CLI's text output no longer passes a terminal the control characters
+  in names other people chose.** A team, user, workspace, key, SSH key or
+  computer name, a guest's filename, and a platform error were written to the
+  terminal as they came, so an escape sequence in one was obeyed rather than
+  shown: an OSC 52 clipboard write, an erased line, a spoofed `Account:` line,
+  or a bidi override reordering what followed. `whoami`, `api-keys list`,
+  `api-keys create`'s notice, `account`, `usage`, `files list`, `ssh`,
+  `ssh-key list | add`, `ssh-access`, every diagnostic and error on stderr,
+  the text form of streamed frames, and the indented JSON printed without
+  `--json` now show each C0 and C1 control, DEL and bidi control as `\uXXXX`
+  (`\u001b` for ESC). Letters in any script and emoji are unchanged. The
+  indented JSON still parses to the real strings, and `--json` output is
+  unchanged. `files list` now says when a name was shown escaped, and its note
+  about names left out no longer claims every name with a control character
+  was. `computers exec` still writes the command's own output unaltered, as
+  `ssh` would.
+
 ## [0.6.0] — 2026-09-25
 
 Two behaviour changes to read before upgrading, both under **Changed**: a 503

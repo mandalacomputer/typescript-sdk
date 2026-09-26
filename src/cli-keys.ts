@@ -12,7 +12,7 @@
  */
 
 import { CliError } from './cli-options.js';
-import type { Output } from './cli-output.js';
+import { type Output, terminalSafe } from './cli-output.js';
 import type { CliIO } from './cli-runtime.js';
 import { removeCredentials, selectedProfile } from './credentials.js';
 import type { ApiKey, Client, Whoami } from './index.js';
@@ -22,16 +22,21 @@ const scopeText = (k: ApiKey): string =>
     ? 'account-wide'
     : `workspace ${k.workspaceName ?? '?'} (${k.workspaceId})`;
 
-/** One key in a line: what the Credentials page shows for it. */
+/**
+ * One key in a line: what the Credentials page shows for it. Escaped whole:
+ * a key's name, and its workspace's, are whatever someone typed.
+ */
 const keyLine = (k: ApiKey): string =>
-  [
-    k.id,
-    k.name ?? '(unnamed)',
-    k.prefix,
-    scopeText(k),
-    k.manageKeys ? 'manages keys' : '-',
-    k.lastUsedAt ? `last used ${k.lastUsedAt}` : 'never used',
-  ].join('  ');
+  terminalSafe(
+    [
+      k.id,
+      k.name ?? '(unnamed)',
+      k.prefix,
+      scopeText(k),
+      k.manageKeys ? 'manages keys' : '-',
+      k.lastUsedAt ? `last used ${k.lastUsedAt}` : 'never used',
+    ].join('  '),
+  );
 
 export async function apiKeysList(
   client: Client,
@@ -90,15 +95,20 @@ export async function apiKeysRevoke(
 
 function whoamiText(w: Whoami): string {
   const k = w.key;
-  return [
-    `${w.user.name ? `${w.user.name} ` : ''}<${w.user.email}> (${w.user.id})`,
-    `Account: ${w.account.name ?? '(unnamed)'} (${w.account.id}), plan ${w.account.plan}, ${w.account.status}`,
-    `Role: ${w.role}`,
-    `Scope: ${w.workspace ? `workspace ${w.workspace.name} (${w.workspace.id})` : 'the whole account'}`,
-    k
-      ? `Key: ${k.name ?? '(unnamed)'} (${k.id}, ${k.prefix}); ${k.manageKeys ? 'can' : 'cannot'} manage API keys`
-      : 'Key: not reported',
-  ].join('\n');
+  return (
+    [
+      `${w.user.name ? `${w.user.name} ` : ''}<${w.user.email}> (${w.user.id})`,
+      `Account: ${w.account.name ?? '(unnamed)'} (${w.account.id}), plan ${w.account.plan}, ${w.account.status}`,
+      `Role: ${w.role}`,
+      `Scope: ${w.workspace ? `workspace ${w.workspace.name} (${w.workspace.id})` : 'the whole account'}`,
+      k
+        ? `Key: ${k.name ?? '(unnamed)'} (${k.id}, ${k.prefix}); ${k.manageKeys ? 'can' : 'cannot'} manage API keys`
+        : 'Key: not reported',
+    ]
+      // Each line escaped on its own: a name holding a newline must not start one.
+      .map((line) => terminalSafe(line))
+      .join('\n')
+  );
 }
 
 export async function whoamiCommand(

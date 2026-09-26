@@ -11,7 +11,7 @@ import {
 import { loginCommand } from './cli-login.js';
 import { manifest } from './cli-manifest.js';
 import { CliError, help, type Parsed, parseArgs } from './cli-options.js';
-import { errorInfo, Output, redact, snakeKeys } from './cli-output.js';
+import { errorInfo, Output, redact, snakeKeys, terminalSafe } from './cli-output.js';
 import { type CliIO, documentInput, openBrowser, readInput } from './cli-runtime.js';
 import {
   bindingSpecs,
@@ -227,7 +227,9 @@ function accountText(q: AccountQuota): string {
     'Snapshot storage excludes in-flight capture reservations; its headroom does not predict capture admission.',
     `Per-computer maxima: ${q.perComputer.maxVcpu} vCPU; ${q.perComputer.maxRamMb} MiB RAM; ${q.perComputer.maxDiskGb} GiB disk`,
     `Windows capability: ${q.capabilities.windows ? 'yes' : 'no'}`,
-  ].join('\n');
+  ]
+    .map((line) => terminalSafe(line))
+    .join('\n');
 }
 
 /**
@@ -243,12 +245,16 @@ export function dashboardUrl(baseUrl: string, id: string): string {
   return url.href;
 }
 
-/** `files list` for a person: one line per entry, directories marked with a `/`. */
+/**
+ * `files list` for a person: one line per entry, directories marked with a `/`.
+ * A name is the guest's, and whoever made the file chose it: its control and
+ * bidi characters are shown escaped (see {@link terminalSafe}), not obeyed.
+ */
 function directoryText(dir: GuestDirectory): string {
   return dir.entries
     .map(
       (e) =>
-        `${e.type.padEnd(11)} ${e.sizeBytes === undefined ? '-'.padStart(12) : String(e.sizeBytes).padStart(12)}  ${e.name}${e.type === 'directory' ? '/' : ''}\n`,
+        `${terminalSafe(e.type).padEnd(11)} ${e.sizeBytes === undefined ? '-'.padStart(12) : String(e.sizeBytes).padStart(12)}  ${terminalSafe(e.name)}${e.type === 'directory' ? '/' : ''}\n`,
     )
     .join('');
 }
@@ -354,7 +360,9 @@ function usageText(u: UsageReport): string {
               `  ${c.name || c.id} (${c.id})${c.gone ? ' [deleted]' : ''}: ${c.runHours} run hours; ${c.vcpuHours} vCPU-hours; ${c.ramGbHours} RAM GB-hours`,
           ),
         ]),
-  ].join('\n');
+  ]
+    .map((line) => terminalSafe(line))
+    .join('\n');
 }
 
 function checkUsageWindow(from?: string, to?: string): void {
@@ -944,7 +952,11 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
           );
         if (dir.skipped)
           output.diagnostic(
-            `mandala: ${dir.skipped} name${dir.skipped === 1 ? '' : 's'} could not be shown (control characters or not UTF-8)`,
+            `mandala: ${dir.skipped} name${dir.skipped === 1 ? '' : 's'} left out of the listing (the computer does not send a name that is not UTF-8 or holds an ASCII control character)`,
+          );
+        if (dir.entries.some((e) => terminalSafe(e.name) !== e.name))
+          output.diagnostic(
+            'mandala: control and bidi characters in the names above are shown escaped, as \\uXXXX; --json has the exact names',
           );
         return 0;
       }
