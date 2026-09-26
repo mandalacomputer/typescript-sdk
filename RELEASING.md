@@ -23,16 +23,28 @@ In each repository, rename `## [Unreleased]` in `CHANGELOG.md` to
 change merged since the last release should already have an entry; if one does
 not, add it now.
 
-## 2. Version, in two places per repository
+## 2. Version, in every place a repository declares it
 
-The release workflow refuses a tag that disagrees with either place, and the
-one-line bump is the commit most likely to be half done.
+The release workflow refuses a tag that disagrees with any of them, and the
+one-line bump is the commit most likely to be half done. mcp has a third place:
+its Claude Code plugin manifest, which a test holds to the package version.
 
-| Repository | First place | Second place |
-| --- | --- | --- |
-| typescript-sdk | `package.json` `version` | `export const VERSION` in `src/index.ts` |
-| python-sdk | `pyproject.toml` `version` | `__version__` in `src/mandala_computer/__init__.py` |
-| mcp | `package.json` `version` | `SERVER_VERSION` in `src/server.ts` |
+| Repository | Places |
+| --- | --- |
+| typescript-sdk | `package.json` `version`; `export const VERSION` in `src/index.ts` |
+| python-sdk | `pyproject.toml` `version`; `__version__` in `src/mandala_computer/__init__.py` |
+| mcp | `package.json` `version`; `SERVER_VERSION` in `src/server.ts`; `version` in `plugin/.claude-plugin/plugin.json` |
+
+Before opening the pull request, search each repository for the old version
+so a place added after this list was written does not slip past it; from
+0.6.0, for example:
+
+```sh
+git grep -nF 0.6.0 -- ':!CHANGELOG.md' ':!*lock*'
+```
+
+In typescript-sdk that search also finds `packaging/homebrew/mandala.rb`,
+which moves in step 5, not here.
 
 Run `npm install --package-lock-only` after the `package.json` bump so the
 lockfile's own version follows it.
