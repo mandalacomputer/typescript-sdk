@@ -2590,7 +2590,7 @@ describe('files, rename, resize, view, and secrets bound at create', () => {
     expect(result.code).toBe(1);
     expect(result.frames[0].error).toMatchObject({
       code: 'invalid_arguments',
-      message: expect.stringContaining(`${unlisted}=VAR`),
+      message: expect.stringContaining(`--secret ${unlisted} --as VAR`),
     });
     expect(bare.rec.routes()).toEqual([['GET', 'secrets']]);
   });
@@ -2611,7 +2611,7 @@ describe('files, rename, resize, view, and secrets bound at create', () => {
     const h = harness(store());
     const result = await h.run(['computers', 'create', '--secret-file', 'OPENAI_API_KEY']);
     expect(result.code).toBe(1);
-    expect(result.frames[0].error.message).toContain('OPENAI_API_KEY=FILE');
+    expect(result.frames[0].error.message).toContain('"OPENAI_API_KEY" --path FILE');
     expect(h.rec.routes()).toEqual([['GET', 'secrets']]);
   });
 
@@ -2808,6 +2808,238 @@ describe('files, rename, resize, view, and secrets bound at create', () => {
       expect(result.out + result.err).not.toContain('MY_ODD_NAME');
       expect(result.out + result.err).toContain('env [REDACTED] is reserved');
     }
+  });
+
+  it('binds under the variable named by --as and the file named by --path', async () => {
+    const bound = {
+      ...COMPUTER,
+      secrets: [
+        { secret_id: SECRET.id, revision_id: SECRET.revision_id, env: 'MY_KEY' },
+        { secret_id: OTHER.id, revision_id: SECRET.revision_id, file: 'gh' },
+      ],
+    };
+    const respond = store();
+    for (const jsonMode of [true, false]) {
+      const h = harness((call) =>
+        call.method === 'POST' && call.path === '/computers' ? json(bound) : respond(call),
+      );
+      const result = await h.run(
+        [
+          'computers',
+          'create',
+          '--secret',
+          SECRET.id,
+          '--as',
+          'MY_KEY',
+          '--secret-file=gh-token',
+          '--path=gh',
+        ],
+        jsonMode,
+      );
+      expect(result.code).toBe(0);
+      expect(h.rec.last().body).toMatchObject({
+        secrets: [
+          { secret_id: SECRET.id, env: 'MY_KEY' },
+          { secret_id: OTHER.id, file: 'gh' },
+        ],
+      });
+      // A target with its own flag is a name, never a mistyped value: shown
+      // as it is, and nothing is deprecated.
+      expect(result.out).toContain('MY_KEY');
+      expect(result.out).not.toContain('[REDACTED]');
+      expect(result.err).not.toContain('deprecated');
+    }
+  });
+
+  it('pairs each --as with its own --secret, beside bindings that take the default', async () => {
+    const third = { ...SECRET, id: 'csec-0123456789abcdee', name: 'db_url' };
+    const h = harness(store({ ...SECRET_LIST, secrets: [SECRET, OTHER, third] }));
+    const result = await h.run([
+      'computers',
+      'create',
+      '--secret',
+      'openai_api_key',
+      '--secret',
+      'db_url',
+      '--as',
+      'DATABASE_URL',
+      '--secret-file',
+      'gh-token',
+    ]);
+    expect(result.code).toBe(0);
+    expect(h.rec.last().body).toMatchObject({
+      secrets: [
+        { secret_id: SECRET.id, env: 'OPENAI_API_KEY' },
+        { secret_id: third.id, env: 'DATABASE_URL' },
+        { secret_id: OTHER.id, file: 'gh-token' },
+      ],
+    });
+  });
+
+  it('takes the whole --secret as the secret when --as names the variable, = and all', async () => {
+    const odd = { ...SECRET, name: 'a=b' };
+    const h = harness(store({ ...SECRET_LIST, secrets: [odd] }));
+    const result = await h.run(['computers', 'create', '--secret', 'a=b', '--as', 'AB']);
+    expect(result.code).toBe(0);
+    expect(h.rec.last().body).toMatchObject({ secrets: [{ secret_id: odd.id, env: 'AB' }] });
+    expect(result.err).not.toContain('deprecated');
+  });
+
+  it('never quotes a value typed after = even when --as names the variable', async () => {
+    const value = 'sk-live-do-not-print-me';
+    for (const jsonMode of [true, false]) {
+      const h = harness(store());
+      const result = await h.run(
+        ['computers', 'create', '--secret', `OPENAI_API_KEY=${value}`, '--as', 'MY_KEY'],
+        jsonMode,
+      );
+      expect(result.code).toBe(1);
+      expect(result.frames[0]?.error?.code ?? 'not_found').toBe('not_found');
+      expect(result.out + result.err).not.toContain(value);
+      expect(result.out + result.err).toContain('OPENAI_API_KEY=…');
+      expect(h.rec.routes()).toEqual([['GET', 'secrets']]);
+    }
+  });
+
+  it('sends a name --as or --path gives without the value check, which only = needs', async () => {
+    // Refused after =, where it could be a value typed by mistake.
+    const hashed = 'cert-sha256-9f86d081884c7d659a2f';
+    const h = harness(store());
+    const result = await h.run([
+      'computers',
+      'create',
+      '--secret-file',
+      'gh-token',
+      '--path',
+      hashed,
+    ]);
+    expect(result.code).toBe(0);
+    expect(h.rec.last().body).toMatchObject({ secrets: [{ secret_id: OTHER.id, file: hashed }] });
+  });
+
+  it('holds --as and --path to the naming rules, without quoting what was typed', async () => {
+    for (const [argv, rule] of [
+      [['--secret', 'openai_api_key', '--as', 'bad-name.x'], '--as must be letters'],
+      [['--secret-file', 'gh-token', '--path', 'Upper.Case'], '--path must be lowercase'],
+    ] as const) {
+      const h = harness(store());
+      const result = await h.run(['computers', 'create', ...argv]);
+      expect(result.code, argv.join(' ')).toBe(1);
+      expect(result.frames[0].error).toMatchObject({
+        code: 'invalid_arguments',
+        message: expect.stringContaining(rule),
+      });
+      expect(result.out + result.err).not.toContain(argv[3]);
+      expect(h.rec.calls).toEqual([]);
+    }
+  });
+
+  it('refuses an --as or --path that does not directly follow its own flag', async () => {
+    const stray = 'stray-target-do-not-print';
+    for (const [argv, says] of [
+      [['--as', stray], '--as names what the --secret directly before it is bound as'],
+      [['--path', stray, '--secret-file', 'gh-token'], 'right after one: --secret-file SECRET'],
+      [
+        ['--secret-file', 'gh-token', '--as', stray],
+        '--as goes after --secret; --secret-file takes --path',
+      ],
+      [
+        ['--secret', 'openai_api_key', '--path', stray],
+        '--path goes after --secret-file; --secret takes --as',
+      ],
+      [
+        ['--secret', 'openai_api_key', '--as', 'A', '--as', stray],
+        '--as was given twice for one --secret',
+      ],
+      [
+        ['--secret', 'openai_api_key', '--name', 'box', '--as', stray],
+        '--secret directly before it',
+      ],
+      [['--secret', 'openai_api_key', '--no-start', '--as', stray], '--secret directly before it'],
+    ] as const) {
+      for (const jsonMode of [true, false]) {
+        const h = harness(store());
+        const result = await h.run(['computers', 'create', ...argv], jsonMode);
+        expect(result.code, argv.join(' ')).toBe(1);
+        const printed = result.out + result.err;
+        expect(printed, argv.join(' ')).toContain(says);
+        expect(printed, argv.join(' ')).not.toContain(stray);
+        expect(h.rec.calls).toEqual([]);
+      }
+    }
+  });
+
+  it('prints help for --help beside a stray --as or --path, before it or after', async () => {
+    const stray = 'stray-target-do-not-print';
+    for (const argv of [
+      ['--help', '--as', stray],
+      ['--as', stray, '--help'],
+      ['--secret-file', 'gh-token', '--as', stray, '--help'],
+      ['--path', stray, '--secret-file', 'gh-token', '--help'],
+    ]) {
+      const h = harness(store());
+      const result = await h.run(['computers', 'create', ...argv], false);
+      expect(result.code, argv.join(' ')).toBe(0);
+      expect(result.out, argv.join(' ')).toContain('mandala computers create');
+      expect(result.out + result.err, argv.join(' ')).not.toContain(stray);
+      expect(result.err, argv.join(' ')).not.toContain('--as');
+      expect(h.rec.calls).toEqual([]);
+    }
+  });
+
+  it('warns once on stderr that SECRET=VAR is deprecated, without the target, and still binds', async () => {
+    for (const jsonMode of [true, false]) {
+      const h = harness(store());
+      const result = await h.run(
+        [
+          'computers',
+          'create',
+          '--secret',
+          'openai_api_key=MY_KEY',
+          '--secret',
+          `${OTHER.id}=OTHER_KEY`,
+        ],
+        jsonMode,
+      );
+      expect(result.code).toBe(0);
+      expect(h.rec.last().body).toMatchObject({
+        secrets: [
+          { secret_id: SECRET.id, env: 'MY_KEY' },
+          { secret_id: OTHER.id, env: 'OTHER_KEY' },
+        ],
+      });
+      const warnings = result.err.split('\n').filter((l) => l.includes('deprecated'));
+      expect(warnings).toEqual([
+        'mandala: --secret SECRET=VAR is deprecated; use --secret SECRET --as VAR',
+      ]);
+      expect(result.err).not.toContain('MY_KEY');
+      expect(result.err).not.toContain('OTHER_KEY');
+      // The JSON stream is untouched by it.
+      if (jsonMode) expect(result.frames).toHaveLength(1);
+    }
+    const files = harness(store());
+    const both = await files.run([
+      'computers',
+      'create',
+      '--secret',
+      'openai_api_key=MY_KEY',
+      '--secret-file',
+      'gh-token=gh',
+    ]);
+    expect(both.err).toContain(
+      'mandala: --secret SECRET=VAR and --secret-file SECRET=FILE are deprecated; ' +
+        'use --secret SECRET --as VAR and --secret-file SECRET --path FILE',
+    );
+    expect(both.err).not.toContain('=gh');
+  });
+
+  it('points a refused = target at --as, which takes a name without the check', async () => {
+    const value = ['ghp', '_', 'aB3dE5fG7hJ9kL2mN4pQ6rS8tU0vW1xY2z4c'].join('');
+    const h = harness(store());
+    const result = await h.run(['computers', 'create', '--secret', `openai_api_key=${value}`]);
+    expect(result.code).toBe(1);
+    expect(result.frames[0].error.message).toContain('give it with --as instead of =');
+    expect(result.out + result.err).not.toContain(value);
   });
 
   it('creates with a browser proxy and its bypass list', async () => {

@@ -163,6 +163,11 @@ describe('one command inventory', () => {
       { name: 'secret', repeatable: true },
       { name: 'secret-file', repeatable: true },
     ]);
+    // The flags that name a binding's variable or file say which flag they complete.
+    expect(create.flags.filter((f) => f.follows)).toMatchObject([
+      { name: 'as', repeatable: true, follows: 'secret' },
+      { name: 'path', repeatable: true, follows: 'secret-file' },
+    ]);
     expect(tree.commands.find((c) => c.path[0] === 'completion')?.arguments[0]).toMatchObject({
       choices: ['bash', 'zsh', 'fish'],
     });
@@ -190,7 +195,11 @@ describe('one command inventory', () => {
         const args = baseArgs(command);
         const already = args.indexOf(`--${flag.name}`);
         if (already >= 0) args.splice(already, flag.type === 'boolean' ? 1 : 2);
-        const parsed = parseArgs(withFlag(command, args, [`--${flag.name}`, ...valueFor(flag)]));
+        // A flag that completes another (--as after --secret) is typed after it.
+        const leader = flag.follows ? [`--${flag.follows}`, 'value'] : [];
+        const parsed = parseArgs(
+          withFlag(command, args, [...leader, `--${flag.name}`, ...valueFor(flag)]),
+        );
         expect(parsed.flags[flag.name]).toEqual(
           flag.repeatable
             ? valueFor(flag)
@@ -274,6 +283,17 @@ describe('offline discovery', () => {
           expect(plain.out).toContain(shell === 'fish' ? `-l ${flag.name}` : `--${flag.name}`);
     },
   );
+
+  it('completes --as and --path after computers create', () => {
+    for (const shell of ['bash', 'zsh'] as const)
+      expect(completion(shell)).toMatch(/'computers create'\) candidates='[^']*--as [^']*--path /);
+    expect(completion('fish')).toContain(
+      'complete -c mandala -f -n "__mandala_matches_context \'computers create\'" -l as -r',
+    );
+    expect(completion('fish')).toContain(
+      'complete -c mandala -f -n "__mandala_matches_context \'computers create\'" -l path -r',
+    );
+  });
 
   it('produces syntactically valid bash and zsh scripts', () => {
     execFileSync('/bin/bash', ['-n'], { input: completion('bash') });

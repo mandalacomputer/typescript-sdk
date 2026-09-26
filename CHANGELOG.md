@@ -16,6 +16,14 @@ name.
 
 ### Added
 
+- **CLI: `computers create --secret SECRET --as VAR` and `--secret-file SECRET
+  --path FILE`** name a binding's variable or file with a flag of its own, so
+  nothing typed there can be taken for the secret's value. Each `--as` or
+  `--path` must come directly after its `--secret` or `--secret-file`; a stray
+  one is refused without being quoted, unless `--help` is also given, which
+  prints help. A name given this way is not put
+  through the value-shape check and prints as it is. The manifest marks both
+  with `follows`, and the completions offer them.
 - **A proxy for a computer's browsers:** `browserProxy: { server, bypass? }` on
   `computers.create()` and `launch()`, and on `computer.update()`, where it
   travels alone and `null` removes it; `computer.browserProxy` and
@@ -141,6 +149,13 @@ name.
   names a profile and is judged as typed under `computers list`. A second
   `--profile` is refused before an unknown option is judged, so it cannot
   hide which of the two was meant.
+
+### Deprecated
+
+- **CLI `computers create --secret SECRET=VAR` and `--secret-file
+  SECRET=FILE`.** They still bind, with the value-shape guard and the redacted
+  output they had, and now print one line on stderr naming `--as` and `--path`
+  instead; the line never repeats what followed the `=`.
 
 ## [0.6.0] — 2026-09-25
 
