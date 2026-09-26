@@ -41,9 +41,12 @@ name.
   prints help. A name given this way goes through the same value-shape check
   as one after `=`, so `--as "$GITHUB_TOKEN"` is refused without being quoted
   rather than sent as the variable's name; `--no-value-check` lets a flagged
-  one through, and it then prints as `[REDACTED]` in the create's bindings and
-  error. Any other prints as it is. The manifest marks both with `follows`, and
-  the completions offer them.
+  one through. The check is a guess and misses some values, so every `--as` or
+  `--path` name prints as `[REDACTED]` in the create's bindings and error,
+  flagged or not; `computers get` shows it. A secret typed where its name was
+  meant (`--secret "$GITHUB_TOKEN" --as GITHUB_TOKEN`) is not quoted either:
+  an error names that binding by its flag and position. The manifest marks
+  both with `follows`, and the completions offer them.
 - **A proxy for a computer's browsers:** `browserProxy: { server, bypass? }` on
   `computers.create()` and `launch()`, and on `computer.update()`, where it
   travels alone and `null` removes it; `computer.browserProxy` and

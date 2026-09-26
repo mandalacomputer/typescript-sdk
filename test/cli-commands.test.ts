@@ -10,6 +10,7 @@ import { main } from '../src/cli.js';
 import { dashboardUrl, type LegacyCommands, runCli } from '../src/cli-commands.js';
 import { type Flag, GLOBAL_FLAGS, parseArgs } from '../src/cli-options.js';
 import { type CliIO, runtime } from '../src/cli-runtime.js';
+import { looksLikeSecretValue } from '../src/cli-secrets.js';
 import { Client } from '../src/index.js';
 import {
   anyRoute,
@@ -2843,10 +2844,16 @@ describe('files, rename, resize, view, and secrets bound at create', () => {
           { secret_id: OTHER.id, file: 'gh' },
         ],
       });
-      // A target with its own flag is a name, never a mistyped value: shown
-      // as it is, and nothing is deprecated.
-      expect(result.out).toContain('MY_KEY');
-      expect(result.out).not.toContain('[REDACTED]');
+      // A typed target prints as [REDACTED] however it was given: the value
+      // check cannot catch every value typed where a name was meant. It keeps
+      // its kind, and nothing is deprecated.
+      expect(result.out).not.toContain('MY_KEY');
+      expect(result.out).toContain('[REDACTED]');
+      if (jsonMode)
+        expect(result.frames[0].data.secrets).toEqual([
+          expect.objectContaining({ env: '[REDACTED]' }),
+          expect.objectContaining({ file: '[REDACTED]' }),
+        ]);
       expect(result.err).not.toContain('deprecated');
     }
   });
@@ -3021,6 +3028,97 @@ describe('files, rename, resize, view, and secrets bound at create', () => {
       expect(failed.out + failed.err).not.toContain(hashed);
       expect(failed.out + failed.err).toContain('env [REDACTED] and file [REDACTED] are reserved');
     }
+  });
+
+  it('never prints an --as or --path the value check misses', async () => {
+    // Random tokens the heuristic lets through, assembled at run time. The
+    // check is asserted here so neither can quietly become a flagged case,
+    // which the tests above already cover.
+    const token = ['Bhd7jydqqYgtn1Bac', 'RmG5YwbQsd34Ze0ZJloQaA2'].join('');
+    const fileToken = ['gg9rvsaeiovmyb8w', '509qebwuesd29gys'].join('');
+    expect(looksLikeSecretValue(token)).toBe(false);
+    expect(looksLikeSecretValue(fileToken)).toBe(false);
+    const argv = [
+      'computers',
+      'create',
+      '--secret',
+      'openai_api_key',
+      '--as',
+      token,
+      '--secret-file',
+      'gh-token',
+      '--path',
+      fileToken,
+    ];
+    const bound = {
+      ...COMPUTER,
+      secrets: [
+        { secret_id: SECRET.id, revision_id: SECRET.revision_id, env: token },
+        { secret_id: OTHER.id, revision_id: SECRET.revision_id, file: fileToken },
+      ],
+    };
+    const respond = store();
+    for (const jsonMode of [true, false]) {
+      const h = harness((call) =>
+        call.method === 'POST' && call.path === '/computers' ? json(bound) : respond(call),
+      );
+      const result = await h.run(argv, jsonMode);
+      expect(result.code).toBe(0);
+      // Sent as typed: only the printing changes.
+      expect(h.rec.last().body).toMatchObject({
+        secrets: [
+          { secret_id: SECRET.id, env: token },
+          { secret_id: OTHER.id, file: fileToken },
+        ],
+      });
+      expect(result.out + result.err).not.toContain(token);
+      expect(result.out + result.err).not.toContain(fileToken);
+      if (jsonMode)
+        expect(result.frames[0].data.secrets).toEqual([
+          expect.objectContaining({ env: '[REDACTED]' }),
+          expect.objectContaining({ file: '[REDACTED]' }),
+        ]);
+      const refused = harness((call) =>
+        call.method === 'POST' && call.path === '/computers'
+          ? json(
+              { error: `secrets: env ${token} and file ${fileToken} are reserved` },
+              { status: 400 },
+            )
+          : respond(call),
+      );
+      const failed = await refused.run(argv, jsonMode);
+      expect(failed.code).toBe(1);
+      expect(failed.out + failed.err).not.toContain(token);
+      expect(failed.out + failed.err).not.toContain(fileToken);
+      expect(failed.out + failed.err).toContain('env [REDACTED] and file [REDACTED] are reserved');
+    }
+  });
+
+  it('never quotes a token typed as the secret, the operands of --as swapped', async () => {
+    // `--secret "$GITHUB_TOKEN" --as GITHUB_TOKEN`: the store holds no secret
+    // by that name, and the not-found error names the binding by position.
+    const token = ['ghp', '_', 'aB3dE5fG7hJ9kL2mN4pQ6rS8tU0vW1xY2z4c'].join('');
+    const fileToken = ['xoxb', '-123456789012-4096409640964-ab12'].join('');
+    const cases = [
+      ['--secret', token, '--as', 'GITHUB_TOKEN'],
+      ['--secret-file', fileToken, '--path', 'slack-token'],
+      ['--secret', token],
+    ];
+    for (const args of cases)
+      for (const jsonMode of [true, false]) {
+        const h = harness(store());
+        const result = await h.run(['computers', 'create', ...args], jsonMode);
+        expect(result.code, args.join(' ')).toBe(1);
+        expect(result.out + result.err).not.toContain(args[1]);
+        const message = jsonMode ? result.frames[0].error.message : result.err;
+        expect(message).toContain(`${args[0]} #1: no secret by that name or id`);
+        if (jsonMode) expect(result.frames[0].error.code).toBe('not_found');
+        expect(h.rec.routes()).toEqual([['GET', 'secrets']]);
+      }
+    // A real name or id is still quoted, so the error reads clearly.
+    const h = harness(store());
+    const missing = await h.run(['computers', 'create', '--secret', 'no_such', '--as', 'X']);
+    expect(missing.frames[0].error.message).toContain('--secret "no_such": no secret');
   });
 
   it('holds --as and --path to the naming rules, without quoting what was typed', async () => {

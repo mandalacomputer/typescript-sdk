@@ -2901,8 +2901,12 @@ repeat. `--as` and `--path` only ever name where the value goes, never the
 value itself; the value only ever goes in through `secrets set`. A name that
 looks like a value rather than a name (see below) is refused before anything is
 sent and never quoted: `--as "$GITHUB_TOKEN"` would otherwise send the token as
-the variable's name. `--no-value-check` sends such a name as typed, and the
-create then prints it as `[REDACTED]`. Two bindings
+the variable's name. `--no-value-check` sends such a name as typed. The check
+is a guess and misses some values, so the create prints every `--as` or
+`--path` name as `[REDACTED]`, in its output and in any error it fails with;
+`computers get` shows it. A secret or id that itself looks like a value
+(`--secret "$GITHUB_TOKEN" --as GITHUB_TOKEN`, the two swapped) is never quoted
+either: an error names that binding by its flag and position. Two bindings
 of one secret, or into one variable or file, fail before anything is created.
 An id the default scope does not list, such as one of a workspace's secrets, is
 sent as it is and needs its `--as` or `--path`. A name that matches nothing

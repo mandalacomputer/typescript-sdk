@@ -401,14 +401,14 @@ describe('a target named by --as or --path', () => {
   it('takes the names people bind as, the ones the check lets through after =', () => {
     for (const name of NAMES.filter((n) => /^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(n)))
       expect(bindingSpecs(['S'], [], { as: [name] }), name).toEqual([
-        expect.objectContaining({ key: 'S', target: name, hidden: false }),
+        expect.objectContaining({ key: 'S', target: name, hidden: true }),
       ]);
     for (const name of ['HF_TOKEN', 'OPENAI_API_KEY', 'MysqlReplicaPassword'])
       expect(bindingSpecs(['S'], [], { as: [name] })[0]).toMatchObject({ target: name });
     for (const file of ['config_token', 'gh-token', 'id_ed25519'])
       expect(bindingSpecs([], ['s'], { paths: [file] })[0]).toMatchObject({
         target: file,
-        hidden: false,
+        hidden: true,
       });
   });
 
@@ -436,35 +436,36 @@ describe('a target named by --as or --path', () => {
     );
   });
 
-  it('is shown as it is when it reads as a name, where a target typed after = is hidden', () => {
-    const specs = bindingSpecs(['A', 'B=TYPED'], [], { as: ['NAMED'] });
-    const shown = withoutTypedTargets({ secrets: [{ env: 'NAMED' }, { env: 'TYPED' }] }, specs);
-    expect(shown.secrets).toEqual([{ env: 'NAMED' }, { env: '[REDACTED]' }]);
+  it('is hidden even when it reads as a name, as a target typed after = is', () => {
+    // Only a target taken from the secret's own name (C here) is shown.
+    const specs = bindingSpecs(['A', 'B=TYPED', 'C'], [], { as: ['NAMED'] });
+    const shown = withoutTypedTargets(
+      { secrets: [{ env: 'NAMED' }, { env: 'TYPED' }, { env: 'C' }] },
+      specs,
+    );
+    expect(shown.secrets).toEqual([{ env: '[REDACTED]' }, { env: '[REDACTED]' }, { env: 'C' }]);
     const error = scrubTypedTargets(new Error('env NAMED and env TYPED are reserved'), specs);
-    expect((error as Error).message).toBe('env NAMED and env [REDACTED] are reserved');
+    expect((error as Error).message).toBe('env [REDACTED] and env [REDACTED] are reserved');
   });
 
   it('is hidden from the output and the error when it looks like a value', () => {
+    // B takes its secret's own name, which is shown.
     const specs = bindingSpecs(['A', 'B'], ['c'], {
-      as: [values.ghp, 'NAMED'],
+      as: [values.ghp],
       paths: [values.slack],
       valueCheck: false,
     });
     const shown = withoutTypedTargets(
-      { secrets: [{ env: values.ghp }, { env: 'NAMED' }, { file: values.slack }] },
+      { secrets: [{ env: values.ghp }, { env: 'B' }, { file: values.slack }] },
       specs,
     );
-    expect(shown.secrets).toEqual([
-      { env: '[REDACTED]' },
-      { env: 'NAMED' },
-      { file: '[REDACTED]' },
-    ]);
+    expect(shown.secrets).toEqual([{ env: '[REDACTED]' }, { env: 'B' }, { file: '[REDACTED]' }]);
     const error = scrubTypedTargets(
-      new Error(`env ${values.ghp} is reserved; file ${values.slack} is taken; NAMED is fine`),
+      new Error(`env ${values.ghp} is reserved; file ${values.slack} is taken; B is fine`),
       specs,
     );
     expect((error as Error).message).toBe(
-      'env [REDACTED] is reserved; file [REDACTED] is taken; NAMED is fine',
+      'env [REDACTED] is reserved; file [REDACTED] is taken; B is fine',
     );
   });
 });
