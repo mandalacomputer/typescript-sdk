@@ -16,6 +16,17 @@ name.
 
 ### Added
 
+- **A proxy for a computer's browsers:** `browserProxy: { server, bypass? }` on
+  `computers.create()` and `launch()`, and on `computer.update()`, where it
+  travels alone and `null` removes it; `computer.browserProxy` and
+  `computer.browserProxyPending` read it back, and
+  `computer.waitForBrowserProxy()` waits until the guest has it. `launch()`
+  waits for it when the create carried one. Which proxies are accepted is the
+  platform's rule, so a refused value is its `400`, not a check here. The CLI
+  takes `computers create --browser-proxy URL [--browser-proxy-bypass LIST]`,
+  `computers browser-proxy set COMPUTER URL [--bypass LIST]`,
+  `computers browser-proxy clear COMPUTER` and `computers wait --until
+  browser-proxy`. New exports: `BrowserProxy` and `BrowserProxyArgs`.
 - **Screenshot shaping: `region`, `scale`, `format` and `quality`** on
   `computer.screenshot(width, { ... })`, over the platform's new query
   parameters — a crop in screen pixels, a shrink factor in (0, 1], `png` or

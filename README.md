@@ -1679,6 +1679,32 @@ suspended out from under itself.
 await c.update({ idleSuspendMin: 120 });      // or null to follow the host
 ```
 
+### A proxy for the browsers
+
+`browserProxy` sends a Linux computer's browsers — Chromium, Chrome and Firefox —
+through a proxy, as a locked policy each reads when it starts. Nothing else on
+the computer uses it: `exec`, a terminal and every other program reach the
+network directly. Set it at create or with `update()`, where it travels alone,
+replaces the setting whole, and `null` removes it. Which proxies are accepted is
+the platform's rule; a value it refuses is a `400` whose message says why.
+
+```ts
+const c = await client.computers.launch({
+  template: 'base',
+  browserProxy: { server: 'http://proxy.example.com:3128', bypass: ['<local>', '*.internal'] },
+});                                    // launch waits for the guest to have it
+
+await c.update({ browserProxy: { server: 'socks5://127.0.0.1:1080' } });
+await c.waitForBrowserProxy();         // before starting a browser that must use it
+c.browserProxy;                        // { server: 'socks5://127.0.0.1:1080' }
+await c.update({ browserProxy: null }); // browsers go out directly again
+```
+
+A running computer has a change within seconds; `browserProxyPending` is true
+until it does, and `waitForBrowserProxy()` waits on it. A stopped or suspended
+computer is given the setting as it starts. A browser already running when the
+setting changes applies it at its next start.
+
 ### Growing past the host
 
 A resize is refused when the size asks for more RAM than the host the computer
@@ -2794,6 +2820,10 @@ mandala computers exec workbench -c 'uname -a' --timeout 60
 printf 'pwd\nls -la\n' | mandala computers exec workbench
 mandala computers exec workbench -c 'make build' --cwd /home/user/project --background --json
 mandala computers rename workbench build-box
+mandala computers create --name via-proxy --browser-proxy http://proxy.example.com:3128 --browser-proxy-bypass '<local>,*.internal'
+mandala computers browser-proxy set workbench socks5://127.0.0.1:1080 --bypass example.com
+mandala computers wait workbench --until browser-proxy
+mandala computers browser-proxy clear workbench
 mandala computers stop build-box && mandala computers resize build-box --cpu 4 --ram-mb 8192
 mandala computers view build-box
 ```
@@ -2801,8 +2831,9 @@ mandala computers view build-box
 Create starts the computer by default; `--no-start` leaves it stopped. It returns
 after provisioning responds. Use `computers wait` for readiness: `built` waits
 for the disk copy, `running` waits for the VM, `guest` waits for the guest
-agent, and `secrets` waits until a computer's bound secrets have reached its
-desktop (at once for one with none bound). The default is `running`. `--timeout-ms` bounds the readiness wait and
+agent, `secrets` waits until a computer's bound secrets have reached its
+desktop (at once for one with none bound), and `browser-proxy` waits until its
+browsers have its proxy (at once for one with none). The default is `running`. `--timeout-ms` bounds the readiness wait and
 `--poll-ms` controls its polling interval; neither changes the initial computer
 lookup's request budget. The SDK also provides [`computers.launch()`](#use) for
 creating and waiting in one call.
@@ -2828,6 +2859,13 @@ workspace's secrets, is sent as it is and needs its `=VAR` or `=FILE`. A name
 that matches nothing fails before anything is created. The secrets reach the
 desktop a few seconds after the computer runs: `computers wait --until secrets`
 waits for them.
+
+`--browser-proxy URL` sends the new computer's browsers through a proxy, and
+`--browser-proxy-bypass` lists the hosts they reach directly, comma-separated or
+repeated. `computers browser-proxy set COMPUTER URL [--bypass LIST]` replaces a
+computer's proxy and `computers browser-proxy clear COMPUTER` removes it. The
+platform decides which URLs and entries it accepts, and its refusal is printed
+as it is.
 
 `--size` selects a named size and cannot be combined with `--template`, `--cpu`,
 `--ram-mb`, `--disk-gb`, or `--template-transfer`. A preparation token is accepted

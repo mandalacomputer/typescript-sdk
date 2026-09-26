@@ -179,6 +179,7 @@ export type {
   ApiKey,
   ApiKeyCreated,
   BackgroundExec,
+  BrowserProxy,
   BuildProgress,
   BuildStep,
   ComputerUsage,
@@ -225,6 +226,7 @@ export type {
 export type {
   ActivitiesArgs,
   ApiKeyCreateArgs,
+  BrowserProxyArgs,
   ComputerState,
   CreateArgs,
   ExecArgs,

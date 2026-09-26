@@ -65,6 +65,7 @@ import type {
   ActivityPage,
   ActivityResults,
   BackgroundExec,
+  BrowserProxy,
   DeleteResult,
   ExecResult,
   GuestDirectory,
@@ -97,6 +98,7 @@ import {
   toActivityPage,
   toActivityResults,
   toBackgroundExec,
+  toBrowserProxy,
   toDeleteResult,
   toExecResult,
   toGuestDirectory,
@@ -1249,6 +1251,43 @@ export class Computer {
     return typeof v === 'boolean' ? v : undefined;
   }
 
+  // --- browser proxy --------------------------------------------------
+
+  /**
+   * The proxy this computer's browsers are sent through — Chromium, Chrome and
+   * Firefox, as a locked policy each reads when it starts. Nothing else on the
+   * computer uses it: `exec`, a terminal and every other program reach the
+   * network directly. `undefined` when none is set.
+   *
+   * Decoded strictly: a value this client cannot read throws rather than being
+   * dropped, because {@link update} replaces the setting whole and this is what
+   * a caller would edit and send back.
+   */
+  get browserProxy(): BrowserProxy | undefined {
+    return toBrowserProxy(this.#data.browser_proxy, this.id);
+  }
+
+  /**
+   * Whether this running computer's browsers are still waiting for its
+   * {@link browserProxy} — just after a create, a start or a change — or its
+   * guest still holds the files of one just removed.
+   * {@link waitForBrowserProxy} waits on it.
+   *
+   * `false` on a computer that is not running, where the setting is applied as
+   * it starts, and on a platform that predates the field. A browser already
+   * running when the setting changes applies it at its next start.
+   */
+  get browserProxyPending(): boolean {
+    const v = this.#data.browser_proxy_pending;
+    if (v === undefined || v === null) return false;
+    // Strict, since a wait decides on it: a value that is not a boolean is not
+    // a "no" this client can honestly read into it.
+    if (typeof v !== 'boolean') {
+      throw new MandalaError(`expected ${this.id}'s browser_proxy_pending to be a boolean`);
+    }
+    return v;
+  }
+
   /** The API response verbatim, including any fields this SDK predates. */
   get raw(): Record<string, unknown> {
     // A deep copy. A shallow one shares every nested object, and
@@ -1429,7 +1468,8 @@ export class Computer {
   }
 
   /**
-   * Change this computer's name, size, or idle window, and return it changed.
+   * Change this computer's name, size, idle window or browser proxy, and
+   * return it changed.
    *
    * A name is a label — nothing is derived from it, so a rename moves no bytes
    * and breaks no reference. The platform trims whitespace and control
@@ -1441,6 +1481,13 @@ export class Computer {
    * both without applying half of it.
    *
    * Snapshots already taken keep the name they were captured under.
+   *
+   * `browserProxy` travels alone and replaces the setting whole; `null`
+   * removes it and takes its files out of the computer. A running computer has
+   * the change within seconds — {@link waitForBrowserProxy} before starting a
+   * browser that must use it — and a stopped or suspended one is given it as
+   * it starts. Which proxies are accepted is the platform's rule, and a value
+   * it refuses is a `400` naming why.
    */
   async update(args: P.UpdateArgs, opts: CallOptions = {}): Promise<this> {
     const data = P.computerPayload(
@@ -2584,6 +2631,107 @@ export class Computer {
       if (generation !== undefined && generation > 0 && applied < generation) return 'delivering';
     }
     return 'delivered';
+  }
+
+  /**
+   * Wait until this computer's browsers have its browser proxy.
+   *
+   * The setting reaches a running computer a few seconds after a create, a
+   * start or a change, and a browser started in between goes out directly. This
+   * polls until the platform says the guest has it ({@link browserProxyPending}
+   * is false on a running computer), and returns at once for a computer with no
+   * proxy and nothing left to remove. {@link Computers.launch} calls it for you
+   * when the create carried one.
+   *
+   * Always reads the computer again before answering, so it is safe straight
+   * after `update({ browserProxy })`, `start()` or a create.
+   *
+   * Throws rather than waiting out the timeout when nothing will apply it: a
+   * computer that is stopped or suspended while the platform says it has
+   * admitted no start — the proxy is applied as it starts, so `start()` is the
+   * fix — a create's computer whose first start failed, and a failed build. A
+   * host that does not say whether a start is under way is waited on.
+   */
+  async waitForBrowserProxy(opts: WaitOptions = {}): Promise<this> {
+    const { timeoutMs = 180_000, pollMs = 2_000, signal } = opts;
+    checkWait(timeoutMs, pollMs);
+    const deadline = Date.now() + timeoutMs;
+    // waitForSecrets' three pieces of state, for its reasons: no verdict on a
+    // reading from before this call, a timeout sentence that knows whether the
+    // last poll answered, and a create's failed start kept past the refresh
+    // that clears it until a later reservation retires it.
+    let observed = false;
+    let fresh = false;
+    let initialStartError = this.startError;
+    let state: 'applied' | 'applying' | MandalaError = 'applying';
+    for (;;) {
+      let delayMs = pollMs;
+      if (Date.now() < deadline) {
+        try {
+          await this.refresh({ signal: deadlineSignal(deadline - Date.now(), signal) });
+          observed = true;
+          fresh = true;
+          if (this.#startAdmitted()) initialStartError = '';
+        } catch (err) {
+          if (signal?.aborted) throw err;
+          if (!isDeadlineAbort(err) && !isTransientForPoll(err)) throw err;
+          if (!isDeadlineAbort(err)) fresh = false;
+          delayMs = retryDelay(pollMs, err);
+        }
+      }
+      if (observed) {
+        state = this.#browserProxyState(this.startError || initialStartError);
+        if (state === 'applied') return this;
+        if (state instanceof MandalaError) throw state;
+      }
+      if (Date.now() >= deadline) {
+        throw new TimeoutError(
+          !observed
+            ? `${this.id} could not be observed within ${timeoutMs}ms, so whether its browsers ` +
+                'have its proxy is unknown'
+            : fresh
+              ? `${this.id}'s browser proxy was still being applied after ${timeoutMs}ms`
+              : `${this.id} could not be reached for the last part of ${timeoutMs}ms; when it ` +
+                'last answered its browser proxy was still being applied',
+        );
+      }
+      await sleepUntilNextPoll(delayMs, deadline, signal);
+    }
+  }
+
+  /**
+   * Where this computer's browser proxy is, as {@link waitForBrowserProxy}
+   * reads it. `startFailed` is why a create's first start failed, if it did.
+   */
+  #browserProxyState(startFailed = ''): 'applied' | 'applying' | MandalaError {
+    if (this.browserProxyPending) return 'applying';
+    // Nothing set and nothing pending: there is nothing for a guest to have,
+    // and a removal that has landed reads exactly like this too.
+    if (this.browserProxy === undefined) return 'applied';
+    if (this.buildFailed) return this.#buildFailure();
+    // The platform never reports the setting pending on a computer that is not
+    // running, so a false here means only "not running yet" until it is.
+    if (this.isBuilding) return 'applying';
+    if (!this.#statusIs('running')) {
+      // The refusals #secretsState makes, for its reasons: a known failed boot
+      // on the weaker evidence, and a machine the platform says nobody is
+      // starting. A start admitted but not yet booted reads stopped or
+      // suspended, and its proxy is ahead of it.
+      if (startFailed && this.#statusIs('stopped') && !this.#startAdmitted()) {
+        return new MandalaError(
+          `${this.id} is stopped after it failed to start, so its browser proxy was not ` +
+            `applied: ${startFailed}. Call start() to try again`,
+        );
+      }
+      if (this.#nothingAdmitted()) {
+        return new MandalaError(
+          `${this.id} is ${JSON.stringify(this.status)}, and its browser proxy is applied only ` +
+            'as it starts: call start()',
+        );
+      }
+      return 'applying';
+    }
+    return 'applied';
   }
 
   // --- events ---------------------------------------------------------

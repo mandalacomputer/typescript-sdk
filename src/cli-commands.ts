@@ -136,6 +136,22 @@ export async function resolveComputer(
 
 /** Format the SDK's public projection explicitly; never expose desktop credentials. */
 const computerData = (computer: Computer) => computer.toJSON();
+
+/**
+ * A bypass list as typed: each value comma-separated, repeatable, blanks
+ * dropped, so `--bypass a.com,b.com` and `--bypass a.com --bypass b.com` say
+ * the same thing. `undefined` when none was given, so the setting is sent
+ * without one. Nothing else is checked here: which entries are valid is the
+ * platform's rule, and its refusal names the entry.
+ */
+function bypassList(values: string[] | undefined): string[] | undefined {
+  if (values === undefined) return undefined;
+  return values
+    .flatMap((v) => v.split(','))
+    .map((v) => v.trim())
+    .filter(Boolean);
+}
+
 const raw = (value: { raw: Record<string, unknown> }) => value.raw;
 const publicWebhook = (value: { raw: Record<string, unknown> }, secret?: string) => {
   const { secret: _secret, ...data } = value.raw;
@@ -451,7 +467,12 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
     const usageWindow = { from: s('from'), to: s('to'), signal };
     if (path === 'usage') checkUsageWindow(usageWindow.from, usageWindow.to);
     // Preparation and pure SDK validation happen before name resolution or any request.
-    const create = {
+    const bypass = bypassList(
+      many(path === 'computers create' ? 'browser-proxy-bypass' : 'bypass'),
+    );
+    if (path === 'computers create' && bypass !== undefined && s('browser-proxy') === undefined)
+      throw new CliError('invalid_arguments', '--browser-proxy-bypass requires --browser-proxy');
+    const create: P.CreateArgs = {
       name: s('name'),
       size: s('size'),
       template: s('template'),
@@ -461,6 +482,8 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
       diskGb: n('disk-gb'),
       resolution: s('resolution'),
       start: !b('no-start'),
+      browserProxy:
+        s('browser-proxy') === undefined ? undefined : { server: s('browser-proxy')!, bypass },
     };
     // Split and checked here; each is found by name or id only once the rest
     // of the create has passed, just before it is sent.
@@ -468,6 +491,10 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
       valueCheck: !b('no-value-check'),
     });
     if (path === 'computers create') P.createBody(create);
+    const proxy: P.UpdateArgs = {
+      browserProxy: path === 'computers browser-proxy set' ? { server: args[1]!, bypass } : null,
+    };
+    if (path === 'computers browser-proxy set') P.updateBody(proxy);
     const resize = { cpu: n('cpu'), ramMb: n('ram-mb'), diskGb: n('disk-gb') };
     if (path === 'computers resize') {
       if (resize.cpu === undefined && resize.ramMb === undefined && resize.diskGb === undefined)
@@ -647,6 +674,9 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
         return output.result(computerData(await (await computer()).rename(args[1]!, call)));
       case 'computers resize':
         return output.result(computerData(await (await computer()).update(resize, call)));
+      case 'computers browser-proxy set':
+      case 'computers browser-proxy clear':
+        return output.result(computerData(await (await computer()).update(proxy, call)));
       case 'computers view': {
         const c = await computer();
         const url = dashboardUrl(client.baseUrl, c.id);
@@ -732,7 +762,9 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
               ? await c.waitForGuest(wait)
               : s('until') === 'secrets'
                 ? await c.waitForSecrets(wait)
-                : await c.waitUntilRunning(wait);
+                : s('until') === 'browser-proxy'
+                  ? await c.waitForBrowserProxy(wait)
+                  : await c.waitUntilRunning(wait);
         return output.result(computerData(result));
       }
       case 'templates list': {

@@ -836,3 +836,213 @@ describe('waitForSecrets', () => {
     expect(rec.calls).toHaveLength(3);
   });
 });
+
+// --- browser proxy (OPL-5144) -----------------------------------------------
+
+const PROXY = { server: 'http://proxy.example.com:3128', bypass: ['<local>'] };
+const proxied = (pending: boolean | undefined, extra: Record<string, unknown> = {}) => ({
+  ...computer(),
+  browser_proxy: PROXY,
+  ...(pending === undefined ? {} : { browser_proxy_pending: pending }),
+  ...extra,
+});
+
+describe('waitForBrowserProxy', () => {
+  const handle = (respond: (n: number) => unknown) => {
+    let n = 0;
+    const rec = recorder(() => json(respond(++n)));
+    const client = new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: rec.fetch });
+    return { rec, get: () => client.computers.get('launch-42') };
+  };
+
+  it('polls until the guest has the setting', async () => {
+    const { rec, get } = handle((n) => proxied(n < 4 ? true : undefined));
+    const c = await get();
+    expect(c.browserProxyPending).toBe(true);
+    await expect(c.waitForBrowserProxy({ pollMs: 1 })).resolves.toBe(c);
+    expect(c.browserProxyPending).toBe(false);
+    expect(c.browserProxy).toEqual(PROXY);
+    expect(rec.calls).toHaveLength(4);
+  });
+
+  it('reads again before answering, even when the handle already says applied', async () => {
+    const { rec, get } = handle((n) => (n === 1 ? proxied(undefined) : proxied(true)));
+    const c = await get();
+    const error = await c.waitForBrowserProxy({ timeoutMs: 5, pollMs: 1 }).catch((e) => e);
+    expect(error).toBeInstanceOf(TimeoutError);
+    expect(error.message).toBe("launch-42's browser proxy was still being applied after 5ms");
+    expect(rec.calls.length).toBeGreaterThan(1);
+  });
+
+  it('waits out a removal whose files are still in the guest', async () => {
+    // No setting, and pending: the files of the one just removed are still
+    // there. That is not "nothing to wait for".
+    const { rec, get } = handle((n) =>
+      n < 3 ? { ...computer(), browser_proxy_pending: true } : computer(),
+    );
+    const c = await get();
+    await c.waitForBrowserProxy({ pollMs: 1 });
+    expect(c.browserProxy).toBeUndefined();
+    expect(rec.calls).toHaveLength(3);
+  });
+
+  it('answers at once for a computer with none', async () => {
+    const { rec, get } = handle(() => computer());
+    const c = await get();
+    await c.waitForBrowserProxy();
+    expect(rec.calls).toHaveLength(2);
+  });
+
+  it('refuses a stopped computer with no start under way, rather than waiting', async () => {
+    const { get } = handle(() => proxied(undefined, { status: 'stopped', running_ram_mb: 0 }));
+    const c = await get();
+    const started = Date.now();
+    const error = await c.waitForBrowserProxy({ timeoutMs: 60_000, pollMs: 1 }).catch((e) => e);
+    expect(error).toBeInstanceOf(MandalaError);
+    expect(error).not.toBeInstanceOf(TimeoutError);
+    expect(error.message).toBe(
+      'launch-42 is "stopped", and its browser proxy is applied only as it starts: call start()',
+    );
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
+  it('waits through a start that is admitted but not yet booted', async () => {
+    // Never pending while not running, so the false on a stopped read is not
+    // an answer; the admitted start is.
+    const { get } = handle((n) =>
+      n <= 2
+        ? proxied(undefined, { status: 'stopped', running_ram_mb: 1024 })
+        : n === 3
+          ? proxied(true)
+          : proxied(false),
+    );
+    const c = await get();
+    await c.waitForBrowserProxy({ pollMs: 1 });
+    expect(c.status).toBe('running');
+  });
+
+  it('names a create whose first start failed', async () => {
+    const rec = recorder((call) =>
+      call.method === 'POST'
+        ? json(
+            { ...proxied(undefined), status: 'stopped', start_error: 'no room' },
+            { status: 201 },
+          )
+        : json(proxied(undefined, { status: 'stopped', running_ram_mb: undefined })),
+    );
+    const client = new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: rec.fetch });
+    const c = await client.computers.create({ browserProxy: PROXY });
+    await expect(c.waitForBrowserProxy({ timeoutMs: 60_000, pollMs: 1 })).rejects.toThrow(
+      'launch-42 is stopped after it failed to start, so its browser proxy was not applied: ' +
+        'no room. Call start() to try again',
+    );
+  });
+
+  it('rides out a host that cannot be reached, and says so on a timeout', async () => {
+    let n = 0;
+    const rec = recorder(() => {
+      n++;
+      if (n === 2) return json({ error: 'host unreachable' }, { status: 503 });
+      return json(n === 1 ? proxied(true) : proxied(false));
+    });
+    const client = new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: rec.fetch });
+    const c = await client.computers.get('launch-42');
+    await c.waitForBrowserProxy({ pollMs: 1 });
+    expect(rec.calls).toHaveLength(3);
+
+    const down = recorder(() =>
+      down.calls.length === 1
+        ? json(proxied(true))
+        : json({ error: 'host unreachable' }, { status: 503 }),
+    );
+    const other = new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: down.fetch });
+    const d = await other.computers.get('launch-42');
+    const error = await d.waitForBrowserProxy({ timeoutMs: 20, pollMs: 1 }).catch((e) => e);
+    expect(error).toBeInstanceOf(TimeoutError);
+    expect(error.message).toBe(
+      'launch-42 could not be observed within 20ms, so whether its browsers have its proxy ' +
+        'is unknown',
+    );
+  });
+});
+
+describe('browserProxy on the computer', () => {
+  const read = async (body: Record<string, unknown>) => {
+    const rec = recorder(() => json(body));
+    const client = new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: rec.fetch });
+    return client.computers.get('launch-42');
+  };
+
+  it('reads the setting, and leaves out fields this client does not know', async () => {
+    const c = await read(proxied(true, { browser_proxy: { ...PROXY, later: 'field' } }));
+    expect(c.browserProxy).toEqual(PROXY);
+    expect(c.browserProxyPending).toBe(true);
+    const bare = await read(proxied(undefined, { browser_proxy: { server: PROXY.server } }));
+    expect(bare.browserProxy).toEqual({ server: PROXY.server });
+    expect(bare.browserProxyPending).toBe(false);
+  });
+
+  it('refuses a value it cannot read rather than dropping it', async () => {
+    // update() replaces the setting whole, so a bypass entry lost on the read
+    // is one a caller's next update would remove without knowing.
+    for (const value of [
+      'http://proxy:1',
+      { bypass: [] },
+      { server: '' },
+      { server: PROXY.server, bypass: 'a.com' },
+      { server: PROXY.server, bypass: ['a.com', 7] },
+    ]) {
+      const c = await read(proxied(undefined, { browser_proxy: value }));
+      expect(() => c.browserProxy).toThrow(MandalaError);
+    }
+    const c = await read(proxied(undefined, { browser_proxy_pending: 'yes' }));
+    expect(() => c.browserProxyPending).toThrow(/browser_proxy_pending to be a boolean/);
+  });
+
+  it('sends a change alone, and null to remove it', async () => {
+    const rec = recorder((call) =>
+      json(
+        call.method === 'PATCH' && (call.body as { browser_proxy?: unknown }).browser_proxy === null
+          ? computer()
+          : proxied(true),
+      ),
+    );
+    const client = new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: rec.fetch });
+    const c = await client.computers.get('launch-42');
+    await c.update({ browserProxy: PROXY });
+    expect(rec.calls[1]!.body).toEqual({ browser_proxy: PROXY });
+    expect(c.browserProxyPending).toBe(true);
+    await c.update({ browserProxy: null });
+    expect(rec.calls[2]!.body).toEqual({ browser_proxy: null });
+    expect(c.browserProxy).toBeUndefined();
+  });
+});
+
+describe('launch with a browser proxy', () => {
+  it('waits for the guest to have it before returning, sharing the budget', async () => {
+    const waited = vi.spyOn(Computer.prototype, 'waitForBrowserProxy');
+    let gets = 0;
+    const rec = recorder((call) => {
+      if (call.path.endsWith('/exec')) return json(guest);
+      if (call.method === 'POST') return json(proxied(true), { status: 201 });
+      gets++;
+      return json(proxied(gets < 3));
+    });
+    const client = new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: rec.fetch });
+    const c = await client.computers.launch({ browserProxy: PROXY }, { pollMs: 1 });
+    expect(c.browserProxyPending).toBe(false);
+    expect(rec.calls[0]!.body).toMatchObject({ start: true, browser_proxy: PROXY });
+    expect(waited).toHaveBeenCalledOnce();
+    expect(waited.mock.calls[0]![0]!.timeoutMs).toBeLessThanOrEqual(180_000);
+    expect(gets).toBe(3);
+  });
+
+  it('adds no request for a computer with none', async () => {
+    const waited = vi.spyOn(Computer.prototype, 'waitForBrowserProxy');
+    const rec = recorder((call) => json(call.path.endsWith('/exec') ? guest : computer()));
+    const client = new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: rec.fetch });
+    await client.computers.launch();
+    expect(waited).not.toHaveBeenCalled();
+    expect(rec.calls).toHaveLength(3);
+  });
+});

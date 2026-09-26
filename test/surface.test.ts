@@ -250,6 +250,11 @@ async function exerciseEverything(client: Client): Promise<void> {
       { secretId: 'csec-0123456789abcde0', file: 'kubeconfig' },
     ],
   });
+  // A browser proxy at create, with its bypass list (OPL-5144).
+  await client.computers.create({
+    template: 'base',
+    browserProxy: { server: 'http://proxy.example.com:3128', bypass: ['<local>'] },
+  });
   await client.computers.create({
     template: 'base',
     templateTransfer: 'prepare-token',
@@ -265,13 +270,14 @@ async function exerciseEverything(client: Client): Promise<void> {
   const scratch = await client.computers.ephemeral({ template: 'base' });
   await scratch[Symbol.asyncDispose]();
   await c.refresh();
-  // The four readiness waits, which poll routes the calls around them already
+  // The five readiness waits, which poll routes the calls around them already
   // reach: `GET computers/:id` for all but the guest, and a
   // `POST computers/:id/exec` probe for the guest.
   await c.waitUntilBuilt();
   await c.waitUntilRunning();
   await c.waitForGuest();
   await c.waitForSecrets();
+  await c.waitForBrowserProxy();
   await c.start();
   await c.start({ resumeOnly: true });
   await c.stop();
@@ -282,6 +288,8 @@ async function exerciseEverything(client: Client): Promise<void> {
   await c.rename('renamed');
   await c.update({ cpu: 4 });
   await c.update({ name: 'resized', ramMb: 8192, diskGb: 80, idleSuspendMin: 30 });
+  await c.update({ browserProxy: { server: 'socks5://127.0.0.1:1080' } });
+  await c.update({ browserProxy: null });
   // All three sizing fields in one call: the platform reads exactly these three
   // off a move body, and the parameter sweep is what proves the SDK sends them.
   // `move` on the class is the mouse pointer — see Computer.relocate.
