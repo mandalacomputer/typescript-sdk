@@ -40,11 +40,13 @@ so a place added after this list was written does not slip past it; from
 0.6.0, for example:
 
 ```sh
-git grep -nF 0.6.0 -- ':!CHANGELOG.md' ':!*lock*'
+git grep -nF 0.6.0 -- ':!CHANGELOG.md' ':!*lock*' ':!RELEASING.md'
 ```
 
-In typescript-sdk that search also finds `packaging/homebrew/mandala.rb`,
-which moves in step 5, not here.
+`':!RELEASING.md'` keeps this example out of its own results; python-sdk and
+mcp have no such file, so the exclusion changes nothing there. In
+typescript-sdk that search also finds `packaging/homebrew/mandala.rb`, which
+moves in step 5, not here.
 
 Run `npm install --package-lock-only` after the `package.json` bump so the
 lockfile's own version follows it.
