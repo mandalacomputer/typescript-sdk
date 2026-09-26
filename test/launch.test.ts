@@ -921,6 +921,43 @@ describe('waitForBrowserProxy', () => {
     expect(c.status).toBe('running');
   });
 
+  it('waits through an admitted start after a removal made while stopped', async () => {
+    // Cleared while stopped, then started: the old policy is still on the
+    // disk, and the platform reports that pending only once the machine runs.
+    // The admitted start is not "nothing to remove".
+    const { rec, get } = handle((n) =>
+      n <= 2
+        ? { ...computer(), status: 'stopped', running_ram_mb: 1024 }
+        : n === 3
+          ? { ...computer(), browser_proxy_pending: true }
+          : computer(),
+    );
+    const c = await get();
+    await c.waitForBrowserProxy({ pollMs: 1 });
+    expect(c.status).toBe('running');
+    expect(rec.calls).toHaveLength(4);
+  });
+
+  it('answers at once for a stopped computer with none and nothing admitted', async () => {
+    const { rec, get } = handle(() => ({ ...computer(), status: 'stopped', running_ram_mb: 0 }));
+    const c = await get();
+    await c.waitForBrowserProxy({ pollMs: 1 });
+    expect(rec.calls).toHaveLength(2);
+  });
+
+  it('with expectBrowserProxy, times out on reads that never report the setting', async () => {
+    const { get } = handle(() => computer());
+    const c = await get();
+    const error = await c
+      .waitForBrowserProxy({ timeoutMs: 5, pollMs: 1, expectBrowserProxy: true })
+      .catch((e) => e);
+    expect(error).toBeInstanceOf(TimeoutError);
+    expect(error.message).toBe(
+      'launch-42 was read for 5ms without reporting its browser proxy, so whether its ' +
+        'browsers have it is unknown',
+    );
+  });
+
   it('names a create whose first start failed', async () => {
     const rec = recorder((call) =>
       call.method === 'POST'
@@ -1020,20 +1057,45 @@ describe('browserProxy on the computer', () => {
 
 describe('launch with a browser proxy', () => {
   it('waits for the guest to have it before returning, sharing the budget', async () => {
+    let now = 0;
+    vi.spyOn(performance, 'now').mockImplementation(() => now);
     const waited = vi.spyOn(Computer.prototype, 'waitForBrowserProxy');
+    let gets = 0;
+    const rec = recorder((call) => {
+      if (call.path.endsWith('/exec')) {
+        // The guest wait spends 30ms of the 100ms budget.
+        now = 1_030;
+        return json(guest);
+      }
+      if (call.method === 'POST') {
+        now = 1_000;
+        return json(proxied(true), { status: 201 });
+      }
+      gets++;
+      return json(proxied(gets < 3));
+    });
+    const client = new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: rec.fetch });
+    const c = await client.computers.launch({ browserProxy: PROXY }, { timeoutMs: 100, pollMs: 1 });
+    expect(c.browserProxyPending).toBe(false);
+    expect(rec.calls[0]!.body).toMatchObject({ start: true, browser_proxy: PROXY });
+    expect(waited).toHaveBeenCalledOnce();
+    expect(waited.mock.calls[0]![0]).toMatchObject({ timeoutMs: 70, expectBrowserProxy: true });
+    expect(gets).toBe(3);
+  });
+
+  it('waits past a read that leaves the setting out, since the create carried one', async () => {
+    // A running read with no browser_proxy is "none" to a caller who does not
+    // know better; launch does, so it waits for a read that says.
     let gets = 0;
     const rec = recorder((call) => {
       if (call.path.endsWith('/exec')) return json(guest);
       if (call.method === 'POST') return json(proxied(true), { status: 201 });
       gets++;
-      return json(proxied(gets < 3));
+      return json(gets < 3 ? computer() : proxied(false));
     });
     const client = new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: rec.fetch });
     const c = await client.computers.launch({ browserProxy: PROXY }, { pollMs: 1 });
-    expect(c.browserProxyPending).toBe(false);
-    expect(rec.calls[0]!.body).toMatchObject({ start: true, browser_proxy: PROXY });
-    expect(waited).toHaveBeenCalledOnce();
-    expect(waited.mock.calls[0]![0]!.timeoutMs).toBeLessThanOrEqual(180_000);
+    expect(c.browserProxy).toEqual(PROXY);
     expect(gets).toBe(3);
   });
 

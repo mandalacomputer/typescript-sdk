@@ -138,18 +138,24 @@ export async function resolveComputer(
 const computerData = (computer: Computer) => computer.toJSON();
 
 /**
- * A bypass list as typed: each value comma-separated, repeatable, blanks
- * dropped, so `--bypass a.com,b.com` and `--bypass a.com --bypass b.com` say
- * the same thing. `undefined` when none was given, so the setting is sent
- * without one. Nothing else is checked here: which entries are valid is the
- * platform's rule, and its refusal names the entry.
+ * A bypass list as typed: each value comma-separated and repeatable, so
+ * `--bypass a.com,b.com` and `--bypass a.com --bypass b.com` say the same
+ * thing. `undefined` when none was given, so the setting is sent without one.
+ * An empty entry is refused, as the SDK refuses one: `--bypass ''` would
+ * otherwise send an empty list and look like it had said something. Nothing
+ * else is checked here: which entries are valid is the platform's rule, and its
+ * refusal names the entry.
  */
-function bypassList(values: string[] | undefined): string[] | undefined {
+function bypassList(values: string[] | undefined, flagName: string): string[] | undefined {
   if (values === undefined) return undefined;
-  return values
-    .flatMap((v) => v.split(','))
-    .map((v) => v.trim())
-    .filter(Boolean);
+  const entries = values.flatMap((v) => v.split(',')).map((v) => v.trim());
+  if (entries.some((v) => !v)) {
+    throw new CliError(
+      'invalid_arguments',
+      `--${flagName} has an empty entry; name each host, comma-separated`,
+    );
+  }
+  return entries;
 }
 
 const raw = (value: { raw: Record<string, unknown> }) => value.raw;
@@ -467,9 +473,13 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
     const usageWindow = { from: s('from'), to: s('to'), signal };
     if (path === 'usage') checkUsageWindow(usageWindow.from, usageWindow.to);
     // Preparation and pure SDK validation happen before name resolution or any request.
-    const bypass = bypassList(
-      many(path === 'computers create' ? 'browser-proxy-bypass' : 'bypass'),
-    );
+    const bypassFlag =
+      path === 'computers create'
+        ? 'browser-proxy-bypass'
+        : path === 'computers browser-proxy set'
+          ? 'bypass'
+          : undefined;
+    const bypass = bypassFlag && bypassList(many(bypassFlag), bypassFlag);
     if (path === 'computers create' && bypass !== undefined && s('browser-proxy') === undefined)
       throw new CliError('invalid_arguments', '--browser-proxy-bypass requires --browser-proxy');
     const create: P.CreateArgs = {
@@ -491,10 +501,13 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
       valueCheck: !b('no-value-check'),
     });
     if (path === 'computers create') P.createBody(create);
-    const proxy: P.UpdateArgs = {
-      browserProxy: path === 'computers browser-proxy set' ? { server: args[1]!, bypass } : null,
-    };
-    if (path === 'computers browser-proxy set') P.updateBody(proxy);
+    const proxy: P.UpdateArgs | undefined =
+      path === 'computers browser-proxy set'
+        ? { browserProxy: { server: args[1]!, bypass } }
+        : path === 'computers browser-proxy clear'
+          ? { browserProxy: null }
+          : undefined;
+    if (proxy) P.updateBody(proxy);
     const resize = { cpu: n('cpu'), ramMb: n('ram-mb'), diskGb: n('disk-gb') };
     if (path === 'computers resize') {
       if (resize.cpu === undefined && resize.ramMb === undefined && resize.diskGb === undefined)
@@ -676,7 +689,7 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
         return output.result(computerData(await (await computer()).update(resize, call)));
       case 'computers browser-proxy set':
       case 'computers browser-proxy clear':
-        return output.result(computerData(await (await computer()).update(proxy, call)));
+        return output.result(computerData(await (await computer()).update(proxy!, call)));
       case 'computers view': {
         const c = await computer();
         const url = dashboardUrl(client.baseUrl, c.id);

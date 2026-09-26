@@ -3037,6 +3037,12 @@ describe('files, rename, resize, view, and secrets bound at create', () => {
     [['computers', 'browser-proxy', 'set', 'vm']],
     [['computers', 'browser-proxy', 'set', 'vm', ' ']],
     [['computers', 'browser-proxy', 'clear']],
+    // A bypass of blanks is refused as the SDK refuses a blank entry, rather
+    // than sent as an empty list.
+    [['computers', 'browser-proxy', 'set', 'vm', 'http://p:1', '--bypass', '']],
+    [['computers', 'browser-proxy', 'set', 'vm', 'http://p:1', '--bypass', ',']],
+    [['computers', 'browser-proxy', 'set', 'vm', 'http://p:1', '--bypass', 'a.com,']],
+    [['computers', 'create', '--browser-proxy', 'http://p:1', '--browser-proxy-bypass', ' ']],
   ])('%j makes no requests', async (argv) => {
     const h = harness();
     const result = await h.run(argv);

@@ -349,9 +349,16 @@ export class Computers {
         });
       }
       // The same gap for a browser proxy: the guest answers before the policy
-      // is on disk, and a browser opened in between goes out directly.
+      // is on disk, and a browser opened in between goes out directly. Told
+      // one is set, as the secrets wait is, so a read that leaves the setting
+      // out is not taken for "none" and returned on.
       if (args.browserProxy !== undefined || computer.browserProxy !== undefined) {
-        await computer.waitForBrowserProxy({ timeoutMs: remaining(), pollMs, signal });
+        await computer.waitForBrowserProxy({
+          timeoutMs: remaining(),
+          pollMs,
+          signal,
+          expectBrowserProxy: true,
+        });
       }
       signal?.throwIfAborted();
       return computer;
