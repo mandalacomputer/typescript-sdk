@@ -687,6 +687,8 @@ export function parseArgs(argv: string[]): Parsed {
   let positional = false;
   // The option read just before this word, for a flag that must follow it.
   let previous: Flag | undefined;
+  // The first --as or --path that did not directly follow its own flag.
+  let stray: CliError | undefined;
   // The first value a global option took that would also have extended the
   // command read so far, for judging an unknown option after it (meantPath).
   let taken: Taken | undefined;
@@ -759,9 +761,14 @@ export function parseArgs(argv: string[]): Parsed {
       if (spec.follows) {
         // Refused rather than attached to some earlier one: which binding a
         // stray --as meant is a guess, and the value is never repeated here.
+        // The refusal waits for the end of argv, so that --help anywhere in
+        // it still prints help rather than this error.
         const leads = parsed.paired[spec.follows];
-        if (previous?.name !== spec.follows || !leads)
-          throw usageError(parsed.command, followError(spec, previous, parsed.command));
+        if (previous?.name !== spec.follows || !leads) {
+          stray ??= usageError(parsed.command, followError(spec, previous, parsed.command));
+          previous = spec;
+          continue;
+        }
         leads[leads.length - 1] = value as string;
       } else if (parsed.command?.flags.some((f) => f.follows === spec.name)) {
         parsed.paired[spec.name] ??= [];
@@ -797,6 +804,7 @@ export function parseArgs(argv: string[]): Parsed {
     } else parsed.args.push(arg);
   }
   if (parsed.help || !argv.length) return parsed;
+  if (stray) throw stray;
   const c = parsed.command;
   if (!c)
     throw new CliError(

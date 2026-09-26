@@ -2969,6 +2969,24 @@ describe('files, rename, resize, view, and secrets bound at create', () => {
     }
   });
 
+  it('prints help for --help beside a stray --as or --path, before it or after', async () => {
+    const stray = 'stray-target-do-not-print';
+    for (const argv of [
+      ['--help', '--as', stray],
+      ['--as', stray, '--help'],
+      ['--secret-file', 'gh-token', '--as', stray, '--help'],
+      ['--path', stray, '--secret-file', 'gh-token', '--help'],
+    ]) {
+      const h = harness(store());
+      const result = await h.run(['computers', 'create', ...argv], false);
+      expect(result.code, argv.join(' ')).toBe(0);
+      expect(result.out, argv.join(' ')).toContain('mandala computers create');
+      expect(result.out + result.err, argv.join(' ')).not.toContain(stray);
+      expect(result.err, argv.join(' ')).not.toContain('--as');
+      expect(h.rec.calls).toEqual([]);
+    }
+  });
+
   it('warns once on stderr that SECRET=VAR is deprecated, without the target, and still binds', async () => {
     for (const jsonMode of [true, false]) {
       const h = harness(store());

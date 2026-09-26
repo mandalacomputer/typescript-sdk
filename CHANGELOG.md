@@ -20,7 +20,8 @@ name.
   --path FILE`** name a binding's variable or file with a flag of its own, so
   nothing typed there can be taken for the secret's value. Each `--as` or
   `--path` must come directly after its `--secret` or `--secret-file`; a stray
-  one is refused without being quoted. A name given this way is not put
+  one is refused without being quoted, unless `--help` is also given, which
+  prints help. A name given this way is not put
   through the value-shape check and prints as it is. The manifest marks both
   with `follows`, and the completions offer them.
 - **A proxy for a computer's browsers:** `browserProxy: { server, bypass? }` on

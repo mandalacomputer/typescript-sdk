@@ -2840,9 +2840,10 @@ creating and waiting in one call.
 
 `--secret SECRET` binds a secret from the store (`mandala secrets set`) as an
 environment variable in the computer's desktop session, and `--secret-file
-SECRET` as the file `/run/mandala-secrets/user/files/FILE`. `SECRET` is a name
-or an id in the default scope. The variable or file is the secret's own name,
-or the one `--as VAR` or `--path FILE` gives directly after it:
+SECRET` as a file under `/run/mandala-secrets/user/files/`. `SECRET` is a name
+or an id in the default scope. The variable's name, or the file's name in that
+directory, is the secret's own name, or the one `--as VAR` or `--path FILE`
+gives directly after it:
 `--secret OPENAI --as OPENAI_API_KEY --secret-file GH_TOKEN --path gh`. Each
 `--as` goes right after its `--secret` and each `--path` right after its
 `--secret-file`; one anywhere else (first, after the other kind, twice for one
