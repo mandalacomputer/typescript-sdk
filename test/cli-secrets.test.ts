@@ -157,7 +157,8 @@ describe('looksLikeSecretValue', () => {
   it('catches a known prefix ahead of random letters and no digits, from twelve on', () => {
     // Issued tokens nearly always hold a digit, but a random letter body is
     // still one: split at its capitals it is mostly pairs and lone capitals,
-    // which no run of camel-case words is.
+    // which no run of camel-case words is. Twelve letters sit about a tenth of
+    // a point above the bar, so the sample is large enough to see that.
     const next = seeded(5128);
     const LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
     for (const [prefix, n] of [
@@ -172,9 +173,9 @@ describe('looksLikeSecretValue', () => {
       ['glpat-', 20],
     ] as const) {
       let hit = 0;
-      for (let i = 0; i < 1000; i++)
+      for (let i = 0; i < 10_000; i++)
         if (looksLikeSecretValue(tok(prefix, random(next, LETTERS, n)))) hit++;
-      expect(hit / 1000, `${prefix} + ${n} letters`).toBeGreaterThanOrEqual(0.99);
+      expect(hit / 10_000, `${prefix} + ${n} letters`).toBeGreaterThanOrEqual(0.99);
     }
   });
 
@@ -207,6 +208,82 @@ describe('looksLikeSecretValue', () => {
     ];
     for (const prefix of ['hf_', 'sk_test_', 'ghp_', 'npm_'])
       for (const w of words) expect(looksLikeSecretValue(tok(prefix, w)), prefix + w).toBe(false);
+  });
+
+  it('passes names the spelling rules alone would refuse', () => {
+    // Collected in review, not picked to fit: every one was refused by a
+    // version that held each segment to English spelling with no give.
+    const words = [
+      // Vowelless abbreviations, title-cased.
+      'SslCertPassword',
+      'NpmPublishToken',
+      'GcpServiceKey',
+      'GrpcAuthToken',
+      'CdnPurgeToken',
+      'KmsKeyForBackups',
+      'VpnSharedSecret',
+      'PgpPrivateKeyArmored',
+      'RdsMasterPassword',
+      'StsAssumeRoleSecret',
+      'McpServerToken',
+      // Names joined from words, meeting at a pair no single word holds.
+      'KafkaConsumerSecret',
+      'LangchainApiKeyProd',
+      'myHuggingfaceToken',
+      'BlockchainNodeKey',
+      'WebflowApiToken',
+      'BuildkiteAgentToken',
+      'FirmwareSigningKey',
+      'MemcachedAuthSecret',
+      'DeepgramApiKeyProd',
+      'InfluxdbWriteToken',
+      'ZipkinCollectorToken',
+      'HetznerCloudToken',
+      'NextjsPreviewSecret',
+      'EcdsaSigningKey',
+      'strengthLengthWidth',
+      'LlamaApiKey',
+      // Spelled against English, and listed.
+      'nginxConfigSecret',
+      'EtcdClientCert',
+      'JfrogArtifactToken',
+      'GroqApiKeyForBot',
+      'RabbitmqAdminPassword',
+      // A q ahead of an l.
+      'MysqlReplicaPassword',
+      'PostgresqlAdminPassword',
+      'SqliteEncryptionKey',
+      'GraphqlGatewaySecret',
+      'BigqueryServiceAccount',
+      // Two-letter abbreviations.
+      'CiCdDeployToken',
+      'PgBouncerPassword',
+      'TfCloudApiToken',
+      'PyPackageIndexToken',
+      'GhActionsDeployKey',
+      'TsNodeSigningKey',
+      // A lone lowercase vowel opening the name.
+      'iPhoneBackupKey',
+      'iOSSigningCertificate',
+      'eSignatureToken',
+      'aTokenForMyApp',
+    ];
+    for (const prefix of ['hf_', 'sk-', 'sk_test_', 'npm_'])
+      for (const w of words) expect(looksLikeSecretValue(tok(prefix, w)), prefix + w).toBe(false);
+  });
+
+  it('refuses the names it is known to, so a change to the rules shows here', () => {
+    // A lone consonant capital inside the run: random bodies are full of
+    // them, so no name holding one gets through. Its way through is --as.
+    expect(looksLikeSecretValue(tok('hf_', 'WalGEncryptionKey'))).toBe(true);
+    // A capital and an s is a two-letter segment, held to the short-word
+    // list like any other, not an acronym's plural (`JWTs` above is one).
+    expect(looksLikeSecretValue(tok('hf_', 'QsPublishingToken'))).toBe(true);
+    // A two-letter segment outside the list, and a vowelless one.
+    expect(looksLikeSecretValue(tok('hf_', 'ZqPublishingToken'))).toBe(true);
+    expect(looksLikeSecretValue(tok('hf_', 'PublishingXzvToken'))).toBe(true);
+    // Two pairs no English word holds, in one segment.
+    expect(looksLikeSecretValue(tok('hf_', 'PublishingTokenXavkzq'))).toBe(true);
   });
 
   it('never flags something short, whatever it is', () => {
