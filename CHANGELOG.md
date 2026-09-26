@@ -112,8 +112,9 @@ name.
   which is refused as above. A restart delivers bound secrets again and reads
   `running` before they land. Called after `restart()`, it waits for them on a
   platform that reports that redelivery as `secrets_delivering`; on one that
-  does not, `secrets_delivering` reads false throughout and the wait returns at
-  once. The CLI's `computers wait --until secrets` runs it.
+  does not, `secrets_delivering` may read false (or be absent on an older
+  platform) before the values land, and the wait can return before they do.
+  The CLI's `computers wait --until secrets` runs it.
 
 ### Changed
 
