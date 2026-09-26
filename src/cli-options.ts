@@ -505,6 +505,11 @@ function unknownOption(spelling: string, path: string): string {
   return 'unknown option: an argument starts with "-" but is not an option name; put -- before a value that starts with one';
 }
 
+/** Whether `word` is the first word of some command. */
+function startsCommand(word: string): boolean {
+  return COMMANDS.some((c) => c.path === word || c.path.startsWith(`${word} `));
+}
+
 /**
  * The command an option typed before its verb was meant for: `path`, the
  * words read so far, extended by the words from `from` on. Options are passed
@@ -515,8 +520,15 @@ function unknownOption(spelling: string, path: string): string {
  * meant. It stops at the first full command, so `mandala --sk-live-0123 help
  * secrets list` is judged as typed under `secrets list`; with none it returns
  * the group reached, `secrets` for `mandala secrets --sk-live-0123`.
+ *
+ * A global option's value that is a word a command starts with is read both
+ * ways, as its value and as that command, and a reading under `secrets` wins:
+ * `mandala --sk-live-0123 --profile secrets set A` left the value out and
+ * meant `secrets set`, while `--profile computers secrets set A` names a
+ * profile. Only the first such value is read both ways, so a line repeating
+ * one costs two walks and not one per repeat.
  */
-function pathAhead(argv: string[], from: number, path: string): string {
+function pathAhead(argv: string[], from: number, path: string, fork = true): string {
   let positional = false;
   for (let i = from; i < argv.length; i++) {
     const word = argv[i]!;
@@ -526,7 +538,13 @@ function pathAhead(argv: string[], from: number, path: string): string {
     }
     if (!positional && word.startsWith('-') && word !== '-') {
       const spec = GLOBAL_FLAGS.find((f) => word === `--${f.name}` || word === `-${f.alias}`);
-      if (spec && spec.type !== 'boolean') i++;
+      if (!spec || spec.type === 'boolean') continue;
+      const value = argv[i + 1];
+      if (fork && value !== undefined && startsCommand(value)) {
+        const asCommand = pathAhead(argv, i + 1, path, false);
+        return quotesInput(asCommand) ? pathAhead(argv, i + 2, path, false) : asCommand;
+      }
+      i++;
       continue;
     }
     if (!path && word === 'help') continue;

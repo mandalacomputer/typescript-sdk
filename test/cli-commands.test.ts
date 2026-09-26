@@ -2304,11 +2304,22 @@ describe('one JSON casing and one error vocabulary (OPL-5048)', () => {
       [`--${secret}`, '--', 'secrets'],
       ['secrets', `--${secret}`],
       [`--${secret}`, 'secrets', 'ls'],
+      // --profile with its value left out: secrets is read as the command.
+      [`--${secret}`, '--profile', 'secrets', 'set', 'A'],
+      [`--${secret}`, '--profile', 'secrets'],
+      // A profile named like a command is still read as one.
+      [`--${secret}`, '--profile', 'computers', 'secrets', 'set', 'A'],
     ])
       for (const jsonMode of [true, false]) {
+        // --json goes first: after -- it would be one more operand.
         const h = harness();
-        const result = await h.run(argv, jsonMode);
+        const result = await h.run(jsonMode ? ['--json', ...argv] : argv, false);
         expect(result.code).toBe(1);
+        if (jsonMode) {
+          const error = JSON.parse(result.out).error;
+          expect(error.code).toBe('invalid_arguments');
+          expect(error.message).toBe(setHint);
+        }
         expect(result.out + result.err).not.toContain(secret);
         expect(result.out + result.err).toContain(setHint);
         expect(h.rec.calls).toEqual([]);
@@ -2323,6 +2334,7 @@ describe('one JSON casing and one error vocabulary (OPL-5048)', () => {
       ['--profile', 'p', `--${secret}`, 'secrets', 'rm', 'A'],
       [`--${secret}`, 'help', 'secrets', 'list'],
       [`--${secret}`, '--', 'secrets', 'rm', 'A'],
+      [`--${secret}`, '--profile', 'secrets', 'list'],
     ]) {
       // --json goes first: after -- it would be one more operand.
       const result = await harness().run(['--json', ...argv], false);
@@ -2349,6 +2361,7 @@ describe('one JSON casing and one error vocabulary (OPL-5048)', () => {
       ['--jsno', 'help', 'computers', 'list'],
       ['--jsno', '--', 'computers', 'list'],
       ['--jsno', 'computers'],
+      ['--jsno', '--profile', 'computers', 'list'],
     ]) {
       const early = await harness().run(['--json', ...argv], false);
       expect(JSON.parse(early.out).error.message).toBe('unknown option --jsno');
