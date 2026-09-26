@@ -680,6 +680,121 @@ describe('waitForSecrets', () => {
     expect(c.status).toBe('running');
   });
 
+  it('refuses a stopped computer with nothing admitted even when the bindings are left out', async () => {
+    // expectSecrets waits past a read that omits the bindings, but not one
+    // that says outright nothing is starting: that is an answer whatever is
+    // bound. The long timeout is the test.
+    const { secrets: _left, ...unreported } = { ...bound(false), status: 'stopped' };
+    const { get } = handle(() => ({ ...unreported, running_ram_mb: 0 }));
+    const c = await get();
+    const started = Date.now();
+    const error = await c
+      .waitForSecrets({ timeoutMs: 60_000, pollMs: 1, expectSecrets: true })
+      .catch((e) => e);
+    expect(error).toBeInstanceOf(MandalaError);
+    expect(error).not.toBeInstanceOf(TimeoutError);
+    expect(error.message).toBe(
+      'launch-42 is "stopped", and secrets are delivered only as it starts: call start()',
+    );
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
+  it('still waits past omitted bindings when the host does not say whether a start is admitted', async () => {
+    const {
+      secrets: _left,
+      running_ram_mb: _held,
+      ...silent
+    } = {
+      ...bound(false),
+      status: 'stopped',
+    };
+    const { get } = handle(() => silent);
+    const c = await get();
+    const error = await c
+      .waitForSecrets({ timeoutMs: 20, pollMs: 1, expectSecrets: true })
+      .catch((e) => e);
+    expect(error).toBeInstanceOf(TimeoutError);
+    expect(error.message).toContain('without reporting its bindings');
+  });
+
+  describe("a create's failed start", () => {
+    // The create's answer is the one response carrying start_error, and it
+    // does not report the pool; every read after it has neither.
+    const created = (reads: (n: number) => unknown) => {
+      let gets = 0;
+      const rec = recorder((call) => {
+        if (call.method === 'POST') {
+          const { running_ram_mb: _held, ...stopped } = { ...bound(false), status: 'stopped' };
+          return json({ computer: stopped, start_error: 'no host had room' }, { status: 201 });
+        }
+        return json(reads(++gets));
+      });
+      const client = new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: rec.fetch });
+      return client.computers.create({ secrets: [{ secretId: BINDING.secret_id, env: 'TOKEN' }] });
+    };
+    const silentStopped = (extra: Record<string, unknown> = {}) => {
+      const { running_ram_mb: _held, ...stopped } = { ...bound(false), status: 'stopped' };
+      return { ...stopped, ...extra };
+    };
+
+    it('is refused with its reason rather than waited on to the timeout', async () => {
+      const c = await created(() => silentStopped());
+      expect(c.startError).toBe('no host had room');
+      const started = Date.now();
+      const error = await c.waitForSecrets({ timeoutMs: 60_000, pollMs: 1 }).catch((e) => e);
+      expect(error).toBeInstanceOf(MandalaError);
+      expect(error).not.toBeInstanceOf(TimeoutError);
+      expect(error.message).toBe(
+        'launch-42 is stopped after it failed to start, so its secrets were not delivered: ' +
+          'no host had room. Call start() to try again',
+      );
+      expect(Date.now() - started).toBeLessThan(1_000);
+    });
+
+    it('is refused when the reads leave the bindings out too', async () => {
+      const { secrets: _left, ...unreported } = silentStopped();
+      const c = await created(() => unreported);
+      const error = await c
+        .waitForSecrets({ timeoutMs: 60_000, pollMs: 1, expectSecrets: true })
+        .catch((e) => e);
+      expect(error).not.toBeInstanceOf(TimeoutError);
+      expect(error.message).toContain('no host had room');
+    });
+
+    it('is retired by a start somebody made since', async () => {
+      // A reservation, then a read that does not report the pool: the old
+      // failure belongs to an earlier attempt and must not refuse this one.
+      const c = await created((n) => {
+        if (n === 1) return silentStopped({ running_ram_mb: 1024 });
+        if (n === 2) return silentStopped();
+        return bound(false);
+      });
+      await expect(c.waitForSecrets({ timeoutMs: 60_000, pollMs: 1 })).resolves.toBe(c);
+      expect(c.status).toBe('running');
+    });
+  });
+
+  it('waits after restart() until the redelivered secrets are applied', async () => {
+    // A restart comes back running before its secrets are delivered again;
+    // secrets_delivering reads true until they are.
+    let gets = 0;
+    const rec = recorder((call) => {
+      if (call.path.endsWith('/restart')) return json(bound(true));
+      gets++;
+      if (gets === 1) return json(bound(false, { secrets_applied: RECEIPT }));
+      return json(gets < 5 ? bound(true) : bound(false, { secrets_applied: RECEIPT }));
+    });
+    const client = new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: rec.fetch });
+    const c = await client.computers.get('launch-42');
+    await c.restart();
+    await c.waitForSecrets({ pollMs: 1 });
+    expect(gets).toBe(5);
+    expect(c.secretsDelivering).toBe(false);
+    expect(rec.routes().filter(([m]) => m === 'POST')).toEqual([
+      ['POST', 'computers/launch-42/restart'],
+    ]);
+  });
+
   it('reads the receipt on a platform that predates secrets_delivering', async () => {
     const { rec, get } = handle((n) =>
       n <= 2 ? bound(undefined) : bound(undefined, { secrets_applied: RECEIPT }),
