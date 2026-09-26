@@ -795,6 +795,24 @@ describe('waitForSecrets', () => {
     ]);
   });
 
+  it('returns at once after restart() on a platform that does not report the redelivery', async () => {
+    // What restart()'s documentation says of such a platform: delivering
+    // reads false from the restart's own answer, with the old receipt still
+    // current, so the wait has nothing to wait on and must not invent it.
+    let gets = 0;
+    const rec = recorder((call) => {
+      if (call.path.endsWith('/restart')) return json(bound(false, { secrets_applied: RECEIPT }));
+      gets++;
+      return json(bound(false, { secrets_applied: RECEIPT }));
+    });
+    const client = new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: rec.fetch });
+    const c = await client.computers.get('launch-42');
+    await c.restart();
+    expect(c.secretsDelivering).toBe(false);
+    await c.waitForSecrets({ timeoutMs: 60_000, pollMs: 1 });
+    expect(gets).toBe(2);
+  });
+
   it('reads the receipt on a platform that predates secrets_delivering', async () => {
     const { rec, get } = handle((n) =>
       n <= 2 ? bound(undefined) : bound(undefined, { secrets_applied: RECEIPT }),

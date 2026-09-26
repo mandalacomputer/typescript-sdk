@@ -1359,9 +1359,12 @@ export class Computer {
    *
    * A computer with secrets bound has them delivered again as it comes back,
    * and reads `running` a few seconds before they land: a command run in
-   * between sees them unset. {@link secretsDelivering} is true until they are
-   * applied, so a caller whose commands need their secrets calls
-   * {@link waitForSecrets} after this.
+   * between sees them unset. {@link waitForSecrets} after this waits for them
+   * on a platform that reports that redelivery, as {@link secretsDelivering}
+   * true until they are applied. On one that does not, `secretsDelivering`
+   * reads false from the moment the restart answers and the wait returns at
+   * once, so a command that must not run without its secrets checks for them
+   * itself.
    */
   async restart(opts: CallOptions = {}): Promise<this> {
     return this.#power('restart', opts);

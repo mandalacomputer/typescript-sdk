@@ -71,8 +71,10 @@ name.
   read that leaves the bindings out is waited past rather than taken for
   "nothing bound" — unless that read says outright that nothing is starting,
   which is refused as above. A restart delivers bound secrets again and reads
-  `running` before they land, so call it after `restart()` too. The CLI's
-  `computers wait --until secrets` runs it.
+  `running` before they land. Called after `restart()`, it waits for them on a
+  platform that reports that redelivery as `secrets_delivering`; on one that
+  does not, `secrets_delivering` reads false throughout and the wait returns at
+  once. The CLI's `computers wait --until secrets` runs it.
 
 ### Changed
 
