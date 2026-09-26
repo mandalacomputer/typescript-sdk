@@ -1401,9 +1401,12 @@ export class Computer {
    * between sees them unset. {@link waitForSecrets} after this waits for them
    * on a platform that reports that redelivery, as {@link secretsDelivering}
    * true until they are applied. On one that does not, `secretsDelivering`
-   * reads false from the moment the restart answers and the wait returns at
-   * once, so a command that must not run without its secrets checks for them
-   * itself.
+   * may read false before they land, and the wait returns as soon as it does.
+   * On a platform that predates the field it is `undefined`, and the wait
+   * instead compares the receipt's generation ({@link secretsApplied}) with
+   * {@link secretsGeneration}, returning once the receipt has caught up.
+   * Either way the wait can return before the values land, so a command that
+   * must not run without its secrets checks for them itself.
    */
   async restart(opts: CallOptions = {}): Promise<this> {
     return this.#power('restart', opts);
