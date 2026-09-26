@@ -506,19 +506,35 @@ function unknownOption(spelling: string, path: string): string {
 }
 
 /**
- * The command group the words from `from` on name, for an option typed before
- * any: the first word that is neither an option nor a global option's value.
- * So `mandala --sk-live-0123 secrets set` is judged as typed under secrets.
+ * The command an option typed before its verb was meant for: `path`, the
+ * words read so far, extended by the words from `from` on. Options are passed
+ * over, with the value of a global one that takes one (no other is declared
+ * before a verb), and so are `--` and a leading `help`. A word that extends
+ * `path` to no command is passed over too, as most likely a value: it could
+ * only fail as an unknown command, and a verb past it still says what was
+ * meant. It stops at the first full command, so `mandala --sk-live-0123 help
+ * secrets list` is judged as typed under `secrets list`; with none it returns
+ * the group reached, `secrets` for `mandala secrets --sk-live-0123`.
  */
-function groupAhead(argv: string[], from: number): string {
+function pathAhead(argv: string[], from: number, path: string): string {
+  let positional = false;
   for (let i = from; i < argv.length; i++) {
     const word = argv[i]!;
-    if (word === '--') return '';
-    if (!word.startsWith('-')) return word;
-    const spec = GLOBAL_FLAGS.find((f) => word === `--${f.name}`);
-    if (spec && spec.type !== 'boolean') i++;
+    if (!positional && word === '--') {
+      positional = true;
+      continue;
+    }
+    if (!positional && word.startsWith('-') && word !== '-') {
+      const spec = GLOBAL_FLAGS.find((f) => word === `--${f.name}` || word === `-${f.alias}`);
+      if (spec && spec.type !== 'boolean') i++;
+      continue;
+    }
+    if (!path && word === 'help') continue;
+    const next = [path, word].filter(Boolean).join(' ');
+    if (COMMANDS.some((c) => c.path === next)) return next;
+    if (COMMANDS.some((c) => c.path.startsWith(`${next} `))) path = next;
   }
-  return '';
+  return path;
 }
 
 export function parseArgs(argv: string[]): Parsed {
@@ -553,7 +569,10 @@ export function parseArgs(argv: string[]): Parsed {
       if (!spec)
         throw usageError(
           parsed.command,
-          unknownOption(spelling!, parsed.path || groupAhead(argv, i + 1)),
+          unknownOption(
+            spelling!,
+            parsed.command ? parsed.path : pathAhead(argv, i + 1, parsed.path),
+          ),
         );
       if (parsed.flags[spec.name] !== undefined && !spec.repeatable)
         throw new CliError('invalid_arguments', `--${spec.name} may only be supplied once`);
