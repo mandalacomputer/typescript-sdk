@@ -64,10 +64,17 @@ name.
   land. The wait polls until the platform's `secrets_delivering` is false (or,
   on a platform that predates it, until the receipt names the latest delivering
   start), and throws instead of waiting out its timeout for a delivery that
-  failed or a stopped computer the platform says has no start admitted; a host
-  that does not say is waited on. `expectSecrets: true` tells it secrets are
-  bound, so a read that leaves the bindings out is waited past rather than
-  taken for "nothing bound". The CLI's `computers wait --until secrets` runs it.
+  failed, a stopped computer the platform says has no start admitted, or a
+  create's computer whose first start failed (`startError`, kept past the
+  refresh that clears it, as `waitUntilRunning` keeps it); a host that does
+  not say is waited on. `expectSecrets: true` tells it secrets are bound, so a
+  read that leaves the bindings out is waited past rather than taken for
+  "nothing bound" — unless that read says outright that nothing is starting,
+  which is refused as above. A restart delivers bound secrets again and reads
+  `running` before they land. Called after `restart()`, it waits for them on a
+  platform that reports that redelivery as `secrets_delivering`; on one that
+  does not, `secrets_delivering` reads false throughout and the wait returns at
+  once. The CLI's `computers wait --until secrets` runs it.
 
 ### Changed
 

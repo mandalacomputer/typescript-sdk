@@ -1356,6 +1356,15 @@ export class Computer {
    * away. Start it or stop it first.
    *
    * Desktop credentials do not survive this — see {@link vnc}.
+   *
+   * A computer with secrets bound has them delivered again as it comes back,
+   * and reads `running` a few seconds before they land: a command run in
+   * between sees them unset. {@link waitForSecrets} after this waits for them
+   * on a platform that reports that redelivery, as {@link secretsDelivering}
+   * true until they are applied. On one that does not, `secretsDelivering`
+   * reads false from the moment the restart answers and the wait returns at
+   * once, so a command that must not run without its secrets checks for them
+   * itself.
    */
   async restart(opts: CallOptions = {}): Promise<this> {
     return this.#power('restart', opts);
@@ -2446,10 +2455,11 @@ export class Computer {
    *
    * Throws rather than waiting out the timeout when no delivery is coming: a
    * delivery that failed (the host stops the computer, and the error carries
-   * {@link secretsError}), and a computer that is stopped or suspended while
-   * the platform says it has admitted no start — `start()` is what delivers
-   * its secrets. A host that does not say whether a start is under way is
-   * waited on, not refused.
+   * {@link secretsError}), a computer that is stopped or suspended while the
+   * platform says it has admitted no start — `start()` is what delivers its
+   * secrets — and a create's computer that is stopped because its first start
+   * failed ({@link startError}). A host that does not say whether a start is
+   * under way is waited on, not refused.
    *
    * `expectSecrets` is for a caller that knows secrets are bound, such as one
    * that just created the computer with them. A read that leaves the list of
@@ -2466,6 +2476,13 @@ export class Computer {
     // the LAST read answered, for the timeout sentence, as waitUntilRunning does.
     let observed = false;
     let fresh = false;
+    // A create's failed first start, kept past the refresh that clears it, as
+    // waitUntilRunning keeps it and for the same reason: the create's answer
+    // is the one response that carries both `start_error` and no
+    // `running_ram_mb`, and a stopped read with the pool left out is otherwise
+    // waited on to the end of the budget. Retired the moment a reservation is
+    // seen, since that is a start somebody made after the one that failed.
+    let initialStartError = this.startError;
     let state: SecretsState = 'delivering';
     for (;;) {
       let delayMs = pollMs;
@@ -2474,6 +2491,7 @@ export class Computer {
           await this.refresh({ signal: deadlineSignal(deadline - Date.now(), signal) });
           observed = true;
           fresh = true;
+          if (this.#startAdmitted()) initialStartError = '';
         } catch (err) {
           if (signal?.aborted) throw err;
           if (!isDeadlineAbort(err) && !isTransientForPoll(err)) throw err;
@@ -2482,7 +2500,7 @@ export class Computer {
         }
       }
       if (observed) {
-        state = this.#secretsState(expectSecrets);
+        state = this.#secretsState(expectSecrets, this.startError || initialStartError);
         if (state === 'delivered') return this;
         if (state instanceof MandalaError) throw state;
       }
@@ -2512,8 +2530,9 @@ export class Computer {
    * Where this computer's secrets are, as {@link waitForSecrets} reads it.
    * `unreported` is a read that left the bindings out when the caller knows
    * some are bound: not an answer either way, so it is waited past.
+   * `startFailed` is why a create's first start failed, if it did.
    */
-  #secretsState(expectSecrets = false): SecretsState {
+  #secretsState(expectSecrets = false, startFailed = ''): SecretsState {
     if (this.secretsDelivering === true) return 'delivering';
     const failed = this.secretsError;
     if (failed) {
@@ -2526,20 +2545,37 @@ export class Computer {
     // The platform leaves the whole group out on a computer that holds none —
     // and also on a record served without its host's answer. A caller that
     // knows secrets are bound reads that second case as silence, not "none".
-    if (bound == null && expectSecrets) return 'unreported';
-    if (!Array.isArray(bound) || bound.length === 0) return 'delivered';
-    if (this.isBuilding) return 'delivering';
+    const unreported = bound == null && expectSecrets;
+    if (!unreported && (!Array.isArray(bound) || bound.length === 0)) return 'delivered';
+    if (this.isBuilding) return unreported ? 'unreported' : 'delivering';
     if (!this.#statusIs('running')) {
+      // Both refusals come before the silence about bindings is waited past:
+      // whatever is bound, a machine nobody is starting delivers nothing, and
+      // a read that says so outright is an answer.
+      //
+      // A known failed boot first, on waitUntilRunning's weaker evidence: the
+      // response that carries `start_error` does not report the pool, so
+      // requiring an explicit zero would poll out the budget and lose the one
+      // sentence that says why. Only a reservation overturns it.
+      if (startFailed && this.#statusIs('stopped') && !this.#startAdmitted()) {
+        return new MandalaError(
+          `${this.id} is stopped after it failed to start, so its secrets were not delivered: ` +
+            `${startFailed}. Call start() to try again`,
+        );
+      }
       // A start admitted but not yet booted reads stopped or suspended; its
       // delivery is ahead of it. Only the platform saying it has admitted
       // nothing is nothing coming: a host that did not say is waited on, as
       // every other wait here reads that silence (see #nothingAdmitted).
-      if (!this.#nothingAdmitted()) return 'delivering';
-      return new MandalaError(
-        `${this.id} is ${JSON.stringify(this.status)}, and secrets are delivered only as it ` +
-          'starts: call start()',
-      );
+      if (this.#nothingAdmitted()) {
+        return new MandalaError(
+          `${this.id} is ${JSON.stringify(this.status)}, and secrets are delivered only as it ` +
+            'starts: call start()',
+        );
+      }
+      return unreported ? 'unreported' : 'delivering';
     }
+    if (unreported) return 'unreported';
     if (this.secretsDelivering === undefined) {
       // A platform that predates the field: the receipt names the delivering
       // start it is for, so one behind the latest is a delivery still on its way.
