@@ -206,9 +206,11 @@ name.
   line breaks, so a line feed is the one control a string quoted in them can
   still carry; an error's message and the names in `api-keys create`'s notice
   are escaped whole, line feed included, so neither can start a line of its
-  own. Letters in any script and emoji are unchanged. The
-  indented JSON still parses to the real strings, and `--json` output is
-  unchanged. `files list` now says when a name was shown escaped, and its note
+  own. Credentials are still masked before anything is escaped, so a secret
+  with line breaks in it, such as a PEM key given to `secrets set`, still
+  prints as `[REDACTED]` when an error or a name repeats it. Letters in any
+  script and emoji are unchanged. The indented JSON still parses to the real
+  strings, and `--json` output is unchanged. `files list` now says when a name was shown escaped, and its note
   about names left out no longer claims every name with a control character
   was. `computers exec` still writes the command's own output unaltered, as
   `ssh` would.

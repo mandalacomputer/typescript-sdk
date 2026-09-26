@@ -242,9 +242,10 @@ export class Output {
         });
     } else {
       // The message is escaped whole, line feed included: it often quotes a
-      // platform error or a name another party chose, and diagnostic() keeps
-      // line breaks, which would let one start a forged `mandala:` line.
-      this.diagnostic(`mandala: ${terminalSafe(info.message)}`);
+      // platform error or a name another party chose, and a line break in it
+      // would let one start a forged `mandala:` line. diagnostic() escapes it,
+      // after redacting: a secret escaped first no longer matches itself.
+      this.diagnostic(`mandala: ${info.message}`, { keepNewlines: false });
       if (info.usage) this.diagnostic(`\n${info.usage.trimEnd()}`);
     }
     return exitCode;
@@ -271,10 +272,15 @@ export class Output {
    * A line for a person on stderr. Escaped here, once, because nearly every
    * one quotes something another party chose: a platform error, a key or
    * computer name, a device-login code.
+   *
+   * Redacted BEFORE it is escaped: a registered secret can hold a line feed
+   * (a PEM key), and once that is `\u000a` the secret no longer matches. So a
+   * caller passes raw text, never text it escaped itself, and sets
+   * `keepNewlines: false` when a line feed in it must not start a line.
    */
-  diagnostic(text: string): void {
+  diagnostic(text: string, { keepNewlines = true } = {}): void {
     this.io.stderr.write(
-      `${terminalSafe(redact(text, this.io.env, this.io.secrets) as string, { keepNewlines: true })}\n`,
+      `${terminalSafe(redact(text, this.io.env, this.io.secrets) as string, { keepNewlines })}\n`,
     );
   }
 }

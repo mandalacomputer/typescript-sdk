@@ -333,7 +333,12 @@ function checkUsageReport(d: Record<string, unknown>): void {
   }
 }
 
-function usageText(u: UsageReport): string {
+/**
+ * `usage` for a person, one line each, raw: the caller redacts each line and
+ * then escapes it. A computer name is another party's and may repeat a secret
+ * with a line feed in it, which no longer matches once it is escaped.
+ */
+function usageLines(u: UsageReport): string[] {
   return [
     'Historical metered usage (account-wide)',
     `Completeness: degraded=${u.degraded}; unmetered=${u.unmetered}`,
@@ -360,9 +365,7 @@ function usageText(u: UsageReport): string {
               `  ${c.name || c.id} (${c.id})${c.gone ? ' [deleted]' : ''}: ${c.runHours} run hours; ${c.vcpuHours} vCPU-hours; ${c.ramGbHours} RAM GB-hours`,
           ),
         ]),
-  ]
-    .map((line) => terminalSafe(line))
-    .join('\n');
+  ];
 }
 
 function checkUsageWindow(from?: string, to?: string): void {
@@ -696,7 +699,11 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
           return output.result(
             snakeKeys({ ...data, reportedThrough: report.reportedThrough ?? null }),
           );
-        io.stdout.write(`${redact(usageText(report), io.env, io.secrets)}\n`);
+        io.stdout.write(
+          `${usageLines(report)
+            .map((line) => terminalSafe(redact(line, io.env, io.secrets) as string))
+            .join('\n')}\n`,
+        );
         return 0;
       }
       case 'computers list': {

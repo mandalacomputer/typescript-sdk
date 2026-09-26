@@ -225,6 +225,7 @@ function cli(respond: Responder = anyRoute, environment: NodeJS.ProcessEnv = {})
   };
   return {
     rec,
+    io,
     clients: () => clients,
     async run(args: string[]) {
       stdout.length = 0;
@@ -437,6 +438,27 @@ describe('names others chose reach the terminal escaped', () => {
         'Store the key now: it is shown once and cannot be read again.\n',
     );
     expect(r.err.split('\n')).toHaveLength(2);
+  });
+
+  it('the create diagnostic redacts a secret holding a line feed before escaping the name', async () => {
+    const secret = '-----BEGIN KEY-----\nAAAASECRET\n-----END KEY-----';
+    const created = { ...API_KEY_CREATED, name: `ci ${secret}` };
+    const h = cli(() => json(created, { status: 201 }));
+    h.io.secrets = new Set([secret]);
+    const r = await h.run(['api-keys', 'create', '--name', 'x']);
+    expect(r.code).toBe(0);
+    expect(r.err).not.toContain('AAAASECRET');
+    expect(r.err).toContain(`Created ${created.id} (ci [REDACTED], account-wide)`);
+  });
+
+  it('an error repeating a secret that holds a line feed prints it redacted', async () => {
+    const secret = '-----BEGIN KEY-----\nAAAASECRET\n-----END KEY-----';
+    const h = cli(() => json({ error: `refused ${secret}` }, { status: 403 }));
+    h.io.secrets = new Set([secret]);
+    const r = await h.run(['api-keys', 'create']);
+    expect(r.code).not.toBe(0);
+    expect(r.err).not.toContain('AAAASECRET');
+    expect(r.err).toContain('refused [REDACTED]');
   });
 
   it("an error quoting the platform's message escapes a line feed in it", async () => {

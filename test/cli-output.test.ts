@@ -215,4 +215,27 @@ describe('terminalSafe', () => {
     w.output.error(new CliError('failure', 'refused: \u001b]52;c;aGk=\u0007'));
     expect(w.read().stderr).toBe('mandala: refused: \\u001b]52;c;aGk=\\u0007\n');
   });
+
+  // Redaction matches the secret literally, so it has to run before escaping:
+  // a PEM key given to `secrets set` holds line feeds, and escaped to
+  // `\u000a` it would no longer match and would print in readable form.
+  it('redacts a secret holding line feeds before escaping it, in an error and a diagnostic', () => {
+    const secret = '-----BEGIN KEY-----\nAAAASECRET\n-----END KEY-----';
+    const w = writer(false);
+    w.io.secrets?.add(secret);
+    w.output.error(new Error(`rejected ${secret}`));
+    w.output.diagnostic(`echoed ${secret}\ttab`, { keepNewlines: false });
+    w.output.diagnostic(`kept ${secret}`);
+    const { stderr } = w.read();
+    expect(stderr).toBe(
+      'mandala: rejected [REDACTED]\nechoed [REDACTED]\\u0009tab\nkept [REDACTED]\n',
+    );
+    expect(stderr).not.toContain('AAAASECRET');
+  });
+
+  it('a diagnostic told not to keep line feeds escapes them', () => {
+    const w = writer(false);
+    w.output.diagnostic('one\nmandala: forged', { keepNewlines: false });
+    expect(w.read().stderr).toBe('one\\u000amandala: forged\n');
+  });
 });

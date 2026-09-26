@@ -3657,6 +3657,25 @@ describe('text output escapes control and bidi characters', () => {
     expect(result.out).toContain('x\\u001b]52;c;aGk=\\u0007\\u001b[2K\\u000dfake (vm-1)');
   });
 
+  // Redacted line by line BEFORE it is escaped: a secret with a line feed in
+  // it, escaped first, would no longer match and would print readable.
+  it('usage redacts a secret holding a line feed that a computer name repeats', async () => {
+    const secret = '-----BEGIN KEY-----\nAAAASECRET\n-----END KEY-----';
+    const report = {
+      ...USAGE,
+      usage: {
+        ...USAGE.usage,
+        computers: [{ ...USAGE.usage.computers[0], name: `box ${secret}` }],
+      },
+    };
+    const h = harness((call) => (call.path === '/usage' ? json(report) : anyRoute(call)));
+    h.io.secrets = new Set([secret]);
+    const result = await h.run(['usage'], false);
+    expect(result.code).toBe(0);
+    expect(result.out).not.toContain('AAAASECRET');
+    expect(result.out).toContain('  box [REDACTED] (vm-1)');
+  });
+
   it('ssh-key list escapes a key name, and keeps its columns', async () => {
     const key = { ...SSH_KEY, name: 'k\u001b[31mred\u202e' };
     const result = await harness((call) =>

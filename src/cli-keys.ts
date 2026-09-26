@@ -75,10 +75,11 @@ export async function apiKeysCreate(
     { signal },
   );
   output.diagnostic(
-    // The name and scope are escaped whole, line feed included: diagnostic()
-    // keeps its own line breaks, and a name must not start a line of its own.
-    `Created ${terminalSafe(created.id)} (${terminalSafe(created.name ?? 'unnamed')}, ${terminalSafe(scopeText(created))}). ` +
+    // Escaped whole, line feed included, so a name cannot start a line of its
+    // own; diagnostic() does it after redacting, so it is passed raw here.
+    `Created ${created.id} (${created.name ?? 'unnamed'}, ${scopeText(created)}). ` +
       'Store the key now: it is shown once and cannot be read again.',
+    { keepNewlines: false },
   );
   if (output.json) return output.result(created.raw);
   io.stdout.write(`${created.key}\n`);
