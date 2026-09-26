@@ -29,7 +29,7 @@ import path from 'node:path';
 import process from 'node:process';
 import { resolveComputer } from './cli-commands.js';
 import { CliError } from './cli-options.js';
-import type { Output } from './cli-output.js';
+import { type Output, terminalSafe } from './cli-output.js';
 import type { CliIO } from './cli-runtime.js';
 import type { Computer } from './computer.js';
 import { ConflictError } from './errors.js';
@@ -690,8 +690,8 @@ export async function sshSetup(
     });
   else
     io.stdout.write(
-      `key ${registered.fingerprint} (${registered.name}) ${added ? 'registered' : 'already registered'}\n` +
-        `SSH is on for ${label}\n` +
+      `${terminalSafe(`key ${registered.fingerprint} (${registered.name}) ${added ? 'registered' : 'already registered'}`)}\n` +
+        `${terminalSafe(`SSH is on for ${label}`)}\n` +
         `connect with: ${command}\n`,
     );
   if (access.pending)
@@ -722,7 +722,12 @@ export async function sshKeyList(client: Client, io: CliIO, output: Output): Pro
     io.stdout.write(
       `${table(
         ['ID', 'TYPE', 'FINGERPRINT', 'LAST USED', 'NAME'],
-        keys.map((k) => [k.id, k.keyType, k.fingerprint, k.lastUsedAt ?? 'never', k.name]),
+        // Escaped before the widths are measured, so the columns still line up.
+        keys.map((k) =>
+          [k.id, k.keyType, k.fingerprint, k.lastUsedAt ?? 'never', k.name].map((cell) =>
+            terminalSafe(cell),
+          ),
+        ),
       )}\n`,
     );
   else output.diagnostic('no SSH keys');
@@ -741,7 +746,7 @@ export async function sshKeyAdd(
   const line = readPublicKey(keyPath(rt.home(), given));
   const key = await client.sshKeys.add({ publicKey: line, name });
   if (output.json) return output.result(key.raw);
-  io.stdout.write(`added ${key.id}  ${key.fingerprint}  ${key.name}\n`);
+  io.stdout.write(`${terminalSafe(`added ${key.id}  ${key.fingerprint}  ${key.name}`)}\n`);
   return 0;
 }
 
@@ -780,7 +785,11 @@ export async function sshAccessCommand(
   const access =
     state === undefined ? await computer.sshAccess() : await computer.setSshAccess(state === 'on');
   if (output.json) return output.result(access.raw);
-  io.stdout.write(`${accessLines(computer.name || computer.id, access).join('\n')}\n`);
+  io.stdout.write(
+    `${accessLines(computer.name || computer.id, access)
+      .map((line) => terminalSafe(line))
+      .join('\n')}\n`,
+  );
   return 0;
 }
 
