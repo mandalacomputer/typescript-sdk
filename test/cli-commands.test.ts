@@ -2258,9 +2258,51 @@ describe('one JSON casing and one error vocabulary (OPL-5048)', () => {
     expect(result.code).toBe(1);
     expect(result.out + result.err).not.toContain(token);
     expect(result.frames[0].error.message).toBe(
-      'unknown option: an argument starts with "-" but is not an option name; put -- before a ' +
-        'value that starts with one',
+      'unknown option, not repeated here, as under secrets it may be a secret value; secrets set ' +
+        'reads the value from stdin or a hidden prompt, never argv',
     );
+  });
+
+  it('never echoes a secret shaped like an option name, or one typed after --', async () => {
+    // `--sk-demo-123` reads exactly like a mistyped flag, and `-- --sk-demo-123`
+    // is the standard way to pass a value that starts with a dash; neither may
+    // come back in a diagnostic, in text or in --json.
+    const secret = 'sk-demo-123';
+    const cases: [string[], string][] = [
+      [['--', `--${secret}`], '1 argument too many: mandala secrets set takes <name>'],
+      [['--', secret, `--${secret}`], '2 arguments too many: mandala secrets set takes <name>'],
+      [[`--${secret}`], 'unknown option, not repeated here, as under secrets it may be a secret'],
+      [[`--keep-newline=${secret}`], 'unknown option, not repeated here'],
+      [[`--workspace=ws-1`, `--${secret}`], 'unknown option, not repeated here'],
+    ];
+    for (const [tail, message] of cases)
+      for (const jsonMode of [true, false]) {
+        // --json goes first: after -- it would be one more operand.
+        const h = harness();
+        const argv = ['secrets', 'set', 'OPENAI_API_KEY', ...tail];
+        const result = await h.run(jsonMode ? ['--json', ...argv] : argv, false);
+        expect(result.code).toBe(1);
+        if (jsonMode) expect(JSON.parse(result.out).error.code).toBe('invalid_arguments');
+        expect(result.out + result.err).not.toContain(secret);
+        expect(result.out + result.err).toContain(message);
+        expect(h.rec.calls).toEqual([]);
+      }
+    // A word under secrets that is no verb is not repeated either: it is as
+    // likely the value as a mistyped verb.
+    const h = harness();
+    const result = await h.run(['secrets', `--${secret}`, 'set', 'A']);
+    expect(result.out + result.err).not.toContain(secret);
+    const verb = await harness().run(['secrets', secret]);
+    expect(verb.out + verb.err).not.toContain(secret);
+    expect(verb.frames[0].error.message).toBe(
+      'unknown command under secrets, not repeated here, as under secrets it may be a secret ' +
+        'value; choose one of: list, set, rm',
+    );
+    // Outside secrets, a mistyped flag is still named, which is the point of naming it.
+    const typo = await harness().run(['computers', 'list', '--jsno']);
+    expect(typo.frames[0].error.message).toBe('unknown option --jsno');
+    const unknown = await harness().run(['computers', 'lsit']);
+    expect(unknown.frames[0].error.message).toBe('unknown command computers lsit');
   });
 
   it('waits for bound secrets with computers wait --until secrets', async () => {

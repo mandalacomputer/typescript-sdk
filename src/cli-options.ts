@@ -470,14 +470,29 @@ export function usage(c: Command): string {
 }
 
 /**
+ * Whether a diagnostic may repeat what was typed. Not under `secrets`: a value
+ * typed there is most often the secret itself, where `secrets set` meant to
+ * read it from stdin or a prompt, and any shape it has — `--sk-live-0123`
+ * reads exactly like an option name — is one some real secret has too. These
+ * messages fire before any command could register the value for redaction.
+ */
+function quotesInput(path: string): boolean {
+  return path !== 'secrets' && !path.startsWith('secrets ');
+}
+
+const NOT_REPEATED = 'not repeated here, as under secrets it may be a secret value';
+
+/**
  * The message for an option nobody declared, naming it only when it is shaped
- * like an option name (`-x`, `--name`).
+ * like an option name (`-x`, `--name`) and typed outside `secrets`.
  *
  * Anything else that starts with a dash is as likely to be a value — a key or
  * a token that happens to begin with one — as a mistyped flag, and it is read
  * before any command could mark it secret, so it is described and not echoed.
  */
-function unknownOption(spelling: string): string {
+function unknownOption(spelling: string, path: string): string {
+  if (!quotesInput(path))
+    return `unknown option, ${NOT_REPEATED}; secrets set reads the value from stdin or a hidden prompt, never argv`;
   if (/^(?:-[A-Za-z0-9]|--[A-Za-z][A-Za-z0-9-]{0,39})$/.test(spelling))
     return `unknown option ${spelling}`;
   return 'unknown option: an argument starts with "-" but is not an option name; put -- before a value that starts with one';
@@ -512,7 +527,7 @@ export function parseArgs(argv: string[]): Parsed {
       const [spelling, ...tail] = arg.split('=');
       const flags = [...GLOBAL_FLAGS, ...(parsed.command?.flags ?? [])];
       const spec = flags.find((f) => spelling === `--${f.name}` || spelling === `-${f.alias}`);
-      if (!spec) throw usageError(parsed.command, unknownOption(spelling!));
+      if (!spec) throw usageError(parsed.command, unknownOption(spelling!, parsed.path));
       if (parsed.flags[spec.name] !== undefined && !spec.repeatable)
         throw new CliError('invalid_arguments', `--${spec.name} may only be supplied once`);
       let value: string | number | boolean = true;
@@ -556,8 +571,17 @@ export function parseArgs(argv: string[]): Parsed {
     if (!parsed.command) {
       parsed.path = [parsed.path, arg].filter(Boolean).join(' ');
       parsed.command = COMMANDS.find((c) => c.path === parsed.path);
-      if (!parsed.command && !COMMANDS.some((c) => c.path.startsWith(`${parsed.path} `)))
-        throw new CliError('invalid_arguments', `unknown command ${parsed.path}`);
+      if (!parsed.command && !COMMANDS.some((c) => c.path.startsWith(`${parsed.path} `))) {
+        if (quotesInput(parsed.path))
+          throw new CliError('invalid_arguments', `unknown command ${parsed.path}`);
+        const verbs = COMMANDS.filter((c) => c.path.startsWith('secrets ')).map((c) =>
+          c.path.slice('secrets '.length),
+        );
+        throw new CliError(
+          'invalid_arguments',
+          `unknown command under secrets, ${NOT_REPEATED}; choose one of: ${verbs.join(', ')}`,
+        );
+      }
     } else parsed.args.push(arg);
   }
   if (parsed.help || !argv.length) return parsed;
