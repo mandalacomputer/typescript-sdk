@@ -2288,7 +2288,8 @@ describe('one JSON casing and one error vocabulary (OPL-5048)', () => {
         expect(h.rec.calls).toEqual([]);
       }
     // An option typed before the verb, or before secrets itself, is judged
-    // as typed under secrets: the command it was meant for is secrets set.
+    // by the command it was meant for, read past options, help and --. The
+    // stdin hint belongs to secrets set, or to no verb at all.
     const setHint =
       'unknown option, not repeated here, as under secrets it may be a secret value; secrets set ' +
       'reads the value from stdin or a hidden prompt, never argv';
@@ -2296,24 +2297,50 @@ describe('one JSON casing and one error vocabulary (OPL-5048)', () => {
       ['secrets', `--${secret}`, 'set', 'A'],
       [`--${secret}`, 'secrets', 'set', 'A'],
       ['--profile', 'p', `--${secret}`, 'secrets', 'set', 'A'],
+      [`--${secret}`, '--profile', 'p', 'secrets', 'set', 'A'],
+      [`--${secret}`, 'help', 'secrets', 'set'],
+      [`--${secret}`, '--', 'secrets', 'set', 'A'],
+      [`--${secret}`, 'help', 'secrets'],
+      [`--${secret}`, '--', 'secrets'],
+      ['secrets', `--${secret}`],
+      [`--${secret}`, 'secrets', 'ls'],
+      // --profile with its value left out: secrets is read as the command.
+      [`--${secret}`, '--profile', 'secrets', 'set', 'A'],
+      [`--${secret}`, '--profile', 'secrets'],
+      // A profile named like a command is still read as one.
+      [`--${secret}`, '--profile', 'computers', 'secrets', 'set', 'A'],
     ])
       for (const jsonMode of [true, false]) {
+        // --json goes first: after -- it would be one more operand.
         const h = harness();
-        const result = await h.run(argv, jsonMode);
+        const result = await h.run(jsonMode ? ['--json', ...argv] : argv, false);
         expect(result.code).toBe(1);
+        if (jsonMode) {
+          const error = JSON.parse(result.out).error;
+          expect(error.code).toBe('invalid_arguments');
+          expect(error.message).toBe(setHint);
+        }
         expect(result.out + result.err).not.toContain(secret);
         expect(result.out + result.err).toContain(setHint);
         expect(h.rec.calls).toEqual([]);
       }
-    // list and rm read no value, so they do not point at stdin.
+    // list and rm read no value, so they do not point at stdin, wherever the
+    // option sits.
     for (const argv of [
       ['secrets', 'list', `--${secret}`],
       ['secrets', 'rm', 'A', `--${secret}`],
+      ['secrets', `--${secret}`, 'list'],
+      [`--${secret}`, 'secrets', 'list'],
+      ['--profile', 'p', `--${secret}`, 'secrets', 'rm', 'A'],
+      [`--${secret}`, 'help', 'secrets', 'list'],
+      [`--${secret}`, '--', 'secrets', 'rm', 'A'],
+      [`--${secret}`, '--profile', 'secrets', 'list'],
     ]) {
-      const result = await harness().run(argv);
+      // --json goes first: after -- it would be one more operand.
+      const result = await harness().run(['--json', ...argv], false);
       expect(result.code).toBe(1);
       expect(result.out + result.err).not.toContain(secret);
-      expect(result.frames[0].error.message).toBe(
+      expect(JSON.parse(result.out).error.message).toBe(
         'unknown option, not repeated here, as under secrets it may be a secret value',
       );
     }
@@ -2329,8 +2356,16 @@ describe('one JSON casing and one error vocabulary (OPL-5048)', () => {
       );
     }
     // An option typed before any other command is still named.
-    const early = await harness().run(['--jsno', 'computers', 'list']);
-    expect(early.frames[0].error.message).toBe('unknown option --jsno');
+    for (const argv of [
+      ['--jsno', 'computers', 'list'],
+      ['--jsno', 'help', 'computers', 'list'],
+      ['--jsno', '--', 'computers', 'list'],
+      ['--jsno', 'computers'],
+      ['--jsno', '--profile', 'computers', 'list'],
+    ]) {
+      const early = await harness().run(['--json', ...argv], false);
+      expect(JSON.parse(early.out).error.message).toBe('unknown option --jsno');
+    }
     // A --json past -- is an operand, so a usage error is not reported as JSON.
     const operand = await harness().run(['secrets', 'set', 'A', '--', '--json'], false);
     expect(operand.code).toBe(1);

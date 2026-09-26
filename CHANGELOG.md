@@ -110,9 +110,13 @@ name.
   unknown option is named only when it is shaped like one: either could be a
   secret typed where `secrets set` reads stdin. Under `secrets`, no usage
   error repeats what was typed — not an option-shaped word such as
-  `--sk-live-0123`, even typed before `secrets`, and not an unknown verb — and
-  a word after `--` is always an operand, counted; a `--json` there no longer
-  turns a usage error into JSON.
+  `--sk-live-0123`, even typed before `secrets`, `help secrets` or
+  `-- secrets`, and not an unknown verb — and a word after `--` is always an
+  operand, counted; a `--json` there no longer turns a usage error into JSON.
+  An unknown option under `secrets` points at stdin unless the verb is `list`
+  or `rm`, which read no value: for `set`, for no verb, and for a word that is
+  no verb, wherever the option sits. A `--profile` whose value was left out
+  before `secrets` no longer hides that the option was typed under it.
 
 ## [0.6.0] — 2026-09-25
 
