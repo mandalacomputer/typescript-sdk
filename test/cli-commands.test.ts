@@ -2594,6 +2594,110 @@ describe('files, rename, resize, view, and secrets bound at create', () => {
     expect(h.rec.routes()).toEqual([['GET', 'secrets']]);
   });
 
+  it('refuses a target that looks like a value, even one a variable name could be', async () => {
+    // A classic GitHub token is letters, digits and underscores: a valid
+    // variable name, so only the shape of it can say it is a value. Assembled
+    // at run time so the source holds no token-shaped literal.
+    const value = ['ghp', '_', 'aB3dE5fG7hJ9kL2mN4pQ6rS8tU0vW1xY2z4c'].join('');
+    for (const [flag, jsonMode] of [
+      ['--secret', true],
+      ['--secret-file', false],
+      ['--secret', false],
+    ] as const) {
+      const h = harness(store());
+      const typed = flag === '--secret' ? value : value.toLowerCase();
+      const result = await h.run(
+        ['computers', 'create', flag, `openai_api_key=${typed}`],
+        jsonMode,
+      );
+      expect(result.code).toBe(1);
+      const printed = result.out + result.err;
+      expect(printed).not.toContain(typed);
+      expect(printed).toContain(`${flag} #1`);
+      expect(printed).toContain('openai_api_key=…');
+      expect(printed).toContain("looks like a secret's value");
+      // Refused while the arguments are read: not even the store was listed.
+      expect(h.rec.calls).toEqual([]);
+    }
+  });
+
+  it('sends a flagged target with --no-value-check, and still prints it hidden', async () => {
+    const hashed = 'cert-sha256-9f86d081884c7d659a2f';
+    const bound = {
+      ...COMPUTER,
+      secrets: [{ secret_id: SECRET.id, revision_id: SECRET.revision_id, file: hashed }],
+    };
+    const respond = store();
+    for (const jsonMode of [true, false]) {
+      const refused = await harness(respond).run(
+        ['computers', 'create', '--secret-file', `openai_api_key=${hashed}`],
+        jsonMode,
+      );
+      expect(refused.code).toBe(1);
+      expect(refused.out + refused.err).toContain('--no-value-check');
+      const h = harness((call) =>
+        call.method === 'POST' && call.path === '/computers' ? json(bound) : respond(call),
+      );
+      const result = await h.run(
+        ['computers', 'create', '--secret-file', `openai_api_key=${hashed}`, '--no-value-check'],
+        jsonMode,
+      );
+      expect(result.code).toBe(0);
+      const create = h.rec.calls.find((c) => c.method === 'POST' && c.path === '/computers');
+      expect(JSON.stringify(create?.body)).toContain(hashed);
+      expect(result.out).not.toContain(hashed);
+      expect(result.out).toContain('[REDACTED]');
+    }
+  });
+
+  it('prints a typed variable or file as hidden, and the kind it was bound as', async () => {
+    const bound = {
+      ...COMPUTER,
+      secrets: [
+        { secret_id: SECRET.id, revision_id: SECRET.revision_id, env: 'MY_KEY' },
+        { secret_id: 'csec-fedcba9876543210', revision_id: SECRET.revision_id, file: 'gh-token' },
+      ],
+    };
+    const respond = store();
+    for (const jsonMode of [true, false]) {
+      const h = harness((call) =>
+        call.method === 'POST' && call.path === '/computers' ? json(bound) : respond(call),
+      );
+      const result = await h.run(
+        ['computers', 'create', '--secret', 'openai_api_key=MY_KEY', '--secret-file', 'gh-token'],
+        jsonMode,
+      );
+      expect(result.code).toBe(0);
+      expect(result.out).not.toContain('MY_KEY');
+      expect(result.out).toContain('[REDACTED]');
+      // Bound under the secret's own name: nothing was typed, nothing hidden.
+      expect(result.out).toContain('gh-token');
+      if (jsonMode)
+        expect(result.frames[0].data.secrets).toEqual([
+          expect.objectContaining({ env: '[REDACTED]' }),
+          expect.objectContaining({ file: 'gh-token' }),
+        ]);
+    }
+  });
+
+  it("cuts a typed target out of the platform's refusal", async () => {
+    const respond = store();
+    for (const jsonMode of [true, false]) {
+      const h = harness((call) =>
+        call.method === 'POST' && call.path === '/computers'
+          ? json({ error: 'secrets: env MY_ODD_NAME is reserved' }, { status: 400 })
+          : respond(call),
+      );
+      const result = await h.run(
+        ['computers', 'create', '--secret', 'openai_api_key=MY_ODD_NAME'],
+        jsonMode,
+      );
+      expect(result.code).toBe(1);
+      expect(result.out + result.err).not.toContain('MY_ODD_NAME');
+      expect(result.out + result.err).toContain('env [REDACTED] is reserved');
+    }
+  });
+
   it('renames through the resolved id', async () => {
     const h = harness((call) =>
       call.method === 'PATCH' ? json({ ...COMPUTER, name: 'build box' }) : anyRoute(call),

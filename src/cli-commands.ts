@@ -15,10 +15,12 @@ import { errorInfo, Output, redact, snakeKeys } from './cli-output.js';
 import { type CliIO, documentInput, openBrowser, readInput } from './cli-runtime.js';
 import {
   bindingSpecs,
+  scrubTypedTargets,
   secretBindings,
   secretsList,
   secretsRemove,
   secretsSet,
+  withoutTypedTargets,
 } from './cli-secrets.js';
 import {
   defaultSshRuntime,
@@ -462,7 +464,9 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
     };
     // Split and checked here; each is found by name or id only once the rest
     // of the create has passed, just before it is sent.
-    const bindings = bindingSpecs(many('secret'), many('secret-file'));
+    const bindings = bindingSpecs(many('secret'), many('secret-file'), {
+      valueCheck: !b('no-value-check'),
+    });
     if (path === 'computers create') P.createBody(create);
     const resize = { cpu: n('cpu'), ramMb: n('ram-mb'), diskGb: n('disk-gb') };
     if (path === 'computers resize') {
@@ -612,11 +616,16 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
       }
       case 'computers create': {
         const secrets = await secretBindings(client, bindings, signal);
-        return output.result(
-          computerData(
-            await client.computers.create(secrets.length ? { ...create, secrets } : create, call),
-          ),
-        );
+        let created: Computer;
+        try {
+          created = await client.computers.create(
+            secrets.length ? { ...create, secrets } : create,
+            call,
+          );
+        } catch (error) {
+          throw scrubTypedTargets(error, bindings);
+        }
+        return output.result(withoutTypedTargets(computerData(created), bindings));
       }
       case 'computers get':
         return output.result(computerData(await (await computer()).refresh(call)));

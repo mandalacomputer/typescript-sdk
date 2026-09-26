@@ -2798,7 +2798,14 @@ as an environment variable in the computer's desktop session, and
 to the secret's name. Both repeat. The part after the last `=` names where the
 value goes, never the value itself; the value only ever goes in through
 `secrets set`. So an error never quotes anything after the first `=`: it names
-the binding by flag, position and the text before that `=`. Two bindings of
+the binding by flag, position and the text before that `=`. A target that looks
+like a value rather than a name (a known token prefix such as `ghp_` or `sk-`, an
+AWS key id, a UUID, or a long random-looking string) is refused before anything
+is sent. The check is a guess, so a real name it refuses (one holding a hash,
+say) goes through with `--no-value-check`, which still holds it to the naming
+rules. A variable or file typed after `=` prints as `[REDACTED]` in the
+create's output and in any error the create fails with; `computers get` shows
+it. Two bindings of
 one secret, or into one variable or file, fail before anything is created. An
 id the default scope does not list, such as one of a
 workspace's secrets, is sent as it is and needs its `=VAR` or `=FILE`. A name
