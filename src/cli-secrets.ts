@@ -124,6 +124,148 @@ function camelWords(run: string): boolean {
 }
 
 /**
+ * Two-letter words a camel-case name really holds (`Id`, `In`, `Db`, `Pg`,
+ * `Cd`): the only ones {@link wordSegment} takes, as a random body is mostly
+ * pairs. Each one lets a random body through a little more often, so this
+ * holds English words and the abbreviations names are made of, not every
+ * pair someone might type.
+ */
+const SHORT_WORDS = new Set(
+  (
+    'ad ai an as at az be by ca cd cf ci db dc de do dr ec eu ex fr gc gh gl go hr id if ' +
+    'in io ip is it jp js kv lb me ml mq ms mx my nd no of ok on or os pg pk pr py qa rb ' +
+    're ro rw rx sa sf so tf to ts tx ui uk up us ux vm vs we wg wp ws'
+  ).split(' '),
+);
+
+/**
+ * Words the spelling rules of {@link wordSegment} would refuse: abbreviations
+ * with no vowel in them (`Http`, `Ssl`, `Npm`), and a few names spelled
+ * against English (`Nginx`, `Graphql`, `Etcd`). A random segment is almost
+ * never one of these, so the list costs the catch rate nothing measurable.
+ */
+const KNOWN_WORDS = new Set(
+  (
+    'acr aks alb bgp cdn cfg cmd cms cpp cpu crl crm crt csr csrf csv ctx dbt dkim dns dsn dst ' +
+    'ecr ecs eks elb ftp gcp gcr gcs ghcr gke gpg gpt gpu grpc hsm html http https jwks jwt ' +
+    'kdf kms ldap lfs llm mcp mfa mgmt mqtt msg mtls nfs nlb nlp npm ntp ocsp pbkdf pdf pfx ' +
+    'pgp pkg pkcs pki png pnpm prd psk pwd rbac rds rpc rsa rtc scp sdk ses sftp smb sms smtp ' +
+    'sns spf sql sqs src ssh ssl ssm sso stg sts svc svg svn tcp tls tmp tpm tpu ttl txt udp ' +
+    'vcs vlan vpc vpn vxlan waf wss xml xsrf xss zfs ' +
+    'etcd graphql groq jfrog mysql nginx pgbackrest pgbouncer qdrant rabbitmq'
+  ).split(' '),
+);
+
+/**
+ * The consonants that follow each consonant inside English words (`y` counts
+ * as a vowel): every pair making up 0.02% or more of the consonant pairs in
+ * a 236,000-word dictionary, and each one ahead of a plural `s`. About half
+ * of the 400 pairs, and the half random letters rarely keep to.
+ */
+const CONSONANT_PAIRS = new Set(
+  Object.entries({
+    b: 'bcdhjlmnprstv',
+    c: 'chklnqrst',
+    d: 'bcdfghjlmnprsvw',
+    f: 'flrst',
+    g: 'bdghlmnrstw',
+    h: 'bdflmnprstw',
+    j: 's',
+    k: 'bfhlmnrstw',
+    l: 'bcdfghklmnprstvw',
+    m: 'bflmnps',
+    n: 'bcdfghjklmnpqrstvwz',
+    p: 'bfhlmnprstw',
+    r: 'bcdfghjklmnpqrstvw',
+    s: 'bcdfghklmnpqrstw',
+    t: 'bcdfghlmnprstwz',
+    v: 's',
+    w: 'bdfhklmnrst',
+    x: 'chpst',
+    z: 'lsz',
+  }).flatMap(([first, next]) => [...next].map((c) => first + c)),
+);
+
+/**
+ * The two consonants an English word opens with: every pair that opens 20 or
+ * more words of the same dictionary. Far fewer than may sit inside a word, and
+ * a random segment opens with two consonants more than half the time.
+ */
+const ONSETS = new Set(
+  (
+    'bh bl br ch cl cn cr ct cz dh dr dw fl fr gh gl gn gr kh kl kn kr mn ph pl pn pr ps pt ' +
+    'rh sc sh sk sl sm sn sp sq st sw th tr ts tw wh wr'
+  ).split(' '),
+);
+
+/**
+ * How far a lowercased segment strays from English spelling, one count for
+ * each: a consonant pair outside {@link CONSONANT_PAIRS}, an opening pair
+ * outside {@link ONSETS}, and a `q` ahead of anything but `u` or `l` (the
+ * `l` of `Sqlite` and `Mysql`).
+ */
+function oddities(word: string): number {
+  let count = /^[^aeiouy]{2}/.test(word) && !ONSETS.has(word.slice(0, 2)) ? 1 : 0;
+  for (const run of word.match(/[^aeiouy]{2,}/g) ?? [])
+    for (let i = 0; i + 1 < run.length; i++) if (!CONSONANT_PAIRS.has(run.slice(i, i + 2))) count++;
+  return count + (word.match(/q(?![ul])/g) ?? []).length;
+}
+
+/**
+ * Whether one camel-case segment of a name reads as a word:
+ * - an acronym, or one with a plural `s` (`JWT`, `JWTs`);
+ * - a lone vowel of either case (the `O` of `OAuth`, the `i` of `iPhone`),
+ *   or a lone capital closing the run (the `V` of `V2`, once its digit is
+ *   dropped);
+ * - a word from {@link KNOWN_WORDS}, or a two-letter one from
+ *   {@link SHORT_WORDS};
+ * - otherwise three letters or more with a vowel, and no {@link oddities}:
+ *   one is let pass from four letters on, as a name joins words into one
+ *   (`Kafka`, `Webflow`, `Buildkite`) where they meet at a pair no single
+ *   word holds.
+ */
+function wordSegment(segment: string, last: boolean): boolean {
+  if (segment.length === 1) return /[AEIOUaeiou]/.test(segment) || (last && /[A-Z]/.test(segment));
+  if (/^[A-Z]+$|^[A-Z]{2,}s$/.test(segment)) return true;
+  const word = segment.toLowerCase();
+  if (KNOWN_WORDS.has(word)) return true;
+  if (word.length === 2) return SHORT_WORDS.has(word);
+  if (!/[aeiouy]/.test(word)) return false;
+  return oddities(word) <= (word.length >= 4 ? 1 : 0);
+}
+
+/**
+ * Whether a digit-free run holding both cases, after a known token prefix,
+ * reads as camel-case words (`hubTokenReadOnly`, `personalAccessTokenForCI`)
+ * rather than as a token body: {@link camelWords}, and every segment a word
+ * ({@link wordSegment}).
+ *
+ * Stricter than a bare run's test, as a prefix already says token: a random
+ * body split at its capitals is mostly pairs and lone capitals, with the odd
+ * longer stretch of letters no word would put together, so nearly every one
+ * holds a segment that fails. Measured over 20,000 random letter bodies each,
+ * it catches 99.1% of twelve letters, 99.5% of fourteen and 99.7% of sixteen,
+ * where {@link camelWords} alone caught under 80%.
+ *
+ * The cost is real names it refuses that {@link camelWords} passed. Over a
+ * list of 263 realistic ones behind four prefixes (`SslCertPassword`,
+ * `KafkaConsumerSecret`, `MysqlReplicaPassword`, `CiCdDeployToken`,
+ * `iPhoneBackupKey`) it refuses one, `WalGEncryptionKey`, for its lone
+ * consonant capital. That list is also where the product names in
+ * {@link KNOWN_WORDS} came from, so a name spelled as oddly as `Nginx` that
+ * is not listed there is refused too. Such a name goes
+ * through with `--as`/`--path`, which are never checked, or
+ * `--no-value-check`.
+ */
+function prefixedWords(run: string): boolean {
+  if (!camelWords(run)) return false;
+  // Only letters reach here (tokenBody takes any digit as a token), and the
+  // three alternatives cover every letter, so the segments rebuild the run.
+  const segments = run.match(/[A-Z]{2,}s(?![a-z])|[A-Z]?[a-z]+|[A-Z]+(?![a-z])/g) ?? [];
+  return segments.every((s, i) => wordSegment(s, i === segments.length - 1));
+}
+
+/**
  * Whether one run of letters and digits reads as random rather than as words.
  *
  * Twenty characters or more, at least two of lowercase, uppercase and digits,
@@ -164,9 +306,10 @@ function randomRun(run: string): boolean {
  * A prefix alone is not enough — `hf_token`, `sk-prod-signing-key`,
  * `npm_package_devDependencies` and `hf_hubTokenReadOnly2024` are names — so
  * what follows it must hold a run of twelve or more letters and digits with a
- * digit in it, or both cases that do not read as camel-case words, as every
- * issued token does. Up to four digits closing the run are a name's version or
- * year, and do not count.
+ * digit in it, or both cases that do not read as camel-case words
+ * ({@link prefixedWords}, stricter than a bare run's test), as every issued
+ * token does. Up to four digits closing the run are a name's version or year,
+ * and do not count.
  */
 export function looksLikeSecretValue(text: string): boolean {
   const runs = text.split(/[^A-Za-z0-9]+/);
@@ -175,7 +318,9 @@ export function looksLikeSecretValue(text: string): boolean {
     const tokenBody = (run: string) => {
       if (run.length < 12) return false;
       const core = run.replace(/[0-9]{1,4}$/, '');
-      return /[0-9]/.test(core) || (/[a-z]/.test(core) && /[A-Z]/.test(core) && !camelWords(core));
+      return (
+        /[0-9]/.test(core) || (/[a-z]/.test(core) && /[A-Z]/.test(core) && !prefixedWords(core))
+      );
     };
     if (
       text

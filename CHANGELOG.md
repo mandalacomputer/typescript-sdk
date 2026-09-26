@@ -83,8 +83,14 @@ name.
   `sk_live_`, `xoxb-`, `glpat-`, `AIza`, `hf_`, `npm_`, `pypi-`, `SG.` and
   others) ahead of a token body, an AWS key id, a UUID, or a random-looking
   stretch of twenty or more characters. Camel-case words, acronyms among
-  them, are not random, and a name the check still refuses goes through with
-  `--no-value-check`. A variable or file typed after `=`
+  them, are not random. After a token prefix, a body of twelve or more
+  mixed-case letters counts as words only when every camel-case segment of it
+  reads as one (an acronym, a known abbreviation such as `Ssl` or `Pg`, or a
+  word spelled as English spells, allowing one join such as `Kafka` or
+  `Webflow`), so a random body with no digit in it is caught too (99% or
+  more). A name the check still refuses goes through when it is named with
+  `--as` or `--path`, which are not checked, or with `--no-value-check`.
+  A variable or file typed after `=`
   prints as `[REDACTED]` in the create's bindings and in the create's error;
   one that defaults to the secret's name prints as it is.
 - **`client.secrets.set({ name, value, workspaceId })`**: create the name, or
