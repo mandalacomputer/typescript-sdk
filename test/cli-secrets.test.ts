@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   bindingSpecs,
+  equalsDeprecation,
   looksLikeSecretValue,
   scrubTypedTargets,
   withoutTypedTargets,
@@ -180,7 +181,7 @@ describe('a secret-looking target is refused before anything is sent', () => {
 
   it('names --no-value-check, and with it sends a flagged but valid target as typed', () => {
     // A file name holding a hash: a real name the heuristic cannot tell from a
-    // hex value, and one no other spelling gets through.
+    // hex value, which after = only this override gets through.
     const hashed = 'cert-sha256-9f86d081884c7d659a2f';
     const acronyms = 'AWSKMSKeyARNForS3SSE';
     expect(looksLikeSecretValue(hashed)).toBe(true);
@@ -202,6 +203,62 @@ describe('a secret-looking target is refused before anything is sent', () => {
       expect.objectContaining({ key: 'OPENAI_API_KEY', target: 'MY_OPENAI_KEY' }),
       expect.objectContaining({ key: 'gh-token', target: 'hf_token' }),
     ]);
+  });
+});
+
+describe('a target named by --as or --path', () => {
+  it('pairs each with its own binding, and takes the whole value as the secret', () => {
+    expect(
+      bindingSpecs(['A', 'b=c', 'D=E'], ['f', 'g'], {
+        as: [undefined, 'BC'],
+        paths: [undefined, 'gee'],
+      }),
+    ).toEqual([
+      expect.objectContaining({ key: 'A', afterEquals: false }),
+      expect.objectContaining({ key: 'b=c', target: 'BC', afterEquals: false }),
+      expect.objectContaining({ key: 'D', target: 'E', afterEquals: true }),
+      expect.objectContaining({ key: 'f', afterEquals: false }),
+      expect.objectContaining({ key: 'g', target: 'gee', afterEquals: false }),
+    ]);
+  });
+
+  it('skips the value check, which only a target typed after = needs', () => {
+    const hashed = 'cert-sha256-9f86d081884c7d659a2f';
+    expect(bindingSpecs([], ['tls'], { paths: [hashed] })).toEqual([
+      expect.objectContaining({ key: 'tls', target: hashed, afterEquals: false }),
+    ]);
+  });
+
+  it('still holds it to the naming rules, without quoting it', () => {
+    expect(() => bindingSpecs(['A'], [], { as: ['not-a-var'] })).toThrow(
+      '--secret "A": --as must be letters',
+    );
+    expect(() => bindingSpecs([], ['a'], { paths: ['Not.A.File'] })).toThrow(
+      '--secret-file "a": --path must be lowercase',
+    );
+  });
+
+  it('is never hidden from the output, where a target typed after = is', () => {
+    const specs = bindingSpecs(['A', 'B=TYPED'], [], { as: ['NAMED'] });
+    const shown = withoutTypedTargets({ secrets: [{ env: 'NAMED' }, { env: 'TYPED' }] }, specs);
+    expect(shown.secrets).toEqual([{ env: 'NAMED' }, { env: '[REDACTED]' }]);
+    const error = scrubTypedTargets(new Error('env NAMED and env TYPED are reserved'), specs);
+    expect((error as Error).message).toBe('env NAMED and env [REDACTED] are reserved');
+  });
+});
+
+describe('the deprecation of SECRET=TARGET', () => {
+  it('is one line naming the flags used, never what was typed', () => {
+    expect(equalsDeprecation(bindingSpecs(['A'], ['b'], { as: ['X'] }))).toBeUndefined();
+    const env = equalsDeprecation(bindingSpecs(['A=HIDDEN_NAME']));
+    expect(env).toBe('mandala: --secret SECRET=VAR is deprecated; use --secret SECRET --as VAR');
+    const file = equalsDeprecation(bindingSpecs([], ['a=hidden_file']));
+    expect(file).toBe(
+      'mandala: --secret-file SECRET=FILE is deprecated; use --secret-file SECRET --path FILE',
+    );
+    const both = equalsDeprecation(bindingSpecs(['A=HIDDEN_NAME', 'B=OTHER'], ['a=hidden_file']));
+    expect(both).not.toContain('\n');
+    for (const typed of ['HIDDEN_NAME', 'OTHER', 'hidden_file']) expect(both).not.toContain(typed);
   });
 });
 

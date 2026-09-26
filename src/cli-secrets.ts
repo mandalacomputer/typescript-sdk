@@ -196,6 +196,12 @@ export type BindingSpec = {
   /** The variable or file it is published as; absent means the secret's own name. */
   target?: string;
   /**
+   * Whether `target` was typed after `=` (`SECRET=VAR`, deprecated) rather than
+   * given by `--as` or `--path`: only such a target may be a value typed there
+   * by mistake, so only such a one is checked for that and printed hidden.
+   */
+  afterEquals: boolean;
+  /**
    * How an error names this binding. Never the whole of `key` once an `=` was
    * typed: see {@link bindingSpecs}.
    */
@@ -203,9 +209,15 @@ export type BindingSpec = {
 };
 
 /**
- * The `--secret SECRET[=VAR]` and `--secret-file SECRET[=FILE]` values, split
- * and checked before any request.
+ * The `--secret` and `--secret-file` values, with the `--as VAR` or `--path
+ * FILE` typed directly after each (`as` and `paths`, one entry per binding, in
+ * order), checked before any request.
  *
+ * A binding given `--as` or `--path` takes its whole value as the secret, `=`
+ * and all: the target has its own flag, so nothing there can be a value typed
+ * where a name was meant, and it is only held to the naming rules.
+ *
+ * Without one, the deprecated `SECRET=VAR` and `SECRET=FILE` are still read.
  * Split at the LAST `=`, since neither a variable nor a file name can hold one
  * and a secret's name can. Nothing after the FIRST `=` is ever quoted back: the
  * likely mistake is `--secret NAME=<the value itself>`, an error is the last
@@ -222,32 +234,59 @@ export type BindingSpec = {
 export function bindingSpecs(
   envs: readonly string[] = [],
   files: readonly string[] = [],
-  { valueCheck = true }: { valueCheck?: boolean } = {},
+  {
+    valueCheck = true,
+    as = [],
+    paths = [],
+  }: {
+    valueCheck?: boolean;
+    as?: readonly (string | undefined)[];
+    paths?: readonly (string | undefined)[];
+  } = {},
 ): BindingSpec[] {
-  const split = (flag: BindingSpec['flag'], typed: string, index: number): BindingSpec => {
+  const split = (
+    flag: BindingSpec['flag'],
+    typed: string,
+    index: number,
+    named: string | undefined,
+  ): BindingSpec => {
+    const env = flag === '--secret';
+    const [pattern, rule] = env
+      ? [P.SECRET_ENV, 'letters, digits and underscores, not starting with a digit, at most 64']
+      : [P.SECRET_FILE, 'lowercase letters, digits, - and _, starting with a letter, at most 48'];
+    // Labelled without what follows an `=` even when --as took the target: a
+    // value typed after one by mistake is still in the key.
+    const eq = typed.indexOf('=');
+    const label =
+      eq < 0
+        ? `${flag} ${JSON.stringify(typed.trim())}`
+        : `${flag} #${index + 1} (${JSON.stringify(`${typed.slice(0, eq).trim()}=…`)})`;
+    if (named !== undefined) {
+      const key = typed.trim();
+      if (!key) throw new CliError('invalid_arguments', `${flag} needs a secret name or id`);
+      if (!pattern.test(named))
+        throw new CliError(
+          'invalid_arguments',
+          `${label}: ${env ? '--as' : '--path'} must be ${rule} characters`,
+        );
+      return { flag, key, target: named, afterEquals: false, label };
+    }
     const at = typed.lastIndexOf('=');
     const key = (at < 0 ? typed : typed.slice(0, at)).trim();
-    const label =
-      at < 0
-        ? `${flag} ${JSON.stringify(key)}`
-        : `${flag} #${index + 1} (${JSON.stringify(`${typed.slice(0, typed.indexOf('=')).trim()}=…`)})`;
     if (!key) throw new CliError('invalid_arguments', `${flag} needs a secret name or id`);
-    if (at < 0) return { flag, key, label };
+    if (at < 0) return { flag, key, afterEquals: false, label };
     const target = typed.slice(at + 1);
-    const [pattern, rule] =
-      flag === '--secret'
-        ? [P.SECRET_ENV, 'letters, digits and underscores, not starting with a digit, at most 64']
-        : [P.SECRET_FILE, 'lowercase letters, digits, - and _, starting with a letter, at most 48'];
     // Checked first, as a value that also passes the pattern (a GitHub token
     // is a valid variable name) would otherwise be sent as the name and
     // printed back as the computer's binding.
     if (valueCheck && looksLikeSecretValue(target))
       throw new CliError(
         'invalid_arguments',
-        `${label}: what follows = looks like a secret's value, not ${flag === '--secret' ? 'a variable' : 'a file'} name, ` +
+        `${label}: what follows = looks like a secret's value, not ${env ? 'a variable' : 'a file'} name, ` +
           `so nothing was sent. It names where the value goes, never the value: store that with ` +
           `mandala secrets set, then bind the secret by its name. ` +
-          `If it is a name after all, --no-value-check sends it as typed`,
+          `If it is a name after all, give it with ${env ? '--as' : '--path'} instead of =, ` +
+          `or send it as typed with --no-value-check`,
       );
     if (!pattern.test(target))
       throw new CliError(
@@ -255,12 +294,32 @@ export function bindingSpecs(
         `${label}: what follows = must be ${rule} characters. ` +
           `It names where the value goes, never the value: store that with mandala secrets set`,
       );
-    return { flag, key, target, label };
+    return { flag, key, target, afterEquals: true, label };
   };
   return [
-    ...envs.map((typed, i) => split('--secret', typed, i)),
-    ...files.map((typed, i) => split('--secret-file', typed, i)),
+    ...envs.map((typed, i) => split('--secret', typed, i, as[i])),
+    ...files.map((typed, i) => split('--secret-file', typed, i, paths[i])),
   ];
+}
+
+/**
+ * The one-line warning a create prints when a binding used the deprecated
+ * `SECRET=VAR` or `SECRET=FILE`, or `undefined` when none did. It names the
+ * flags and never what was typed: the target may be a value put there by
+ * mistake.
+ */
+export function equalsDeprecation(specs: readonly BindingSpec[]): string | undefined {
+  const used = new Set(specs.filter((s) => s.afterEquals).map((s) => s.flag));
+  if (!used.size) return undefined;
+  const instead = [
+    ...(used.has('--secret') ? ['--secret SECRET --as VAR'] : []),
+    ...(used.has('--secret-file') ? ['--secret-file SECRET --path FILE'] : []),
+  ];
+  const old = [
+    ...(used.has('--secret') ? ['--secret SECRET=VAR'] : []),
+    ...(used.has('--secret-file') ? ['--secret-file SECRET=FILE'] : []),
+  ];
+  return `mandala: ${old.join(' and ')} ${old.length > 1 ? 'are' : 'is'} deprecated; use ${instead.join(' and ')}`;
 }
 
 /**
@@ -306,16 +365,17 @@ export async function secretBindings(
       );
     const as = target ?? found?.name;
     const env = flag === '--secret';
+    const name = env ? '--as VAR' : '--path FILE';
     if (as === undefined)
       throw new CliError(
         'invalid_arguments',
-        `${flag} ${key}: say what to bind it as, ${key}=${env ? 'VAR' : 'FILE'}`,
+        `${flag} ${key}: say what to bind it as, ${flag} ${key} ${name}`,
       );
     if (target === undefined && !(env ? P.SECRET_ENV : P.SECRET_FILE).test(as))
       throw new CliError(
         'invalid_arguments',
         `${flag} ${JSON.stringify(key)}: its name cannot be ${env ? 'a variable' : 'a file'} name as it is; ` +
-          `name one: ${flag} ${JSON.stringify(`${key}=${env ? 'VAR' : 'FILE'}`)}`,
+          `name one: ${flag} ${JSON.stringify(key)} ${name}`,
       );
     const secretId = found?.id ?? key;
     once(`id:${secretId}`, label, 'the secret');
@@ -330,15 +390,19 @@ export async function secretBindings(
  *
  * {@link looksLikeSecretValue} cannot catch every value, and one it misses is
  * bound as the name; the create's own output is then the first place it would
- * be printed. A name taken from the secret's own (no `=`) is shown as it is,
- * and `computers get` shows every name.
+ * be printed. A name taken from the secret's own (no `=`), or given by `--as`
+ * or `--path`, is shown as it is, and `computers get` shows every name.
  */
 export function withoutTypedTargets(
   computer: Record<string, unknown>,
   specs: readonly BindingSpec[],
 ): Record<string, unknown> {
   const typed = (flag: BindingSpec['flag']) =>
-    new Set(specs.flatMap((s) => (s.flag === flag && s.target !== undefined ? [s.target] : [])));
+    new Set(
+      specs.flatMap((s) =>
+        s.flag === flag && s.afterEquals && s.target !== undefined ? [s.target] : [],
+      ),
+    );
   const env = typed('--secret');
   const file = typed('--secret-file');
   if (!env.size && !file.size) return computer;
@@ -363,8 +427,8 @@ export function withoutTypedTargets(
 export function scrubTypedTargets(error: unknown, specs: readonly BindingSpec[]): unknown {
   if (!(error instanceof Error)) return error;
   let message = error.message;
-  for (const { target } of specs) {
-    if (!target) continue;
+  for (const { target, afterEquals } of specs) {
+    if (!target || !afterEquals) continue;
     const escaped = target.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     message = message.replace(
       new RegExp(`(?<![A-Za-z0-9_-])${escaped}(?![A-Za-z0-9_-])`, 'g'),

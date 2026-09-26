@@ -8,6 +8,12 @@ export type Flag = {
   repeatable?: boolean;
   choices?: readonly string[];
   conflicts?: readonly string[];
+  /**
+   * The flag this one completes: it must come directly after that one, and
+   * once for it at most (`--secret SECRET --as VAR`). Each value is kept with
+   * the occurrence it follows, in {@link Parsed.paired}.
+   */
+  follows?: string;
 };
 
 export type Command = {
@@ -130,17 +136,25 @@ export const COMMANDS: readonly Command[] = [
       bool('no-start', 'Create without starting'),
       flag(
         'secret',
-        'Bind a stored secret as an environment variable: SECRET[=VAR], SECRET a name or id (VAR defaults to its name); repeat for several',
+        'Bind a stored secret, by name or id, as an environment variable named by --as (default: its name); repeat for several. SECRET=VAR is deprecated',
         { repeatable: true },
       ),
+      flag('as', 'The variable the --secret right before it is bound as', {
+        repeatable: true,
+        follows: 'secret',
+      }),
       flag(
         'secret-file',
-        'Bind a stored secret as a file in /run/mandala-secrets/user/files: SECRET[=FILE] (FILE defaults to its name); repeat for several',
+        'Bind a stored secret as a file in /run/mandala-secrets/user/files named by --path (default: its name); repeat for several. SECRET=FILE is deprecated',
         { repeatable: true },
       ),
+      flag('path', 'The file the --secret-file right before it is bound as', {
+        repeatable: true,
+        follows: 'secret-file',
+      }),
       bool(
         'no-value-check',
-        "Send each =VAR or =FILE as typed, even one that looks like a secret's value rather than a name",
+        "Send each deprecated =VAR or =FILE as typed, even one that looks like a secret's value rather than a name",
       ),
       flag(
         'browser-proxy',
@@ -493,6 +507,12 @@ export type Parsed = {
   json: boolean;
   /** Arguments handed on verbatim, for a command with {@link Command.passthrough}. */
   rest: string[];
+  /**
+   * For each flag another one {@link Flag.follows}, one entry per time it was
+   * given, in order: the follower's value typed directly after it, or
+   * `undefined` for none.
+   */
+  paired: Record<string, (string | undefined)[]>;
 };
 
 export function usage(c: Command): string {
@@ -655,8 +675,18 @@ function meantPath(argv: string[], at: number, parsed: Parsed, taken: Taken | un
 }
 
 export function parseArgs(argv: string[]): Parsed {
-  const parsed: Parsed = { path: '', args: [], flags: {}, help: false, json: false, rest: [] };
+  const parsed: Parsed = {
+    path: '',
+    args: [],
+    flags: {},
+    help: false,
+    json: false,
+    rest: [],
+    paired: {},
+  };
   let positional = false;
+  // The option read just before this word, for a flag that must follow it.
+  let previous: Flag | undefined;
   // The first value a global option took that would also have extended the
   // command read so far, for judging an unknown option after it (meantPath).
   let taken: Taken | undefined;
@@ -673,6 +703,7 @@ export function parseArgs(argv: string[]): Parsed {
     }
     if (!positional && arg === '--') {
       positional = true;
+      previous = undefined;
       continue;
     }
     // `--version` is the conventional spelling, and only before a command: after
@@ -725,6 +756,18 @@ export function parseArgs(argv: string[]): Parsed {
             `--${spec.name} must be one of: ${spec.choices.join(', ')}`,
           );
       }
+      if (spec.follows) {
+        // Refused rather than attached to some earlier one: which binding a
+        // stray --as meant is a guess, and the value is never repeated here.
+        const leads = parsed.paired[spec.follows];
+        if (previous?.name !== spec.follows || !leads)
+          throw usageError(parsed.command, followError(spec, previous, parsed.command));
+        leads[leads.length - 1] = value as string;
+      } else if (parsed.command?.flags.some((f) => f.follows === spec.name)) {
+        parsed.paired[spec.name] ??= [];
+        parsed.paired[spec.name]!.push(undefined);
+      }
+      previous = spec;
       if (spec.repeatable) parsed.flags[spec.name] ??= [];
       if (spec.repeatable) (parsed.flags[spec.name] as string[]).push(value as string);
       else parsed.flags[spec.name] = value;
@@ -732,6 +775,7 @@ export function parseArgs(argv: string[]): Parsed {
       if (spec.name === 'help') parsed.help = true;
       continue;
     }
+    previous = undefined;
     if (!parsed.command && arg === 'help' && !parsed.path) {
       parsed.help = true;
       continue;
@@ -801,6 +845,21 @@ export function parseArgs(argv: string[]): Parsed {
       }
   }
   return parsed;
+}
+
+/**
+ * Why `spec`, a flag that must follow another, cannot follow `previous`: it
+ * names the flag it goes after, and never the value it was given.
+ */
+function followError(spec: Flag, previous: Flag | undefined, c: Command | undefined): string {
+  const leader = `--${spec.follows}`;
+  const shape = `${leader} SECRET --${spec.name} ${spec.name === 'as' ? 'VAR' : 'FILE'}`;
+  const sibling = c?.flags.find((f) => f.follows !== undefined && f.follows === previous?.name);
+  if (sibling)
+    return `--${spec.name} goes after ${leader}; --${previous!.name} takes --${sibling.name}`;
+  if (previous?.name === spec.name)
+    return `--${spec.name} was given twice for one ${leader}; each takes one: ${shape}`;
+  return `--${spec.name} names what the ${leader} directly before it is bound as; type it right after one: ${shape}`;
 }
 
 /**

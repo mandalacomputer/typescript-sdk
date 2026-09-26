@@ -15,6 +15,7 @@ import { errorInfo, Output, redact, snakeKeys } from './cli-output.js';
 import { type CliIO, documentInput, openBrowser, readInput } from './cli-runtime.js';
 import {
   bindingSpecs,
+  equalsDeprecation,
   scrubTypedTargets,
   secretBindings,
   secretsList,
@@ -499,7 +500,11 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
     // of the create has passed, just before it is sent.
     const bindings = bindingSpecs(many('secret'), many('secret-file'), {
       valueCheck: !b('no-value-check'),
+      as: parsed.paired.secret,
+      paths: parsed.paired['secret-file'],
     });
+    const deprecated = equalsDeprecation(bindings);
+    if (deprecated) output.diagnostic(deprecated);
     if (path === 'computers create') P.createBody(create);
     const proxy: P.UpdateArgs | undefined =
       path === 'computers browser-proxy set'

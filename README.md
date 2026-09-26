@@ -2811,7 +2811,7 @@ Listing filters and webhook filters that say `--computer` take IDs.
 ```sh
 mandala computers list --json
 mandala computers create --name workbench --template base --cpu 2 --ram-mb 4096 --disk-gb 40
-mandala computers create --name agent --secret OPENAI_API_KEY --secret-file GH_TOKEN=gh
+mandala computers create --name agent --secret OPENAI_API_KEY --secret-file GH_TOKEN --path gh
 mandala computers wait workbench --until guest --timeout-ms 180000 --poll-ms 2000
 mandala computers get workbench
 mandala computers screenshot workbench -o screen.png --fresh
@@ -2838,27 +2838,35 @@ browsers have its proxy (at once for one with none). The default is `running`. `
 lookup's request budget. The SDK also provides [`computers.launch()`](#use) for
 creating and waiting in one call.
 
-`--secret SECRET[=VAR]` binds a secret from the store (`mandala secrets set`)
-as an environment variable in the computer's desktop session, and
-`--secret-file SECRET[=FILE]` as the file `/run/mandala-secrets/user/files/FILE`.
-`SECRET` is a name or an id in the default scope, and `VAR` or `FILE` defaults
-to the secret's name. Both repeat. The part after the last `=` names where the
-value goes, never the value itself; the value only ever goes in through
-`secrets set`. So an error never quotes anything after the first `=`: it names
-the binding by flag, position and the text before that `=`. A target that looks
-like a value rather than a name (a known token prefix such as `ghp_` or `sk-`, an
-AWS key id, a UUID, or a long random-looking string) is refused before anything
-is sent. The check is a guess, so a real name it refuses (one holding a hash,
-say) goes through with `--no-value-check`, which still holds it to the naming
-rules. A variable or file typed after `=` prints as `[REDACTED]` in the
-create's output and in any error the create fails with; `computers get` shows
-it. Two bindings of
-one secret, or into one variable or file, fail before anything is created. An
-id the default scope does not list, such as one of a
-workspace's secrets, is sent as it is and needs its `=VAR` or `=FILE`. A name
-that matches nothing fails before anything is created. The secrets reach the
-desktop a few seconds after the computer runs: `computers wait --until secrets`
-waits for them.
+`--secret SECRET` binds a secret from the store (`mandala secrets set`) as an
+environment variable in the computer's desktop session, and `--secret-file
+SECRET` as the file `/run/mandala-secrets/user/files/FILE`. `SECRET` is a name
+or an id in the default scope. The variable or file is the secret's own name,
+or the one `--as VAR` or `--path FILE` gives directly after it:
+`--secret OPENAI --as OPENAI_API_KEY --secret-file GH_TOKEN --path gh`. Each
+`--as` goes right after its `--secret` and each `--path` right after its
+`--secret-file`; one anywhere else (first, after the other kind, twice for one
+binding, or with another option in between) is refused, and never quoted. Both
+repeat. `--as` and `--path` only ever name where the value goes, never the
+value itself; the value only ever goes in through `secrets set`. Two bindings
+of one secret, or into one variable or file, fail before anything is created.
+An id the default scope does not list, such as one of a workspace's secrets, is
+sent as it is and needs its `--as` or `--path`. A name that matches nothing
+fails before anything is created. The secrets reach the desktop a few seconds
+after the computer runs: `computers wait --until secrets` waits for them.
+
+`SECRET=VAR` and `SECRET=FILE` still work but are deprecated, and print a
+one-line warning on stderr that never repeats what follows the `=`. The part
+after the last `=` names the target, which is where a value typed by mistake
+would land, so that form keeps its guard: an error never quotes anything after
+the first `=` (it names the binding by flag, position and the text before that
+`=`), and a target that looks like a value rather than a name (a known token
+prefix such as `ghp_` or `sk-`, an AWS key id, a UUID, or a long random-looking
+string) is refused before anything is sent. The check is a guess; a real name
+it refuses (one holding a hash, say) goes through with `--as` or `--path`, or
+as typed with `--no-value-check`, which still holds it to the naming rules. A
+variable or file typed after `=` prints as `[REDACTED]` in the create's output
+and in any error the create fails with; `computers get` shows it.
 
 `--browser-proxy URL` sends the new computer's browsers through a proxy, and
 `--browser-proxy-bypass` lists the hosts they reach directly, comma-separated or
