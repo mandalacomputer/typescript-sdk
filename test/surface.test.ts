@@ -525,6 +525,17 @@ async function exerciseEverything(client: Client): Promise<void> {
   const minted = await client.apiKeys.create({ name: 'ci', workspaceId: 'wsp-1' });
   await client.apiKeys.revoke(minted.id);
 
+  // Lifecycle operations (OPL-5055): a read, a page with every parameter it
+  // sends, and the wait over the read.
+  await client.operations.get('op_0123456789abcdef01234567');
+  await client.operations.list();
+  await client.operations.list({
+    computerId: 'vm-1',
+    limit: 5,
+    cursor: 'op_00000000000000000000000a',
+  });
+  await client.operations.wait('op_0123456789abcdef01234567');
+
   // Last, and both shapes: the purge is what `expect` binds, and a delete that
   // keeps the snapshots sends neither key.
   await (await client.computers.get('vm-2')).delete({ deleteSnapshots: true, expect: 'abc123' });

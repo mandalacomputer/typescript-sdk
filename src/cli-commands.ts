@@ -472,6 +472,8 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
       checkWait(wait.timeoutMs ?? 60_000, wait.pollMs ?? 1_000);
     const call = { signal };
     const usageWindow = { from: s('from'), to: s('to'), signal };
+    const operationPage = { computerId: s('computer'), limit: n('limit'), cursor: s('cursor') };
+    if (path === 'operations list') P.operationsQuery(operationPage);
     if (path === 'usage') checkUsageWindow(usageWindow.from, usageWindow.to);
     // Preparation and pure SDK validation happen before name resolution or any request.
     const bypassFlag =
@@ -637,6 +639,17 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
         );
       case 'api-keys revoke':
         return await apiKeysRevoke(client, output, target, signal);
+      case 'operations list': {
+        const page = await client.operations.list(operationPage, call);
+        return output.result({
+          operations: page.operations.map(raw),
+          next_cursor: page.nextCursor,
+        });
+      }
+      case 'operations get':
+        return output.result(raw(await client.operations.get(target, call)));
+      case 'operations wait':
+        return output.result(raw(await client.operations.wait(target, wait)));
       case 'usage': {
         const report = await client.usage.read(usageWindow);
         checkUsageReport(report.raw);

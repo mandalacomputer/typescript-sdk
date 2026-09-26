@@ -192,10 +192,6 @@ export const UNIMPLEMENTED: ReadonlySet<string> = new Set([
   'GET workspaces',
   'GET workspaces/:id',
   'GET workspaces/:id/members',
-  // Lifecycle operations, read only (OPL-5055). Listed to stay in step with
-  // the surface; no client method yet.
-  'GET operations',
-  'GET operations/:id',
 ]);
 
 /**

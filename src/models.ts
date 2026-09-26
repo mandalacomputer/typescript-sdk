@@ -2017,6 +2017,13 @@ export type Move = {
   startedAt: string;
   /** Absent while {@link live}. */
   finishedAt?: string;
+  /**
+   * The move's lifecycle operation, on the answer to {@link Computer.relocate}
+   * only — never on a row of {@link Moves.list}. `client.operations.wait(id)`
+   * is the same wait as {@link Computer.waitForMove}. Absent where the platform
+   * could not record one; the move was accepted either way.
+   */
+  operationId?: string;
   raw: Record<string, unknown>;
 };
 
@@ -2073,6 +2080,7 @@ export function toMove(d: Record<string, unknown>): Move {
     ...(d.disk_gb == null ? {} : { diskGb: num(d.disk_gb) }),
     startedAt: str(d.started_at),
     ...(finishedAt === undefined ? {} : { finishedAt }),
+    ...(operationIdOf(d) === undefined ? {} : { operationId: operationIdOf(d) }),
     raw: { ...d },
   };
 }
@@ -3914,5 +3922,168 @@ export function toWhoami(d: unknown, method: string, path: string): Whoami {
     workspace,
     key: d.key === null || d.key === undefined ? null : toApiKey(d.key, `the key from ${where}`),
     raw: { ...d },
+  };
+}
+
+// --- lifecycle operations ------------------------------------------------------
+
+/**
+ * The call that started an operation. An open set: the platform adds kinds, and
+ * one this client does not know is a kind, not a malformed answer.
+ */
+export type OperationKind =
+  | 'create'
+  | 'clone'
+  | 'start'
+  | 'stop'
+  | 'suspend'
+  | 'restart'
+  | 'restore'
+  | 'resize'
+  | 'move'
+  | (string & {});
+
+/**
+ * Where an operation has got to. `succeeded` and `failed` are final; `pending`
+ * and `running` are live. Open for the same reason as {@link OperationKind}.
+ */
+export type OperationState = 'pending' | 'running' | 'succeeded' | 'failed' | (string & {});
+
+/**
+ * One lifecycle operation (platform OPL-5055): what an accepted create, clone,
+ * start, stop, suspend, restart, restore, resize or move started, and how it
+ * ended. {@link Operations.wait} polls one to its end.
+ *
+ * `succeeded` MEANS THE PLATFORM FINISHED ITS STEP, not that the desktop inside
+ * has booted: a create or a start that succeeded is a guest that was started.
+ * {@link Computer.waitForGuest} is still the wait for a desktop that answers.
+ *
+ * Most operations are already `succeeded` when the call that started them
+ * answers, because the platform did the step before answering. A clone is
+ * `running` until its disk is copied, and a move until it lands.
+ */
+export type Operation = {
+  /** `op_` and 24 hex characters: the `operationId` a lifecycle call answered. */
+  id: string;
+  kind: OperationKind;
+  /**
+   * The computer it is about — for a create or a clone, the new one. `null`
+   * only for a restore whose computer could not be named when it was recorded.
+   */
+  computerId: string | null;
+  state: OperationState;
+  /**
+   * Why a `failed` one failed, `null` otherwise. `code` is the part to act on
+   * (`start_failed`, `build_failed`, `computer_gone`, `move_failed`,
+   * `resize_not_applied`, `lost`, and more may be added); `message` is a
+   * sentence for a person.
+   */
+  error: { code: string; message: string } | null;
+  createdAt: string;
+  /** When `state` or `error` last changed. */
+  updatedAt: string;
+  /** `null` while it is live. */
+  finishedAt: string | null;
+  raw: Record<string, unknown>;
+};
+
+/** One page of {@link Operations.list}, newest first. */
+export type OperationPage = {
+  operations: Operation[];
+  /** Pass as `cursor` for the page after this one; `null` on the last page. */
+  nextCursor: string | null;
+  raw: Record<string, unknown>;
+};
+
+/**
+ * Strict on the three fields a wait decides on — the id it polls, the state it
+ * ends on, and the error it throws — and on the error's shape, because a
+ * `failed` operation whose reason this client silently dropped would be thrown
+ * as a failure with nothing to say about why. The kind is required to be a
+ * string and is otherwise opaque.
+ */
+export function toOperation(d: unknown, what = 'an operation'): Operation {
+  if (!isRecord(d)) throw new MandalaError(`expected ${what} to be an object`);
+  if (typeof d.id !== 'string' || !d.id || d.id !== d.id.trim()) {
+    throw new MandalaError(`expected ${what} to carry its id`);
+  }
+  if (typeof d.state !== 'string' || !d.state) {
+    throw new MandalaError(`expected ${what} to carry its state`);
+  }
+  if (typeof d.kind !== 'string' || !d.kind) {
+    throw new MandalaError(`expected ${what} to carry its kind`);
+  }
+  let error: Operation['error'] = null;
+  if (d.error !== null && d.error !== undefined) {
+    const e = d.error;
+    if (!isRecord(e) || typeof e.code !== 'string' || typeof e.message !== 'string') {
+      throw new MandalaError(`expected ${what}'s error to be null or carry a code and a message`);
+    }
+    error = { code: e.code, message: e.message };
+  }
+  return {
+    id: d.id,
+    kind: d.kind,
+    computerId: nullableText(d.computer_id, `${what}'s computer_id`),
+    state: d.state,
+    error,
+    createdAt: str(d.created_at),
+    updatedAt: str(d.updated_at),
+    finishedAt: stamp(d.finished_at) ?? null,
+    raw: { ...d },
+  };
+}
+
+export function toOperationPage(d: unknown, method: string, path: string): OperationPage {
+  const where = `${method} ${path}`;
+  if (!isRecord(d) || !Array.isArray(d.operations)) {
+    throw new MandalaError(`expected a list of operations from ${where}`);
+  }
+  // Strict, because a page is how a caller walks to the next one: a cursor that
+  // is not a string would be sent back as `[object Object]`, and one silently
+  // read as null would end the walk early and call the listing complete.
+  const next = d.next_cursor;
+  if (next !== null && next !== undefined && (typeof next !== 'string' || !next)) {
+    throw new MandalaError(`expected the next_cursor from ${where} to be a string or null`);
+  }
+  return {
+    operations: d.operations.map((row, i) => toOperation(row, `operation ${i} from ${where}`)),
+    nextCursor: next ?? null,
+    raw: { ...d },
+  };
+}
+
+/**
+ * The `operation_id` a lifecycle answer carried, or `undefined` for none.
+ *
+ * Absent is ordinary and never an error: the platform leaves it out, with the
+ * call still done, when it could not record the operation, and an older
+ * platform never sends one. Anything that is not a non-empty string is read as
+ * absent for the same reason — the call it came back on already happened.
+ */
+export const operationIdOf = (d: unknown): string | undefined => {
+  if (!isRecord(d)) return undefined;
+  const v = d.operation_id;
+  return typeof v === 'string' && v ? v : undefined;
+};
+
+/**
+ * What a lifecycle call that finishes before it answers returns (platform
+ * `LifecycleAck`): `{"ok": true}` and the operation it recorded.
+ */
+export type LifecycleAck = {
+  /**
+   * The operation this call recorded, already `succeeded`. `undefined` where the
+   * platform could not record one or predates operations; the call is done either way.
+   */
+  operationId?: string;
+  raw: Record<string, unknown>;
+};
+
+export function toLifecycleAck(d: unknown): LifecycleAck {
+  const operationId = operationIdOf(d);
+  return {
+    ...(operationId === undefined ? {} : { operationId }),
+    raw: isRecord(d) ? { ...d } : {},
   };
 }

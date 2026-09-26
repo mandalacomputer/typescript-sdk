@@ -14,6 +14,7 @@ import {
   MethodNotAllowedError,
   MoveRequiredError,
   NotFoundError,
+  OperationFailedError,
   OriginResponseError,
   OriginTLSError,
   OriginUnreachableError,
@@ -139,6 +140,15 @@ export function errorInfo(error: unknown): {
     };
   if (error instanceof Error && error.name === 'AbortError')
     return { code: 'cancelled', message: 'Cancelled' };
+  // Before the branch below, which would read the platform's own `code` —
+  // `start_failed`, or nothing at all — as this CLI's error vocabulary. The
+  // operation's code is kept, as a detail.
+  if (error instanceof OperationFailedError)
+    return {
+      code: 'operation_failed',
+      message: error.message,
+      details: { operation: error.operation.raw },
+    };
   if (error instanceof MandalaError) {
     // The local stages (credentials, device login) name their own failure, in
     // the same snake_case.

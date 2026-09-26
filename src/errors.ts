@@ -17,6 +17,8 @@
  * reached for.
  */
 
+import type { Operation } from './models.js';
+
 /**
  * A caller mistake, refused before the request went out.
  *
@@ -645,6 +647,38 @@ export class OriginTLSError extends APIError {
 /** A wait helper gave up before the computer reached the expected state. */
 export class TimeoutError extends MandalaError {
   override name = 'TimeoutError';
+}
+
+/**
+ * A lifecycle operation {@link Operations.wait} was watching ended `failed`.
+ *
+ * Not an {@link APIError}: every request succeeded, and what failed is the step
+ * the platform was taking — a create that built a computer which would not
+ * boot, a clone whose disk copy did not finish, a move that went nowhere. So
+ * {@link isTransient} says no to it, and waiting again answers the same.
+ *
+ * {@link code} is the part to act on, and one of them is not a failure of
+ * everything: `resize_not_applied` is a move that LANDED at the old size, so
+ * the computer is on another host and an ordinary resize finishes the job.
+ */
+export class OperationFailedError extends MandalaError {
+  override name = 'OperationFailedError';
+  /** The platform's code, e.g. `start_failed`; `''` if the operation named none. */
+  readonly code: string;
+  /** The platform's sentence about it, for a person; `''` if it gave none. */
+  readonly detail: string;
+  constructor(readonly operation: Operation) {
+    const code = operation.error?.code ?? '';
+    const detail = operation.error?.message ?? '';
+    const about = operation.computerId ? ` of ${operation.computerId}` : '';
+    super(
+      `operation ${operation.id} (${operation.kind}${about}) failed` +
+        (code ? `: ${code}` : '') +
+        (detail ? ` — ${detail}` : ''),
+    );
+    this.code = code;
+    this.detail = detail;
+  }
 }
 
 /**
