@@ -492,10 +492,29 @@ const NOT_REPEATED = 'not repeated here, as under secrets it may be a secret val
  */
 function unknownOption(spelling: string, path: string): string {
   if (!quotesInput(path))
-    return `unknown option, ${NOT_REPEATED}; secrets set reads the value from stdin or a hidden prompt, never argv`;
+    // list and rm read no value, so where one is read would be beside the point.
+    return path === 'secrets list' || path === 'secrets rm'
+      ? `unknown option, ${NOT_REPEATED}`
+      : `unknown option, ${NOT_REPEATED}; secrets set reads the value from stdin or a hidden prompt, never argv`;
   if (/^(?:-[A-Za-z0-9]|--[A-Za-z][A-Za-z0-9-]{0,39})$/.test(spelling))
     return `unknown option ${spelling}`;
   return 'unknown option: an argument starts with "-" but is not an option name; put -- before a value that starts with one';
+}
+
+/**
+ * The command group the words from `from` on name, for an option typed before
+ * any: the first word that is neither an option nor a global option's value.
+ * So `mandala --sk-live-0123 secrets set` is judged as typed under secrets.
+ */
+function groupAhead(argv: string[], from: number): string {
+  for (let i = from; i < argv.length; i++) {
+    const word = argv[i]!;
+    if (word === '--') return '';
+    if (!word.startsWith('-')) return word;
+    const spec = GLOBAL_FLAGS.find((f) => word === `--${f.name}`);
+    if (spec && spec.type !== 'boolean') i++;
+  }
+  return '';
 }
 
 export function parseArgs(argv: string[]): Parsed {
@@ -527,7 +546,11 @@ export function parseArgs(argv: string[]): Parsed {
       const [spelling, ...tail] = arg.split('=');
       const flags = [...GLOBAL_FLAGS, ...(parsed.command?.flags ?? [])];
       const spec = flags.find((f) => spelling === `--${f.name}` || spelling === `-${f.alias}`);
-      if (!spec) throw usageError(parsed.command, unknownOption(spelling!, parsed.path));
+      if (!spec)
+        throw usageError(
+          parsed.command,
+          unknownOption(spelling!, parsed.path || groupAhead(argv, i + 1)),
+        );
       if (parsed.flags[spec.name] !== undefined && !spec.repeatable)
         throw new CliError('invalid_arguments', `--${spec.name} may only be supplied once`);
       let value: string | number | boolean = true;
@@ -579,7 +602,7 @@ export function parseArgs(argv: string[]): Parsed {
         );
         throw new CliError(
           'invalid_arguments',
-          `unknown command under secrets, ${NOT_REPEATED}; choose one of: ${verbs.join(', ')}`,
+          `unknown command under secrets; choose one of: ${verbs.join(', ')} (the word typed is ${NOT_REPEATED})`,
         );
       }
     } else parsed.args.push(arg);

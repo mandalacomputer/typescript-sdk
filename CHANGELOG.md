@@ -92,9 +92,11 @@ name.
   nothing more`), rather than the bare usage line. `--json` carries the same
   text as `error.usage`. The extra arguments are counted, never quoted, and an
   unknown option is named only when it is shaped like one: either could be a
-  secret typed where `secrets set` reads stdin. Under `secrets`, nothing typed
-  is repeated at all — not an option-shaped word such as `--sk-live-0123`, and
-  not an unknown verb — and a word after `--` is always an operand, counted.
+  secret typed where `secrets set` reads stdin. Under `secrets`, no usage
+  error repeats what was typed — not an option-shaped word such as
+  `--sk-live-0123`, even typed before `secrets`, and not an unknown verb — and
+  a word after `--` is always an operand, counted; a `--json` there no longer
+  turns a usage error into JSON.
 
 ## [0.6.0] — 2026-09-25
 
