@@ -182,8 +182,16 @@ export const COMMANDS: readonly Command[] = [
     ['computer'],
     [
       flag('output', 'Destination file', { alias: 'o', required: true }),
-      num('width', 'Image width'),
+      num('width', 'Image width', { conflicts: ['scale'] }),
       bool('fresh', 'Request a fresh screenshot'),
+      flag('region', 'Crop to X,Y,WIDTH,HEIGHT in screen pixels, before any scaling'),
+      num('scale', 'Shrink by this factor, greater than 0 and at most 1', {
+        conflicts: ['width'],
+      }),
+      flag('format', 'Image encoding (default png; jpeg with --width)', {
+        choices: ['png', 'jpeg', 'jpg'],
+      }),
+      num('quality', 'JPEG quality, 1 to 100'),
     ],
   ),
   command(

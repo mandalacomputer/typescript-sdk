@@ -468,6 +468,35 @@ for a fresh capture is refused — **409**, telling you to start it first — wi
 without a width, so a poller that suspends its own machine should drop `fresh`
 rather than treat the 409 as the computer having vanished.
 
+#### A crop, a smaller picture, a cheaper encoding
+
+A full-resolution PNG is the most expensive frame to hand a model. `region`,
+`scale`, `format` and `quality` shape it, applied in that order to the same
+capture:
+
+```ts
+// The top-left quarter of a 1280x800 screen, halved, as a JPEG.
+const corner = await c.screenshot(undefined, {
+  fresh: true,
+  region: { x: 0, y: 0, width: 640, height: 400 },  // screen pixels, before scaling
+  scale: 0.5,                                        // 0 < scale <= 1; not with a width
+  format: 'jpeg',                                    // 'png' by default ('jpeg' with a width)
+  quality: 60,                                       // 1-100, JPEG only
+});
+```
+
+A cropped or scaled picture is in its own pixel space. To click on something in
+it, divide its position by the scale and add the region's `x` and `y`: (100, 50)
+in `corner` is (200, 100) on the screen. A region that reaches past the screen's
+edge is refused with a 400 naming the screen size rather than clipped; the value
+checks (a scale out of range or beside a width, a quality on a PNG) throw a
+`ValidationError` before anything is sent.
+
+A suspended computer has only its saved JPEG and cannot shape it: a crop, a
+scale, `format: 'png'` or a quality is a `ConflictError` whose `reason` is
+`unavailable`, which does not clear by waiting. Start the computer, or drop the
+shaping (and `fresh`) for the saved picture; a width or `format: 'jpeg'` may stay.
+
 ### Windows
 
 A screenshot says what the desktop *looks like*; this says what any of it **is**,
@@ -2744,6 +2773,7 @@ mandala computers create --name agent --secret OPENAI_API_KEY --secret-file GH_T
 mandala computers wait workbench --until guest --timeout-ms 180000 --poll-ms 2000
 mandala computers get workbench
 mandala computers screenshot workbench -o screen.png --fresh
+mandala computers screenshot workbench -o corner.jpg --fresh --region 0,0,640,400 --scale 0.5 --format jpeg --quality 60
 mandala computers exec workbench -c 'uname -a' --timeout 60
 printf 'pwd\nls -la\n' | mandala computers exec workbench
 mandala computers exec workbench -c 'make build' --cwd /home/user/project --background --json
@@ -2802,7 +2832,9 @@ to poll or stop it.
 Screenshot always writes the image bytes to the required `-o`/`--output` file.
 Its JSON result reports `{ "path": "screen.png", "bytes": 12345 }`; it never
 embeds or JSON-encodes the image. `--width` scales the requested image, and
-`--fresh` requests a new capture.
+`--fresh` requests a new capture. `--region X,Y,WIDTH,HEIGHT` crops in screen
+pixels, `--scale` shrinks by a factor (not with `--width`), `--format` picks
+`png` or `jpeg`, and `--quality` sets a JPEG's quality.
 
 `computers rename COMPUTER NAME` changes only the label. `computers resize`
 takes any of `--cpu`, `--ram-mb` and `--disk-gb`, and needs the computer

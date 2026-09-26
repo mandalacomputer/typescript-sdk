@@ -947,6 +947,38 @@ describe('computer commands use distinct SDK requests', () => {
     expect(result.frames[0].data).toEqual({ path, bytes: bytes.length });
   });
 
+  it('sends a screenshot region, scale, format and quality', async () => {
+    const path = join(await tempDir(), 'screen.jpg');
+    const bytes = Uint8Array.from([255, 216, 255]);
+    const h = harness((call) =>
+      call.path.endsWith('/screenshot')
+        ? new Response(bytes, { headers: { 'content-type': 'image/jpeg' } })
+        : anyRoute(call),
+    );
+    await h.run([
+      'computers',
+      'screenshot',
+      COMPUTER.id,
+      '-o',
+      path,
+      '--region',
+      '0, 0,640,400',
+      '--scale',
+      '0.5',
+      '--format',
+      'jpeg',
+      '--quality',
+      '60',
+    ]);
+    expect(h.rec.last().query).toEqual({
+      region: '0,0,640,400',
+      scale: '0.5',
+      format: 'jpeg',
+      quality: '60',
+    });
+    expect(await readFile(path)).toEqual(Buffer.from(bytes));
+  });
+
   it.each(['built', 'running', 'guest'])('waits until %s', async (until) => {
     const h = harness();
     const result = await h.run([
@@ -2044,6 +2076,12 @@ describe('malformed arguments are offline failures', () => {
     ['computers', 'delete', 'vm', '--expect', 'fp'],
     ['computers', 'screenshot', 'vm'],
     ['computers', 'screenshot', 'vm', '-o', '/tmp/x', '--width', '-1'],
+    ['computers', 'screenshot', 'vm', '-o', '/tmp/x', '--width', '320', '--scale', '0.5'],
+    ['computers', 'screenshot', 'vm', '-o', '/tmp/x', '--scale', '2'],
+    ['computers', 'screenshot', 'vm', '-o', '/tmp/x', '--region', '0,0,10'],
+    ['computers', 'screenshot', 'vm', '-o', '/tmp/x', '--region', '0,0,-1,10'],
+    ['computers', 'screenshot', 'vm', '-o', '/tmp/x', '--format', 'webp'],
+    ['computers', 'screenshot', 'vm', '-o', '/tmp/x', '--quality', '60'],
     ['computers', 'exec', 'vm', '-c', 'true', '--background', '--timeout', '8'],
     ['computers', 'exec', 'vm', '-c', 'true', '--timeout', '601'],
     ['computers', 'exec', 'vm', '-c', 'true', '--env', 'bad'],

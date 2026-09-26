@@ -230,6 +230,9 @@ export type {
   ExecArgs,
   MoveArgs,
   PasteShortcut,
+  ScreenshotFormat,
+  ScreenshotRegion,
+  ScreenshotShape,
   ScrollDirection,
   SecretBindingArgs,
   SecretCreateArgs,
@@ -246,6 +249,7 @@ export type {
 export {
   COMPUTER_STATES,
   PASTE_MAX_BYTES,
+  SCREENSHOT_FORMATS,
   SCROLL_DIRECTIONS,
   SECRET_BINDINGS_MAX,
   SECRET_FILES_MAX,

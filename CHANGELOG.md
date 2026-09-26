@@ -16,6 +16,16 @@ name.
 
 ### Added
 
+- **Screenshot shaping: `region`, `scale`, `format` and `quality`** on
+  `computer.screenshot(width, { ... })`, over the platform's new query
+  parameters — a crop in screen pixels, a shrink factor in (0, 1], `png` or
+  `jpeg`, and a JPEG quality of 1-100 — for a cheaper frame to hand a model.
+  A scale beside a width, a quality on a PNG and malformed values throw a
+  `ValidationError` before anything is sent. A suspended computer refuses a
+  crop, a scale, a PNG or a quality with a `ConflictError` whose `reason` is
+  `unavailable`. The CLI's `computers screenshot` takes `--region`, `--scale`,
+  `--format` and `--quality`. New exports: `ScreenshotShape`,
+  `ScreenshotRegion`, `ScreenshotFormat` and `SCREENSHOT_FORMATS`.
 - **`client.apiKeys.list()`, `create({ name, workspaceId })` and
   `revoke(id)`**, and **`client.account.whoami()`**, over the platform's new
   `GET whoami` and `GET|POST api-keys`, `DELETE api-keys/{id}`. The key
