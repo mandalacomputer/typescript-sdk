@@ -169,10 +169,17 @@ export const ALLOWED: ReadonlySet<string> = new Set(
  * Routes the platform exposes that this SDK deliberately does not wrap, each
  * with its reason.
  *
- * Only routes that are intentionally not exposed belong here — not ones that
- * are merely unwritten (OPL-5026 closed the last of those). Adding one means
- * saying why here, which is the point: the alternative is a set of routes
- * nobody is tracking, on a surface whose whole design is that it is enumerable.
+ * Two kinds belong here, and each entry says which:
+ *
+ * - A route intentionally not exposed, with the reason it never will be.
+ * - A route the platform has shipped ahead of this SDK's method for it,
+ *   marked "no client method yet" and naming the ticket that added it. It
+ *   leaves this set in the change that adds the method.
+ *
+ * What does not belong is a route nobody decided about (OPL-5026 closed the
+ * last of those). Adding one means saying why here, which is the point: the
+ * alternative is a set of routes nobody is tracking, on a surface whose whole
+ * design is that it is enumerable.
  */
 export const UNIMPLEMENTED: ReadonlySet<string> = new Set([
   // The OpenAI-shaped door onto the agent loop. Deliberately not wrapped: a
@@ -497,7 +504,11 @@ export function patternFor(path: string): string {
       prev === 'api-keys' ||
       // The account's store, and only there: `computers/:id/secrets` is a
       // literal at the end of a computer's path and has nothing after it.
-      (prev === 'secrets' && out.length === 1)
+      (prev === 'secrets' && out.length === 1) ||
+      // A workspace (OPL-5057) and an operation (OPL-5055), first segment
+      // only, as the platform's patternFor pins them.
+      (prev === 'workspaces' && out.length === 1) ||
+      (prev === 'operations' && out.length === 1)
     )
       out.push(':id');
     else if (out.length === 3 && out[0] === 'computers' && prev === 'activities')
