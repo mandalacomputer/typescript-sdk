@@ -131,8 +131,13 @@ name.
   operand, counted; a `--json` there no longer turns a usage error into JSON.
   An unknown option under `secrets` points at stdin unless the verb is `list`
   or `rm`, which read no value: for `set`, for no verb, and for a word that is
-  no verb, wherever the option sits. A `--profile` whose value was left out
-  before `secrets` no longer hides that the option was typed under it.
+  no verb, wherever the option sits. A `--profile` whose value was left out,
+  so that it took `secrets` or a verb under it as its value, is read both ways,
+  before or after the unknown option: `--profile secrets --sk-live-0123 set A`
+  is judged as typed under `secrets set`, and `secrets --sk-live-0123
+  --profile list` under `secrets list`, with no stdin hint. A second
+  `--profile` is refused before an unknown option is judged, so it cannot
+  hide which of the two was meant.
 
 ## [0.6.0] — 2026-09-25
 

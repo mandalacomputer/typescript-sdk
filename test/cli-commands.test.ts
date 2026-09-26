@@ -2309,6 +2309,14 @@ describe('one JSON casing and one error vocabulary (OPL-5048)', () => {
       [`--${secret}`, '--profile', 'secrets'],
       // A profile named like a command is still read as one.
       [`--${secret}`, '--profile', 'computers', 'secrets', 'set', 'A'],
+      // The same, with --profile typed first: parsing has already taken the
+      // word as its value, and it is read as the command too.
+      ['--profile', 'secrets', `--${secret}`, 'set', 'A'],
+      ['--profile', 'secrets', `--${secret}`],
+      ['--profile', 'computers', `--${secret}`, 'secrets', 'set', 'A'],
+      // A verb under the group reached is command-shaped as well.
+      ['secrets', `--${secret}`, '--profile', 'set', 'A'],
+      ['secrets', '--profile', 'set', `--${secret}`, 'A'],
     ])
       for (const jsonMode of [true, false]) {
         // --json goes first: after -- it would be one more operand.
@@ -2335,6 +2343,11 @@ describe('one JSON casing and one error vocabulary (OPL-5048)', () => {
       [`--${secret}`, 'help', 'secrets', 'list'],
       [`--${secret}`, '--', 'secrets', 'rm', 'A'],
       [`--${secret}`, '--profile', 'secrets', 'list'],
+      ['--profile', 'secrets', `--${secret}`, 'list'],
+      // A --profile value that is a verb under secrets is read as that verb.
+      ['secrets', `--${secret}`, '--profile', 'list'],
+      ['secrets', '--profile', 'list', `--${secret}`],
+      ['secrets', `--${secret}`, '--profile', 'rm', 'A'],
     ]) {
       // --json goes first: after -- it would be one more operand.
       const result = await harness().run(['--json', ...argv], false);
@@ -2343,6 +2356,20 @@ describe('one JSON casing and one error vocabulary (OPL-5048)', () => {
       expect(JSON.parse(result.out).error.message).toBe(
         'unknown option, not repeated here, as under secrets it may be a secret value',
       );
+    }
+    // A second --profile is refused as the parse would refuse it, before either
+    // could be read as the one whose value was left out.
+    for (const argv of [
+      [`--${secret}`, '--profile', 'computers', '--profile', 'secrets', 'set', 'A'],
+      [`--${secret}`, '--profile', 'computers', '--profile=secrets', 'set', 'A'],
+      ['--profile', 'p', `--${secret}`, '--profile', 'secrets', 'set', 'A'],
+      ['--profile', 'computers', `--${secret}`, '--profile', 'secrets', 'set', 'A'],
+      ['--jsno', '--profile', 'a', '--profile', 'b', 'computers', 'list'],
+    ]) {
+      const result = await harness().run(['--json', ...argv], false);
+      expect(result.code).toBe(1);
+      expect(result.out + result.err).not.toContain(secret);
+      expect(JSON.parse(result.out).error.message).toBe('--profile may only be supplied once');
     }
     // A word under secrets that is no verb is not repeated either: it is as
     // likely the value as a mistyped verb.
@@ -2362,6 +2389,11 @@ describe('one JSON casing and one error vocabulary (OPL-5048)', () => {
       ['--jsno', '--', 'computers', 'list'],
       ['--jsno', 'computers'],
       ['--jsno', '--profile', 'computers', 'list'],
+      ['--profile', 'computers', '--jsno', 'list'],
+      ['--profile', 'p', '--jsno', 'computers', 'list'],
+      ['computers', '--jsno', '--profile', 'list'],
+      // A profile given with = was not left out, so it is no command.
+      ['--profile=secrets', '--jsno', 'set', 'A'],
     ]) {
       const early = await harness().run(['--json', ...argv], false);
       expect(JSON.parse(early.out).error.message).toBe('unknown option --jsno');

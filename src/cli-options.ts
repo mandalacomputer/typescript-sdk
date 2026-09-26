@@ -531,9 +531,10 @@ function unknownOption(spelling: string, path: string): string {
   return 'unknown option: an argument starts with "-" but is not an option name; put -- before a value that starts with one';
 }
 
-/** Whether `word` is the first word of some command. */
-function startsCommand(word: string): boolean {
-  return COMMANDS.some((c) => c.path === word || c.path.startsWith(`${word} `));
+/** Whether `word` extends `path`, the words read so far, towards some command. */
+function leadsOn(path: string, word: string): boolean {
+  const next = [path, word].filter(Boolean).join(' ');
+  return COMMANDS.some((c) => c.path === next || c.path.startsWith(`${next} `));
 }
 
 /**
@@ -547,14 +548,29 @@ function startsCommand(word: string): boolean {
  * secrets list` is judged as typed under `secrets list`; with none it returns
  * the group reached, `secrets` for `mandala secrets --sk-live-0123`.
  *
- * A global option's value that is a word a command starts with is read both
+ * A global option's value that would extend the command read so far — a word
+ * a command starts with, or a verb under the group reached — is read both
  * ways, as its value and as that command, and a reading under `secrets` wins:
  * `mandala --sk-live-0123 --profile secrets set A` left the value out and
- * meant `secrets set`, while `--profile computers secrets set A` names a
- * profile. Only the first such value is read both ways, so a line repeating
- * one costs two walks and not one per repeat.
+ * meant `secrets set`, and `mandala secrets --sk-live-0123 --profile list`
+ * meant `secrets list`, while `--profile computers secrets set A` names a
+ * profile. Only the first such value is read both ways, so the walk costs
+ * two readings and never one per option.
+ *
+ * `given` names the global options already read. One that takes a value and
+ * is typed again is refused here, as the parse would refuse it, before a
+ * reading the repeat skews could name the option: in `mandala --sk-live-0123
+ * --profile computers --profile secrets set A` either `--profile` may be the
+ * one whose value was left out.
  */
-function pathAhead(argv: string[], from: number, path: string, fork = true): string {
+function pathAhead(
+  argv: string[],
+  from: number,
+  path: string,
+  given: readonly string[],
+  fork = true,
+): string {
+  const seen = new Set(given);
   let positional = false;
   for (let i = from; i < argv.length; i++) {
     const word = argv[i]!;
@@ -563,12 +579,19 @@ function pathAhead(argv: string[], from: number, path: string, fork = true): str
       continue;
     }
     if (!positional && word.startsWith('-') && word !== '-') {
-      const spec = GLOBAL_FLAGS.find((f) => word === `--${f.name}` || word === `-${f.alias}`);
+      const [spelling, ...tail] = word.split('=');
+      const spec = GLOBAL_FLAGS.find(
+        (f) => spelling === `--${f.name}` || spelling === `-${f.alias}`,
+      );
       if (!spec || spec.type === 'boolean') continue;
+      if (seen.has(spec.name))
+        throw new CliError('invalid_arguments', `--${spec.name} may only be supplied once`);
+      seen.add(spec.name);
+      if (tail.length) continue;
       const value = argv[i + 1];
-      if (fork && value !== undefined && startsCommand(value)) {
-        const asCommand = pathAhead(argv, i + 1, path, false);
-        return quotesInput(asCommand) ? pathAhead(argv, i + 2, path, false) : asCommand;
+      if (fork && value !== undefined && leadsOn(path, value)) {
+        const asCommand = pathAhead(argv, i + 1, path, [...seen], false);
+        return quotesInput(asCommand) ? pathAhead(argv, i + 2, path, [...seen], false) : asCommand;
       }
       i++;
       continue;
@@ -581,9 +604,34 @@ function pathAhead(argv: string[], from: number, path: string, fork = true): str
   return path;
 }
 
+/**
+ * The command an unknown option at `at`, typed before any full command, was
+ * meant for. `pathAhead` reads on from it. `taken` is the first value an
+ * earlier global option took that would also have extended the command read
+ * so far — `mandala --profile secrets --sk-live-0123 set A` may have left the
+ * profile out — and it is read as that command too, the reading under
+ * `secrets` winning as in pathAhead's own fork.
+ */
+function meantPath(
+  argv: string[],
+  at: number,
+  parsed: Parsed,
+  taken: { at: number; path: string } | undefined,
+): string {
+  const given = Object.keys(parsed.flags);
+  if (taken) {
+    const asCommand = pathAhead(argv, taken.at, taken.path, given, false);
+    if (!quotesInput(asCommand)) return asCommand;
+  }
+  return pathAhead(argv, at + 1, parsed.path, given);
+}
+
 export function parseArgs(argv: string[]): Parsed {
   const parsed: Parsed = { path: '', args: [], flags: {}, help: false, json: false, rest: [] };
   let positional = false;
+  // The first value a global option took that would also have extended the
+  // command read so far, for judging an unknown option after it (meantPath).
+  let taken: { at: number; path: string } | undefined;
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!;
     const through = parsed.command?.passthrough;
@@ -615,7 +663,7 @@ export function parseArgs(argv: string[]): Parsed {
           parsed.command,
           unknownOption(
             spelling!,
-            parsed.command ? parsed.path : pathAhead(argv, i + 1, parsed.path),
+            parsed.command ? parsed.path : meantPath(argv, i, parsed, taken),
           ),
         );
       if (parsed.flags[spec.name] !== undefined && !spec.repeatable)
@@ -636,6 +684,8 @@ export function parseArgs(argv: string[]): Parsed {
           );
         }
         value = spec.type === 'number' ? Number(raw) : raw;
+        if (!parsed.command && !tail.length && !taken && leadsOn(parsed.path, raw))
+          taken = { at: i, path: parsed.path };
         if (
           spec.type === 'number' &&
           (!/^-?(?:\d+\.?\d*|\.\d+)$/.test(raw) || !Number.isFinite(value))
