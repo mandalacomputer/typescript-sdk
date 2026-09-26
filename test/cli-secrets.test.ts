@@ -295,7 +295,7 @@ describe('looksLikeSecretValue', () => {
 });
 
 describe('a secret-looking target is refused before anything is sent', () => {
-  it('names the flag, the position and the text before =, never the target', () => {
+  it('names the flag and the position alone, never what was typed', () => {
     const value = tok('ghp_', body(36));
     for (const flag of ['--secret', '--secret-file'] as const) {
       const typed = [`OPENAI_API_KEY=${value}`];
@@ -305,7 +305,8 @@ describe('a secret-looking target is refused before anything is sent', () => {
       } catch (error) {
         message = (error as Error).message;
       }
-      expect(message).toContain(`${flag} #2 ("OPENAI_API_KEY=…")`);
+      expect(message).toContain(`${flag} #2: what follows =`);
+      expect(message).not.toContain('OPENAI_API_KEY');
       expect(message).toContain("looks like a secret's value");
       expect(message).toContain('nothing was sent');
       expect(message).not.toContain(value);
@@ -372,12 +373,12 @@ describe('a target named by --as or --path', () => {
       expect(value).toMatch(/^[A-Za-z_][A-Za-z0-9_]{0,63}$/);
     expect(values.slack).toMatch(/^[a-z][a-z0-9_-]{0,47}$/);
     const cases: [() => unknown, string, string][] = [
-      [() => bindingSpecs(['GH'], [], { as: [values.ghp] }), '--secret "GH": --as', values.ghp],
+      [() => bindingSpecs(['GH'], [], { as: [values.ghp] }), '--secret #1: --as', values.ghp],
       [() => bindingSpecs(['S'], [], { as: [values.stripe] }), '--as', values.stripe],
       [() => bindingSpecs(['R'], [], { as: [values.random] }), '--as', values.random],
       [
         () => bindingSpecs([], ['slack'], { paths: [values.slack] }),
-        '--secret-file "slack": --path',
+        '--secret-file #1: --path',
         values.slack,
       ],
       // Not a valid variable name either: the value is still what it says.
@@ -429,10 +430,10 @@ describe('a target named by --as or --path', () => {
 
   it('still holds it to the naming rules, without quoting it', () => {
     expect(() => bindingSpecs(['A'], [], { as: ['not-a-var'] })).toThrow(
-      '--secret "A": --as must be letters',
+      '--secret #1: --as must be letters',
     );
     expect(() => bindingSpecs([], ['a'], { paths: ['Not.A.File'] })).toThrow(
-      '--secret-file "a": --path must be lowercase',
+      '--secret-file #1: --path must be lowercase',
     );
   });
 

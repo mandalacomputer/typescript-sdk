@@ -2904,9 +2904,10 @@ sent and never quoted: `--as "$GITHUB_TOKEN"` would otherwise send the token as
 the variable's name. `--no-value-check` sends such a name as typed. The check
 is a guess and misses some values, so the create prints every `--as` or
 `--path` name as `[REDACTED]`, in its output and in any error it fails with;
-`computers get` shows it. A secret or id that itself looks like a value
-(`--secret "$GITHUB_TOKEN" --as GITHUB_TOKEN`, the two swapped) is never quoted
-either: an error names that binding by its flag and position. Two bindings
+`computers get` shows it. What is typed as the secret is never quoted either,
+since it may be the value (`--secret "$GITHUB_TOKEN" --as GITHUB_TOKEN`, the
+two swapped): an error names the binding by its flag and position alone, and
+quotes the secret only once it matched a stored name or id. Two bindings
 of one secret, or into one variable or file, fail before anything is created.
 An id the default scope does not list, such as one of a workspace's secrets, is
 sent as it is and needs its `--as` or `--path`. A name that matches nothing
@@ -2917,8 +2918,8 @@ after the computer runs: `computers wait --until secrets` waits for them.
 one-line warning on stderr that never repeats what follows the `=`. The part
 after the last `=` names the target, which is where a value typed by mistake
 would land, so that form keeps its guard: an error never quotes anything after
-the first `=` (it names the binding by flag, position and the text before that
-`=`), and a target that looks like a value rather than a name (a known token
+the first `=`, nor what precedes it (it names the binding by flag and
+position), and a target that looks like a value rather than a name (a known token
 prefix such as `ghp_` or `sk-`, an AWS key id, a UUID, or a long random-looking
 string) is refused before anything is sent. The check is a guess, the same one
 `--as` and `--path` get; a real name it refuses (one holding a hash, say) goes

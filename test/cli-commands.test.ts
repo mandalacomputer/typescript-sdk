@@ -2664,9 +2664,9 @@ describe('files, rename, resize, view, and secrets bound at create', () => {
         const printed = result.out + result.err;
         expect(printed, typed).not.toContain(secretPart);
         expect(printed, typed).not.toContain('TAIL');
-        // Still says which one: its flag, its position, what precedes the first =.
-        expect(printed, typed).toContain('--secret #1');
-        expect(printed, typed).toContain(`${typed!.slice(0, typed!.indexOf('='))}=…`);
+        // Still says which one: its flag and its position, nothing typed.
+        expect(printed, typed).toContain('--secret #1:');
+        expect(printed, typed).not.toContain(typed!.slice(0, typed!.indexOf('=')));
         expect(h.rec.routes().filter(([m]) => m === 'POST')).toEqual([]);
       }
     }
@@ -2726,8 +2726,8 @@ describe('files, rename, resize, view, and secrets bound at create', () => {
       expect(result.code).toBe(1);
       const printed = result.out + result.err;
       expect(printed).not.toContain(typed);
-      expect(printed).toContain(`${flag} #1`);
-      expect(printed).toContain('openai_api_key=…');
+      expect(printed).toContain(`${flag} #1: what follows =`);
+      expect(printed).not.toContain('openai_api_key');
       expect(printed).toContain("looks like a secret's value");
       // Refused while the arguments are read: not even the store was listed.
       expect(h.rec.calls).toEqual([]);
@@ -2903,7 +2903,8 @@ describe('files, rename, resize, view, and secrets bound at create', () => {
       expect(result.code).toBe(1);
       expect(result.frames[0]?.error?.code ?? 'not_found').toBe('not_found');
       expect(result.out + result.err).not.toContain(value);
-      expect(result.out + result.err).toContain('OPENAI_API_KEY=…');
+      expect(result.out + result.err).toContain('--secret #1: no secret by that name or id');
+      expect(result.out + result.err).not.toContain('OPENAI_API_KEY');
       expect(h.rec.routes()).toEqual([['GET', 'secrets']]);
     }
   });
@@ -2935,9 +2936,7 @@ describe('files, rename, resize, view, and secrets bound at create', () => {
         expect(result.code, argv.join(' ')).toBe(1);
         expect(printed, argv[3]).not.toContain(argv[3]);
         const message = jsonMode ? result.frames[0].error.message : result.err;
-        expect(message).toContain(
-          `${argv[0]} "${argv[1]}": ${argv[2]} looks like a secret's value`,
-        );
+        expect(message).toContain(`${argv[0]} #1: ${argv[2]} looks like a secret's value`);
         expect(message).toContain('--no-value-check');
         if (jsonMode) expect(result.frames[0].error.code).toBe('invalid_arguments');
         // Refused while the arguments are read: not even the store was listed.
@@ -3096,29 +3095,61 @@ describe('files, rename, resize, view, and secrets bound at create', () => {
 
   it('never quotes a token typed as the secret, the operands of --as swapped', async () => {
     // `--secret "$GITHUB_TOKEN" --as GITHUB_TOKEN`: the store holds no secret
-    // by that name, and the not-found error names the binding by position.
+    // by that name, and every error names the binding by position alone,
+    // whether the check flags the key or not, and whatever precedes an `=`.
+    // Assembled at run time so the source holds no token-shaped literal.
     const token = ['ghp', '_', 'aB3dE5fG7hJ9kL2mN4pQ6rS8tU0vW1xY2z4c'].join('');
     const fileToken = ['xoxb', '-123456789012-4096409640964-ab12'].join('');
-    const cases = [
-      ['--secret', token, '--as', 'GITHUB_TOKEN'],
-      ['--secret-file', fileToken, '--path', 'slack-token'],
-      ['--secret', token],
+    // A 32-byte key in padded Base64: the `=` form reads the text before it.
+    const padded = ['MDEyMzQ1Njc4OWFiY2RlZjAx', 'MjM0NTY3ODlhYmNkZWY='].join('');
+    // A random token the value check does not flag.
+    const unflagged = ['Bhd7jydqqYgtn1Ba', 'cRmG5YwbQsd34Ze0ZJloQaA2'].join('');
+    expect(looksLikeSecretValue(unflagged)).toBe(false);
+    const cases: [string[], string, string][] = [
+      [['--secret', token, '--as', 'GITHUB_TOKEN'], token, 'not_found'],
+      [['--secret-file', fileToken, '--path', 'slack-token'], fileToken, 'not_found'],
+      [['--secret', token], token, 'not_found'],
+      [['--secret', padded, '--as', 'ENC_KEY'], padded.slice(0, -1), 'not_found'],
+      [['--secret', padded], padded.slice(0, -1), 'invalid_arguments'],
+      [['--secret-file', padded, '--path', 'enc-key'], padded.slice(0, -1), 'not_found'],
+      [['--secret', `${token}=GITHUB_TOKEN`], token, 'not_found'],
+      [['--secret', unflagged, '--as', 'API_KEY'], unflagged, 'not_found'],
+      [['--secret-file', unflagged, '--path', 'api-key'], unflagged, 'not_found'],
+      [['--secret', unflagged], unflagged, 'not_found'],
     ];
-    for (const args of cases)
+    for (const [args, secret, code] of cases)
       for (const jsonMode of [true, false]) {
         const h = harness(store());
         const result = await h.run(['computers', 'create', ...args], jsonMode);
-        expect(result.code, args.join(' ')).toBe(1);
-        expect(result.out + result.err).not.toContain(args[1]);
+        const what = `${args.join(' ')} (${jsonMode ? 'json' : 'text'})`;
+        expect(result.code, what).toBe(1);
+        expect(result.out + result.err, what).not.toContain(secret);
+        // Nor a long run of it: the label once quoted what preceded an `=`.
+        expect(result.out + result.err, what).not.toContain(secret.slice(0, 12));
         const message = jsonMode ? result.frames[0].error.message : result.err;
-        expect(message).toContain(`${args[0]} #1: no secret by that name or id`);
-        if (jsonMode) expect(result.frames[0].error.code).toBe('not_found');
-        expect(h.rec.routes()).toEqual([['GET', 'secrets']]);
+        expect(message, what).toContain(`${args[0]} #1: `);
+        if (jsonMode) expect(result.frames[0].error.code, what).toBe(code);
       }
-    // A real name or id is still quoted, so the error reads clearly.
+    // A name that matches nothing is named by position too; one that resolved,
+    // or a secret id, is quoted so the error reads clearly.
     const h = harness(store());
     const missing = await h.run(['computers', 'create', '--secret', 'no_such', '--as', 'X']);
-    expect(missing.frames[0].error.message).toContain('--secret "no_such": no secret');
+    expect(missing.frames[0].error.message).toContain('--secret #1: no secret');
+    const twice = await harness(store()).run([
+      'computers',
+      'create',
+      '--secret',
+      'gh-token',
+      '--as',
+      'A',
+      '--secret-file',
+      OTHER.id,
+      '--path',
+      'b',
+    ]);
+    expect(twice.frames[0].error.message).toContain(
+      `--secret-file #1 ("${OTHER.id}") binds the secret --secret #1 ("gh-token") already binds`,
+    );
   });
 
   it('holds --as and --path to the naming rules, without quoting what was typed', async () => {

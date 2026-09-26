@@ -353,8 +353,8 @@ export type BindingSpec = {
    */
   hidden: boolean;
   /**
-   * How an error names this binding. Never the whole of `key` once an `=` was
-   * typed: see {@link bindingSpecs}.
+   * How an error names this binding before its key has resolved: its flag and
+   * position alone, never anything typed. See {@link bindingSpecs}.
    */
   label: string;
 };
@@ -371,12 +371,12 @@ export type BindingSpec = {
  *
  * Without one, the deprecated `SECRET=VAR` and `SECRET=FILE` are still read.
  * Split at the LAST `=`, since neither a variable nor a file name can hold one
- * and a secret's name can. Nothing after the FIRST `=` is ever quoted back: the
- * likely mistake is `--secret NAME=<the value itself>`, an error is the last
- * place that should print it, and a value can hold `=` itself (Base64 padding,
- * say), which the last-`=` split would move into the key. So once an `=` was
- * typed, an error names the binding by its flag, its position and the text
- * before the first `=` alone.
+ * and a secret's name can. Nothing typed is ever quoted back by these checks:
+ * the likely mistakes are `--secret NAME=<the value itself>` and the operands
+ * swapped (`--secret "$GITHUB_TOKEN" --as GITHUB_TOKEN`), a value can hold `=`
+ * itself (Base64 padding, say), and the value check misses some values. So an
+ * error names the binding by its flag and position alone until
+ * {@link secretBindings} has resolved its key to a stored secret.
  *
  * A target that {@link looksLikeSecretValue} flags, however it was given, is
  * refused unless `valueCheck` is false (`--no-value-check`): the check is a
@@ -408,18 +408,12 @@ export function bindingSpecs(
     const [pattern, rule] = env
       ? [P.SECRET_ENV, 'letters, digits and underscores, not starting with a digit, at most 64']
       : [P.SECRET_FILE, 'lowercase letters, digits, - and _, starting with a letter, at most 48'];
-    // Labelled without what follows an `=` even when --as took the target: a
-    // value typed after one by mistake is still in the key. And by position
-    // alone when the key itself looks like a value: `--secret "$GITHUB_TOKEN"
-    // --as GITHUB_TOKEN`, the operands swapped, would otherwise be quoted by
-    // every error that names the binding (not found, bound twice, ambiguous).
-    const eq = typed.indexOf('=');
-    const label =
-      eq >= 0
-        ? `${flag} #${index + 1} (${JSON.stringify(`${typed.slice(0, eq).trim()}=…`)})`
-        : looksLikeSecretValue(typed.trim())
-          ? `${flag} #${index + 1}`
-          : `${flag} ${JSON.stringify(typed.trim())}`;
+    // Labelled by flag and position alone, never by anything typed: the key
+    // may be the value itself (`--secret "$GITHUB_TOKEN" --as GITHUB_TOKEN`,
+    // the operands swapped), what precedes an `=` may be too (Base64 padding,
+    // or `--secret <token>=VAR`), and the value check misses some values. An
+    // error quotes the key only once it has resolved: see secretBindings.
+    const label = `${flag} #${index + 1}`;
     const option = env ? '--as' : '--path';
     const where = env ? 'a variable' : 'a file';
     const store =
@@ -499,7 +493,8 @@ export function equalsDeprecation(specs: readonly BindingSpec[]): string | undef
  *
  * An id that listing does not hold is sent as it is, for a secret in a scope
  * the listing did not cover; the platform refuses one it cannot bind, and the
- * create with it. A name it does not hold is refused here.
+ * create with it. A name it does not hold is refused here, naming the binding
+ * by flag and position alone: what was typed may be the value itself.
  *
  * Two bindings of one secret, or into one variable or file, are refused here
  * too, by label: the SDK's own check would quote a typed target, which may be
@@ -527,13 +522,18 @@ export async function secretBindings(
       );
     seen.set(slot, label);
   };
-  return specs.map(({ flag, key, target, label }) => {
-    const found = byNameOrId(list.secrets, key, 'nothing was created', label);
+  return specs.map(({ flag, key, target, label: position }) => {
+    const found = byNameOrId(list.secrets, key, 'nothing was created', position);
+    // Named by position alone: a key that matched no stored secret and is not
+    // shaped like an id may be the value typed where the name was meant.
     if (!found && !SECRET_ID.test(key))
       throw new CliError(
         'not_found',
-        `${label}: no secret by that name or id in this scope; nothing was created`,
+        `${position}: no secret by that name or id in this scope; nothing was created`,
       );
+    // Resolved to a stored secret's name or id, or shaped like an id: a name
+    // the user needs to see, not a value.
+    const label = `${position} (${JSON.stringify(key)})`;
     const as = target ?? found?.name;
     const env = flag === '--secret';
     const name = env ? '--as VAR' : '--path FILE';
