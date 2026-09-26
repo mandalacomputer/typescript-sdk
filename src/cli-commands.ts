@@ -342,7 +342,9 @@ function screenshotRegionFlag(v: string | undefined): P.ScreenshotRegion | undef
 
 export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands): Promise<number> {
   // Used only if parsing fails before it can return its explicit output mode.
-  let output = new Output(io, '', argv.includes('--json'));
+  // Past a bare `--` a word is an operand, however it is spelled.
+  const options = argv.indexOf('--') < 0 ? argv : argv.slice(0, argv.indexOf('--'));
+  let output = new Output(io, '', options.includes('--json'));
   let parsed: Parsed | undefined;
   const controller = new AbortController();
   let watching = false;
