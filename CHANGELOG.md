@@ -38,9 +38,17 @@ name.
   nothing typed there can be taken for the secret's value. Each `--as` or
   `--path` must come directly after its `--secret` or `--secret-file`; a stray
   one is refused without being quoted, unless `--help` is also given, which
-  prints help. A name given this way is not put
-  through the value-shape check and prints as it is. The manifest marks both
-  with `follows`, and the completions offer them.
+  prints help. A name given this way goes through the same value-shape check
+  as one after `=`, so `--as "$GITHUB_TOKEN"` is refused without being quoted
+  rather than sent as the variable's name; `--no-value-check` lets a flagged
+  one through. The check is a guess and misses some values, so every `--as` or
+  `--path` name prints as `[REDACTED]` in the create's bindings and error,
+  flagged or not; `computers get` shows it. A secret typed where its name was
+  meant (`--secret "$GITHUB_TOKEN" --as GITHUB_TOKEN`, or
+  `--secret "$TOKEN"=VAR`) is not quoted either, whether the check flags it or
+  not: an error names a binding by its flag and position alone, and quotes
+  the secret only once it matched a stored name or id. The manifest marks
+  both with `follows`, and the completions offer them.
 - **A proxy for a computer's browsers:** `browserProxy: { server, bypass? }` on
   `computers.create()` and `launch()`, and on `computer.update()`, where it
   travels alone and `null` removes it; `computer.browserProxy` and
@@ -105,8 +113,8 @@ name.
   reads as one (an acronym, a known abbreviation such as `Ssl` or `Pg`, or a
   word spelled as English spells, allowing one join such as `Kafka` or
   `Webflow`), so a random body with no digit in it is caught too (99% or
-  more). A name the check still refuses goes through when it is named with
-  `--as` or `--path`, which are not checked, or with `--no-value-check`.
+  more). A name the check still refuses goes through with `--no-value-check`,
+  whether it is typed after `=` or named with `--as` or `--path`.
   A variable or file typed after `=`
   prints as `[REDACTED]` in the create's bindings and in the create's error;
   one that defaults to the secret's name prints as it is.

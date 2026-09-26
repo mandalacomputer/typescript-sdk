@@ -253,8 +253,7 @@ function wordSegment(segment: string, last: boolean): boolean {
  * `iPhoneBackupKey`) it refuses one, `WalGEncryptionKey`, for its lone
  * consonant capital. That list is also where the product names in
  * {@link KNOWN_WORDS} came from, so a name spelled as oddly as `Nginx` that
- * is not listed there is refused too. Such a name goes
- * through with `--as`/`--path`, which are never checked, or
+ * is not listed there is refused too. Such a name goes through with
  * `--no-value-check`.
  */
 function prefixedWords(run: string): boolean {
@@ -299,8 +298,9 @@ function randomRun(run: string): boolean {
 }
 
 /**
- * Whether what follows `=` in `--secret NAME=…` looks like a secret's VALUE
- * rather than the variable or file it is bound as: a known token prefix ahead
+ * Whether a binding's target — what follows `=` in `--secret NAME=…`, or what
+ * `--as` or `--path` gives — looks like a secret's VALUE rather than the
+ * variable or file it is bound as: a known token prefix ahead
  * of a token body, an AWS key id, a UUID, or a random-looking stretch.
  *
  * A prefix alone is not enough — `hf_token`, `sk-prod-signing-key`,
@@ -342,13 +342,19 @@ export type BindingSpec = {
   target?: string;
   /**
    * Whether `target` was typed after `=` (`SECRET=VAR`, deprecated) rather than
-   * given by `--as` or `--path`: only such a target may be a value typed there
-   * by mistake, so only such a one is checked for that and printed hidden.
+   * given by `--as` or `--path`.
    */
   afterEquals: boolean;
   /**
-   * How an error names this binding. Never the whole of `key` once an `=` was
-   * typed: see {@link bindingSpecs}.
+   * Whether `target` is printed as `[REDACTED]`: every one typed, after `=` or
+   * with `--as` or `--path`. {@link looksLikeSecretValue} cannot catch every
+   * value typed where a name was meant, so none is echoed; only a target
+   * taken from the secret's own name is shown.
+   */
+  hidden: boolean;
+  /**
+   * How an error names this binding before its key has resolved: its flag and
+   * position alone, never anything typed. See {@link bindingSpecs}.
    */
   label: string;
 };
@@ -359,22 +365,25 @@ export type BindingSpec = {
  * order), checked before any request.
  *
  * A binding given `--as` or `--path` takes its whole value as the secret, `=`
- * and all: the target has its own flag, so nothing there can be a value typed
- * where a name was meant, and it is only held to the naming rules.
+ * and all. The target is still checked for a value typed where a name was
+ * meant (`--as "$GITHUB_TOKEN"`): a GitHub token is a valid variable name, so
+ * without the check it would be sent as the name and printed back.
  *
  * Without one, the deprecated `SECRET=VAR` and `SECRET=FILE` are still read.
  * Split at the LAST `=`, since neither a variable nor a file name can hold one
- * and a secret's name can. Nothing after the FIRST `=` is ever quoted back: the
- * likely mistake is `--secret NAME=<the value itself>`, an error is the last
- * place that should print it, and a value can hold `=` itself (Base64 padding,
- * say), which the last-`=` split would move into the key. So once an `=` was
- * typed, an error names the binding by its flag, its position and the text
- * before the first `=` alone.
+ * and a secret's name can. Nothing typed is ever quoted back by these checks:
+ * the likely mistakes are `--secret NAME=<the value itself>` and the operands
+ * swapped (`--secret "$GITHUB_TOKEN" --as GITHUB_TOKEN`), a value can hold `=`
+ * itself (Base64 padding, say), and the value check misses some values. So an
+ * error names the binding by its flag and position alone until
+ * {@link secretBindings} has resolved its key to a stored secret.
  *
- * A target that {@link looksLikeSecretValue} flags is refused unless
- * `valueCheck` is false (`--no-value-check`): the check is a heuristic, and a
- * real name it misreads — one holding a hash, say — has no other way through.
- * It must still be a valid name either way, and prints redacted either way.
+ * A target that {@link looksLikeSecretValue} flags, however it was given, is
+ * refused unless `valueCheck` is false (`--no-value-check`): the check is a
+ * heuristic, and a real name it misreads — one holding a hash, say — has no
+ * other way through. It must still be a valid name either way; the refusal
+ * never quotes it. Every typed target prints redacted, flagged or not, since
+ * the check also misses some values.
  */
 export function bindingSpecs(
   envs: readonly string[] = [],
@@ -399,27 +408,39 @@ export function bindingSpecs(
     const [pattern, rule] = env
       ? [P.SECRET_ENV, 'letters, digits and underscores, not starting with a digit, at most 64']
       : [P.SECRET_FILE, 'lowercase letters, digits, - and _, starting with a letter, at most 48'];
-    // Labelled without what follows an `=` even when --as took the target: a
-    // value typed after one by mistake is still in the key.
-    const eq = typed.indexOf('=');
-    const label =
-      eq < 0
-        ? `${flag} ${JSON.stringify(typed.trim())}`
-        : `${flag} #${index + 1} (${JSON.stringify(`${typed.slice(0, eq).trim()}=…`)})`;
+    // Labelled by flag and position alone, never by anything typed: the key
+    // may be the value itself (`--secret "$GITHUB_TOKEN" --as GITHUB_TOKEN`,
+    // the operands swapped), what precedes an `=` may be too (Base64 padding,
+    // or `--secret <token>=VAR`), and the value check misses some values. An
+    // error quotes the key only once it has resolved: see secretBindings.
+    const label = `${flag} #${index + 1}`;
+    const option = env ? '--as' : '--path';
+    const where = env ? 'a variable' : 'a file';
+    const store =
+      'It names where the value goes, never the value: store that with ' +
+      'mandala secrets set, then bind the secret by its name. ';
     if (named !== undefined) {
       const key = typed.trim();
       if (!key) throw new CliError('invalid_arguments', `${flag} needs a secret name or id`);
-      if (!pattern.test(named))
+      // Checked first, as for a target after =: a value that also passes the
+      // pattern would otherwise be sent as the name.
+      if (valueCheck && looksLikeSecretValue(named))
         throw new CliError(
           'invalid_arguments',
-          `${label}: ${env ? '--as' : '--path'} must be ${rule} characters`,
+          `${label}: ${option} looks like a secret's value, not ${where} name, so nothing was sent. ` +
+            `${store}If it is a name after all, send it as typed with --no-value-check`,
         );
-      return { flag, key, target: named, afterEquals: false, label };
+      if (!pattern.test(named))
+        throw new CliError('invalid_arguments', `${label}: ${option} must be ${rule} characters`);
+      // Hidden whether or not it was flagged: the check is a heuristic and
+      // misses some values (a random mixed-case run, say), and a missed one
+      // would otherwise be printed back as the binding's name.
+      return { flag, key, target: named, afterEquals: false, hidden: true, label };
     }
     const at = typed.lastIndexOf('=');
     const key = (at < 0 ? typed : typed.slice(0, at)).trim();
     if (!key) throw new CliError('invalid_arguments', `${flag} needs a secret name or id`);
-    if (at < 0) return { flag, key, afterEquals: false, label };
+    if (at < 0) return { flag, key, afterEquals: false, hidden: false, label };
     const target = typed.slice(at + 1);
     // Checked first, as a value that also passes the pattern (a GitHub token
     // is a valid variable name) would otherwise be sent as the name and
@@ -427,11 +448,10 @@ export function bindingSpecs(
     if (valueCheck && looksLikeSecretValue(target))
       throw new CliError(
         'invalid_arguments',
-        `${label}: what follows = looks like a secret's value, not ${env ? 'a variable' : 'a file'} name, ` +
-          `so nothing was sent. It names where the value goes, never the value: store that with ` +
-          `mandala secrets set, then bind the secret by its name. ` +
-          `If it is a name after all, give it with ${env ? '--as' : '--path'} instead of =, ` +
-          `or send it as typed with --no-value-check`,
+        `${label}: what follows = looks like a secret's value, not ${where} name, ` +
+          `so nothing was sent. ${store}` +
+          `If it is a name after all, give it with ${option} instead of = ` +
+          `and send it as typed with --no-value-check`,
       );
     if (!pattern.test(target))
       throw new CliError(
@@ -439,7 +459,7 @@ export function bindingSpecs(
         `${label}: what follows = must be ${rule} characters. ` +
           `It names where the value goes, never the value: store that with mandala secrets set`,
       );
-    return { flag, key, target, afterEquals: true, label };
+    return { flag, key, target, afterEquals: true, hidden: true, label };
   };
   return [
     ...envs.map((typed, i) => split('--secret', typed, i, as[i])),
@@ -473,7 +493,8 @@ export function equalsDeprecation(specs: readonly BindingSpec[]): string | undef
  *
  * An id that listing does not hold is sent as it is, for a secret in a scope
  * the listing did not cover; the platform refuses one it cannot bind, and the
- * create with it. A name it does not hold is refused here.
+ * create with it. A name it does not hold is refused here, naming the binding
+ * by flag and position alone: what was typed may be the value itself.
  *
  * Two bindings of one secret, or into one variable or file, are refused here
  * too, by label: the SDK's own check would quote a typed target, which may be
@@ -501,13 +522,18 @@ export async function secretBindings(
       );
     seen.set(slot, label);
   };
-  return specs.map(({ flag, key, target, label }) => {
-    const found = byNameOrId(list.secrets, key, 'nothing was created', label);
+  return specs.map(({ flag, key, target, label: position }) => {
+    const found = byNameOrId(list.secrets, key, 'nothing was created', position);
+    // Named by position alone: a key that matched no stored secret and is not
+    // shaped like an id may be the value typed where the name was meant.
     if (!found && !SECRET_ID.test(key))
       throw new CliError(
         'not_found',
-        `${label}: no secret by that name or id in this scope; nothing was created`,
+        `${position}: no secret by that name or id in this scope; nothing was created`,
       );
+    // Resolved to a stored secret's name or id, or shaped like an id: a name
+    // the user needs to see, not a value.
+    const label = `${position} (${JSON.stringify(key)})`;
     const as = target ?? found?.name;
     const env = flag === '--secret';
     const name = env ? '--as VAR' : '--path FILE';
@@ -531,12 +557,14 @@ export async function secretBindings(
 
 /**
  * A create's computer as the CLI prints it: each binding whose variable or file
- * was typed after `=` keeps its kind (`env` or `file`) but not the name.
+ * is {@link BindingSpec.hidden} keeps its kind (`env` or `file`) but not the
+ * name.
  *
- * {@link looksLikeSecretValue} cannot catch every value, and one it misses is
- * bound as the name; the create's own output is then the first place it would
- * be printed. A name taken from the secret's own (no `=`), or given by `--as`
- * or `--path`, is shown as it is, and `computers get` shows every name.
+ * {@link looksLikeSecretValue} cannot catch every value, and one it misses,
+ * after `=` or with `--as` or `--path`, is bound as the name; the create's own
+ * output is then the first place it would be printed. So every typed target
+ * is hidden here, flagged or not. A name taken from the secret's own is shown
+ * as it is, and `computers get` shows every name.
  */
 export function withoutTypedTargets(
   computer: Record<string, unknown>,
@@ -545,7 +573,7 @@ export function withoutTypedTargets(
   const typed = (flag: BindingSpec['flag']) =>
     new Set(
       specs.flatMap((s) =>
-        s.flag === flag && s.afterEquals && s.target !== undefined ? [s.target] : [],
+        s.flag === flag && s.hidden && s.target !== undefined ? [s.target] : [],
       ),
     );
   const env = typed('--secret');
@@ -564,16 +592,17 @@ export function withoutTypedTargets(
 }
 
 /**
- * The error a create failed with, with every variable or file typed after `=`
+ * The error a create failed with, with every {@link BindingSpec.hidden}
+ * variable or file — every typed one, after `=` or with `--as` or `--path` —
  * cut out of its message: the platform's refusal may name the binding it
- * refused. Cut only where it stands as a whole name, so a short one (`gh`)
- * does not take letters out of the words around it.
+ * refused. Cut only where it stands as a whole name, so a
+ * short one (`gh`) does not take letters out of the words around it.
  */
 export function scrubTypedTargets(error: unknown, specs: readonly BindingSpec[]): unknown {
   if (!(error instanceof Error)) return error;
   let message = error.message;
-  for (const { target, afterEquals } of specs) {
-    if (!target || !afterEquals) continue;
+  for (const { target, hidden } of specs) {
+    if (!target || !hidden) continue;
     const escaped = target.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     message = message.replace(
       new RegExp(`(?<![A-Za-z0-9_-])${escaped}(?![A-Za-z0-9_-])`, 'g'),
