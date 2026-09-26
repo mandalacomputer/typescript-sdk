@@ -25,6 +25,7 @@ import {
   Builds,
   Computers,
   Moves,
+  Operations,
   Secrets,
   Sizes,
   Snapshots,
@@ -51,6 +52,7 @@ export class Client {
   readonly builds: Builds;
   readonly computers: Computers;
   readonly moves: Moves;
+  readonly operations: Operations;
   readonly secrets: Secrets;
   readonly snapshots: Snapshots;
   readonly sshKeys: SshKeys;
@@ -71,6 +73,7 @@ export class Client {
     this.builds = new Builds(this.#t);
     this.computers = new Computers(this.#t);
     this.moves = new Moves(this.#t);
+    this.operations = new Operations(this.#t);
     this.secrets = new Secrets(this.#t);
     this.snapshots = new Snapshots(this.#t);
     this.sshKeys = new SshKeys(this.#t);
@@ -124,6 +127,7 @@ export {
   MethodNotAllowedError,
   MoveRequiredError,
   NotFoundError,
+  OperationFailedError,
   OriginResponseError,
   OriginTLSError,
   OriginUnreachableError,
@@ -189,7 +193,12 @@ export type {
   GuestDirectoryEntry,
   GuestWindow,
   Holdings,
+  LifecycleAck,
   Move,
+  Operation,
+  OperationKind,
+  OperationPage,
+  OperationState,
   PlatformSignal,
   PlatformSignalGap,
   Point,
@@ -231,6 +240,7 @@ export type {
   CreateArgs,
   ExecArgs,
   MoveArgs,
+  OperationListArgs,
   PasteShortcut,
   ScreenshotFormat,
   ScreenshotRegion,
@@ -250,6 +260,7 @@ export type {
 } from './paths.js';
 export {
   COMPUTER_STATES,
+  OPERATIONS_PAGE_MAX,
   PASTE_MAX_BYTES,
   SCREENSHOT_FORMATS,
   SCROLL_DIRECTIONS,
@@ -275,6 +286,7 @@ export {
   Builds,
   Computers,
   Moves,
+  Operations,
   Secrets,
   Sizes,
   Snapshots,

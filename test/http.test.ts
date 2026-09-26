@@ -586,7 +586,7 @@ describe('decoding', () => {
 
   it('treats an empty body and a 204 as nothing, not as a parse failure', async () => {
     const rec = recorder(() => new Response(null, { status: 204 }));
-    await expect(client(rec).snapshots.restore('snap-1')).resolves.toBeUndefined();
+    await expect(client(rec).snapshots.restore('snap-1')).resolves.toEqual({ raw: {} });
   });
 
   it('rewrites a network failure to name the platform, not the DNS error', async () => {

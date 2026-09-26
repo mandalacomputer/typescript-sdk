@@ -1901,6 +1901,42 @@ Until the disk lands there is nothing to boot, and starting, stopping,
 snapshotting or cloning it throws `ConflictError`. If the copy dies,
 `buildFailed` is true and `buildError` says why — nothing will fix it on its own.
 
+### Operations
+
+Every accepted create, clone, start, stop, suspend, restart, snapshot restore,
+resize and move records a **lifecycle operation**, and its answer carries the
+id: `computer.operationId` after a create, a clone or any of those calls on the
+handle, `(await client.snapshots.restore(id)).operationId`, and
+`move.operationId` on what `relocate` accepted. It is `undefined` where the
+platform could not record one; the call happened either way.
+
+```ts
+const copy = await c.clone('experiment');
+if (copy.operationId) {
+  const op = await client.operations.wait(copy.operationId); // 'succeeded', or throws
+  console.log(op.kind, op.finishedAt);
+}
+```
+
+`wait` resolves on `succeeded` and throws `OperationFailedError` on `failed`,
+with the platform's `code` (`start_failed`, `build_failed`, `computer_gone`,
+`move_failed`, `resize_not_applied`, `lost`, and more may be added) and its
+sentence as `detail`. `resize_not_applied` is a move that landed at the old
+size: the computer has moved, and a plain `update` finishes the resize.
+
+**`succeeded` is not a booted desktop.** It means the platform finished its
+step — a started guest, a copied disk, a landed move. Most operations are
+already `succeeded` when their call returns; a clone is `running` until its disk
+is copied, and a move until it lands. Keep `waitForGuest` (or
+`waitFor('computer.ready')`) for a desktop that answers; see
+[Readiness](#readiness).
+
+`client.operations.get(id)` reads one, and `client.operations.list({ computerId,
+limit, cursor })` pages through them newest first — pass `nextCursor` back as
+`cursor`. An API key confined to a workspace sees only its computers'
+operations, and anything else is a `NotFoundError`. Calls made from the
+dashboard record none.
+
 ### Snapshots
 
 ```ts
@@ -2746,6 +2782,19 @@ minted from the CLI never has the permission. `create` prints only the key on
 stdout, so `KEY=$(mandala api-keys create --name ci)` captures it, and writes
 what it made and the warning to stderr; `--json` answers the platform's object,
 with the key under `raw`. It is shown once.
+
+### Operations
+
+```sh
+mandala operations list --computer demo    # newest first; --limit, --cursor
+mandala operations get op_...
+mandala operations wait op_...              # exit 0 on succeeded
+```
+
+`wait` exits non-zero with `error.code` `operation_failed` when the operation
+failed; the operation itself, with the platform's `error.code`, is under
+`error.details.operation`. `succeeded` means the platform's step finished, not
+that the desktop has booted — follow with `computers wait`.
 
 ### Account quota and historical usage
 

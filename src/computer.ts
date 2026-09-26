@@ -92,6 +92,7 @@ import {
   moveAnchor,
   moveRows,
   num,
+  operationIdOf,
   said,
   str,
   toActivity,
@@ -742,6 +743,11 @@ export class Computer {
   // waitUntilBuilt() that follows every clone.
   #memoryDropped: boolean;
   #memoryDroppedReason: string | undefined;
+  // The operation the last lifecycle call through this handle started
+  // (platform OPL-5055). Apart from #data for the same reason: a lifecycle
+  // answer is the only place it appears, and a start or stop that answers an
+  // acknowledgement is followed by a refresh that replaces #data.
+  #operationId: string | undefined;
 
   /**
    * Obtain one from a {@link Client} — `client.computers.create()`, `.get()`, or
@@ -757,6 +763,7 @@ export class Computer {
       this.#memoryDropped && typeof data.memory_dropped_reason === 'string'
         ? data.memory_dropped_reason
         : undefined;
+    this.#operationId = operationIdOf(data);
   }
 
   // --- fields ---------------------------------------------------------
@@ -1155,6 +1162,25 @@ export class Computer {
     return this.#memoryDroppedReason;
   }
 
+  /**
+   * The lifecycle operation the last lifecycle call made through this handle
+   * started (platform OPL-5055): the create or clone that returned it, or the
+   * latest {@link start}, {@link stop}, {@link suspend}, {@link restart} or
+   * {@link update} since. `client.operations.wait(id)` polls it to its end.
+   *
+   * Each of those calls replaces it with what its answer carried, so an
+   * {@link update} that only renamed — which starts no operation — leaves it
+   * `undefined`. A {@link refresh} leaves it alone: reads never carry one.
+   * `undefined` on a handle from `computers.get()` or a listing, and wherever
+   * the platform could not record the operation, with the call done either way.
+   *
+   * Most are `succeeded` before the call returns. A clone's is `running` until
+   * its disk is copied, which is what {@link waitUntilBuilt} also waits for.
+   */
+  get operationId(): string | undefined {
+    return this.#operationId;
+  }
+
   // --- bound secrets --------------------------------------------------
   //
   // Read off the computer record itself, so a listing answers them without a
@@ -1438,12 +1464,12 @@ export class Computer {
     // Use a computer response directly, and refresh after an acknowledgement
     // or 204. In particular, a resume-only start can acknowledge success while
     // leaving the computer stopped; only the returned state tells us otherwise.
-    const data = P.computerPayload(
-      await this.#t.json('POST', P.computerAction(this.id, action), {
-        query,
-        signal: opts.signal,
-      }),
-    );
+    const answer = await this.#t.json('POST', P.computerAction(this.id, action), {
+      query,
+      signal: opts.signal,
+    });
+    this.#operationId = operationIdOf(answer);
+    const data = P.computerPayload(answer);
     if (data.id) {
       this.#data = data;
       return this;
@@ -1493,12 +1519,12 @@ export class Computer {
    * it refuses is a `400` naming why.
    */
   async update(args: P.UpdateArgs, opts: CallOptions = {}): Promise<this> {
-    const data = P.computerPayload(
-      await this.#t.json('PATCH', P.computer(this.id), {
-        body: P.updateBody(args),
-        signal: opts.signal,
-      }),
-    );
+    const answer = await this.#t.json('PATCH', P.computer(this.id), {
+      body: P.updateBody(args),
+      signal: opts.signal,
+    });
+    this.#operationId = operationIdOf(answer);
+    const data = P.computerPayload(answer);
     // #power's guard, for #power's reason: a platform that answered 204 would
     // otherwise leave this handle holding `{}` — no id, no name, no status —
     // and reporting the update as applied.

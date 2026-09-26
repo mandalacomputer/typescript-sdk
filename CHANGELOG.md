@@ -16,6 +16,23 @@ name.
 
 ### Added
 
+- **Lifecycle operations:** `client.operations.get(id)`, `list({ computerId,
+  limit, cursor })` and `wait(idOrOperation, { timeoutMs, pollMs })`, over the
+  platform's `GET operations` and `GET operations/{id}`. `wait` resolves on
+  `succeeded` and throws the new `OperationFailedError` (with the platform's
+  `code` and `detail`) on `failed`. `succeeded` means the platform finished
+  its step, not that the desktop has booted: keep `waitForGuest` for that.
+  `kind` and `state` are open strings, since the platform adds kinds. The id is
+  surfaced as `computer.operationId` (after a create, a clone, and each start,
+  stop, suspend, restart or update through the handle; a refresh keeps it),
+  `move.operationId` on what `relocate` accepted, and on
+  `snapshots.restore()`, which now returns a `LifecycleAck` rather than
+  nothing. CLI: `operations list | get | wait`; a failed wait is
+  `operation_failed`. `operations list --computer` takes a name or an id, and
+  sends a value that is neither as typed, since a deleted computer's
+  operations are still found by its id. New exports: `Operations`, `Operation`, `OperationKind`,
+  `OperationState`, `OperationPage`, `OperationListArgs`, `LifecycleAck`,
+  `OperationFailedError` and `OPERATIONS_PAGE_MAX`.
 - **CLI: `computers create --secret SECRET --as VAR` and `--secret-file SECRET
   --path FILE`** name a binding's variable or file with a flag of its own, so
   nothing typed there can be taken for the secret's value. Each `--as` or

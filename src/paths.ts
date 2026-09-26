@@ -92,6 +92,12 @@ export const WHOAMI = 'whoami';
  * without it the platform answers 403 with a sentence that says so.
  */
 export const API_KEYS = 'api-keys';
+/**
+ * Lifecycle operations (platform OPL-5055): what each accepted create, clone,
+ * start, stop, suspend, restart, restore, resize and move started, and how it
+ * ended. Read only, and answered by the control plane from its own table.
+ */
+export const OPERATIONS = 'operations';
 
 /**
  * One id, in a path, refused when it is empty.
@@ -487,6 +493,7 @@ export const sshKey = (id: string): string => `${SSH_KEYS}/${pathId(id, 'ssh key
 export const webhook = (id: string): string => `${WEBHOOKS}/${pathId(id, 'webhook id')}`;
 export const secret = (id: string): string => `${SECRETS}/${pathId(id, 'secret id')}`;
 export const apiKey = (id: string): string => `${API_KEYS}/${pathId(id, 'API key id')}`;
+export const operation = (id: string): string => `${OPERATIONS}/${pathId(id, 'operation id')}`;
 export const webhookAction = (id: string, action: 'rotate' | 'test' | 'deliveries'): string =>
   `${webhook(id)}/${action}`;
 
@@ -530,8 +537,13 @@ export function computerPayload(data: unknown): Record<string, unknown> {
   // it describes one start attempt, not the machine. Only carried over when the
   // envelope actually had one — `raw` claims to be the response verbatim, and a
   // `start_error: undefined` key the platform never sent would not be.
-  if ('start_error' in data) return { ...inner, start_error: data.start_error };
-  return { ...inner };
+  //
+  // `operation_id` the same way (platform OPL-5055): on a create that would not
+  // boot it is on the envelope, beside `start_error`, not on the computer.
+  const out: Record<string, unknown> = { ...inner };
+  if ('start_error' in data) out.start_error = data.start_error;
+  if ('operation_id' in data && !('operation_id' in inner)) out.operation_id = data.operation_id;
+  return out;
 }
 
 export function isRecord(v: unknown): v is Record<string, unknown> {
@@ -2629,4 +2641,54 @@ export function apiKeyCreateBody(args: ApiKeyCreateArgs = {}): Json {
   }
   if (args.name !== undefined) requireString(args.name, 'name');
   return omitUndefined({ name: args.name, workspace_id: workspaceId });
+}
+
+// --- operations -------------------------------------------------------------
+
+/** The most one page of `GET operations` holds; the platform refuses more. */
+export const OPERATIONS_PAGE_MAX = 100;
+
+/** What one page of `GET operations` asks for. */
+export type OperationListArgs = {
+  /** Only this computer's operations. For a clone, that is the NEW computer. */
+  computerId?: string;
+  /** At most this many, 1 to {@link OPERATIONS_PAGE_MAX}. The platform's default is 20. */
+  limit?: number;
+  /** The `nextCursor` of the page before. */
+  cursor?: string;
+};
+
+/**
+ * The query for `GET operations`.
+ *
+ * An empty `computerId` or `cursor` is refused rather than sent: the platform
+ * answers a 400 for either, and an empty `computerId` dropped instead would
+ * list the whole account's operations to a caller who believes they asked
+ * about one computer.
+ */
+export function operationsQuery(args: OperationListArgs = {}): Query {
+  if (!isRecord(args)) throw new ValidationError(`options must be an object (got ${typeof args})`);
+  const q: Query = {};
+  if (args.computerId !== undefined) {
+    const id = requireString(args.computerId, 'computerId');
+    if (!id || id !== id.trim()) {
+      throw new ValidationError('computerId must be a computer id, with no spaces around it');
+    }
+    q.computer_id = id;
+  }
+  if (args.limit !== undefined) {
+    if (!Number.isInteger(args.limit) || args.limit < 1 || args.limit > OPERATIONS_PAGE_MAX) {
+      throw new ValidationError(
+        `limit must be a whole number from 1 to ${OPERATIONS_PAGE_MAX} (got ${args.limit})`,
+      );
+    }
+    q.limit = args.limit;
+  }
+  if (args.cursor !== undefined) {
+    const c = requireString(args.cursor, 'cursor');
+    if (!c)
+      throw new ValidationError('cursor must be the nextCursor of the page before, not empty');
+    q.cursor = c;
+  }
+  return q;
 }

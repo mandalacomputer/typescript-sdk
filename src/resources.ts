@@ -5,6 +5,7 @@ import {
   ConflictError,
   MandalaError,
   NotFoundError,
+  OperationFailedError,
   suppressing,
   TimeoutError,
   ValidationError,
@@ -14,7 +15,10 @@ import type {
   ApiKey,
   ApiKeyCreated,
   BuildProgress,
+  LifecycleAck,
   Move,
+  Operation,
+  OperationPage,
   PublishedTemplate,
   Retention,
   RetiredTemplates,
@@ -43,7 +47,10 @@ import {
   toApiKey,
   toApiKeyCreated,
   toBuildProgress,
+  toLifecycleAck,
   toMove,
+  toOperation,
+  toOperationPage,
   toPublishedTemplate,
   toRetention,
   toRetiredTemplates,
@@ -792,9 +799,15 @@ export class Snapshots {
    *
    * Refused on an orphaned snapshot — {@link clone} is what works there, because
    * a restore puts the disk back on a source that no longer exists.
+   *
+   * Done when this returns. The answer's `operationId` names the operation the
+   * platform recorded for it, already `succeeded`; it is absent where none
+   * could be recorded, and the restore happened either way.
    */
-  async restore(snapshotId: string, opts: CallOptions = {}): Promise<void> {
-    await this.#t.json('POST', P.snapshotAction(snapshotId, 'restore'), { signal: opts.signal });
+  async restore(snapshotId: string, opts: CallOptions = {}): Promise<LifecycleAck> {
+    return toLifecycleAck(
+      await this.#t.json('POST', P.snapshotAction(snapshotId, 'restore'), { signal: opts.signal }),
+    );
   }
 
   /**
@@ -2238,5 +2251,144 @@ export class ApiKeys {
    */
   async revoke(keyId: string, opts: CallOptions = {}): Promise<void> {
     await this.#t.json('DELETE', P.apiKey(keyId), { signal: opts.signal });
+  }
+}
+
+/**
+ * The lifecycle operations this account's API calls started (platform OPL-5055).
+ *
+ * Every accepted create, clone, start, stop, suspend, restart, snapshot
+ * restore, resize and move records one and answers its id: as
+ * {@link Computer.operationId}, {@link LifecycleAck.operationId} or
+ * {@link Move.operationId}. A refused call records nothing, since its error is
+ * its outcome, and calls made from the dashboard record none. Operations are
+ * kept for a limited time, after which a read is a {@link NotFoundError}.
+ *
+ * An API key confined to a workspace sees the operations of computers in that
+ * workspace only; any other id answers {@link NotFoundError}, the same as one
+ * that never existed.
+ */
+export class Operations {
+  #t: Transport;
+
+  /** @internal */
+  constructor(transport: Transport) {
+    this.#t = transport;
+  }
+
+  /** One operation, brought up to date by the platform as it is read. */
+  async get(operationId: string, opts: CallOptions = {}): Promise<Operation> {
+    const path = P.operation(operationId);
+    return toOperation(
+      await this.#t.json('GET', path, { signal: opts.signal }),
+      `the operation from GET ${path}`,
+    );
+  }
+
+  /**
+   * One page of operations, newest first. Pass the page's `nextCursor` back as
+   * `cursor` for the next; it is `null` on the last page.
+   *
+   * ```ts
+   * let cursor: string | undefined;
+   * do {
+   *   const page = await client.operations.list({ computerId: 'vm-1', cursor });
+   *   for (const op of page.operations) console.log(op.kind, op.state);
+   *   cursor = page.nextCursor ?? undefined;
+   * } while (cursor);
+   * ```
+   */
+  async list(args: P.OperationListArgs = {}, opts: CallOptions = {}): Promise<OperationPage> {
+    const data = await this.#t.json('GET', P.OPERATIONS, {
+      query: P.operationsQuery(args),
+      signal: opts.signal,
+    });
+    return toOperationPage(data, 'GET', P.OPERATIONS);
+  }
+
+  /**
+   * Poll an operation until it is final, and answer it.
+   *
+   * ```ts
+   * const clone = await vm.clone('copy');
+   * if (clone.operationId) await client.operations.wait(clone.operationId);
+   * await clone.start();
+   * ```
+   *
+   * Resolves on `succeeded`, and throws {@link OperationFailedError} on
+   * `failed`, carrying the platform's `code` and sentence. `pending`,
+   * `running`, and a state this client does not know yet while the operation
+   * is still live, are polled through.
+   *
+   * `succeeded` IS NOT A BOOTED DESKTOP. It means the platform finished its
+   * step: a create or a start that succeeded has a guest that was started, not
+   * one that is ready. Follow with {@link Computer.waitForGuest} for that — the
+   * two waits answer different questions and neither stands in for the other.
+   *
+   * Throws {@link TimeoutError} if it is still live when `timeoutMs` (default
+   * 15 minutes, the length of a long clone) runs out; the operation is not
+   * stopped by that, only the waiting is. A transient failure of a poll is
+   * ridden out, as every wait in this SDK does; an id this credential cannot
+   * see, or one that has expired, is a {@link NotFoundError} at once.
+   */
+  async wait(operation: Operation | string, opts: WaitOptions = {}): Promise<Operation> {
+    const { timeoutMs = 900_000, pollMs = 2_000, signal } = opts;
+    checkWait(timeoutMs, pollMs);
+    const id = typeof operation === 'string' ? operation : operation?.id;
+    if (typeof id !== 'string' || !id) {
+      // The usual way to get here is `wait(computer.operationId)` on an answer
+      // that carried none, which is not the caller's typo and deserves a
+      // sentence that says what happened.
+      throw new ValidationError(
+        'operation id must be a non-empty string; a lifecycle call whose answer carried no ' +
+          'operationId has no operation to wait on',
+      );
+    }
+    P.operation(id);
+    const deadline = Date.now() + timeoutMs;
+    let polled = false;
+    let delayMs = pollMs;
+    let last: Operation | undefined;
+    let observed = false;
+    for (;;) {
+      if (Date.now() >= deadline) {
+        throw new TimeoutError(
+          last && observed
+            ? `operation ${id} (${last.kind}) was still ${last.state} after ${timeoutMs}ms; ` +
+                'the operation has not stopped, only this wait has'
+            : last
+              ? `operation ${id} could not be read for the last part of ${timeoutMs}ms; when it ` +
+                `last answered it was ${last.state}. Read operations.get for where it got to.`
+              : `operation ${id} could not be read within ${timeoutMs}ms`,
+        );
+      }
+      if (polled) await sleepUntilNextPoll(delayMs, deadline, signal);
+      polled = true;
+      delayMs = pollMs;
+      if (Date.now() >= deadline) continue;
+      try {
+        const now = await this.get(id, { signal: deadlineSignal(deadline - Date.now(), signal) });
+        last = now;
+        observed = true;
+        if (now.state === 'succeeded') return now;
+        if (now.state === 'failed') throw new OperationFailedError(now);
+        // A state this client does not know, on an operation the platform says
+        // has FINISHED, is a final state added after this client was written.
+        // Polling it would run to the deadline and then report it as still
+        // live; neither resolving nor throwing it as a failure would be true.
+        if (now.finishedAt !== null && now.state !== 'pending' && now.state !== 'running') {
+          throw new MandalaError(
+            `operation ${id} finished in state ${JSON.stringify(now.state)}, which this client ` +
+              'does not know; read operations.get for it',
+          );
+        }
+      } catch (err) {
+        if (signal?.aborted) throw err;
+        if (isDeadlineAbort(err)) continue;
+        if (!isTransientForPoll(err)) throw err;
+        observed = false;
+        delayMs = retryDelay(pollMs, err);
+      }
+    }
   }
 }

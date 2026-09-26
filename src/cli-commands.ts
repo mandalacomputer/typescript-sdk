@@ -135,6 +135,32 @@ export async function resolveComputer(
   throw idLookupError;
 }
 
+/**
+ * `operations list --computer`: a computer by name or id, as every other
+ * computer argument is. A value that is neither a live computer's id nor its
+ * name is sent as typed, because an operation outlives its computer: the id of
+ * one since deleted (a create that would not boot, a clone that failed) is
+ * still how its operations are found. Said on stderr when that happens, so the
+ * empty page a mistyped name gets is not read as "no operations".
+ */
+async function operationsComputer(
+  client: Client,
+  target: string,
+  output: Output,
+  signal: AbortSignal,
+): Promise<string> {
+  try {
+    return (await resolveComputer(client, target, signal)).id;
+  } catch (error) {
+    signal.throwIfAborted();
+    if (!(error instanceof NotFoundError)) throw error;
+    output.diagnostic(
+      `mandala: no computer is named ${target} or has that id now; listing the operations recorded under the id ${target}`,
+    );
+    return target;
+  }
+}
+
 /** Format the SDK's public projection explicitly; never expose desktop credentials. */
 const computerData = (computer: Computer) => computer.toJSON();
 
@@ -472,6 +498,8 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
       checkWait(wait.timeoutMs ?? 60_000, wait.pollMs ?? 1_000);
     const call = { signal };
     const usageWindow = { from: s('from'), to: s('to'), signal };
+    const operationPage = { computerId: s('computer'), limit: n('limit'), cursor: s('cursor') };
+    if (path === 'operations list') P.operationsQuery(operationPage);
     if (path === 'usage') checkUsageWindow(usageWindow.from, usageWindow.to);
     // Preparation and pure SDK validation happen before name resolution or any request.
     const bypassFlag =
@@ -637,6 +665,21 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
         );
       case 'api-keys revoke':
         return await apiKeysRevoke(client, output, target, signal);
+      case 'operations list': {
+        const computerId =
+          operationPage.computerId === undefined
+            ? undefined
+            : await operationsComputer(client, operationPage.computerId, output, signal);
+        const page = await client.operations.list({ ...operationPage, computerId }, call);
+        return output.result({
+          operations: page.operations.map(raw),
+          next_cursor: page.nextCursor,
+        });
+      }
+      case 'operations get':
+        return output.result(raw(await client.operations.get(target, call)));
+      case 'operations wait':
+        return output.result(raw(await client.operations.wait(target, wait)));
       case 'usage': {
         const report = await client.usage.read(usageWindow);
         checkUsageReport(report.raw);

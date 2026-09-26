@@ -396,6 +396,26 @@ export const COMMANDS: readonly Command[] = [
     'id',
   ]),
   command(
+    'operations list',
+    'List lifecycle operations, newest first; pass next_cursor back as --cursor for the next page',
+    [],
+    [
+      flag(
+        'computer',
+        'Only this computer, by name or ID (for a clone, the new computer); a deleted one by its ID',
+      ),
+      num('limit', 'Page size, 1 to 100 (default 20)'),
+      flag('cursor', 'The next_cursor of the page before'),
+    ],
+  ),
+  command('operations get', 'Read one lifecycle operation', ['id']),
+  command(
+    'operations wait',
+    'Wait until an operation succeeds (exit 0) or fails (operation_failed); succeeded is not a booted desktop',
+    ['id'],
+    waits,
+  ),
+  command(
     'files list',
     'List one guest directory: names, types and file sizes (bounded, not paged)',
     ['computer', 'path'],
