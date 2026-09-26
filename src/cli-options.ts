@@ -142,6 +142,15 @@ export const COMMANDS: readonly Command[] = [
         'no-value-check',
         "Send each =VAR or =FILE as typed, even one that looks like a secret's value rather than a name",
       ),
+      flag(
+        'browser-proxy',
+        "Send the computer's browsers through this proxy URL, e.g. http://proxy.example.com:3128",
+      ),
+      flag(
+        'browser-proxy-bypass',
+        'Hosts the browsers reach directly, comma-separated (with --browser-proxy); repeat for more',
+        { repeatable: true },
+      ),
     ],
   ),
   command('computers get', 'Get a computer by name or ID', ['computer']),
@@ -173,6 +182,21 @@ export const COMMANDS: readonly Command[] = [
     'Change vCPU, RAM or disk; the computer must be stopped, and disks grow only',
     ['computer'],
     [num('cpu', 'vCPU count'), num('ram-mb', 'RAM in MiB'), num('disk-gb', 'Disk in GiB')],
+  ),
+  command(
+    'computers browser-proxy set',
+    "Send a computer's browsers through a proxy, replacing any it has",
+    ['computer', 'url'],
+    [
+      flag('bypass', 'Hosts the browsers reach directly, comma-separated; repeat for more', {
+        repeatable: true,
+      }),
+    ],
+  ),
+  command(
+    'computers browser-proxy clear',
+    "Remove a computer's browser proxy; its browsers go out directly",
+    ['computer'],
   ),
   command(
     'computers view',
@@ -216,9 +240,11 @@ export const COMMANDS: readonly Command[] = [
     'Wait for a computer',
     ['computer'],
     [
-      flag('until', 'Readiness condition (default running; secrets: bound secrets delivered)', {
-        choices: ['built', 'running', 'guest', 'secrets'],
-      }),
+      flag(
+        'until',
+        'Readiness condition (default running; secrets: bound secrets delivered; browser-proxy: browsers have the proxy)',
+        { choices: ['built', 'running', 'guest', 'secrets', 'browser-proxy'] },
+      ),
       ...waits,
     ],
   ),

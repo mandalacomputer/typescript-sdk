@@ -470,11 +470,6 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
  * would say nothing the route's own line does not.
  */
 export const UNIMPLEMENTED_PARAMETERS: ReadonlySet<string> = new Set([
-  // OPL-5056: `browser_proxy` ({server, bypass}) sends a computer's browsers
-  // through a proxy, set at create or by PATCH (null clears it). Listed to
-  // stay in step with the surface; not yet sent.
-  'POST computers  body:browser_proxy',
-  'PATCH computers/:id  body:browser_proxy',
   // `manage_keys: true` is refused from every API key (403): the permission is
   // granted only from a dashboard session, and false is the default. There is
   // nothing for this SDK to send.

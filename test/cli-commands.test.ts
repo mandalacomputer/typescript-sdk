@@ -2733,6 +2733,110 @@ describe('files, rename, resize, view, and secrets bound at create', () => {
     }
   });
 
+  it('creates with a browser proxy and its bypass list', async () => {
+    const h = harness((call) =>
+      call.method === 'POST' ? json({ ...COMPUTER }, { status: 201 }) : anyRoute(call),
+    );
+    const result = await h.run([
+      'computers',
+      'create',
+      '--browser-proxy',
+      'http://proxy.example.com:3128',
+      '--browser-proxy-bypass',
+      '<local>, *.example.com',
+      '--browser-proxy-bypass',
+      '10.0.0.0/8',
+    ]);
+    expect(result.code).toBe(0);
+    expect(h.rec.last()).toMatchObject({
+      method: 'POST',
+      path: '/computers',
+      body: {
+        browser_proxy: {
+          server: 'http://proxy.example.com:3128',
+          bypass: ['<local>', '*.example.com', '10.0.0.0/8'],
+        },
+      },
+    });
+  });
+
+  it('sets and clears a browser proxy through the resolved id', async () => {
+    const h = harness((call) => (call.method === 'PATCH' ? json(COMPUTER) : anyRoute(call)));
+    const set = await h.run([
+      'computers',
+      'browser-proxy',
+      'set',
+      COMPUTER.name,
+      'socks5://127.0.0.1:1080',
+      '--bypass',
+      'example.com',
+    ]);
+    expect(set.code).toBe(0);
+    expect(h.rec.last()).toMatchObject({
+      method: 'PATCH',
+      path: `/computers/${COMPUTER.id}`,
+      body: { browser_proxy: { server: 'socks5://127.0.0.1:1080', bypass: ['example.com'] } },
+    });
+    const bare = await h.run(['computers', 'browser-proxy', 'set', COMPUTER.id, 'http://p:1']);
+    expect(bare.code).toBe(0);
+    expect(h.rec.last()!.body).toEqual({ browser_proxy: { server: 'http://p:1' } });
+    const clear = await h.run(['computers', 'browser-proxy', 'clear', COMPUTER.id]);
+    expect(clear.code).toBe(0);
+    expect(h.rec.last()).toMatchObject({
+      method: 'PATCH',
+      path: `/computers/${COMPUTER.id}`,
+      body: { browser_proxy: null },
+    });
+  });
+
+  it("prints the platform's refusal of a proxy as it is", async () => {
+    // The rules on a proxy URL are the platform's, and they grow; the CLI
+    // sends what was typed and passes the sentence back.
+    const sentence = 'browser_proxy.server: https:// is not supported yet';
+    const h = harness((call) =>
+      call.method === 'PATCH' ? json({ error: sentence }, { status: 400 }) : anyRoute(call),
+    );
+    const result = await h.run([
+      'computers',
+      'browser-proxy',
+      'set',
+      COMPUTER.id,
+      'https://proxy.example.com:443',
+    ]);
+    expect(result.code).toBe(1);
+    expect(h.rec.last()!.body).toEqual({
+      browser_proxy: { server: 'https://proxy.example.com:443' },
+    });
+    expect(result.frames[0].error.message).toContain(sentence);
+  });
+
+  it('waits for the browser proxy with computers wait --until browser-proxy', async () => {
+    let gets = 0;
+    const h = harness(() => {
+      gets++;
+      return json({
+        ...COMPUTER,
+        status: 'running',
+        browser_proxy: { server: 'http://proxy.example.com:3128' },
+        ...(gets < 3 ? { browser_proxy_pending: true } : {}),
+      });
+    });
+    const result = await h.run([
+      'computers',
+      'wait',
+      COMPUTER.id,
+      '--until',
+      'browser-proxy',
+      '--poll-ms',
+      '1',
+    ]);
+    expect(result.code).toBe(0);
+    expect(gets).toBe(3);
+    expect(result.frames[0].data.browser_proxy).toEqual({
+      server: 'http://proxy.example.com:3128',
+    });
+  });
+
   it('renames through the resolved id', async () => {
     const h = harness((call) =>
       call.method === 'PATCH' ? json({ ...COMPUTER, name: 'build box' }) : anyRoute(call),
@@ -2928,6 +3032,17 @@ describe('files, rename, resize, view, and secrets bound at create', () => {
     [['computers', 'create', '--secret', 'A=1BAD']],
     [['computers', 'create', '--secret-file', 'A=Upper']],
     [['computers', 'create', '--secret', 'A=']],
+    [['computers', 'create', '--browser-proxy-bypass', 'a.com']],
+    [['computers', 'create', '--browser-proxy', '']],
+    [['computers', 'browser-proxy', 'set', 'vm']],
+    [['computers', 'browser-proxy', 'set', 'vm', ' ']],
+    [['computers', 'browser-proxy', 'clear']],
+    // A bypass of blanks is refused as the SDK refuses a blank entry, rather
+    // than sent as an empty list.
+    [['computers', 'browser-proxy', 'set', 'vm', 'http://p:1', '--bypass', '']],
+    [['computers', 'browser-proxy', 'set', 'vm', 'http://p:1', '--bypass', ',']],
+    [['computers', 'browser-proxy', 'set', 'vm', 'http://p:1', '--bypass', 'a.com,']],
+    [['computers', 'create', '--browser-proxy', 'http://p:1', '--browser-proxy-bypass', ' ']],
   ])('%j makes no requests', async (argv) => {
     const h = harness();
     const result = await h.run(argv);

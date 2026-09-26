@@ -3146,6 +3146,39 @@ export function toSshAccess(d: Record<string, unknown>): SshAccess {
   };
 }
 
+// --- browser proxy ----------------------------------------------------------
+
+/**
+ * The proxy a computer's browsers are sent through, as the platform reports it:
+ * `server` in its stored spelling (lower-cased), and the bypass list as
+ * stored, duplicates dropped. `bypass` is absent when there is none.
+ */
+export type BrowserProxy = {
+  server: string;
+  bypass?: string[];
+};
+
+/**
+ * Strict, for the reason {@link toSecretBinding} is: a change replaces the
+ * setting whole, so what is read here is what a caller edits and sends back. A
+ * bypass entry dropped or a server coerced on the read is one the caller never
+ * saw, removed by an update that looked like it kept everything. Fields this
+ * client does not know are left out rather than refused, so a platform that
+ * grows the setting is still readable.
+ */
+export function toBrowserProxy(d: unknown, id = 'the computer'): BrowserProxy | undefined {
+  if (d === undefined || d === null) return undefined;
+  if (!isRecord(d)) throw new MandalaError(`expected ${id}'s browser_proxy to be an object`);
+  if (typeof d.server !== 'string' || !d.server) {
+    throw new MandalaError(`expected ${id}'s browser_proxy to name its server`);
+  }
+  if (d.bypass === undefined || d.bypass === null) return { server: d.server };
+  if (!Array.isArray(d.bypass) || !d.bypass.every((e) => typeof e === 'string' && e !== '')) {
+    throw new MandalaError(`expected ${id}'s browser_proxy bypass to be a list of hosts`);
+  }
+  return d.bypass.length ? { server: d.server, bypass: [...d.bypass] } : { server: d.server };
+}
+
 // --- secret bindings --------------------------------------------------------
 
 /**

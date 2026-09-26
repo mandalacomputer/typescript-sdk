@@ -34,6 +34,8 @@ const expectedCommands = [
   'computers clone',
   'computers rename',
   'computers resize',
+  'computers browser-proxy set',
+  'computers browser-proxy clear',
   'computers view',
   'computers screenshot',
   'computers exec',

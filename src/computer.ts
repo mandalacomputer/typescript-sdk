@@ -65,6 +65,7 @@ import type {
   ActivityPage,
   ActivityResults,
   BackgroundExec,
+  BrowserProxy,
   DeleteResult,
   ExecResult,
   GuestDirectory,
@@ -97,6 +98,7 @@ import {
   toActivityPage,
   toActivityResults,
   toBackgroundExec,
+  toBrowserProxy,
   toDeleteResult,
   toExecResult,
   toGuestDirectory,
@@ -1249,6 +1251,43 @@ export class Computer {
     return typeof v === 'boolean' ? v : undefined;
   }
 
+  // --- browser proxy --------------------------------------------------
+
+  /**
+   * The proxy this computer's browsers are sent through — Chromium, Chrome and
+   * Firefox, as a locked policy each reads when it starts. Nothing else on the
+   * computer uses it: `exec`, a terminal and every other program reach the
+   * network directly. `undefined` when none is set.
+   *
+   * Decoded strictly: a value this client cannot read throws rather than being
+   * dropped, because {@link update} replaces the setting whole and this is what
+   * a caller would edit and send back.
+   */
+  get browserProxy(): BrowserProxy | undefined {
+    return toBrowserProxy(this.#data.browser_proxy, this.id);
+  }
+
+  /**
+   * Whether this running computer's browsers are still waiting for its
+   * {@link browserProxy} — just after a create, a start or a change — or its
+   * guest still holds the files of one just removed.
+   * {@link waitForBrowserProxy} waits on it.
+   *
+   * `false` on a computer that is not running, where the setting is applied as
+   * it starts, and on a platform that predates the field. A browser already
+   * running when the setting changes applies it at its next start.
+   */
+  get browserProxyPending(): boolean {
+    const v = this.#data.browser_proxy_pending;
+    if (v === undefined || v === null) return false;
+    // Strict, since a wait decides on it: a value that is not a boolean is not
+    // a "no" this client can honestly read into it.
+    if (typeof v !== 'boolean') {
+      throw new MandalaError(`expected ${this.id}'s browser_proxy_pending to be a boolean`);
+    }
+    return v;
+  }
+
   /** The API response verbatim, including any fields this SDK predates. */
   get raw(): Record<string, unknown> {
     // A deep copy. A shallow one shares every nested object, and
@@ -1429,7 +1468,8 @@ export class Computer {
   }
 
   /**
-   * Change this computer's name, size, or idle window, and return it changed.
+   * Change this computer's name, size, idle window or browser proxy, and
+   * return it changed.
    *
    * A name is a label — nothing is derived from it, so a rename moves no bytes
    * and breaks no reference. The platform trims whitespace and control
@@ -1441,6 +1481,13 @@ export class Computer {
    * both without applying half of it.
    *
    * Snapshots already taken keep the name they were captured under.
+   *
+   * `browserProxy` travels alone and replaces the setting whole; `null`
+   * removes it and takes its files out of the computer. A running computer has
+   * the change within seconds — {@link waitForBrowserProxy} before starting a
+   * browser that must use it — and a stopped or suspended one is given it as
+   * it starts. Which proxies are accepted is the platform's rule, and a value
+   * it refuses is a `400` naming why.
    */
   async update(args: P.UpdateArgs, opts: CallOptions = {}): Promise<this> {
     const data = P.computerPayload(
@@ -2467,23 +2514,62 @@ export class Computer {
    * as "nothing bound", which would return before anything was delivered.
    */
   async waitForSecrets(opts: WaitOptions & { expectSecrets?: boolean } = {}): Promise<this> {
-    const { timeoutMs = 180_000, pollMs = 2_000, signal, expectSecrets = false } = opts;
+    const { expectSecrets = false } = opts;
+    return this.#waitForState(
+      opts,
+      'delivered',
+      'delivering',
+      (startFailed) => this.#secretsState(expectSecrets, startFailed),
+      (timeoutMs, observed, fresh, state) =>
+        !observed
+          ? `${this.id} could not be observed within ${timeoutMs}ms, so whether its secrets ` +
+            'arrived is unknown'
+          : fresh
+            ? state === 'unreported'
+              ? `${this.id} was read for ${timeoutMs}ms without reporting its bindings, so ` +
+                'whether its secrets arrived is unknown'
+              : `${this.id}'s secrets were still being delivered after ${timeoutMs}ms`
+            : `${this.id} could not be reached for the last part of ${timeoutMs}ms; when it ` +
+              `last answered ${
+                state === 'unreported'
+                  ? 'it did not report its bindings'
+                  : 'its secrets were still being delivered'
+              }`,
+    );
+  }
+
+  /**
+   * The loop {@link waitForSecrets} and {@link waitForBrowserProxy} share:
+   * read the computer, ask `judge` where things are, and return on `done`,
+   * throw the refusal `judge` hands back, or sleep and read again until the
+   * deadline, when `timedOut` words the {@link TimeoutError}.
+   *
+   * No verdict on state read before this call: the handle may be a create's
+   * answer or an old listing, and "done" concluded from either is a claim
+   * about something nobody has looked at. Tracked apart from whether the LAST
+   * read answered, for the timeout sentence, as waitUntilRunning does.
+   *
+   * A create's failed first start is kept past the refresh that clears it, as
+   * waitUntilRunning keeps it and for the same reason: the create's answer is
+   * the one response that carries both `start_error` and no `running_ram_mb`,
+   * and a stopped read with the pool left out is otherwise waited on to the end
+   * of the budget. Retired the moment a reservation is seen, since that is a
+   * start somebody made after the one that failed.
+   */
+  async #waitForState<S extends string>(
+    opts: WaitOptions,
+    done: S,
+    initial: S,
+    judge: (startFailed: string) => S | MandalaError,
+    timedOut: (timeoutMs: number, observed: boolean, fresh: boolean, state: S) => string,
+  ): Promise<this> {
+    const { timeoutMs = 180_000, pollMs = 2_000, signal } = opts;
     checkWait(timeoutMs, pollMs);
     const deadline = Date.now() + timeoutMs;
-    // No verdict on state read before this call: the handle may be a create's
-    // answer or an old listing, and "delivered" concluded from either is a
-    // claim about a delivery nobody has looked at. Tracked apart from whether
-    // the LAST read answered, for the timeout sentence, as waitUntilRunning does.
     let observed = false;
     let fresh = false;
-    // A create's failed first start, kept past the refresh that clears it, as
-    // waitUntilRunning keeps it and for the same reason: the create's answer
-    // is the one response that carries both `start_error` and no
-    // `running_ram_mb`, and a stopped read with the pool left out is otherwise
-    // waited on to the end of the budget. Retired the moment a reservation is
-    // seen, since that is a start somebody made after the one that failed.
     let initialStartError = this.startError;
-    let state: SecretsState = 'delivering';
+    let state = initial;
     for (;;) {
       let delayMs = pollMs;
       if (Date.now() < deadline) {
@@ -2500,27 +2586,13 @@ export class Computer {
         }
       }
       if (observed) {
-        state = this.#secretsState(expectSecrets, this.startError || initialStartError);
-        if (state === 'delivered') return this;
-        if (state instanceof MandalaError) throw state;
+        const verdict = judge(this.startError || initialStartError);
+        if (verdict instanceof MandalaError) throw verdict;
+        state = verdict;
+        if (state === done) return this;
       }
       if (Date.now() >= deadline) {
-        const last =
-          state === 'unreported'
-            ? 'it did not report its bindings'
-            : 'its secrets were still being delivered';
-        throw new TimeoutError(
-          !observed
-            ? `${this.id} could not be observed within ${timeoutMs}ms, so whether its secrets ` +
-                'arrived is unknown'
-            : fresh
-              ? state === 'unreported'
-                ? `${this.id} was read for ${timeoutMs}ms without reporting its bindings, so ` +
-                  'whether its secrets arrived is unknown'
-                : `${this.id}'s secrets were still being delivered after ${timeoutMs}ms`
-              : `${this.id} could not be reached for the last part of ${timeoutMs}ms; when it ` +
-                `last answered ${last}`,
-        );
+        throw new TimeoutError(timedOut(timeoutMs, observed, fresh, state));
       }
       await sleepUntilNextPoll(delayMs, deadline, signal);
     }
@@ -2584,6 +2656,109 @@ export class Computer {
       if (generation !== undefined && generation > 0 && applied < generation) return 'delivering';
     }
     return 'delivered';
+  }
+
+  /**
+   * Wait until this computer's browsers have its browser proxy.
+   *
+   * The setting reaches a running computer a few seconds after a create, a
+   * start or a change, and a browser started in between goes out directly. This
+   * polls until the platform says the guest has it ({@link browserProxyPending}
+   * is false on a running computer), and returns at once for a computer with no
+   * proxy and nothing left to remove. A computer with none whose start has been
+   * admitted but has not booted is waited on until it runs, since a proxy
+   * removed while it was stopped is only reported pending once it does.
+   * {@link Computers.launch} calls it for you when the create carried one.
+   *
+   * Always reads the computer again before answering, so it is safe straight
+   * after `update({ browserProxy })`, `start()` or a create.
+   *
+   * Throws rather than waiting out the timeout when nothing will apply it: a
+   * computer that is stopped or suspended while the platform says it has
+   * admitted no start — the proxy is applied as it starts, so `start()` is the
+   * fix — a create's computer whose first start failed, and a failed build. A
+   * host that does not say whether a start is under way is waited on.
+   *
+   * `expectBrowserProxy` is for a caller that knows a proxy is set, such as one
+   * that just created the computer with it. A read that leaves the setting out
+   * then counts as "cannot tell" and is waited past, rather than as "none
+   * set", which would return before the guest had anything.
+   */
+  async waitForBrowserProxy(
+    opts: WaitOptions & { expectBrowserProxy?: boolean } = {},
+  ): Promise<this> {
+    const { expectBrowserProxy = false } = opts;
+    return this.#waitForState(
+      opts,
+      'applied',
+      'applying',
+      (startFailed) => this.#browserProxyState(expectBrowserProxy, startFailed),
+      (timeoutMs, observed, fresh, state) =>
+        !observed
+          ? `${this.id} could not be observed within ${timeoutMs}ms, so whether its browsers ` +
+            'have its proxy is unknown'
+          : fresh
+            ? state === 'unreported'
+              ? `${this.id} was read for ${timeoutMs}ms without reporting its browser proxy, so ` +
+                'whether its browsers have it is unknown'
+              : `${this.id}'s browser proxy was still being applied after ${timeoutMs}ms`
+            : `${this.id} could not be reached for the last part of ${timeoutMs}ms; when it ` +
+              `last answered ${
+                state === 'unreported'
+                  ? 'it did not report its browser proxy'
+                  : 'its browser proxy was still being applied'
+              }`,
+    );
+  }
+
+  /**
+   * Where this computer's browser proxy is, as {@link waitForBrowserProxy}
+   * reads it. `unreported` is a read that left the setting out when the caller
+   * knows one is set: not an answer either way, so it is waited past.
+   * `startFailed` is why a create's first start failed, if it did.
+   */
+  #browserProxyState(expectProxy = false, startFailed = ''): BrowserProxyState {
+    if (this.browserProxyPending) return 'applying';
+    const set = this.browserProxy !== undefined;
+    if (!set && !expectProxy) {
+      // Nothing set and nothing pending. On a running computer that is the
+      // answer — a removal that has landed reads exactly like this — and a
+      // computer nobody is starting runs no browser to read anything.
+      //
+      // A start admitted but not yet booted is the exception. The platform
+      // reports a removal pending only once the machine is running, so a clear
+      // sent while it was stopped leaves the old policy on its disk with
+      // nothing here saying so, and a browser opened at login could still read
+      // it. That start is waited through, and the running read decides.
+      return !this.#statusIs('running') && this.#startAdmitted() ? 'applying' : 'applied';
+    }
+    // From here the caller has a proxy to wait for, whether the read carried
+    // it or left it out ('unreported').
+    const waiting = set ? 'applying' : 'unreported';
+    if (this.buildFailed) return this.#buildFailure();
+    // The platform never reports the setting pending on a computer that is not
+    // running, so a false here means only "not running yet" until it is.
+    if (this.isBuilding) return waiting;
+    if (!this.#statusIs('running')) {
+      // The refusals #secretsState makes, for its reasons: a known failed boot
+      // on the weaker evidence, and a machine the platform says nobody is
+      // starting. A start admitted but not yet booted reads stopped or
+      // suspended, and its proxy is ahead of it.
+      if (startFailed && this.#statusIs('stopped') && !this.#startAdmitted()) {
+        return new MandalaError(
+          `${this.id} is stopped after it failed to start, so its browser proxy was not ` +
+            `applied: ${startFailed}. Call start() to try again`,
+        );
+      }
+      if (this.#nothingAdmitted()) {
+        return new MandalaError(
+          `${this.id} is ${JSON.stringify(this.status)}, and its browser proxy is applied only ` +
+            'as it starts: call start()',
+        );
+      }
+      return waiting;
+    }
+    return set ? 'applied' : 'unreported';
   }
 
   // --- events ---------------------------------------------------------
@@ -5012,6 +5187,8 @@ export class Computer {
  */
 /** Where a computer's secrets are, as {@link Computer.waitForSecrets} reads it. */
 type SecretsState = 'delivered' | 'delivering' | 'unreported' | MandalaError;
+/** Where a computer's browser proxy is, as {@link Computer.waitForBrowserProxy} reads it. */
+type BrowserProxyState = 'applied' | 'applying' | 'unreported' | MandalaError;
 
 export const strandedText = (id: string, err: unknown): string =>
   `${id} was not deleted at the end of its block and is still billable: ` +

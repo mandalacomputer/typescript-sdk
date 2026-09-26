@@ -584,6 +584,28 @@ export type CreateArgs = {
    * Linux only, and only on a template whose image can receive them.
    */
   secrets?: SecretBindingArgs[];
+  /**
+   * Send this computer's browsers through a proxy (Chromium, Chrome and
+   * Firefox; nothing else on the computer). Linux only. A create carrying one
+   * is always a cold boot; wait for {@link Computer.waitForBrowserProxy} before
+   * starting a browser that must use it. {@link Computers.launch} waits for you.
+   */
+  browserProxy?: BrowserProxyArgs;
+};
+
+/**
+ * A proxy for a computer's browsers.
+ *
+ * `server` is the proxy's URL, such as `http://proxy.example.com:3128` or
+ * `socks5://127.0.0.1:1080`. Which schemes and hosts are accepted is the
+ * platform's rule, not this client's: a value it refuses comes back as a
+ * `400` whose message says why. `bypass` names the hosts the browsers reach
+ * directly — `example.com`, `*.example.com`, an address or a range, or
+ * `<local>`.
+ */
+export type BrowserProxyArgs = {
+  server: string;
+  bypass?: string[];
 };
 
 /**
@@ -691,7 +713,18 @@ export function secretsBody(list: SecretBindingArgs[], version?: number): Json {
  * the four it stands in for or a preparation token is refused here.
  */
 export function createBody(args: CreateArgs): Json {
-  const { size, template, cpu, ramMb, diskGb, name, resolution, templateTransfer, secrets } = args;
+  const {
+    size,
+    template,
+    cpu,
+    ramMb,
+    diskGb,
+    name,
+    resolution,
+    templateTransfer,
+    secrets,
+    browserProxy,
+  } = args;
   // Defaulted after validation, not by destructuring: `start = true` fills in
   // only for `undefined`, so a `"false"` kept its own shape and went onto the
   // wire as a string where the platform expects a boolean.
@@ -739,6 +772,7 @@ export function createBody(args: CreateArgs): Json {
       disk_gb: diskGb,
       resolution,
       secrets: secrets === undefined ? undefined : secretBindingsBody(secrets),
+      browser_proxy: browserProxy === undefined ? undefined : browserProxyBody(browserProxy),
     }),
     start,
   };
@@ -760,7 +794,42 @@ export type UpdateArgs = {
    * "leave it alone", rather than null doing both jobs.
    */
   idleSuspendMin?: number | null;
+  /**
+   * The proxy this computer's browsers are sent through, replaced whole; `null`
+   * removes it. On its own: the platform refuses it beside any other field. A
+   * running computer has it within seconds ({@link Computer.waitForBrowserProxy});
+   * a stopped or suspended one is given it as it starts.
+   */
+  browserProxy?: BrowserProxyArgs | null;
 };
+
+/**
+ * A browser proxy as the wire takes it, checked for shape only.
+ *
+ * The shape is this client's to know; the rules on the values are not. Which
+ * schemes a proxy may use, which hosts it may name and how many bypass entries
+ * there may be are the platform's, and they are growing, so they are left to
+ * its `400`, which names the rule that was broken. A copy here would refuse a
+ * value the platform has since learned to accept.
+ */
+export function browserProxyBody(p: BrowserProxyArgs, what = 'browserProxy'): Json {
+  if (!p || typeof p !== 'object' || Array.isArray(p)) {
+    throw new ValidationError(`${what} must be an object: {server, bypass?}`);
+  }
+  const server = requireString(p.server, `${what}.server`);
+  if (!server.trim()) throw new ValidationError(`${what}.server must not be empty`);
+  if (p.bypass === undefined) return { server };
+  if (!Array.isArray(p.bypass)) {
+    throw new ValidationError(`${what}.bypass must be a list of hosts`);
+  }
+  const bypass = p.bypass.map((entry, i) => {
+    if (!requireString(entry, `${what}.bypass[${i}]`).trim()) {
+      throw new ValidationError(`${what}.bypass[${i}] must not be empty`);
+    }
+    return entry;
+  });
+  return { server, bypass };
+}
 
 /**
  * What a move is asked for: the same sizing group a resize takes, minus the two
@@ -838,6 +907,11 @@ export function updateBody(args: UpdateArgs): Json {
     // Read off the object rather than destructured with a default, because
     // `null` is a value here and `undefined` is the absence.
     idle_suspend_min: args.idleSuspendMin,
+    // `null` is the clear, as on idle_suspend_min, and survives the filter.
+    browser_proxy:
+      args.browserProxy === undefined || args.browserProxy === null
+        ? args.browserProxy
+        : browserProxyBody(args.browserProxy),
   });
   if (args.name !== undefined && !requireString(args.name, 'name').trim()) {
     // On create an omitted name means "you pick one"; in an update an empty one
@@ -846,7 +920,7 @@ export function updateBody(args: UpdateArgs): Json {
   }
   if (!Object.keys(body).length) {
     throw new ValidationError(
-      'nothing to update: give at least one of name, cpu, ramMb, diskGb, idleSuspendMin',
+      'nothing to update: give at least one of name, cpu, ramMb, diskGb, idleSuspendMin, browserProxy',
     );
   }
   return body;

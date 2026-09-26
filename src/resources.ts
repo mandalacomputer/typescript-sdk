@@ -262,7 +262,7 @@ export class Computers {
    * An admitted start is waited on, and a failed start is never retried.
    *
    * `timeoutMs` defaults to 180,000 and is one readiness budget beginning after
-   * create returns. Disk, running, guest and secrets waits share the remaining time;
+   * create returns. Disk, running, guest, secrets and browser proxy waits share the remaining time;
    * elapsed start work also consumes it. Create and start keep their usual
    * transport deadlines, so this is not a total wall-clock limit on launch.
    * `pollMs` defaults to 3,000 for every stage. `signal` cancels all stages.
@@ -270,6 +270,9 @@ export class Computers {
    * A computer with secrets bound is also waited on until they have reached
    * its desktop ({@link Computer.waitForSecrets}), so a command run on the
    * returned computer sees them; a delivery that failed throws, naming why.
+   * One with a browser proxy is waited on until its guest has it
+   * ({@link Computer.waitForBrowserProxy}), so a browser opened on the returned
+   * computer uses it.
    *
    * The returned computer is persistent. Failure never deletes it. SDK errors
    * after creation retain their type and include its id; cancellation retains
@@ -343,6 +346,18 @@ export class Computers {
           pollMs,
           signal,
           expectSecrets: true,
+        });
+      }
+      // The same gap for a browser proxy: the guest answers before the policy
+      // is on disk, and a browser opened in between goes out directly. Told
+      // one is set, as the secrets wait is, so a read that leaves the setting
+      // out is not taken for "none" and returned on.
+      if (args.browserProxy !== undefined || computer.browserProxy !== undefined) {
+        await computer.waitForBrowserProxy({
+          timeoutMs: remaining(),
+          pollMs,
+          signal,
+          expectBrowserProxy: true,
         });
       }
       signal?.throwIfAborted();

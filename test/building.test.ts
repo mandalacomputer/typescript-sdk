@@ -104,6 +104,50 @@ describe('updateBody', () => {
   });
 });
 
+describe('browserProxy', () => {
+  const server = 'http://proxy.example.com:3128';
+
+  it('sends the setting on create, and only when given', () => {
+    expect(P.createBody({ browserProxy: { server } })).toEqual({
+      browser_proxy: { server },
+      start: true,
+    });
+    expect(
+      P.createBody({ browserProxy: { server, bypass: ['<local>', '*.example.com'] } }),
+    ).toEqual({ browser_proxy: { server, bypass: ['<local>', '*.example.com'] }, start: true });
+    expect(P.createBody({})).not.toHaveProperty('browser_proxy');
+  });
+
+  it('keeps a null on update, which removes it, and refuses one on create', () => {
+    expect(P.updateBody({ browserProxy: null })).toEqual({ browser_proxy: null });
+    expect(P.updateBody({ browserProxy: { server, bypass: [] } })).toEqual({
+      browser_proxy: { server, bypass: [] },
+    });
+    // A create has nothing to remove, and `null` there is a mistake.
+    expect(() => P.createBody({ browserProxy: null as unknown as P.BrowserProxyArgs })).toThrow(
+      /browserProxy must be an object/,
+    );
+  });
+
+  it('checks the shape and leaves the rules on values to the platform', () => {
+    const bad = (v: unknown) => () => P.updateBody({ browserProxy: v as P.BrowserProxyArgs });
+    expect(bad('http://proxy:1')).toThrow(/must be an object/);
+    expect(bad([server])).toThrow(/must be an object/);
+    expect(bad({})).toThrow(/browserProxy.server must be a string/);
+    expect(bad({ server: '  ' })).toThrow(/browserProxy.server must not be empty/);
+    expect(bad({ server, bypass: 'example.com' })).toThrow(/bypass must be a list/);
+    expect(bad({ server, bypass: [1] })).toThrow(/bypass\[0\] must be a string/);
+    expect(bad({ server, bypass: ['a.com', ' '] })).toThrow(/bypass\[1\] must not be empty/);
+    // Schemes, hosts and ports are the platform's to judge: the set it accepts
+    // grows, and a copy here would refuse what it has since learned to take.
+    for (const other of ['https://proxy.example.com:443', 'ftp://x', 'proxy.example.com']) {
+      expect(P.updateBody({ browserProxy: { server: other } })).toEqual({
+        browser_proxy: { server: other },
+      });
+    }
+  });
+});
+
 describe('numbers that would go out as null', () => {
   // JSON.stringify writes a NaN as `null`, and the platform reads that as the
   // field's zero value — or, on the idle window, as "follow the host". The
