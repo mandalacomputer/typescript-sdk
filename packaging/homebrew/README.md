@@ -20,19 +20,15 @@ tap repository, so the two must stay identical.
 
 `brew install mandalacomputer/tap/mandala` reads
 `github.com/mandalacomputer/homebrew-tap`: Homebrew expands `<org>/tap` to the
-repository `<org>/homebrew-tap`. It does not exist yet. To create it:
+repository `<org>/homebrew-tap`. It is public, because Homebrew clones it
+anonymously, and holds this directory's `mandala.rb` as `Formula/mandala.rb`.
+To check it from a clean machine:
 
-1. Create the **public** repository `mandalacomputer/homebrew-tap`. Homebrew
-   clones it anonymously, so it cannot be private.
-2. Commit this directory's `mandala.rb` to it as `Formula/mandala.rb`, with a
-   README that gives the install line above.
-3. Check it from a clean machine:
-
-   ```sh
-   brew install mandalacomputer/tap/mandala
-   brew test mandalacomputer/tap/mandala
-   brew audit --strict --online mandalacomputer/tap/mandala
-   ```
+```sh
+brew install mandalacomputer/tap/mandala
+brew test mandalacomputer/tap/mandala
+brew audit --strict --online mandalacomputer/tap/mandala
+```
 
 ## After each npm release
 

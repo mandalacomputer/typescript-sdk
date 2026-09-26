@@ -21,6 +21,20 @@ npm install mandala-computer
 Published as ES modules, with type declarations alongside. The install also
 puts a `mandala` command on your PATH; see [The `mandala` CLI](#the-mandala-cli).
 
+To install only the CLI, for use outside a project, use Homebrew or the
+installer script:
+
+```sh
+brew install mandalacomputer/tap/mandala
+# or
+curl -fsSL https://mandala.computer/install.sh | sh
+```
+
+Both install this same package. The formula brings Homebrew's own `node`; the
+script needs Node 22+ and npm already present, never uses `sudo`, and falls
+back to `~/.local` when npm's global prefix is not writable. It takes
+`--version` and `--prefix` after `sh -s --`.
+
 Sign in once on your local Node installation:
 
 ```sh
@@ -2584,8 +2598,10 @@ cannot safely recommend replaying for an arbitrary operation.
 The same package provides commands for computers, templates, snapshots, webhooks, secrets,
 account quota, historical usage, and agent runs. The CLI requires Node 22+;
 importing the SDK does not import the CLI or its terminal dependencies.
-Use `npx mandala` from a project with the package
-installed, or prefix the commands below with `npx --package=mandala-computer`.
+Installed with Homebrew or the installer script (see [Install](#install)),
+`mandala` is on your PATH. With the package installed in a project, run
+`npx mandala`. Without installing anything, prefix each `mandala` command with
+`npx --package=mandala-computer`, as here:
 
 ```sh
 npx --package=mandala-computer mandala --help

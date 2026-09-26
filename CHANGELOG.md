@@ -37,10 +37,12 @@ name.
   `--version`** (also `version`). `logout` forgets one saved profile on this
   machine and prints the id of the key it held, which stays valid until
   revoked; `api-keys create` prints only the new key on stdout.
-- **A Homebrew formula for the CLI**, in `packaging/homebrew/`, for
-  `brew install mandalacomputer/tap/mandala` once the tap repository exists. It
-  installs this package's npm tarball against Homebrew's `node`, with bash, zsh
-  and fish completions. The package itself is unchanged.
+- **Two ways to install only the CLI:** `brew install mandalacomputer/tap/mandala`
+  (the formula's reviewed copy is in `packaging/homebrew/`) and
+  `curl -fsSL https://mandala.computer/install.sh | sh`. The formula installs
+  this package's npm tarball against Homebrew's `node`, with bash, zsh and fish
+  completions; the script installs it with npm. The README's Install and CLI
+  sections give both. The package itself is unchanged.
 - **CLI: `files list`, `files upload`, `files download`.** A guest directory's
   entries, and one file in or out, with the computer named on its own rather
   than spelled `computer:/path`. Upload and download are `scp`'s two halves,
