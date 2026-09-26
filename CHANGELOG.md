@@ -135,7 +135,10 @@ name.
   so that it took `secrets` or a verb under it as its value, is read both ways,
   before or after the unknown option: `--profile secrets --sk-live-0123 set A`
   is judged as typed under `secrets set`, and `secrets --sk-live-0123
-  --profile list` under `secrets list`, with no stdin hint. A second
+  --profile list` under `secrets list`, with no stdin hint. Of the two
+  readings, the one that passes over fewer words wins, and the one under
+  `secrets` on a tie, so `--profile secrets --sk-live-0123 computers list`
+  names a profile and is judged as typed under `computers list`. A second
   `--profile` is refused before an unknown option is judged, so it cannot
   hide which of the two was meant.
 
