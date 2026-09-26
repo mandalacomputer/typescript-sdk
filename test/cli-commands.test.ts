@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { main } from '../src/cli.js';
 import { dashboardUrl, type LegacyCommands, runCli } from '../src/cli-commands.js';
+import { type Flag, GLOBAL_FLAGS, parseArgs } from '../src/cli-options.js';
 import { type CliIO, runtime } from '../src/cli-runtime.js';
 import { Client } from '../src/index.js';
 import {
@@ -2309,6 +2310,19 @@ describe('one JSON casing and one error vocabulary (OPL-5048)', () => {
       [`--${secret}`, '--profile', 'secrets'],
       // A profile named like a command is still read as one.
       [`--${secret}`, '--profile', 'computers', 'secrets', 'set', 'A'],
+      // The same, with --profile typed first: parsing has already taken the
+      // word as its value, and it is read as the command too.
+      ['--profile', 'secrets', `--${secret}`, 'set', 'A'],
+      ['--profile', 'secrets', `--${secret}`],
+      ['--profile', 'computers', `--${secret}`, 'secrets', 'set', 'A'],
+      // A verb under the group reached is command-shaped as well.
+      ['secrets', `--${secret}`, '--profile', 'set', 'A'],
+      ['secrets', '--profile', 'set', `--${secret}`, 'A'],
+      // Read as the command, these pass over fewer words than read as a
+      // profile: `usage` sits past a verb, and `0123` may be the value's tail.
+      ['--profile', 'secrets', `--${secret}`, 'set', 'usage'],
+      ['--profile', 'secrets', `--${secret}`, '0123', 'set', 'A'],
+      [`--${secret}`, '--profile', 'secrets', 'set', 'usage'],
     ])
       for (const jsonMode of [true, false]) {
         // --json goes first: after -- it would be one more operand.
@@ -2335,6 +2349,11 @@ describe('one JSON casing and one error vocabulary (OPL-5048)', () => {
       [`--${secret}`, 'help', 'secrets', 'list'],
       [`--${secret}`, '--', 'secrets', 'rm', 'A'],
       [`--${secret}`, '--profile', 'secrets', 'list'],
+      ['--profile', 'secrets', `--${secret}`, 'list'],
+      // A --profile value that is a verb under secrets is read as that verb.
+      ['secrets', `--${secret}`, '--profile', 'list'],
+      ['secrets', '--profile', 'list', `--${secret}`],
+      ['secrets', `--${secret}`, '--profile', 'rm', 'A'],
     ]) {
       // --json goes first: after -- it would be one more operand.
       const result = await harness().run(['--json', ...argv], false);
@@ -2343,6 +2362,20 @@ describe('one JSON casing and one error vocabulary (OPL-5048)', () => {
       expect(JSON.parse(result.out).error.message).toBe(
         'unknown option, not repeated here, as under secrets it may be a secret value',
       );
+    }
+    // A second --profile is refused as the parse would refuse it, before either
+    // could be read as the one whose value was left out.
+    for (const argv of [
+      [`--${secret}`, '--profile', 'computers', '--profile', 'secrets', 'set', 'A'],
+      [`--${secret}`, '--profile', 'computers', '--profile=secrets', 'set', 'A'],
+      ['--profile', 'p', `--${secret}`, '--profile', 'secrets', 'set', 'A'],
+      ['--profile', 'computers', `--${secret}`, '--profile', 'secrets', 'set', 'A'],
+      ['--jsno', '--profile', 'a', '--profile', 'b', 'computers', 'list'],
+    ]) {
+      const result = await harness().run(['--json', ...argv], false);
+      expect(result.code).toBe(1);
+      expect(result.out + result.err).not.toContain(secret);
+      expect(JSON.parse(result.out).error.message).toBe('--profile may only be supplied once');
     }
     // A word under secrets that is no verb is not repeated either: it is as
     // likely the value as a mistyped verb.
@@ -2362,6 +2395,17 @@ describe('one JSON casing and one error vocabulary (OPL-5048)', () => {
       ['--jsno', '--', 'computers', 'list'],
       ['--jsno', 'computers'],
       ['--jsno', '--profile', 'computers', 'list'],
+      ['--profile', 'computers', '--jsno', 'list'],
+      ['--profile', 'p', '--jsno', 'computers', 'list'],
+      ['computers', '--jsno', '--profile', 'list'],
+      // A profile given with = was not left out, so it is no command.
+      ['--profile=secrets', '--jsno', 'set', 'A'],
+      // A profile named secrets, before a command outside it: read as the
+      // command, secrets would have to take computers for a value.
+      ['--profile', 'secrets', '--jsno', 'computers', 'list'],
+      ['--profile', 'secrets', '--jsno', 'computers'],
+      ['--profile', 'secrets', 'computers', '--jsno', 'list'],
+      ['--jsno', '--profile', 'secrets', 'computers', 'list'],
     ]) {
       const early = await harness().run(['--json', ...argv], false);
       expect(JSON.parse(early.out).error.message).toBe('unknown option --jsno');
@@ -2377,6 +2421,39 @@ describe('one JSON casing and one error vocabulary (OPL-5048)', () => {
     expect(typo.frames[0].error.message).toBe('unknown option --jsno');
     const unknown = await harness().run(['computers', 'lsit']);
     expect(unknown.frames[0].error.message).toBe('unknown command computers lsit');
+    // The same holds for an option shaped like a secret: that line was for
+    // computers, run under a profile named secrets.
+    const named = await harness().run(
+      ['--json', '--profile', 'secrets', `--${secret}`, 'computers', 'list'],
+      false,
+    );
+    expect(JSON.parse(named.out).error.message).toBe(`unknown option --${secret}`);
+  });
+
+  it('reads a left-out --profile again without counting the options after it twice', () => {
+    // --profile is the only global option that takes a value today. With a
+    // second one, the reading from where --profile's value sat walks over
+    // that option again, and must not take it for one typed twice.
+    const flags = GLOBAL_FLAGS as Flag[];
+    flags.push({ name: 'region', type: 'string', description: 'test only' });
+    try {
+      for (const argv of [
+        ['--profile', 'secrets', '--region', 'r', '--sk-demo-123', 'set', 'A'],
+        ['--profile', 'secrets', '--region=r', '--sk-demo-123', 'set', 'A'],
+      ])
+        expect(() => parseArgs(argv)).toThrow(
+          'unknown option, not repeated here, as under secrets it may be a secret value; ' +
+            'secrets set reads the value from stdin',
+        );
+      // One typed twice is still refused, wherever the second sits.
+      for (const argv of [
+        ['--profile', 'secrets', '--region', 'r', '--sk-demo-123', '--region', 's', 'set'],
+        ['--profile', 'secrets', '--sk-demo-123', '--region', 'r', '--region', 's', 'set'],
+      ])
+        expect(() => parseArgs(argv)).toThrow('--region may only be supplied once');
+    } finally {
+      flags.pop();
+    }
   });
 
   it('waits for bound secrets with computers wait --until secrets', async () => {
