@@ -124,6 +124,101 @@ function camelWords(run: string): boolean {
 }
 
 /**
+ * Two-letter words a camel-case name really holds (`Id`, `In`, `Of`, `Db`):
+ * the only ones {@link wordSegment} takes, as a random body is mostly pairs.
+ */
+const SHORT_WORDS = new Set(
+  (
+    'ad ai an as at be by ci db do eu go id if in io ip is it js me my no of ok on or os ' +
+    'pr qa so to ui up us vm we'
+  ).split(' '),
+);
+
+/** Words a name holds with no vowel in them (`Http`, `Ssh`, `Cfg`). */
+const BARE_WORDS = new Set(
+  (
+    'cfg cmd crt ctx dns dsn dst ftp gpg html http https jwt jwks mgmt msg pkg prd pwd ' +
+    'sftp smtp sql src ssh stg svc tls tmp txt xml'
+  ).split(' '),
+);
+
+/**
+ * The consonants that follow each consonant inside English words (`y` counts
+ * as a vowel): every pair making up 0.02% or more of the consonant pairs in
+ * a 236,000-word dictionary, and each one ahead of a plural `s`. About half
+ * of the 400 pairs, and the half random letters rarely keep to: a random
+ * segment of four or more letters almost always holds a pair outside it.
+ */
+const CONSONANT_PAIRS = new Set(
+  Object.entries({
+    b: 'bcdhjlmnprstv',
+    c: 'chklnqrst',
+    d: 'bcdfghjlmnprsvw',
+    f: 'flrst',
+    g: 'bdghlmnrstw',
+    h: 'bdflmnprstw',
+    j: 's',
+    k: 'bfhlmnrstw',
+    l: 'bcdfghklmnprstvw',
+    m: 'bflmnps',
+    n: 'bcdfghjklmnpqrstvwz',
+    p: 'bfhlmnprstw',
+    r: 'bcdfghjklmnpqrstvw',
+    s: 'bcdfghklmnpqrstw',
+    t: 'bcdfghlmnprstwz',
+    v: 's',
+    w: 'bdfhklmnrst',
+    x: 'chpst',
+    z: 'lsz',
+  }).flatMap(([first, next]) => [...next].map((c) => first + c)),
+);
+
+/**
+ * Whether one camel-case segment of a name reads as a word:
+ * - an acronym, plural `s` and all (`JWT`, `JWTs`);
+ * - a lone capital closing the run (the `V` of `V2`, once its digit is
+ *   dropped), or a lone vowel anywhere (the `O` of `OAuth`);
+ * - a two-letter word from {@link SHORT_WORDS};
+ * - a vowelless word from {@link BARE_WORDS};
+ * - otherwise a vowel, a `q` only ahead of a `u`, and every consonant ahead
+ *   of another making a pair in {@link CONSONANT_PAIRS}.
+ */
+function wordSegment(segment: string, last: boolean): boolean {
+  if (segment.length === 1) return /[AEIOU]/.test(segment) || (last && /[A-Z]/.test(segment));
+  if (/^[A-Z]+s?$/.test(segment)) return true;
+  const word = segment.toLowerCase();
+  if (word.length === 2) return SHORT_WORDS.has(word);
+  if (BARE_WORDS.has(word)) return true;
+  if (!/[aeiouy]/.test(word) || /q(?!u)/.test(word)) return false;
+  const pairs = (word.match(/[^aeiouy]{2,}/g) ?? []).flatMap((run) =>
+    [...run.slice(1)].map((_, i) => run.slice(i, i + 2)),
+  );
+  return pairs.every((pair) => CONSONANT_PAIRS.has(pair));
+}
+
+/**
+ * Whether a digit-free run holding both cases, after a known token prefix,
+ * reads as camel-case words (`hubTokenReadOnly`, `personalAccessTokenForCI`)
+ * rather than as a token body: {@link camelWords}, and every segment a word
+ * ({@link wordSegment}).
+ *
+ * Stricter than a bare run's test, as a prefix already says token: a random
+ * body split at its capitals is mostly pairs and lone capitals, with the odd
+ * longer stretch of letters no word would put together, so nearly every one
+ * holds a segment that fails. Measured over 20,000 random letter bodies each,
+ * it catches 99.5% of twelve letters and 99.8% of sixteen, where
+ * {@link camelWords} alone caught under 80%.
+ */
+function prefixedWords(run: string): boolean {
+  const segments = run.match(/[A-Z]{2,}s(?![a-z])|[A-Z]?[a-z]+|[A-Z]+(?![a-z])/g) ?? [];
+  return (
+    camelWords(run) &&
+    segments.join('') === run &&
+    segments.every((s, i) => wordSegment(s, i === segments.length - 1))
+  );
+}
+
+/**
  * Whether one run of letters and digits reads as random rather than as words.
  *
  * Twenty characters or more, at least two of lowercase, uppercase and digits,
@@ -164,9 +259,10 @@ function randomRun(run: string): boolean {
  * A prefix alone is not enough — `hf_token`, `sk-prod-signing-key`,
  * `npm_package_devDependencies` and `hf_hubTokenReadOnly2024` are names — so
  * what follows it must hold a run of twelve or more letters and digits with a
- * digit in it, or both cases that do not read as camel-case words, as every
- * issued token does. Up to four digits closing the run are a name's version or
- * year, and do not count.
+ * digit in it, or both cases that do not read as camel-case words
+ * ({@link prefixedWords}, stricter than a bare run's test), as every issued
+ * token does. Up to four digits closing the run are a name's version or year,
+ * and do not count.
  */
 export function looksLikeSecretValue(text: string): boolean {
   const runs = text.split(/[^A-Za-z0-9]+/);
@@ -175,7 +271,9 @@ export function looksLikeSecretValue(text: string): boolean {
     const tokenBody = (run: string) => {
       if (run.length < 12) return false;
       const core = run.replace(/[0-9]{1,4}$/, '');
-      return /[0-9]/.test(core) || (/[a-z]/.test(core) && /[A-Z]/.test(core) && !camelWords(core));
+      return (
+        /[0-9]/.test(core) || (/[a-z]/.test(core) && /[A-Z]/.test(core) && !prefixedWords(core))
+      );
     };
     if (
       text

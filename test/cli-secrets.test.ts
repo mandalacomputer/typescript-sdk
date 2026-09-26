@@ -154,6 +154,61 @@ describe('looksLikeSecretValue', () => {
     expect(share('abcdefghijklmnopqrstuvwxyz0123456789', 32)).toBeGreaterThan(0.6);
   });
 
+  it('catches a known prefix ahead of random letters and no digits, from twelve on', () => {
+    // Issued tokens nearly always hold a digit, but a random letter body is
+    // still one: split at its capitals it is mostly pairs and lone capitals,
+    // which no run of camel-case words is.
+    const next = seeded(5128);
+    const LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
+    for (const [prefix, n] of [
+      ['sk_test_', 12],
+      ['sk_test_', 24],
+      ['hf_', 16],
+      ['hf_', 34],
+      ['ghp_', 36],
+      ['xoxb-', 24],
+      ['sk-proj-', 20],
+      ['AIza', 20],
+      ['glpat-', 20],
+    ] as const) {
+      let hit = 0;
+      for (let i = 0; i < 1000; i++)
+        if (looksLikeSecretValue(tok(prefix, random(next, LETTERS, n)))) hit++;
+      expect(hit / 1000, `${prefix} + ${n} letters`).toBeGreaterThanOrEqual(0.99);
+    }
+  });
+
+  it('passes a known prefix ahead of camel-case words, acronyms among them', () => {
+    const words = [
+      'integrationTestKey',
+      'hubTokenReadOnly',
+      'personalAccessTokenForCI',
+      'devDependencies',
+      'JWTRSAPublicKeyPEMBase64',
+      'AWSIAMRoleARNForCIDeployer',
+      'GCPServiceAccountJSONKeyB64',
+      'TLSCertAndKeyPEMForMTLSProxy',
+      'DBURLForETLJobInUSEast',
+      'DatabaseURLProdEUWest1',
+      'OAuthClientSecretForGitHubApp',
+      'XMLHttpRequestToken',
+      'signingKeyForJWTs',
+      'StripeWebhookSigningSecret',
+      'ScriptsForStrings',
+      'CloudflareDNSEditToken',
+      'KubernetesClusterAdmin',
+      'PostgresReplicaPassword',
+      'WebhookSecretForGitLabCI',
+      'SentryDsnForFrontend',
+      'FirebaseAdminCredentials',
+      'ServiceAccountKeyProdV2',
+      'readOnlyTokenForMyApp',
+      'nightlyBackupSigningKey',
+    ];
+    for (const prefix of ['hf_', 'sk_test_', 'ghp_', 'npm_'])
+      for (const w of words) expect(looksLikeSecretValue(tok(prefix, w)), prefix + w).toBe(false);
+  });
+
   it('never flags something short, whatever it is', () => {
     const next = seeded(1);
     for (let i = 0; i < 200; i++)
