@@ -274,7 +274,8 @@ describe('looksLikeSecretValue', () => {
 
   it('refuses the names it is known to, so a change to the rules shows here', () => {
     // A lone consonant capital inside the run: random bodies are full of
-    // them, so no name holding one gets through. Its way through is --as.
+    // them, so no name holding one gets through. Its way through is
+    // --no-value-check.
     expect(looksLikeSecretValue(tok('hf_', 'WalGEncryptionKey'))).toBe(true);
     // A capital and an s is a two-letter segment, held to the short-word
     // list like any other, not an acronym's plural (`JWTs` above is one).
@@ -354,11 +355,76 @@ describe('a target named by --as or --path', () => {
     ]);
   });
 
-  it('skips the value check, which only a target typed after = needs', () => {
+  // Assembled at run time, like the fixtures above. Each is a valid variable
+  // name, or file name for --path, so only its shape says it is a value.
+  const values = {
+    ghp: tok('ghp_', body(36)),
+    stripe: tok('sk_live_', body(32)),
+    slack: tok('xoxb-', '123456789012-4096409640964-abcdef0123'),
+    random: body(40),
+  };
+
+  it('refuses one that looks like a value, as after =, and never quotes it', () => {
+    for (const value of Object.values(values)) expect(looksLikeSecretValue(value)).toBe(true);
+    // Each one also passes the naming rule it is held to, so the naming rule
+    // alone would have sent it.
+    for (const value of [values.ghp, values.stripe, values.random])
+      expect(value).toMatch(/^[A-Za-z_][A-Za-z0-9_]{0,63}$/);
+    expect(values.slack).toMatch(/^[a-z][a-z0-9_-]{0,47}$/);
+    const cases: [() => unknown, string, string][] = [
+      [() => bindingSpecs(['GH'], [], { as: [values.ghp] }), '--secret "GH": --as', values.ghp],
+      [() => bindingSpecs(['S'], [], { as: [values.stripe] }), '--as', values.stripe],
+      [() => bindingSpecs(['R'], [], { as: [values.random] }), '--as', values.random],
+      [
+        () => bindingSpecs([], ['slack'], { paths: [values.slack] }),
+        '--secret-file "slack": --path',
+        values.slack,
+      ],
+      // Not a valid variable name either: the value is still what it says.
+      [() => bindingSpecs(['S'], [], { as: [tok('sk-live-', body(32))] }), '--as', 'sk-live-'],
+    ];
+    for (const [call, named, value] of cases) {
+      let message = '';
+      try {
+        call();
+      } catch (error) {
+        message = (error as Error).message;
+      }
+      expect(message).toContain(named);
+      expect(message).toContain("looks like a secret's value");
+      expect(message).toContain('nothing was sent');
+      expect(message).toContain('--no-value-check');
+      expect(message).not.toContain(value);
+    }
+  });
+
+  it('takes the names people bind as, the ones the check lets through after =', () => {
+    for (const name of NAMES.filter((n) => /^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(n)))
+      expect(bindingSpecs(['S'], [], { as: [name] }), name).toEqual([
+        expect.objectContaining({ key: 'S', target: name, hidden: false }),
+      ]);
+    for (const name of ['HF_TOKEN', 'OPENAI_API_KEY', 'MysqlReplicaPassword'])
+      expect(bindingSpecs(['S'], [], { as: [name] })[0]).toMatchObject({ target: name });
+    for (const file of ['config_token', 'gh-token', 'id_ed25519'])
+      expect(bindingSpecs([], ['s'], { paths: [file] })[0]).toMatchObject({
+        target: file,
+        hidden: false,
+      });
+  });
+
+  it('with --no-value-check sends a flagged one as typed, and marks it hidden', () => {
     const hashed = 'cert-sha256-9f86d081884c7d659a2f';
-    expect(bindingSpecs([], ['tls'], { paths: [hashed] })).toEqual([
-      expect.objectContaining({ key: 'tls', target: hashed, afterEquals: false }),
+    expect(() => bindingSpecs([], ['tls'], { paths: [hashed] })).toThrow('--no-value-check');
+    expect(
+      bindingSpecs(['GH'], ['tls'], { as: [values.ghp], paths: [hashed], valueCheck: false }),
+    ).toEqual([
+      expect.objectContaining({ key: 'GH', target: values.ghp, afterEquals: false, hidden: true }),
+      expect.objectContaining({ key: 'tls', target: hashed, afterEquals: false, hidden: true }),
     ]);
+    // The override skips only the value check: the name rules still hold.
+    expect(() => bindingSpecs(['S'], [], { as: ['not-a-var'], valueCheck: false })).toThrow(
+      '--as must be letters',
+    );
   });
 
   it('still holds it to the naming rules, without quoting it', () => {
@@ -370,12 +436,36 @@ describe('a target named by --as or --path', () => {
     );
   });
 
-  it('is never hidden from the output, where a target typed after = is', () => {
+  it('is shown as it is when it reads as a name, where a target typed after = is hidden', () => {
     const specs = bindingSpecs(['A', 'B=TYPED'], [], { as: ['NAMED'] });
     const shown = withoutTypedTargets({ secrets: [{ env: 'NAMED' }, { env: 'TYPED' }] }, specs);
     expect(shown.secrets).toEqual([{ env: 'NAMED' }, { env: '[REDACTED]' }]);
     const error = scrubTypedTargets(new Error('env NAMED and env TYPED are reserved'), specs);
     expect((error as Error).message).toBe('env NAMED and env [REDACTED] are reserved');
+  });
+
+  it('is hidden from the output and the error when it looks like a value', () => {
+    const specs = bindingSpecs(['A', 'B'], ['c'], {
+      as: [values.ghp, 'NAMED'],
+      paths: [values.slack],
+      valueCheck: false,
+    });
+    const shown = withoutTypedTargets(
+      { secrets: [{ env: values.ghp }, { env: 'NAMED' }, { file: values.slack }] },
+      specs,
+    );
+    expect(shown.secrets).toEqual([
+      { env: '[REDACTED]' },
+      { env: 'NAMED' },
+      { file: '[REDACTED]' },
+    ]);
+    const error = scrubTypedTargets(
+      new Error(`env ${values.ghp} is reserved; file ${values.slack} is taken; NAMED is fine`),
+      specs,
+    );
+    expect((error as Error).message).toBe(
+      'env [REDACTED] is reserved; file [REDACTED] is taken; NAMED is fine',
+    );
   });
 });
 

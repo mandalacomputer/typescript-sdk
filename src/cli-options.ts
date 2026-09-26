@@ -154,7 +154,7 @@ export const COMMANDS: readonly Command[] = [
       }),
       bool(
         'no-value-check',
-        "Send each deprecated =VAR or =FILE as typed, even one that looks like a secret's value rather than a name",
+        "Send each --as, --path and deprecated =VAR or =FILE as typed, even one that looks like a secret's value rather than a name",
       ),
       flag(
         'browser-proxy',

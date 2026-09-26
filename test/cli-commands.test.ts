@@ -2901,20 +2901,126 @@ describe('files, rename, resize, view, and secrets bound at create', () => {
     }
   });
 
-  it('sends a name --as or --path gives without the value check, which only = needs', async () => {
-    // Refused after =, where it could be a value typed by mistake.
+  it('refuses an --as or --path that looks like a value, and never prints it', async () => {
+    // Assembled at run time so the source holds no token-shaped literal. Each
+    // but the sk-live- one is a valid variable (or, for --path, file) name,
+    // so the naming rules alone would have sent it as one.
+    const alphabet = 'aB3dE5fG7hJ9kL2mN4pQ6rS8tU0vW1xY';
+    const body = (n: number) =>
+      Array.from({ length: n }, (_, i) => alphabet[(i * 7 + 3) % alphabet.length]).join('');
+    const cases = [
+      ['--secret', 'openai_api_key', '--as', ['ghp', '_', body(36)].join('')],
+      ['--secret', 'openai_api_key', '--as', ['sk', '_live_', body(32)].join('')],
+      ['--secret', 'openai_api_key', '--as', ['sk', '-live-', body(32)].join('')],
+      ['--secret', 'openai_api_key', '--as', body(40)],
+      [
+        '--secret-file',
+        'gh-token',
+        '--path',
+        ['xoxb', '-123456789012-4096409640964-ab12'].join(''),
+      ],
+    ] as const;
+    for (const argv of cases)
+      for (const jsonMode of [true, false]) {
+        const h = harness(store());
+        const result = await h.run(['computers', 'create', ...argv], jsonMode);
+        const printed = result.out + result.err;
+        expect(result.code, argv.join(' ')).toBe(1);
+        expect(printed, argv[3]).not.toContain(argv[3]);
+        const message = jsonMode ? result.frames[0].error.message : result.err;
+        expect(message).toContain(
+          `${argv[0]} "${argv[1]}": ${argv[2]} looks like a secret's value`,
+        );
+        expect(message).toContain('--no-value-check');
+        if (jsonMode) expect(result.frames[0].error.code).toBe('invalid_arguments');
+        // Refused while the arguments are read: not even the store was listed.
+        expect(h.rec.calls).toEqual([]);
+      }
+  });
+
+  it('keeps sending the names people bind as with --as and --path', async () => {
+    for (const as of ['OPENAI_API_KEY', 'HF_TOKEN', 'MysqlReplicaPassword']) {
+      const h = harness(store());
+      const result = await h.run([
+        'computers',
+        'create',
+        '--secret',
+        'openai_api_key',
+        '--as',
+        as,
+        '--secret-file',
+        'gh-token',
+        '--path',
+        'config_token',
+      ]);
+      expect(result.code, as).toBe(0);
+      expect(h.rec.last().body).toMatchObject({
+        secrets: [
+          { secret_id: SECRET.id, env: as },
+          { secret_id: OTHER.id, file: 'config_token' },
+        ],
+      });
+    }
+  });
+
+  it('sends a flagged --as or --path with --no-value-check, and never prints it', async () => {
+    const token = ['ghp', '_', 'aB3dE5fG7hJ9kL2mN4pQ6rS8tU0vW1xY2z4c'].join('');
     const hashed = 'cert-sha256-9f86d081884c7d659a2f';
-    const h = harness(store());
-    const result = await h.run([
+    const argv = [
       'computers',
       'create',
+      '--secret',
+      'openai_api_key',
+      '--as',
+      token,
       '--secret-file',
       'gh-token',
       '--path',
       hashed,
-    ]);
-    expect(result.code).toBe(0);
-    expect(h.rec.last().body).toMatchObject({ secrets: [{ secret_id: OTHER.id, file: hashed }] });
+      '--no-value-check',
+    ];
+    const bound = {
+      ...COMPUTER,
+      secrets: [
+        { secret_id: SECRET.id, revision_id: SECRET.revision_id, env: token },
+        { secret_id: OTHER.id, revision_id: SECRET.revision_id, file: hashed },
+      ],
+    };
+    const respond = store();
+    for (const jsonMode of [true, false]) {
+      const h = harness((call) =>
+        call.method === 'POST' && call.path === '/computers' ? json(bound) : respond(call),
+      );
+      const result = await h.run(argv, jsonMode);
+      expect(result.code).toBe(0);
+      expect(h.rec.last().body).toMatchObject({
+        secrets: [
+          { secret_id: SECRET.id, env: token },
+          { secret_id: OTHER.id, file: hashed },
+        ],
+      });
+      expect(result.out + result.err).not.toContain(token);
+      expect(result.out + result.err).not.toContain(hashed);
+      if (jsonMode)
+        expect(result.frames[0].data.secrets).toEqual([
+          expect.objectContaining({ env: '[REDACTED]' }),
+          expect.objectContaining({ file: '[REDACTED]' }),
+        ]);
+      // And the platform's refusal, which may name the binding it refused.
+      const refused = harness((call) =>
+        call.method === 'POST' && call.path === '/computers'
+          ? json(
+              { error: `secrets: env ${token} and file ${hashed} are reserved` },
+              { status: 400 },
+            )
+          : respond(call),
+      );
+      const failed = await refused.run(argv, jsonMode);
+      expect(failed.code).toBe(1);
+      expect(failed.out + failed.err).not.toContain(token);
+      expect(failed.out + failed.err).not.toContain(hashed);
+      expect(failed.out + failed.err).toContain('env [REDACTED] and file [REDACTED] are reserved');
+    }
   });
 
   it('holds --as and --path to the naming rules, without quoting what was typed', async () => {
@@ -3033,12 +3139,14 @@ describe('files, rename, resize, view, and secrets bound at create', () => {
     expect(both.err).not.toContain('=gh');
   });
 
-  it('points a refused = target at --as, which takes a name without the check', async () => {
+  it('points a refused = target at --as and --no-value-check', async () => {
     const value = ['ghp', '_', 'aB3dE5fG7hJ9kL2mN4pQ6rS8tU0vW1xY2z4c'].join('');
     const h = harness(store());
     const result = await h.run(['computers', 'create', '--secret', `openai_api_key=${value}`]);
     expect(result.code).toBe(1);
-    expect(result.frames[0].error.message).toContain('give it with --as instead of =');
+    expect(result.frames[0].error.message).toContain(
+      'give it with --as instead of = and send it as typed with --no-value-check',
+    );
     expect(result.out + result.err).not.toContain(value);
   });
 

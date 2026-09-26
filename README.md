@@ -2898,7 +2898,11 @@ gives directly after it:
 `--secret-file`; one anywhere else (first, after the other kind, twice for one
 binding, or with another option in between) is refused, and never quoted. Both
 repeat. `--as` and `--path` only ever name where the value goes, never the
-value itself; the value only ever goes in through `secrets set`. Two bindings
+value itself; the value only ever goes in through `secrets set`. A name that
+looks like a value rather than a name (see below) is refused before anything is
+sent and never quoted: `--as "$GITHUB_TOKEN"` would otherwise send the token as
+the variable's name. `--no-value-check` sends such a name as typed, and the
+create then prints it as `[REDACTED]`. Two bindings
 of one secret, or into one variable or file, fail before anything is created.
 An id the default scope does not list, such as one of a workspace's secrets, is
 sent as it is and needs its `--as` or `--path`. A name that matches nothing
@@ -2912,11 +2916,12 @@ would land, so that form keeps its guard: an error never quotes anything after
 the first `=` (it names the binding by flag, position and the text before that
 `=`), and a target that looks like a value rather than a name (a known token
 prefix such as `ghp_` or `sk-`, an AWS key id, a UUID, or a long random-looking
-string) is refused before anything is sent. The check is a guess; a real name
-it refuses (one holding a hash, say) goes through with `--as` or `--path`, or
-as typed with `--no-value-check`, which still holds it to the naming rules. A
-variable or file typed after `=` prints as `[REDACTED]` in the create's output
-and in any error the create fails with; `computers get` shows it.
+string) is refused before anything is sent. The check is a guess, the same one
+`--as` and `--path` get; a real name it refuses (one holding a hash, say) goes
+through as typed with `--no-value-check`, which still holds it to the naming
+rules. A variable or file typed after `=` prints as `[REDACTED]` in the
+create's output and in any error the create fails with; `computers get` shows
+it.
 
 `--browser-proxy URL` sends the new computer's browsers through a proxy, and
 `--browser-proxy-bypass` lists the hosts they reach directly, comma-separated or
