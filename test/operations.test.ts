@@ -376,15 +376,20 @@ function cli(respond: Responder = anyRoute) {
       stderr.length = 0;
       const code = await main(args, io);
       const out = Buffer.concat(stdout).toString();
-      return { code, out, json: out.trim() ? JSON.parse(out) : undefined };
+      const err = Buffer.concat(stderr).toString();
+      return { code, out, err, json: out.trim() ? JSON.parse(out) : undefined };
     },
   };
 }
 
 describe('mandala operations', () => {
   it('lists a page with its parameters, in the wire shape', async () => {
-    const { rec, run } = cli(() =>
-      json({ operations: [OPERATION], next_cursor: 'op_00000000000000000000000a' }),
+    const { rec, run } = cli((call) =>
+      call.path === '/operations'
+        ? json({ operations: [OPERATION], next_cursor: 'op_00000000000000000000000a' })
+        : call.path === '/computers'
+          ? json([{ ...COMPUTER, id: 'vm-2' }])
+          : anyRoute(call),
     );
     const r = await run(['operations', 'list', '--computer', 'vm-2', '--limit', '1', '--json']);
     expect(r.code).toBe(0);
@@ -393,6 +398,49 @@ describe('mandala operations', () => {
       operations: [OPERATION],
       next_cursor: 'op_00000000000000000000000a',
     });
+  });
+
+  it('finds --computer by name, as every other computer argument is', async () => {
+    const { rec, run } = cli((call) =>
+      call.path === '/computers'
+        ? json([{ ...COMPUTER, id: 'vm-2' }])
+        : call.path === `/computers/${COMPUTER.name}`
+          ? json({ error: 'computer not found' }, { status: 404 })
+          : anyRoute(call),
+    );
+    const r = await run(['operations', 'list', '--computer', COMPUTER.name, '--json']);
+    expect(r.code).toBe(0);
+    expect(rec.last().path).toBe('/operations');
+    expect(rec.last().query).toEqual({ computer_id: 'vm-2' });
+    expect(r.err).toBe('');
+  });
+
+  it('sends a --computer that is no live computer as typed, and says so', async () => {
+    const { rec, run } = cli((call) =>
+      call.path === '/computers'
+        ? json([COMPUTER])
+        : call.path === '/computers/vm-gone'
+          ? json({ error: 'computer not found' }, { status: 404 })
+          : anyRoute(call),
+    );
+    const r = await run(['operations', 'list', '--computer', 'vm-gone', '--json']);
+    expect(r.code).toBe(0);
+    expect(rec.last().query).toEqual({ computer_id: 'vm-gone' });
+    expect(r.err).toContain('no computer is named vm-gone');
+  });
+
+  it('refuses a --computer name two computers share', async () => {
+    const { rec, run } = cli((call) =>
+      call.path === '/computers'
+        ? json([COMPUTER, { ...COMPUTER, id: 'vm-2' }])
+        : call.path === `/computers/${COMPUTER.name}`
+          ? json({ error: 'computer not found' }, { status: 404 })
+          : anyRoute(call),
+    );
+    const r = await run(['operations', 'list', '--computer', COMPUTER.name, '--json']);
+    expect(r.code).not.toBe(0);
+    expect(r.json.error.code).toBe('ambiguous_computer');
+    expect(rec.calls.some((c) => c.path === '/operations')).toBe(false);
   });
 
   it('refuses a bad page size before any request', async () => {

@@ -400,7 +400,10 @@ export const COMMANDS: readonly Command[] = [
     'List lifecycle operations, newest first; pass next_cursor back as --cursor for the next page',
     [],
     [
-      flag('computer', 'Only this computer ID (for a clone, the new computer)'),
+      flag(
+        'computer',
+        'Only this computer, by name or ID (for a clone, the new computer); a deleted one by its ID',
+      ),
       num('limit', 'Page size, 1 to 100 (default 20)'),
       flag('cursor', 'The next_cursor of the page before'),
     ],

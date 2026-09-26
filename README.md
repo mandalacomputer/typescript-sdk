@@ -2786,7 +2786,7 @@ with the key under `raw`. It is shown once.
 ### Operations
 
 ```sh
-mandala operations list --computer vm-...   # newest first; --limit, --cursor
+mandala operations list --computer demo    # newest first; --limit, --cursor
 mandala operations get op_...
 mandala operations wait op_...              # exit 0 on succeeded
 ```

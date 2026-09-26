@@ -28,7 +28,9 @@ name.
   `move.operationId` on what `relocate` accepted, and on
   `snapshots.restore()`, which now returns a `LifecycleAck` rather than
   nothing. CLI: `operations list | get | wait`; a failed wait is
-  `operation_failed`. New exports: `Operations`, `Operation`, `OperationKind`,
+  `operation_failed`. `operations list --computer` takes a name or an id, and
+  sends a value that is neither as typed, since a deleted computer's
+  operations are still found by its id. New exports: `Operations`, `Operation`, `OperationKind`,
   `OperationState`, `OperationPage`, `OperationListArgs`, `LifecycleAck`,
   `OperationFailedError` and `OPERATIONS_PAGE_MAX`.
 - **CLI: `computers create --secret SECRET --as VAR` and `--secret-file SECRET
