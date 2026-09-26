@@ -54,6 +54,13 @@ name.
   found by name or id. The variable or file defaults to the secret's name. An
   error never quotes what follows the first `=`, where a value typed by mistake
   would be, and a secret or a target bound twice fails before the create.
+  A target that looks like a secret's value rather than a name is refused
+  before anything is sent: a known token prefix (`ghp_`, `github_pat_`, `sk-`,
+  `sk_live_`, `xoxb-`, `glpat-`, `AIza`, `hf_`, `npm_`, `pypi-`, `SG.` and
+  others) ahead of a token body, an AWS key id, a UUID, or a random-looking
+  stretch of twenty or more characters. A variable or file typed after `=`
+  prints as `[REDACTED]` in the create's bindings and in the create's error;
+  one that defaults to the secret's name prints as it is.
 - **`client.secrets.set({ name, value, workspaceId })`**: create the name, or
   replace its value if the scope already holds it — the upsert Python and both
   CLIs already had. Names match ignoring ASCII case, as the platform keeps them

@@ -15,10 +15,12 @@ import { errorInfo, Output, redact, snakeKeys } from './cli-output.js';
 import { type CliIO, documentInput, openBrowser, readInput } from './cli-runtime.js';
 import {
   bindingSpecs,
+  scrubTypedTargets,
   secretBindings,
   secretsList,
   secretsRemove,
   secretsSet,
+  withoutTypedTargets,
 } from './cli-secrets.js';
 import {
   defaultSshRuntime,
@@ -612,11 +614,16 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
       }
       case 'computers create': {
         const secrets = await secretBindings(client, bindings, signal);
-        return output.result(
-          computerData(
-            await client.computers.create(secrets.length ? { ...create, secrets } : create, call),
-          ),
-        );
+        let created: Computer;
+        try {
+          created = await client.computers.create(
+            secrets.length ? { ...create, secrets } : create,
+            call,
+          );
+        } catch (error) {
+          throw scrubTypedTargets(error, bindings);
+        }
+        return output.result(withoutTypedTargets(computerData(created), bindings));
       }
       case 'computers get':
         return output.result(computerData(await (await computer()).refresh(call)));

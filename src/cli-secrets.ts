@@ -72,6 +72,86 @@ function byNameOrId(
 /** A secret id: `csec-` and sixteen hex characters. */
 const SECRET_ID = /^csec-[0-9a-f]{16}$/;
 
+/**
+ * The prefixes credential issuers put on their tokens: GitHub, OpenAI and
+ * Stripe style `sk-`/`sk_live_`, Slack, GitLab, Google, Hugging Face, npm,
+ * PyPI, SendGrid, DigitalOcean, Shopify, xAI, Groq, Replicate, Linear, Square,
+ * Perplexity, and a JWT's encoded header.
+ */
+const TOKEN_PREFIX =
+  /^(?:gh[pousr]_|github_pat_|sk-|sk_(?:live|test)_|rk_(?:live|test)_|xox[abeprs]-|xapp-|glpat-|AIza|hf_|npm_|pypi-|SG\.|dop_v1_|shp(?:at|ca|pa|ss)_|xai-|gsk_|r8_|lin_api_|sq0(?:atp|csp)-|pplx-|eyJ)/;
+
+/** An AWS access key id, which is shaped exactly like a variable name. */
+const AWS_KEY_ID = /^(?:AKIA|ASIA)[A-Z0-9]{16}$/;
+
+/** A UUID, the whole of some providers' API keys, and a valid file name. */
+const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+
+/** Shannon entropy, in bits per character. */
+function entropy(text: string): number {
+  const counts = new Map<string, number>();
+  for (const c of text) counts.set(c, (counts.get(c) ?? 0) + 1);
+  let bits = 0;
+  for (const n of counts.values()) bits -= (n / text.length) * Math.log2(n / text.length);
+  return bits;
+}
+
+/**
+ * Whether one run of letters and digits reads as random rather than as words.
+ *
+ * Twenty characters or more, at least two of lowercase, uppercase and digits,
+ * and 3 bits a character or more — which every name made of a few words also
+ * reaches, so one more test decides:
+ * - a hex stretch of twenty or more holding letters and digits is random;
+ * - mixed case is random when under 65% of its letters sit in camel-case words
+ *   (`Access`, `key`), since a random string rarely has two lowercase letters
+ *   running;
+ * - one case with digits is random when its letter/digit runs average under
+ *   3.2 characters and under 30% of its letters are vowels, which words are
+ *   not (`kubeconfig20240115backup`).
+ *
+ * Tuned against realistic names (`CLOUDFLARE_API_TOKEN_2024`,
+ * `ServiceAccountKeyProd2025V2`, `prod-eu-west-1-kubeconfig`), none of which it
+ * flags, and random tokens, most of which it does: every hex one of 24 or more,
+ * and most mixed-case alphanumeric ones. A miss is not a leak by itself — the
+ * value is still only bound on the caller's own computer — and a false alarm
+ * blocks a real name, so it errs toward the names.
+ */
+function randomRun(run: string): boolean {
+  const classes = [/[a-z]/, /[A-Z]/, /[0-9]/].filter((c) => c.test(run)).length;
+  if (run.length < 20 || classes < 2 || entropy(run) < 3) return false;
+  const hex = run.match(/[0-9a-f]{20,}|[0-9A-F]{20,}/)?.[0];
+  if (hex && /[0-9]/.test(hex) && /[a-fA-F]/.test(hex)) return true;
+  const letters = run.replace(/[0-9]/g, '').length;
+  if (/[a-z]/.test(run) && /[A-Z]/.test(run))
+    return (run.match(/[A-Z]?[a-z]{2,}/g) ?? []).join('').length / letters < 0.65;
+  const runs = run.match(/[a-z]+|[A-Z]+|[0-9]+/g) ?? [];
+  const vowels = (run.match(/[aeiou]/gi) ?? []).length;
+  return run.length / runs.length < 3.2 && vowels / letters < 0.3;
+}
+
+/**
+ * Whether what follows `=` in `--secret NAME=…` looks like a secret's VALUE
+ * rather than the variable or file it is bound as: a known token prefix ahead
+ * of a token body, an AWS key id, a UUID, or a random-looking stretch.
+ *
+ * A prefix alone is not enough — `hf_token` and `sk-prod-signing-key` are
+ * names — so what follows it must hold a run of twelve or more letters and
+ * digits with a digit or both cases in it, as every issued token does.
+ */
+export function looksLikeSecretValue(text: string): boolean {
+  const runs = text.split(/[^A-Za-z0-9]+/);
+  const prefix = TOKEN_PREFIX.exec(text);
+  if (prefix) {
+    const body = text.slice(prefix[0].length).split(/[^A-Za-z0-9]+/);
+    if (
+      body.some((r) => r.length >= 12 && (/[0-9]/.test(r) || (/[a-z]/.test(r) && /[A-Z]/.test(r))))
+    )
+      return true;
+  }
+  return UUID.test(text) || runs.some((r) => AWS_KEY_ID.test(r) || randomRun(r));
+}
+
 /** One `--secret` or `--secret-file` on `computers create`, as typed. */
 export type BindingSpec = {
   flag: '--secret' | '--secret-file';
@@ -116,6 +196,16 @@ export function bindingSpecs(
       flag === '--secret'
         ? [P.SECRET_ENV, 'letters, digits and underscores, not starting with a digit, at most 64']
         : [P.SECRET_FILE, 'lowercase letters, digits, - and _, starting with a letter, at most 48'];
+    // Checked first, as a value that also passes the pattern (a GitHub token
+    // is a valid variable name) would otherwise be sent as the name and
+    // printed back as the computer's binding.
+    if (looksLikeSecretValue(target))
+      throw new CliError(
+        'invalid_arguments',
+        `${label}: what follows = looks like a secret's value, not ${flag === '--secret' ? 'a variable' : 'a file'} name, ` +
+          `so nothing was sent. It names where the value goes, never the value: store that with ` +
+          `mandala secrets set, then bind the secret by its name`,
+      );
     if (!pattern.test(target))
       throw new CliError(
         'invalid_arguments',
@@ -189,6 +279,57 @@ export async function secretBindings(
     once(env ? `env:${as}` : `file:${as}`, label, env ? 'the variable' : 'the file');
     return env ? { secretId, env: as } : { secretId, file: as };
   });
+}
+
+/**
+ * A create's computer as the CLI prints it: each binding whose variable or file
+ * was typed after `=` keeps its kind (`env` or `file`) but not the name.
+ *
+ * {@link looksLikeSecretValue} cannot catch every value, and one it misses is
+ * bound as the name; the create's own output is then the first place it would
+ * be printed. A name taken from the secret's own (no `=`) is shown as it is,
+ * and `computers get` shows every name.
+ */
+export function withoutTypedTargets(
+  computer: Record<string, unknown>,
+  specs: readonly BindingSpec[],
+): Record<string, unknown> {
+  const typed = (flag: BindingSpec['flag']) =>
+    new Set(specs.flatMap((s) => (s.flag === flag && s.target !== undefined ? [s.target] : [])));
+  const env = typed('--secret');
+  const file = typed('--secret-file');
+  if (!env.size && !file.size) return computer;
+  const rows = computer.secrets;
+  if (!Array.isArray(rows)) return computer;
+  const hide = (row: unknown) => {
+    if (!row || typeof row !== 'object') return row;
+    const r = row as Record<string, unknown>;
+    if (typeof r.env === 'string' && env.has(r.env)) return { ...r, env: '[REDACTED]' };
+    if (typeof r.file === 'string' && file.has(r.file)) return { ...r, file: '[REDACTED]' };
+    return r;
+  };
+  return { ...computer, secrets: rows.map(hide) };
+}
+
+/**
+ * The error a create failed with, with every variable or file typed after `=`
+ * cut out of its message: the platform's refusal may name the binding it
+ * refused. Cut only where it stands as a whole name, so a short one (`gh`)
+ * does not take letters out of the words around it.
+ */
+export function scrubTypedTargets(error: unknown, specs: readonly BindingSpec[]): unknown {
+  if (!(error instanceof Error)) return error;
+  let message = error.message;
+  for (const { target } of specs) {
+    if (!target) continue;
+    const escaped = target.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    message = message.replace(
+      new RegExp(`(?<![A-Za-z0-9_-])${escaped}(?![A-Za-z0-9_-])`, 'g'),
+      '[REDACTED]',
+    );
+  }
+  if (message !== error.message) error.message = message;
+  return error;
 }
 
 /** `mandala secrets list [--workspace ID]`. */
