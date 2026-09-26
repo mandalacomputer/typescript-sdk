@@ -57,11 +57,24 @@ const NAMES = [
   'GPGKeyFingerprint2024Q3',
   'SSHHostKeyEd25519Pub',
   'K8sSvcAcctJWTPubKeyV1',
+  // Heavy with acronyms: under 65% of the letters sit in camel-case words.
+  'JWTRSAPublicKeyPEMBase64',
+  'AWSIAMRoleARNForCIDeployer',
+  'GCPServiceAccountJSONKeyB64',
+  'TLSCertAndKeyPEMForMTLSProxy',
+  'DBURLForETLJobInUSEast',
+  'DatabaseURLProdEUWest1',
+  'SSHPrivateKeyED25519ForCI',
   'kubeconfig',
   'gh',
   'id_ed25519',
   'hf_token',
   'npm_token',
+  // A token prefix ahead of camel-case words, not a token body.
+  'npm_package_devDependencies',
+  'sk_test_integrationTestKey',
+  'hf_hubTokenReadOnly2024',
+  'ghp_personalAccessTokenForCI',
   'sk-prod-signing-key',
   'sk_live_mode_config',
   'xoxb-bot-token-for-alerts',
@@ -116,6 +129,12 @@ describe('looksLikeSecretValue', () => {
       'f1e2d3c4b5a697887766554433221100aabbccdd',
       // A random mixed-case run with no prefix at all.
       'Xk9fQ2mZr7Lp4Tw8Bv3Nc6Hd',
+      // A prefix ahead of a mixed-case body with no digit, which is no words.
+      tok('sk_test_', 'QxZrTpLmWvNbKjHg'),
+      // ...and one whose only digits close it, as a name's year would.
+      tok('hf_', 'QxZrTpLmWvNbKjHg2024'),
+      // Random, with uppercase runs an acronym could explain, but no words.
+      'QZXkTRmWPbNVcJHLdGFsYK',
     ];
     for (const t of tokens) expect(looksLikeSecretValue(t), t).toBe(true);
   });
@@ -157,6 +176,25 @@ describe('a secret-looking target is refused before anything is sent', () => {
       expect(message).toContain('nothing was sent');
       expect(message).not.toContain(value);
     }
+  });
+
+  it('names --no-value-check, and with it sends a flagged but valid target as typed', () => {
+    // A file name holding a hash: a real name the heuristic cannot tell from a
+    // hex value, and one no other spelling gets through.
+    const hashed = 'cert-sha256-9f86d081884c7d659a2f';
+    const acronyms = 'AWSKMSKeyARNForS3SSE';
+    expect(looksLikeSecretValue(hashed)).toBe(true);
+    expect(looksLikeSecretValue(acronyms)).toBe(true);
+    expect(() => bindingSpecs([], [`tls=${hashed}`])).toThrow('--no-value-check');
+    expect(() => bindingSpecs([`K=${acronyms}`])).toThrow('--no-value-check');
+    expect(bindingSpecs([`K=${acronyms}`], [`tls=${hashed}`], { valueCheck: false })).toEqual([
+      expect.objectContaining({ flag: '--secret', key: 'K', target: acronyms }),
+      expect.objectContaining({ flag: '--secret-file', key: 'tls', target: hashed }),
+    ]);
+    // The override skips only the value check: the name rules still hold.
+    expect(() => bindingSpecs([], ['tls=Cert.PEM'], { valueCheck: false })).toThrow(
+      'what follows = must be',
+    );
   });
 
   it('still binds a realistic custom target', () => {

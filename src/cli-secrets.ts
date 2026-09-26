@@ -96,6 +96,33 @@ function entropy(text: string): number {
   return bits;
 }
 
+/** The share of `run`'s letters that sit in `words`, pieces of it. */
+function letterShare(run: string, words: readonly string[] | null): number {
+  const letters = run.replace(/[0-9]/g, '').length;
+  return letters ? (words ?? []).join('').length / letters : 0;
+}
+
+/**
+ * Whether a run holding both cases reads as camel-case words (`Access`, `key`)
+ * rather than at random, which rarely runs two lowercase letters together.
+ *
+ * Words when 65% of its letters sit in camel-case words. A name heavy with
+ * acronyms (`JWTRSAPublicKeyPEMBase64`, `AWSIAMRoleARNForCIDeployer`) falls
+ * short of that, so the acronyms count too — an uppercase run ahead of a word,
+ * a digit or the end — but only once two capitalised words with a vowel hold
+ * 40% of the letters: counting acronyms alone would pass most random strings,
+ * and this costs a random one only a point or two of being caught.
+ */
+function camelWords(run: string): boolean {
+  if (letterShare(run, run.match(/[A-Z]?[a-z]{2,}/g)) >= 0.65) return true;
+  const words = (run.match(/[A-Z][a-z]{2,}/g) ?? []).filter((w) => /[aeiou]/.test(w));
+  return (
+    words.length >= 2 &&
+    letterShare(run, words) >= 0.4 &&
+    letterShare(run, run.match(/[A-Z]?[a-z]{2,}|[A-Z]{2,}(?=[A-Z][a-z]{2}|[0-9]|$)/g)) >= 0.65
+  );
+}
+
 /**
  * Whether one run of letters and digits reads as random rather than as words.
  *
@@ -103,9 +130,8 @@ function entropy(text: string): number {
  * and 3 bits a character or more — which every name made of a few words also
  * reaches, so one more test decides:
  * - a hex stretch of twenty or more holding letters and digits is random;
- * - mixed case is random when under 65% of its letters sit in camel-case words
- *   (`Access`, `key`), since a random string rarely has two lowercase letters
- *   running;
+ * - mixed case is random unless it reads as camel-case words
+ *   ({@link camelWords});
  * - one case with digits is random when its letter/digit runs average under
  *   3.2 characters and under 30% of its letters are vowels, which words are
  *   not (`kubeconfig20240115backup`).
@@ -115,16 +141,16 @@ function entropy(text: string): number {
  * flags, and random tokens, most of which it does: every hex one of 24 or more,
  * and most mixed-case alphanumeric ones. A miss is not a leak by itself — the
  * value is still only bound on the caller's own computer — and a false alarm
- * blocks a real name, so it errs toward the names.
+ * blocks a real name, so it errs toward the names; one it still refuses (a
+ * name holding a hash, say) goes through with `--no-value-check`.
  */
 function randomRun(run: string): boolean {
   const classes = [/[a-z]/, /[A-Z]/, /[0-9]/].filter((c) => c.test(run)).length;
   if (run.length < 20 || classes < 2 || entropy(run) < 3) return false;
   const hex = run.match(/[0-9a-f]{20,}|[0-9A-F]{20,}/)?.[0];
   if (hex && /[0-9]/.test(hex) && /[a-fA-F]/.test(hex)) return true;
+  if (/[a-z]/.test(run) && /[A-Z]/.test(run)) return !camelWords(run);
   const letters = run.replace(/[0-9]/g, '').length;
-  if (/[a-z]/.test(run) && /[A-Z]/.test(run))
-    return (run.match(/[A-Z]?[a-z]{2,}/g) ?? []).join('').length / letters < 0.65;
   const runs = run.match(/[a-z]+|[A-Z]+|[0-9]+/g) ?? [];
   const vowels = (run.match(/[aeiou]/gi) ?? []).length;
   return run.length / runs.length < 3.2 && vowels / letters < 0.3;
@@ -135,17 +161,27 @@ function randomRun(run: string): boolean {
  * rather than the variable or file it is bound as: a known token prefix ahead
  * of a token body, an AWS key id, a UUID, or a random-looking stretch.
  *
- * A prefix alone is not enough — `hf_token` and `sk-prod-signing-key` are
- * names — so what follows it must hold a run of twelve or more letters and
- * digits with a digit or both cases in it, as every issued token does.
+ * A prefix alone is not enough — `hf_token`, `sk-prod-signing-key`,
+ * `npm_package_devDependencies` and `hf_hubTokenReadOnly2024` are names — so
+ * what follows it must hold a run of twelve or more letters and digits with a
+ * digit in it, or both cases that do not read as camel-case words, as every
+ * issued token does. Up to four digits closing the run are a name's version or
+ * year, and do not count.
  */
 export function looksLikeSecretValue(text: string): boolean {
   const runs = text.split(/[^A-Za-z0-9]+/);
   const prefix = TOKEN_PREFIX.exec(text);
   if (prefix) {
-    const body = text.slice(prefix[0].length).split(/[^A-Za-z0-9]+/);
+    const tokenBody = (run: string) => {
+      if (run.length < 12) return false;
+      const core = run.replace(/[0-9]{1,4}$/, '');
+      return /[0-9]/.test(core) || (/[a-z]/.test(core) && /[A-Z]/.test(core) && !camelWords(core));
+    };
     if (
-      body.some((r) => r.length >= 12 && (/[0-9]/.test(r) || (/[a-z]/.test(r) && /[A-Z]/.test(r))))
+      text
+        .slice(prefix[0].length)
+        .split(/[^A-Za-z0-9]+/)
+        .some(tokenBody)
     )
       return true;
   }
@@ -177,10 +213,16 @@ export type BindingSpec = {
  * say), which the last-`=` split would move into the key. So once an `=` was
  * typed, an error names the binding by its flag, its position and the text
  * before the first `=` alone.
+ *
+ * A target that {@link looksLikeSecretValue} flags is refused unless
+ * `valueCheck` is false (`--no-value-check`): the check is a heuristic, and a
+ * real name it misreads — one holding a hash, say — has no other way through.
+ * It must still be a valid name either way, and prints redacted either way.
  */
 export function bindingSpecs(
   envs: readonly string[] = [],
   files: readonly string[] = [],
+  { valueCheck = true }: { valueCheck?: boolean } = {},
 ): BindingSpec[] {
   const split = (flag: BindingSpec['flag'], typed: string, index: number): BindingSpec => {
     const at = typed.lastIndexOf('=');
@@ -199,12 +241,13 @@ export function bindingSpecs(
     // Checked first, as a value that also passes the pattern (a GitHub token
     // is a valid variable name) would otherwise be sent as the name and
     // printed back as the computer's binding.
-    if (looksLikeSecretValue(target))
+    if (valueCheck && looksLikeSecretValue(target))
       throw new CliError(
         'invalid_arguments',
         `${label}: what follows = looks like a secret's value, not ${flag === '--secret' ? 'a variable' : 'a file'} name, ` +
           `so nothing was sent. It names where the value goes, never the value: store that with ` +
-          `mandala secrets set, then bind the secret by its name`,
+          `mandala secrets set, then bind the secret by its name. ` +
+          `If it is a name after all, --no-value-check sends it as typed`,
       );
     if (!pattern.test(target))
       throw new CliError(

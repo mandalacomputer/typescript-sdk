@@ -138,6 +138,10 @@ export const COMMANDS: readonly Command[] = [
         'Bind a stored secret as a file in /run/mandala-secrets/user/files: SECRET[=FILE] (FILE defaults to its name); repeat for several',
         { repeatable: true },
       ),
+      bool(
+        'no-value-check',
+        "Send each =VAR or =FILE as typed, even one that looks like a secret's value rather than a name",
+      ),
     ],
   ),
   command('computers get', 'Get a computer by name or ID', ['computer']),

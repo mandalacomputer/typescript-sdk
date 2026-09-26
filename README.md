@@ -2801,7 +2801,9 @@ value goes, never the value itself; the value only ever goes in through
 the binding by flag, position and the text before that `=`. A target that looks
 like a value rather than a name (a known token prefix such as `ghp_` or `sk-`, an
 AWS key id, a UUID, or a long random-looking string) is refused before anything
-is sent, and a variable or file typed after `=` prints as `[REDACTED]` in the
+is sent. The check is a guess, so a real name it refuses (one holding a hash,
+say) goes through with `--no-value-check`, which still holds it to the naming
+rules. A variable or file typed after `=` prints as `[REDACTED]` in the
 create's output and in any error the create fails with; `computers get` shows
 it. Two bindings of
 one secret, or into one variable or file, fail before anything is created. An

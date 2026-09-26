@@ -2621,6 +2621,35 @@ describe('files, rename, resize, view, and secrets bound at create', () => {
     }
   });
 
+  it('sends a flagged target with --no-value-check, and still prints it hidden', async () => {
+    const hashed = 'cert-sha256-9f86d081884c7d659a2f';
+    const bound = {
+      ...COMPUTER,
+      secrets: [{ secret_id: SECRET.id, revision_id: SECRET.revision_id, file: hashed }],
+    };
+    const respond = store();
+    for (const jsonMode of [true, false]) {
+      const refused = await harness(respond).run(
+        ['computers', 'create', '--secret-file', `openai_api_key=${hashed}`],
+        jsonMode,
+      );
+      expect(refused.code).toBe(1);
+      expect(refused.out + refused.err).toContain('--no-value-check');
+      const h = harness((call) =>
+        call.method === 'POST' && call.path === '/computers' ? json(bound) : respond(call),
+      );
+      const result = await h.run(
+        ['computers', 'create', '--secret-file', `openai_api_key=${hashed}`, '--no-value-check'],
+        jsonMode,
+      );
+      expect(result.code).toBe(0);
+      const create = h.rec.calls.find((c) => c.method === 'POST' && c.path === '/computers');
+      expect(JSON.stringify(create?.body)).toContain(hashed);
+      expect(result.out).not.toContain(hashed);
+      expect(result.out).toContain('[REDACTED]');
+    }
+  });
+
   it('prints a typed variable or file as hidden, and the kind it was bound as', async () => {
     const bound = {
       ...COMPUTER,
