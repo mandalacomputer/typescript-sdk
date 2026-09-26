@@ -157,6 +157,10 @@ export const ALLOWED: ReadonlySet<string> = new Set(
       ['GET', 'api-keys'],
       ['POST', 'api-keys'],
       ['DELETE', 'api-keys/:id'],
+
+      // Lifecycle operations, read only (OPL-5055).
+      ['GET', 'operations'],
+      ['GET', 'operations/:id'],
     ] as Route[]
   ).map(([m, p]) => `${m} ${p}`),
 );
@@ -181,6 +185,10 @@ export const UNIMPLEMENTED: ReadonlySet<string> = new Set([
   'GET workspaces',
   'GET workspaces/:id',
   'GET workspaces/:id/members',
+  // Lifecycle operations, read only (OPL-5055). Listed to stay in step with
+  // the surface; no client method yet.
+  'GET operations',
+  'GET operations/:id',
 ]);
 
 /**
@@ -426,6 +434,10 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
   ['GET api-keys', []],
   ['POST api-keys', ['body:manage_keys', 'body:name', 'body:workspace_id']],
   ['DELETE api-keys/:id', []],
+
+  // Lifecycle operations, read only (OPL-5055).
+  ['GET operations', ['query:computer_id', 'query:cursor', 'query:limit']],
+  ['GET operations/:id', []],
 ]);
 
 /**
