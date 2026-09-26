@@ -241,7 +241,10 @@ export class Output {
           exit_code: exitCode,
         });
     } else {
-      this.diagnostic(`mandala: ${info.message}`);
+      // The message is escaped whole, line feed included: it often quotes a
+      // platform error or a name another party chose, and diagnostic() keeps
+      // line breaks, which would let one start a forged `mandala:` line.
+      this.diagnostic(`mandala: ${terminalSafe(info.message)}`);
       if (info.usage) this.diagnostic(`\n${info.usage.trimEnd()}`);
     }
     return exitCode;

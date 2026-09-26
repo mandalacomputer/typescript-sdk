@@ -202,7 +202,11 @@ name.
   `ssh-key list | add`, `ssh-access`, every diagnostic and error on stderr,
   the text form of streamed frames, and the indented JSON printed without
   `--json` now show each C0 and C1 control, DEL and bidi control as `\uXXXX`
-  (`\u001b` for ESC). Letters in any script and emoji are unchanged. The
+  (`\u001b` for ESC). A diagnostic and a streamed frame's text keep their own
+  line breaks, so a line feed is the one control a string quoted in them can
+  still carry; an error's message and the names in `api-keys create`'s notice
+  are escaped whole, line feed included, so neither can start a line of its
+  own. Letters in any script and emoji are unchanged. The
   indented JSON still parses to the real strings, and `--json` output is
   unchanged. `files list` now says when a name was shown escaped, and its note
   about names left out no longer claims every name with a control character

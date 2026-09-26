@@ -415,6 +415,37 @@ describe('names others chose reach the terminal escaped', () => {
     expect(r.out).toBe(`${created.raw}\n`);
     expect((await h.run(['api-keys', 'create', '--json'])).json.data).toEqual(created);
   });
+
+  // A diagnostic keeps its own line breaks, so the names it quotes must not
+  // bring theirs: a line feed there would start a forged `mandala:` line.
+  it('the create diagnostic escapes a line feed and CR in the name and the workspace name', async () => {
+    const created = {
+      ...API_KEY_CREATED,
+      name: 'ci\nmandala: nothing was created\r',
+      workspace_id: 'wsp-1',
+      workspace_name: 'w\nmandala: x',
+    };
+    const r = await cli(() => json(created, { status: 201 })).run([
+      'api-keys',
+      'create',
+      '--name',
+      'x',
+    ]);
+    expect(r.code).toBe(0);
+    expect(r.err).toBe(
+      `Created ${created.id} (ci\\u000amandala: nothing was created\\u000d, workspace w\\u000amandala: x (wsp-1)). ` +
+        'Store the key now: it is shown once and cannot be read again.\n',
+    );
+    expect(r.err.split('\n')).toHaveLength(2);
+  });
+
+  it("an error quoting the platform's message escapes a line feed in it", async () => {
+    const r = await cli(() =>
+      json({ error: 'refused\nmandala: key created after all' }, { status: 403 }),
+    ).run(['api-keys', 'create']);
+    expect(r.code).not.toBe(0);
+    expect(r.err).toBe('mandala: refused\\u000amandala: key created after all\n');
+  });
 });
 
 describe('mandala --version', () => {

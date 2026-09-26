@@ -28,6 +28,7 @@ import {
   SECRET,
   SECRET_LIST,
   SNAPSHOT,
+  SSH_ACCESS,
   SSH_KEY,
   TEMPLATE_CHECK,
   USAGE,
@@ -3664,6 +3665,86 @@ describe('text output escapes control and bidi characters', () => {
     expect(result.code).toBe(0);
     expect(rawControls(result.out)).toEqual([]);
     expect(result.out.trimEnd().split('\n')[1]).toMatch(/ k\\u001b\[31mred\\u202e$/);
+  });
+
+  // The SSH commands quote a computer name, a key name and the platform's
+  // access error. A responder with all three hostile, and an ssh runtime whose
+  // home holds the key the fixture registers.
+  const HOSTILE_NAME = 'box\u001b]52;c;aGk=\u0007\u001b[2K\rfake\u202e';
+  const sshHarness = async (access: object, put: object = access) => {
+    const home = await tempDir();
+    fs.mkdirSync(join(home, '.ssh'));
+    fs.writeFileSync(join(home, '.ssh', 'id_ed25519.pub'), `${SSH_KEY.public_key}\n`);
+    const key = { ...SSH_KEY, name: 'k\u001b[31mred\u202e' };
+    const named = { ...COMPUTER, name: HOSTILE_NAME };
+    const respond: Responder = (call) =>
+      call.method === 'GET' && call.path === '/computers'
+        ? json([named])
+        : call.path === `/computers/${COMPUTER.id}`
+          ? json(named)
+          : call.path === `/computers/${COMPUTER.id}/ssh`
+            ? json(call.method === 'PUT' ? put : access)
+            : call.path === '/ssh-keys'
+              ? call.method === 'GET'
+                ? json([])
+                : json(key, { status: 201 })
+              : anyRoute(call);
+    const h = harness(respond);
+    h.io.ssh = {
+      home: () => home,
+      windows: false,
+      which: () => '/usr/bin/ssh',
+      run: async () => 0,
+    };
+    return { h, home };
+  };
+
+  it("ssh-access escapes the computer's name and the platform's error", async () => {
+    const { h } = await sshHarness({ ...SSH_ACCESS, error: 'boom\u001b[2K\rfake\nline' });
+    const result = await h.run(['ssh-access', COMPUTER.id], false);
+    expect(result.code).toBe(0);
+    expect(rawControls(result.out)).toEqual([]);
+    expect(result.out).toBe(
+      'SSH is on for box\\u001b]52;c;aGk=\\u0007\\u001b[2K\\u000dfake\\u202e\n' +
+        '  keys: 1 of 1 delivered\n' +
+        '  error: boom\\u001b[2K\\u000dfake\\u000aline\n',
+    );
+  });
+
+  it("ssh-key add escapes the key's name", async () => {
+    const { h, home } = await sshHarness(SSH_ACCESS);
+    const result = await h.run(
+      ['ssh-key', 'add', join(home, '.ssh', 'id_ed25519.pub'), '--name', 'x'],
+      false,
+    );
+    expect(result.code).toBe(0);
+    expect(rawControls(result.out)).toEqual([]);
+    expect(result.out).toBe(
+      `added ${SSH_KEY.id}  ${SSH_KEY.fingerprint}  k\\u001b[31mred\\u202e\n`,
+    );
+  });
+
+  it("ssh --setup escapes the key's and the computer's names", async () => {
+    const { h } = await sshHarness({ ...SSH_ACCESS, enabled: false, key_count: 0 });
+    const result = await h.run(['ssh', '--setup', COMPUTER.id], false);
+    expect(result.code).toBe(0);
+    expect(rawControls(result.out)).toEqual([]);
+    expect(result.out.split('\n').slice(0, 2)).toEqual([
+      `key ${SSH_KEY.fingerprint} (k\\u001b[31mred\\u202e) registered`,
+      'SSH is on for box\\u001b]52;c;aGk=\\u0007\\u001b[2K\\u000dfake\\u202e',
+    ]);
+  });
+
+  it("ssh --setup's refusal escapes the platform's error, line feed included", async () => {
+    const { h } = await sshHarness(SSH_ACCESS, {
+      ...SSH_ACCESS,
+      error: 'no\nmandala: SSH is on',
+    });
+    const result = await h.run(['ssh', '--setup', COMPUTER.id], false);
+    expect(result.code).not.toBe(0);
+    expect(result.err).toBe(
+      "mandala: the computer's host refused the SSH setting: no\\u000amandala: SSH is on\n",
+    );
   });
 
   it("escapes a record's strings in the JSON printed for a person, which still parses to them", async () => {

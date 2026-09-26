@@ -75,7 +75,9 @@ export async function apiKeysCreate(
     { signal },
   );
   output.diagnostic(
-    `Created ${created.id} (${created.name ?? 'unnamed'}, ${scopeText(created)}). ` +
+    // The name and scope are escaped whole, line feed included: diagnostic()
+    // keeps its own line breaks, and a name must not start a line of its own.
+    `Created ${terminalSafe(created.id)} (${terminalSafe(created.name ?? 'unnamed')}, ${terminalSafe(scopeText(created))}). ` +
       'Store the key now: it is shown once and cannot be read again.',
   );
   if (output.json) return output.result(created.raw);
