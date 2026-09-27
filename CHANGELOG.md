@@ -98,7 +98,12 @@ name.
 - **CLI: `whoami`, `api-keys list | create | revoke`, `logout` and
   `--version`** (also `version`). `logout` forgets one saved profile on this
   machine and prints the id of the key it held, which stays valid until
-  revoked; `api-keys create` prints only the new key on stdout.
+  revoked; `api-keys create` prints only the new key on stdout. For a
+  workspace-scoped key, `whoami` names what the platform withholds from it
+  (the user's name and email, the account's name and plan) instead of
+  printing them empty: `User usr-1 (name and email withheld from a
+  workspace-scoped key)` rather than `<> (usr-1)`, and `Account: acc-1,
+  active (name and plan withheld …)` rather than `(unnamed)` and `plan ,`.
 - **Two ways to install only the CLI:** `brew install mandalacomputer/tap/mandala`
   (the formula's reviewed copy is in `packaging/homebrew/`) and
   `curl -fsSL https://mandala.computer/install.sh | sh`. The formula installs

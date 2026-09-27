@@ -294,6 +294,54 @@ describe('mandala whoami', () => {
     );
   });
 
+  it('says what a workspace-scoped key is not told, instead of printing it empty', async () => {
+    const r = await cli(() =>
+      json({
+        ...WHOAMI,
+        role: 'member',
+        user: { ...WHOAMI.user, email: null, name: null },
+        account: { ...WHOAMI.account, name: null, plan: null },
+        workspace: { id: 'ws-1', name: 'ci', created_at: '2026-09-20T08:00:00.000Z' },
+      }),
+    ).run(['whoami']);
+    expect(r.code).toBe(0);
+    expect(r.out).toBe(
+      [
+        'User usr-1 (name and email withheld from a workspace-scoped key)',
+        'Account: acc-1, active (name and plan withheld from a workspace-scoped key)',
+        'Role: member',
+        'Scope: workspace ci (ws-1)',
+        'Key: laptop (key-000000000001, com_1a2b3c4d…); can manage API keys',
+        '',
+      ].join('\n'),
+    );
+    expect(r.out).not.toContain('<>');
+    expect(r.out).not.toContain('(unnamed)');
+    expect(r.out).not.toContain('plan ,');
+  });
+
+  it('names only what a scoped key was not told', async () => {
+    const r = await cli(() =>
+      json({
+        ...WHOAMI,
+        user: { ...WHOAMI.user, email: null },
+        account: { ...WHOAMI.account, plan: null },
+        workspace: { id: 'ws-1', name: 'ci', created_at: 'x' },
+      }),
+    ).run(['whoami']);
+    expect(r.out.split('\n').slice(0, 2)).toEqual([
+      'Dana (usr-1) (email withheld from a workspace-scoped key)',
+      'Account: Acme (acc-1), active (plan withheld from a workspace-scoped key)',
+    ]);
+  });
+
+  it('still calls an unscoped account with no name unnamed', async () => {
+    const r = await cli(() => json({ ...WHOAMI, account: { ...WHOAMI.account, name: null } })).run([
+      'whoami',
+    ]);
+    expect(r.out.split('\n')[1]).toBe('Account: (unnamed) (acc-1), plan team, active');
+  });
+
   it('answers the platform object under --json', async () => {
     const r = await cli().run(['whoami', '--json']);
     expect(r.json).toMatchObject({ command: 'whoami', ok: true, data: WHOAMI });
