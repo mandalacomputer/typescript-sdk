@@ -185,6 +185,26 @@ function bypassList(values: string[] | undefined, flagName: string): string[] | 
   return entries;
 }
 
+/**
+ * Whether two proxy URLs name the same server: the scheme, host and port,
+ * compared without case, as the platform stores a server. A proxy's
+ * credentials are sent to its server on every request, so they are carried
+ * over only to the server they were set for; `false` when either will not
+ * parse, which refuses the carry rather than guessing.
+ */
+function sameProxyServer(a: string, b: string): boolean {
+  const parts = (value: string) => {
+    try {
+      const u = new URL(value);
+      return `${u.protocol.toLowerCase()}//${u.hostname.toLowerCase()}:${u.port}`;
+    } catch {
+      return undefined;
+    }
+  };
+  const left = parts(a);
+  return left !== undefined && left === parts(b);
+}
+
 const raw = (value: { raw: Record<string, unknown> }) => value.raw;
 const publicWebhook = (value: { raw: Record<string, unknown> }, secret?: string) => {
   const { secret: _secret, ...data } = value.raw;
@@ -568,7 +588,8 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
     if (path === 'computers create') P.createBody(create);
     // The setting is replaced whole, so a set that named no credentials would
     // remove the ones the proxy has. Unless told to change them, the current id
-    // is read off the computer just before the change and carried over.
+    // is read off the computer just before the change and carried over, but
+    // only to the same server: a new server without either flag is refused.
     const proxy: P.UpdateArgs | undefined =
       path === 'computers browser-proxy set'
         ? { browserProxy: { server: args[1]!, bypass, credentialsSecretId: s('credentials') } }
@@ -783,9 +804,18 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
         let change = proxy!;
         if (keepProxyCredentials) {
           // Read fresh rather than off the listing the name was resolved from.
-          const kept = (await c.refresh(call)).browserProxy?.credentialsSecretId;
-          if (kept)
+          const current = (await c.refresh(call)).browserProxy;
+          const kept = current?.credentialsSecretId;
+          if (kept) {
+            // The credentials are sent to the proxy on every request, so they
+            // follow only an unchanged server; a new one must be told which.
+            if (!sameProxyServer(current!.server, args[1]!))
+              throw new CliError(
+                'invalid_arguments',
+                `the proxy's credentials (${terminalSafe(kept)}) are for ${terminalSafe(current!.server)}, not ${terminalSafe(args[1]!)}; give --credentials SECRET_ID to use credentials with the new server, or --no-credentials to set it without any`,
+              );
             change = { browserProxy: { ...change.browserProxy!, credentialsSecretId: kept } };
+          }
         }
         return output.result(computerData(await c.update(change, call)));
       }

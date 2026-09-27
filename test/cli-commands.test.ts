@@ -3343,7 +3343,7 @@ describe('files, rename, resize, view, and secrets bound at create', () => {
     const creds = 'csec-0123456789abcdef';
     const proxied = {
       ...COMPUTER,
-      browser_proxy: { server: 'http://old:1', credentials_secret_id: creds },
+      browser_proxy: { server: 'http://p:1', credentials_secret_id: creds },
     };
     const h = harness((call) =>
       call.path === '/computers'
@@ -3396,6 +3396,77 @@ describe('files, rename, resize, view, and secrets bound at create', () => {
     ).run(['computers', 'get', COMPUTER.id], false);
     expect(shown.code).toBe(0);
     expect(shown.out).toContain(`"credentials_secret_id": "${creds}"`);
+  });
+
+  it("carries a proxy's credentials only to the server they were set for", async () => {
+    // The forwarder sends user:password to the proxy on every request, so a set
+    // that names another server must not take the current credentials with it.
+    const creds = 'csec-0123456789abcdef';
+    const proxied = {
+      ...COMPUTER,
+      browser_proxy: { server: 'http://corp-proxy.example:3128', credentials_secret_id: creds },
+    };
+    const h = harness((call) =>
+      call.path === '/computers'
+        ? json([proxied])
+        : call.path === `/computers/${COMPUTER.id}`
+          ? json(proxied)
+          : anyRoute(call),
+    );
+    const set = (url: string, ...flags: string[]) =>
+      h.run(['computers', 'browser-proxy', 'set', COMPUTER.id, url, ...flags]);
+    const patches = () => h.rec.calls.filter((call) => call.method === 'PATCH').length;
+    // The same server, written with other case and a trailing slash: kept.
+    const same = await set('HTTP://Corp-Proxy.example:3128/', '--bypass', 'a.com');
+    expect(same.code).toBe(0);
+    expect(h.rec.last()!.body).toEqual({
+      browser_proxy: {
+        server: 'HTTP://Corp-Proxy.example:3128/',
+        bypass: ['a.com'],
+        credentials_secret_id: creds,
+      },
+    });
+    for (const url of [
+      'http://other.example:3128',
+      'http://corp-proxy.example:8080',
+      'socks5://corp-proxy.example:3128',
+      'https://corp-proxy.example:3128',
+      'not a url',
+    ]) {
+      const before = patches();
+      const refused = await set(url);
+      // Frames accumulate across runs in one harness; this run's is the last.
+      const frame = refused.frames.at(-1);
+      expect(refused.code, url).toBe(1);
+      expect(frame, url).toMatchObject({ ok: false, error: { code: 'invalid_arguments' } });
+      expect(JSON.stringify(frame), url).toContain(creds);
+      expect(JSON.stringify(frame), url).toContain('--no-credentials');
+      expect(patches(), url).toBe(before);
+    }
+    const other = 'csec-fedcba9876543210';
+    const given = await set('http://other.example:3128', '--credentials', other);
+    expect(given.code).toBe(0);
+    expect(h.rec.last()!.body).toEqual({
+      browser_proxy: { server: 'http://other.example:3128', credentials_secret_id: other },
+    });
+    const dropped = await set('http://other.example:3128', '--no-credentials');
+    expect(dropped.code).toBe(0);
+    expect(h.rec.last()!.body).toEqual({ browser_proxy: { server: 'http://other.example:3128' } });
+    // A proxy with no credentials: any server, as before.
+    const bare = harness((call) =>
+      call.path === `/computers/${COMPUTER.id}`
+        ? json({ ...COMPUTER, browser_proxy: { server: 'http://corp-proxy.example:3128' } })
+        : anyRoute(call),
+    );
+    const moved = await bare.run([
+      'computers',
+      'browser-proxy',
+      'set',
+      COMPUTER.id,
+      'socks5://elsewhere:1080',
+    ]);
+    expect(moved.code).toBe(0);
+    expect(bare.rec.last()!.body).toEqual({ browser_proxy: { server: 'socks5://elsewhere:1080' } });
   });
 
   it('creates with a browser proxy and its credentials', async () => {

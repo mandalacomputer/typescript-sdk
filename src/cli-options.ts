@@ -203,7 +203,7 @@ export const COMMANDS: readonly Command[] = [
   ),
   command(
     'computers browser-proxy set',
-    "Send a computer's browsers through a proxy, replacing any it has; its credentials are kept unless changed",
+    "Send a computer's browsers through a proxy, replacing any it has; its credentials are kept when the server is unchanged",
     ['computer', 'url'],
     [
       flag('bypass', 'Hosts the browsers reach directly, comma-separated; repeat for more', {
