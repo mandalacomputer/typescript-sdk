@@ -3519,23 +3519,48 @@ describe('files, rename, resize, view, and secrets bound at create', () => {
         ...COMPUTER,
         [field]: { server: 'https://proxy-a.example:3128', credentials_secret_id: creds },
       };
-      const h = harness((call) =>
-        call.path === `/computers/${COMPUTER.id}` ? json(proxied) : anyRoute(call),
-      );
-      for (const json of [[], ['--json']]) {
-        const r = await h.run([
-          'computers',
-          kind,
-          'set',
-          COMPUTER.id,
-          'http://alice:S3cret@new-proxy.example:3128',
-          ...json,
-        ]);
-        expect(r.code, kind).toBe(1);
-        expect(r.out + r.err, kind).not.toContain('S3cret');
-        expect(r.out + r.err, kind).not.toContain('alice');
-        expect(r.out + r.err, kind).toContain('http://new-proxy.example:3128');
-        expect(r.out + r.err, kind).toContain('https://proxy-a.example:3128');
+      // One harness per run: a harness keeps everything written to it, so a
+      // later run's text would otherwise carry an earlier run's.
+      const refuse = (server: string, jsonMode: boolean) =>
+        harness((call) =>
+          call.path === `/computers/${COMPUTER.id}` ? json(proxied) : anyRoute(call),
+        ).run(['computers', kind, 'set', COMPUTER.id, server], jsonMode);
+      // The well-formed one; two whose password ends the authority early so
+      // that the URL parser reads `alice:<digits>` as host and port; and two
+      // typed without a scheme, which parse with the username as the scheme
+      // and an empty host. A scheme-plus-host quote of any of them would print
+      // the username, and for the early-ending ones the start of the password.
+      for (const [server, user, secrets] of [
+        ['http://alice:S3cret@new-proxy.example:3128', 'alice', ['S3cret']],
+        ['http://alice:4242#Zq@proxy-b.example:3128', 'alice', ['4242', 'Zq']],
+        ['http://alice:7777/xyz@proxy-b.example:3128', 'alice', ['7777', 'xyz']],
+        ['svc-ci:hunter2@10.0.0.9:3128', 'svc-ci', ['hunter2']],
+        ['alice:S3cret@proxy-b.example:3128', 'alice', ['S3cret']],
+      ] as const) {
+        for (const jsonMode of [false, true]) {
+          const r = await refuse(server, jsonMode);
+          const text = r.out + r.err;
+          const label = `${kind} ${server} json=${jsonMode}`;
+          expect(r.code, label).toBe(1);
+          // The refusal itself, not some earlier argument error.
+          expect(text, label).toContain(`are for https://proxy-a.example:3128, not the URL given;`);
+          expect(text, label).not.toContain(user);
+          for (const secret of secrets) expect(text, label).not.toContain(secret);
+        }
+      }
+      // A clean server is still named, and a schemeless one is not quoted as
+      // `<host>://`, which would misname it.
+      for (const [server, quoted] of [
+        ['http://new-proxy.example:3128', 'not http://new-proxy.example:3128;'],
+        ['new-proxy.example:3128', 'not the URL given;'],
+      ] as const) {
+        for (const jsonMode of [false, true]) {
+          const r = await refuse(server, jsonMode);
+          const label = `${kind} ${server} json=${jsonMode}`;
+          expect(r.code, label).toBe(1);
+          expect(r.out + r.err, label).toContain(quoted);
+          expect(r.out + r.err, label).not.toContain('new-proxy.example://');
+        }
       }
     }
   });

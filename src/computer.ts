@@ -4968,13 +4968,12 @@ export class Computer {
    * Set the automatic daily snapshot window, in the given IANA timezone.
    *
    * The platform stores the four fields whole, so each of `hour`, `minute`
-   * and `tz` left out is taken from the computer's current schedule (read
-   * first), and `setSchedule({ enabled: false })` keeps the chosen time so
-   * that `setSchedule({ enabled: true })` restores it. With no schedule to
-   * take them from, they default to 04:00 UTC. The platform reads a computer
-   * with no schedule as disabled at 00:00 UTC, so that one reading is taken
-   * as none: give the time again to re-enable a window disabled at exactly
-   * midnight UTC.
+   * and `tz` left out is taken from the computer's current schedule (the
+   * computer is read first), and `setSchedule({ enabled: false })` keeps the
+   * chosen time so that `setSchedule({ enabled: true })` restores it. Only a
+   * computer with no schedule at all takes the 04:00 UTC defaults. When the
+   * computer's host does not answer that read, the call is refused with
+   * {@link MandalaError} rather than guessing; give all three to skip it.
    */
   async setSchedule(
     args: {
@@ -4988,10 +4987,22 @@ export class Computer {
     // Checked before the read, so a bad value costs no request.
     let body = P.scheduleBody(args);
     if (args.hour === undefined || args.minute === undefined || args.tz === undefined) {
-      const current = await this.schedule(opts);
-      const none =
-        !current.enabled && current.hour === 0 && current.minute === 0 && current.tz === 'UTC';
-      if (!none) {
+      // The computer read, not GET /schedule: that route answers a computer
+      // with no schedule as "disabled at 00:00 UTC", the same reading as a real
+      // window disabled at midnight UTC. The computer record carries
+      // `snapshot_schedule` only when a schedule exists, so it is the one read
+      // that tells "none" apart from that window.
+      await this.refresh(opts);
+      const projected = this.snapshotSchedule;
+      if (projected === undefined && this.unreachable) {
+        // A record the host did not answer lacks the field for that reason
+        // alone; defaulting here would move a real window to 04:00 UTC.
+        throw new MandalaError(
+          `could not read the current schedule of ${this.id}: its host did not answer; give hour, minute and tz`,
+        );
+      }
+      if (projected !== undefined) {
+        const current = toSchedule(projected);
         body = P.scheduleBody({
           enabled: args.enabled,
           hour: args.hour ?? current.hour,

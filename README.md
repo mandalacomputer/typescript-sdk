@@ -2227,10 +2227,13 @@ Taking them on a timer is a property of the computer:
 await c.setSchedule({ enabled: true, hour: 4, tz: 'America/New_York' });
 ```
 
-`c.schedule()` reads the daily schedule back. `setSchedule` reads the current
-schedule first and keeps each of `hour`, `minute` and `tz` you leave out (04:00
-UTC when there is none), so `setSchedule({ enabled: false })` keeps the chosen
-time and `setSchedule({ enabled: true })` restores it. `c.clearSchedule()`
+`c.schedule()` reads the daily schedule back. `setSchedule` reads the computer
+first and keeps each of `hour`, `minute` and `tz` you leave out from its current
+schedule (04:00 UTC only when the computer has no schedule; a window disabled at
+00:00 UTC is kept like any other), so `setSchedule({ enabled: false })` keeps the
+chosen time and `setSchedule({ enabled: true })` restores it. Give all three to
+skip the read; without them, a computer whose host does not answer is refused
+rather than guessed at. `c.clearSchedule()`
 returns the computer to never having had one.
 
 `client.snapshots.list()` is every snapshot on the account;
@@ -2691,7 +2694,9 @@ run. No 401, 402, 403, 404 or 405 is transient, even with a contradictory reason
 Nested run reasons never grant replay permission. Stream error frames keep their
 full evidence in `raw`; thrown stream errors expose their request ID without
 turning frame reasons or the successful stream's headers into retry advice.
-The CLI JSON error envelope remains `{code, message, status}`.
+The CLI JSON error envelope is `{code, message, status}`, plus `request_id`,
+`idempotency_key` and `operation_id` when the failed call has them; the CLI's
+Operations section below says how to use them to find out how a keyed call ended.
 
 **Read `isTransient` rather than the comments above when it matters.** Three
 entries in that list are things a caller must not replay blind, and two of them
@@ -2866,12 +2871,15 @@ network access and never prompt for input; `logout` needs no network.
 
 | Command group | Available commands |
 | --- | --- |
-| `computers` | `list`, `create`, `get`, `start`, `stop`, `suspend`, `restart`, `delete`, `clone`, `rename`, `resize`, `view`, `screenshot`, `exec`, `wait` |
-| `templates` | `list`, `get`, `validate`, `publish`, `build`, `watch`, `retire` |
+| `computers` | `list`, `create`, `get`, `start`, `stop`, `suspend`, `restart`, `delete`, `clone`, `rename`, `resize`, `browser-proxy set`, `browser-proxy clear`, `egress-proxy set`, `egress-proxy clear`, `view`, `screenshot`, `exec`, `wait` |
+| `templates` | `list`, `get`, `validate`, `publish`, `build`, `watch`, `retire`, `schema` |
+| `builds` | `list`, `get`, `progress` |
 | `snapshots` | `list`, `create`, `restore`, `clone`, `delete`, `holdings`, `schedule get`, `schedule set`, `schedule clear`, `retention` |
 | `webhooks` | `list`, `create`, `get`, `update`, `delete`, `rotate`, `test`, `deliveries` |
 | `secrets` | `list`, `set`, `rm` |
 | `api-keys` | `list`, `create`, `revoke` |
+| `operations` | `list`, `get`, `wait` |
+| `workspaces` | `list`, `get`, `members` |
 | `files` | `list`, `upload`, `download` |
 | `agent` | `run` |
 | `ssh-key` | `list`, `add`, `rm` |
@@ -3191,8 +3199,10 @@ is not proof of completion. `snapshots restore` restores the specified snapshot
 and prints the `operation_id` it recorded;
 `snapshots clone SNAPSHOT --name NAME` creates a new computer from one; add `--disk-only` to build
 a memory snapshot's clone from its disk, or `--inherit-secrets` to resume one of a computer that
-held secrets (the output's `memory_dropped` says when a session did not come across). Schedule set uses
-04:00 UTC when time flags are omitted; `--disabled` disables the specified window.
+held secrets (the output's `memory_dropped` says when a session did not come across). Schedule set
+takes each time flag left out (`--hour`, `--minute`, `--tz`) from the computer's current schedule,
+and uses 04:00 UTC only when the computer has no schedule; `--disabled` keeps the current window
+and stops capture, so a later `schedule set` without time flags turns the same window back on.
 `schedule clear` removes it. Retention is read-only.
 
 Webhook create accepts repeatable `--event` and `--computer` filters,

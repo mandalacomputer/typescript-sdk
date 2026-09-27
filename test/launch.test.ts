@@ -1193,12 +1193,16 @@ describe('waitForEgressProxy', () => {
   });
 
   it('times out naming what it waited for', async () => {
-    const { get } = handle(() => egress(true));
+    // A budget an in-process mock cannot miss: the message below is the one
+    // for a computer that WAS read, and a budget that expired inside the first
+    // read would get the "could not be observed" one instead.
+    const { rec, get } = handle(() => egress(true));
     const c = await get();
-    const error = await c.waitForEgressProxy({ timeoutMs: 5, pollMs: 1 }).catch((e) => e);
+    const error = await c.waitForEgressProxy({ timeoutMs: 200, pollMs: 1 }).catch((e) => e);
+    expect(rec.calls.length).toBeGreaterThan(1);
     expect(error).toBeInstanceOf(TimeoutError);
     expect(error.message).toBe(
-      "launch-42's egress proxy was still waiting for its credentials after 5ms",
+      "launch-42's egress proxy was still waiting for its credentials after 200ms",
     );
   });
 

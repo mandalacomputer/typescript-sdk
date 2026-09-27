@@ -240,9 +240,10 @@ name. Two types are widened: `Whoami.user.email` and `Whoami.account.plan` are
 - **`Whoami.user.email` and `Whoami.account.plan` are `string | null`.** The
   platform answers `null` for both to a key confined to a workspace, and they
   were decoded as `''`. Such a key reads the plan with `client.account.read()`.
-- **`setSchedule()` keeps the fields you leave out.** It reads the computer's
-  schedule first and takes each omitted `hour`, `minute` and `tz` from it
-  (04:00 UTC when there is none), so `setSchedule({ enabled: false })` and
+- **`setSchedule()` keeps the fields you leave out.** It reads the computer
+  first and takes each omitted `hour`, `minute` and `tz` from its schedule
+  (04:00 UTC only when it has none; a window disabled at 00:00 UTC is kept
+  like any other), so `setSchedule({ enabled: false })` and
   `setSchedule({ enabled: true })` pause and resume the chosen window. It used
   to send 04:00 UTC for each, replacing the window. A call naming all four
   sends no read.

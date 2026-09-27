@@ -209,11 +209,22 @@ function sameProxyServer(a: string, b: string): boolean {
  * A proxy URL as a refusal may quote it: scheme, host and port only. A server
  * typed with `user:password@` in it is refused by the platform without being
  * repeated, and an error here must not repeat it either, since stderr and the
- * --json error are what CI logs keep. One that will not parse is not quoted.
+ * --json error are what CI logs keep. One that will not parse is not quoted,
+ * and neither is one with an `@` anywhere in it: a password holding an
+ * unencoded `/`, `?` or `#` ends the authority early, so the URL parser reads
+ * `user:pass` as the host and port (`http://alice:12#34@proxy:3128` has host
+ * `alice:12`), and scheme-plus-host would then quote the credentials. Only
+ * a proxy scheme with a host is quoted: a server typed without one parses
+ * with whatever precedes the first `:` as its scheme and an empty host, so
+ * `svc-ci:hunter2@10.0.0.9:3128` would otherwise be quoted as `svc-ci://`.
  */
+const PROXY_SCHEMES = new Set(['http:', 'https:', 'socks5:']);
 function proxyServerText(value: string): string {
+  if (value.includes('@')) return 'the URL given';
   try {
     const u = new URL(value);
+    if (u.username || u.password) return 'the URL given';
+    if (!PROXY_SCHEMES.has(u.protocol) || !u.host) return 'the URL given';
     return terminalSafe(`${u.protocol}//${u.host}`);
   } catch {
     return 'the URL given';
