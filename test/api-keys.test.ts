@@ -100,6 +100,20 @@ describe('client.account.whoami', () => {
     expect(who.role).toBe('viewer');
   });
 
+  it('keeps the null email and plan a workspace-scoped key is answered, rather than empty strings', async () => {
+    const { client } = sdk(() =>
+      json({
+        ...WHOAMI,
+        user: { id: 'usr-1', email: null, name: null },
+        account: { id: 'acc-1', name: null, plan: null, status: 'active' },
+        workspace: { id: 'wsp-1', name: 'ci', created_at: '2026-09-01T00:00:00.000Z' },
+      }),
+    );
+    const who = await client.account.whoami();
+    expect(who.user).toEqual({ id: 'usr-1', email: null, name: null });
+    expect(who.account).toEqual({ id: 'acc-1', name: null, plan: null, status: 'active' });
+  });
+
   it.each([
     ['no user', { ...WHOAMI, user: undefined }],
     ['a user with no id', { ...WHOAMI, user: { email: 'x@example.com' } }],
@@ -130,9 +144,21 @@ describe('client.apiKeys', () => {
         workspaceId: null,
         workspaceName: null,
         manageKeys: false,
+        mintedByKeyId: null,
         raw: API_KEY,
       },
     ]);
+  });
+
+  it('decodes the key that minted each one, and refuses a non-string minter', async () => {
+    const minted = { ...API_KEY, minted_by_key_id: 'key-000000000001' };
+    const { client } = sdk(() => json([minted]));
+    const [key] = await client.apiKeys.list();
+    expect(key?.mintedByKeyId).toBe('key-000000000001');
+    const created = await sdk().client.apiKeys.create({ name: 'ci' });
+    expect(created.mintedByKeyId).toBe('key-000000000001');
+    const bad = sdk(() => json([{ ...API_KEY, minted_by_key_id: 7 }]));
+    await expect(bad.client.apiKeys.list()).rejects.toBeInstanceOf(MandalaError);
   });
 
   it('refuses a listing row without an id or a manage_keys boolean', async () => {
@@ -371,6 +397,16 @@ describe('mandala api-keys', () => {
     );
   });
 
+  it('names the key that minted one, when one did', async () => {
+    const r = await cli(() => json([{ ...API_KEY, minted_by_key_id: 'key-000000000001' }])).run([
+      'api-keys',
+      'list',
+    ]);
+    expect(r.out).toBe(
+      `${API_KEY.id}  ci  ${API_KEY.prefix}  account-wide  -  last used ${API_KEY.last_used_at}  minted by key-000000000001\n`,
+    );
+  });
+
   it('lists the platform objects under --json', async () => {
     const r = await cli().run(['api-keys', 'list', '--json']);
     expect(r.json.data).toEqual([API_KEY]);
@@ -407,11 +443,11 @@ describe('mandala api-keys', () => {
     const r = await h.run(args);
     expect(r.code).toBe(1);
     expect(r.out).toBe('');
-    expect(r.err).toBe(`mandala: ${NO_PERMISSION}\n`);
+    expect(r.err).toBe(`mandala: ${NO_PERMISSION}\nmandala: request id r1\n`);
     const j = await h.run([...args, '--json']);
     expect(j.json).toMatchObject({
       ok: false,
-      error: { code: 'permission_denied', status: 403, message: NO_PERMISSION },
+      error: { code: 'permission_denied', status: 403, message: NO_PERMISSION, request_id: 'r1' },
     });
   });
 

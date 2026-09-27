@@ -714,8 +714,9 @@ export function toPublishedTemplate(d: Record<string, unknown>): PublishedTempla
  *
  * Both outcomes are a 200 — an invalid document is an answer to the question,
  * not a failed request — so this never throws for {@link valid} being false.
- * That is the point of validating: {@link problems} lists EVERY problem at once,
- * where publishing reports the first thing that stops it.
+ * {@link problems} lists EVERY problem at once. Publishing an invalid document
+ * reports every problem too, as a `400` whose `err.body.problems` holds them;
+ * validating gets them without claiming the ref.
  */
 export type TemplateCheck = {
   valid: boolean;
@@ -723,16 +724,19 @@ export type TemplateCheck = {
   problems: string[];
   /** The ref the document claims. Present only when it parsed far enough to have one. */
   ref?: string;
-  /** `sha256:…` of the whole document. Changes with any edit at all, a label included. */
+  /**
+   * `sha256:…` of {@link canonical}. Changes with anything that changes what
+   * the document means, a label included, and not with comments, key order,
+   * whitespace or YAML vs JSON.
+   */
   docDigest?: string;
   /**
    * `sha256:…` of only what decides the IMAGE.
    *
-   * A new label or a version bump leaves it alone, so comparing it against a
-   * previous run is how you tell whether an edit means a rebuild. Absent for a
-   * document naming a parent in `spec.from`, which cannot be computed without
-   * the parent's — and {@link buildDigestNeeds} is the platform's own sentence
-   * about that document rather than this general one.
+   * A new label or a version bump leaves it alone. Present only for a document
+   * with no `spec.from`, which builds nothing (build steps need a parent to
+   * layer onto). A document naming a parent has {@link buildDigestNeeds}
+   * instead, since its digest cannot be computed without the parent's.
    */
   buildDigest?: string;
   /**
@@ -744,18 +748,12 @@ export type TemplateCheck = {
    * a caller watching only for the digest sees a field missing and is told
    * nothing about why.
    *
-   * A sentence meant to be read, naming what could not be computed and where
-   * to compute it:
-   *
-   * > the contents of acme/base's image, which only a host holding it can
-   * > supply. Run `gorillad -build-template <file> -dry-run` there to see this
-   * > document's build digest
-   *
-   * The answer is a fact about a particular host's images directory rather than
-   * anything the author of a document has or could send, which is why it is
-   * prose and not a second digest. This SDK dropped it until OPL-4195, so a
-   * caller read {@link buildDigest}'s doc comment where the platform had sent
-   * the answer for their own document.
+   * A sentence meant to be read, naming what could not be computed: an
+   * identity for the contents of the parent's image, which is a fact about a
+   * host holding it rather than anything the author of a document has or could
+   * send. That is why it is prose and not a second digest. This SDK dropped it
+   * until OPL-4195, so a caller read {@link buildDigest}'s doc comment where
+   * the platform had sent the answer for their own document.
    */
   buildDigestNeeds?: string;
   /**
@@ -936,7 +934,12 @@ export type BuildStep = {
   kind: string;
   /** What the step does, from the document — the packages, the path, or the first real line of the script. */
   label: string;
-  /** `pending`, `running`, `done`, `failed`, or `skipped` for one an earlier failure meant we never reached. */
+  /**
+   * `pending`, `running`, `done`, `failed`, or `skipped` for one an earlier
+   * failure meant we never reached. `unknown` is a step whose record was lost
+   * mid-build and rebuilt from the document: it ran, and what became of it
+   * cannot be recovered.
+   */
   status: string;
   startedAt?: string;
   finishedAt?: string;
@@ -1343,8 +1346,8 @@ export type ComputerUsage = {
  *
  * The two storage figures stay separate because the remedies are: a computer's
  * disk is provisioned at create and released at delete, and snapshots come and
- * go under the retention policy you set. One summed number would be a figure
- * nobody could act on.
+ * go under your plan's retention and your own deletions. One summed number
+ * would be a figure nobody could act on.
  */
 export type UsageTotals = {
   runHours: number;
@@ -2180,6 +2183,12 @@ export type DeleteResult = {
   /** The platform's account of a partial, queued, refused or unknown outcome. */
   error: string | undefined;
   purge: SnapshotPurge | undefined;
+  /**
+   * This delete's operation (kind `delete`), `succeeded` because the delete
+   * was accepted: this result, not the operation, says what was removed and
+   * what is still queued. `undefined` where the platform recorded none.
+   */
+  operationId?: string;
   raw: Record<string, unknown>;
 };
 
@@ -2212,6 +2221,7 @@ export function toDeleteResult(d: unknown): DeleteResult {
             unselected: nullableCount(p.unselected),
             complete: p.complete === true,
           },
+    ...(operationIdOf(r) === undefined ? {} : { operationId: operationIdOf(r) }),
     raw: { ...r },
   };
 }
@@ -3163,7 +3173,9 @@ export function toSshAccess(d: Record<string, unknown>): SshAccess {
  * `credentialsSecretId` when the proxy is used without credentials.
  *
  * Its shape is {@link BrowserProxyArgs}'s, so a proxy read here can be spread,
- * edited and passed back to {@link Computer.update} with nothing lost.
+ * edited and passed back to {@link Computer.update} with nothing lost. Its
+ * `credentialsSecretId` is for its `server`: drop it or give it again when
+ * changing the server, since the credentials are sent to the server named.
  */
 export type BrowserProxy = {
   server: string;
@@ -3220,7 +3232,9 @@ export function toBrowserProxy(d: unknown, id = 'the computer'): BrowserProxy | 
  * `credentialsSecretId` when the proxy is signed in to with a secret's value.
  *
  * Its shape is {@link EgressProxyArgs}'s, so a proxy read here can be spread,
- * edited and passed back to {@link Computer.update} with nothing lost.
+ * edited and passed back to {@link Computer.update} with nothing lost. Its
+ * `credentialsSecretId` is for its `server`: drop it or give it again when
+ * changing the server, since the credentials are sent to the server named.
  */
 export type EgressProxy = {
   server: string;
@@ -3876,6 +3890,13 @@ export type ApiKey = {
    * this on, and a key minted over the API never has it.
    */
   manageKeys: boolean;
+  /**
+   * The id of the key that minted this one over the API, or `null` for a key
+   * made in a signed-in dashboard session. Kept after that key is revoked:
+   * the plain keys a key minted keep working when it is revoked, so this is
+   * how to find them and revoke them too.
+   */
+  mintedByKeyId: string | null;
   raw: Record<string, unknown>;
 };
 
@@ -3916,6 +3937,7 @@ export function toApiKey(d: unknown, what = 'an API key'): ApiKey {
     workspaceId: nullableText(d.workspace_id, `${what}'s workspace_id`),
     workspaceName: nullableText(d.workspace_name, `${what}'s workspace_name`),
     manageKeys: d.manage_keys,
+    mintedByKeyId: nullableText(d.minted_by_key_id, `${what}'s minted_by_key_id`),
     raw: { ...d },
   };
 }
@@ -3941,10 +3963,18 @@ export type Role = 'owner' | 'member' | 'viewer' | (string & {});
 
 /** Who a credential is: {@link Account.whoami}. */
 export type Whoami = {
-  /** The person the key was issued to. */
-  user: { id: string; email: string; name: string | null };
-  /** The account it acts on. `status` is `active` or `suspended`; a suspended account can still ask this. */
-  account: { id: string; name: string | null; plan: string; status: string };
+  /**
+   * The person the key was issued to. For a key confined to a workspace,
+   * `email` and `name` are `null`: such a key is not told who the account's
+   * people are.
+   */
+  user: { id: string; email: string | null; name: string | null };
+  /**
+   * The account it acts on. `status` is `active` or `suspended`; a suspended
+   * account can still ask this. For a key confined to a workspace, `name` and
+   * `plan` are `null`; such a key reads the plan with `client.account.read()`.
+   */
+  account: { id: string; name: string | null; plan: string | null; status: string };
   /** The role it acts with, as it is NOW — not as it was when the key was minted. */
   role: Role;
   /** The workspace it is confined to, or `null` for a key that acts on the whole account. */
@@ -3982,16 +4012,86 @@ export function toWhoami(d: unknown, method: string, path: string): Whoami {
     workspace = { id: ws.id, name: str(ws.name), createdAt: str(ws.created_at) };
   }
   return {
-    user: { id: user.id, email: str(user.email), name: nullableText(user.name, "the user's name") },
+    user: {
+      id: user.id,
+      email: nullableText(user.email, "the user's email"),
+      name: nullableText(user.name, "the user's name"),
+    },
     account: {
       id: account.id,
       name: nullableText(account.name, "the account's name"),
-      plan: str(account.plan),
+      plan: nullableText(account.plan, "the account's plan"),
       status: str(account.status),
     },
     role: d.role,
     workspace,
     key: d.key === null || d.key === undefined ? null : toApiKey(d.key, `the key from ${where}`),
+    raw: { ...d },
+  };
+}
+
+// --- workspaces ----------------------------------------------------------------
+
+/**
+ * One of the account's workspaces (platform OPL-5057). A workspace partitions
+ * the account's computers: a key confined to one reaches its computers only,
+ * and a computer's `workspaceId` names the workspace it is in.
+ */
+export type Workspace = {
+  /** `wsp-` and twelve hex characters. */
+  id: string;
+  /** Unique within the account. */
+  name: string;
+  createdAt: string;
+  raw: Record<string, unknown>;
+};
+
+/**
+ * Somebody who reaches a workspace: a member of the account, since workspaces
+ * do not divide people. `role` is their role on the account, which is their
+ * role in every workspace.
+ */
+export type WorkspaceMember = {
+  /** `usr-` and sixteen hex characters. */
+  userId: string;
+  /** The address they sign in with. */
+  email: string;
+  /** Their display name, or `null` when they have not set one. */
+  name: string | null;
+  role: Role;
+  /** When they joined the account. */
+  acceptedAt: string;
+  /** `true` when they cannot sign in at the moment; still on the account. */
+  suspended: boolean;
+  raw: Record<string, unknown>;
+};
+
+/** Strict on the id, which is what a later read or a key's scope names. */
+export function toWorkspace(d: unknown, what = 'a workspace'): Workspace {
+  if (!isRecord(d) || typeof d.id !== 'string' || !d.id) {
+    throw new MandalaError(`expected ${what} to carry its id`);
+  }
+  return { id: d.id, name: str(d.name), createdAt: str(d.created_at), raw: { ...d } };
+}
+
+/**
+ * Strict on the id and on `suspended`: a member this client cannot say is
+ * suspended or not is not one to report as able to sign in.
+ */
+export function toWorkspaceMember(d: unknown, what = 'a workspace member'): WorkspaceMember {
+  if (!isRecord(d) || typeof d.user_id !== 'string' || !d.user_id) {
+    throw new MandalaError(`expected ${what} to carry its user_id`);
+  }
+  if (typeof d.suspended !== 'boolean') {
+    throw new MandalaError(`expected ${what} to say whether they are suspended`);
+  }
+  return {
+    userId: d.user_id,
+    email: str(d.email),
+    name: nullableText(d.name, `${what}'s name`),
+    role: str(d.role),
+    acceptedAt: str(d.accepted_at),
+    suspended: d.suspended,
     raw: { ...d },
   };
 }

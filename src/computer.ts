@@ -264,6 +264,12 @@ export type ScrollOptions = CallOptions & {
   modifiers?: readonly string[];
 };
 
+/** What {@link Computer.drag} accepts beside the two ends. */
+export type DragOptions = CallOptions & {
+  /** Keys held down for the whole drag, e.g. `['shift']` to extend a selection. */
+  modifiers?: readonly string[];
+};
+
 export type DeleteOptions = {
   /**
    * Also destroy every snapshot of this computer. Requires `expect`.
@@ -1293,7 +1299,10 @@ export class Computer {
    * dropped, because {@link update} replaces the setting whole and this is what
    * a caller would edit and send back. It carries the proxy's
    * `credentialsSecretId`, so `update({ browserProxy: { ...c.browserProxy!,
-   * bypass } })` keeps the credentials.
+   * bypass } })` keeps the credentials. Spread it only to keep the same
+   * `server`: the credentials are sent to whatever server the setting names,
+   * so a new `server` needs `credentialsSecretId` dropped or given again for
+   * that server, or the old proxy's username and password go to the new one.
    */
   get browserProxy(): BrowserProxy | undefined {
     return toBrowserProxy(this.#data.browser_proxy, this.id);
@@ -1331,8 +1340,12 @@ export class Computer {
    * platform's resolver. `undefined` when none is set.
    *
    * Decoded strictly, as {@link browserProxy} is, and it carries the
-   * `credentialsSecretId`, so `update({ egressProxy: { ...c.egressProxy!,
-   * server } })` keeps the credentials.
+   * `credentialsSecretId`. The credentials are for the server they were set
+   * with, and are sent to whatever server the setting names: to change the
+   * server, send `{ server }` alone (no credentials) or
+   * `{ server, credentialsSecretId }` naming that server's secret. Spreading
+   * this with a new `server` would send the old proxy's username and password
+   * to the new one.
    */
   get egressProxy(): EgressProxy | undefined {
     return toEgressProxy(this.#data.egress_proxy, this.id);
@@ -1343,8 +1356,8 @@ export class Computer {
    * host does not hold yet — just after a create or a change, after the host
    * restarts, or once the secret is deleted. Every connection the computer
    * opens meanwhile is closed, never sent directly; it usually clears within
-   * seconds. `false` on a computer that is not running, and on a platform that
-   * predates the field.
+   * seconds, and {@link waitForEgressProxy} waits on it. `false` on a computer
+   * that is not running, and on a platform that predates the field.
    */
   get egressProxyPending(): boolean {
     const v = this.#data.egress_proxy_pending;
@@ -1522,7 +1535,8 @@ export class Computer {
   }
 
   /**
-   * Copy this computer into a new one. The source must be stopped.
+   * Copy this computer into a new one. The source must be stopped or
+   * suspended; a running one is refused with {@link ConflictError}.
    *
    * Returns as soon as the new computer exists, which is before its disk does:
    * copying a disk runs for minutes, so the clone comes back `"building"` and
@@ -2633,7 +2647,8 @@ export class Computer {
   }
 
   /**
-   * The loop {@link waitForSecrets} and {@link waitForBrowserProxy} share:
+   * The loop {@link waitForSecrets}, {@link waitForBrowserProxy} and
+   * {@link waitForEgressProxy} share:
    * read the computer, ask `judge` where things are, and return on `done`,
    * throw the refusal `judge` hands back, or sleep and read again until the
    * deadline, when `timedOut` words the {@link TimeoutError}.
@@ -2853,6 +2868,70 @@ export class Computer {
       return waiting;
     }
     return set ? 'applied' : 'unreported';
+  }
+
+  /**
+   * Wait until this computer's host holds the credentials its
+   * {@link egressProxy} names, so its connections are no longer closed.
+   *
+   * Just after a create or a change, while the host does not hold the value
+   * yet, {@link egressProxyPending} is true and every connection the computer
+   * opens is closed, never sent directly. This polls until it is false on a
+   * running computer, and returns at once for one whose egress proxy names no
+   * credentials, or that has none. {@link Computers.launch} calls it for you
+   * when the create or the computer names credentials.
+   *
+   * Always reads the computer again before answering. Throws rather than
+   * waiting out the timeout when nothing will ask the host for the value: a
+   * computer that is stopped or suspended while the platform says it has
+   * admitted no start (`start()` is the fix), a create's computer whose first
+   * start failed, and a failed build.
+   */
+  async waitForEgressProxy(opts: WaitOptions = {}): Promise<this> {
+    return this.#waitForState(
+      opts,
+      'applied',
+      'applying',
+      (startFailed) => this.#egressProxyState(startFailed),
+      (timeoutMs, observed, fresh) =>
+        !observed
+          ? `${this.id} could not be observed within ${timeoutMs}ms, so whether its host holds ` +
+            "its egress proxy's credentials is unknown"
+          : fresh
+            ? `${this.id}'s egress proxy was still waiting for its credentials after ${timeoutMs}ms`
+            : `${this.id} could not be reached for the last part of ${timeoutMs}ms; when it ` +
+              'last answered its egress proxy was still waiting for its credentials',
+    );
+  }
+
+  /**
+   * Where this computer's egress proxy is, as {@link waitForEgressProxy} reads
+   * it. Only credentials are waited on: a proxy without them is in effect from
+   * the first packet. The platform reports the wait only on a running
+   * computer, so a stopped one with credentials is waited on while a start is
+   * admitted and refused while none is.
+   */
+  #egressProxyState(startFailed = ''): EgressProxyState {
+    if (this.egressProxyPending) return 'applying';
+    if (!this.egressProxy?.credentialsSecretId) return 'applied';
+    if (this.buildFailed) return this.#buildFailure();
+    if (this.isBuilding) return 'applying';
+    if (!this.#statusIs('running')) {
+      if (startFailed && this.#statusIs('stopped') && !this.#startAdmitted()) {
+        return new MandalaError(
+          `${this.id} is stopped after it failed to start, so its egress proxy's credentials ` +
+            `were not delivered to its host: ${startFailed}. Call start() to try again`,
+        );
+      }
+      if (this.#nothingAdmitted()) {
+        return new MandalaError(
+          `${this.id} is ${JSON.stringify(this.status)}, and its egress proxy's credentials are ` +
+            'taken by its host only as it runs: call start()',
+        );
+      }
+      return 'applying';
+    }
+    return 'applied';
   }
 
   // --- events ---------------------------------------------------------
@@ -3189,9 +3268,11 @@ export class Computer {
    * honours both now, so it is sent. Leave `fresh` off — or pass `false` — to
    * ask for the last frame the platform already holds.
    *
-   * A suspended computer answers only that cached form. Asking a suspended
-   * computer for a fresh capture is refused with a 409 telling you to start it
-   * first, and a width does not change that.
+   * A suspended computer answers only that cached form: its saved desktop, a
+   * JPEG up to 640 pixels wide whatever `width` asked for, even without one.
+   * It is a stored picture, not a screen to drive — its pixels are not screen
+   * coordinates. Asking a suspended computer for a fresh capture is refused
+   * with a 409 telling you to start it first, and a width does not change that.
    *
    * A screenshot is not *use* as far as the platform's idle sweep is concerned,
    * and does not resume a suspended computer. A loop that only polls the screen
@@ -3422,8 +3503,12 @@ export class Computer {
    *
    * At most 64 KiB of UTF-8 goes in — half what comes out, and the two are
    * different bounds on different channels rather than one number rounded
-   * twice. Empty text and a NUL are refused here rather than on the wire; see
+   * twice. A NUL is refused here rather than on the wire; see
    * `MAX_CLIPBOARD_BYTES` in paths.ts for why that is the number.
+   *
+   * `setClipboard('')` CLEARS the clipboard, and is the only way to: the
+   * desktop is left holding nothing, where putting other text there only
+   * replaces one value with another.
    *
    * The platform confirms the write by reading the selection back before it
    * answers, so this returning means the desktop is holding the text, not
@@ -3547,8 +3632,12 @@ export class Computer {
    * Without `from`, the drag starts wherever the pointer is. That is refused if
    * nothing has moved it yet, rather than guessing at an origin and selecting
    * the wrong thing.
+   *
+   * `modifiers` are held down for the whole drag, pressed before the pointer
+   * moves and released after the button:
+   * `drag(400, 300, { x: 100, y: 100 }, { modifiers: ['shift'] })`.
    */
-  async drag(toX: number, toY: number, from?: Point, opts: CallOptions = {}): Promise<void> {
+  async drag(toX: number, toY: number, from?: Point, opts: DragOptions = {}): Promise<void> {
     // `from` is an optional positional in front of `CallOptions`, so a
     // JavaScript `drag(x, y, { signal })` binds the options object here — and
     // an options object is a `Point` at runtime as far as anything could tell:
@@ -3565,7 +3654,15 @@ export class Computer {
           'drag(toX, toY, undefined, { signal })',
       );
     }
-    await this.#input(P.dragBody(toX, toY, from?.x, from?.y), opts);
+    // scroll()'s misbinding, here: `modifiers` is a named option, so an array
+    // in the options slot would drag with nothing held.
+    if (Array.isArray(opts)) {
+      throw new ValidationError(
+        'drag() takes its modifiers as an option, not a positional — ' +
+          "drag(toX, toY, from, { modifiers: ['shift'] })",
+      );
+    }
+    await this.#input(P.dragBody(toX, toY, from?.x, from?.y, opts.modifiers), opts);
   }
 
   /**
@@ -4867,7 +4964,18 @@ export class Computer {
     return toSchedule(data);
   }
 
-  /** Set the automatic daily snapshot window, in the given IANA timezone. */
+  /**
+   * Set the automatic daily snapshot window, in the given IANA timezone.
+   *
+   * The platform stores the four fields whole, so each of `hour`, `minute`
+   * and `tz` left out is taken from the computer's current schedule (read
+   * first), and `setSchedule({ enabled: false })` keeps the chosen time so
+   * that `setSchedule({ enabled: true })` restores it. With no schedule to
+   * take them from, they default to 04:00 UTC. The platform reads a computer
+   * with no schedule as disabled at 00:00 UTC, so that one reading is taken
+   * as none: give the time again to re-enable a window disabled at exactly
+   * midnight UTC.
+   */
   async setSchedule(
     args: {
       enabled: boolean;
@@ -4877,7 +4985,21 @@ export class Computer {
     },
     opts: CallOptions = {},
   ): Promise<Schedule> {
-    const body = P.scheduleBody(args);
+    // Checked before the read, so a bad value costs no request.
+    let body = P.scheduleBody(args);
+    if (args.hour === undefined || args.minute === undefined || args.tz === undefined) {
+      const current = await this.schedule(opts);
+      const none =
+        !current.enabled && current.hour === 0 && current.minute === 0 && current.tz === 'UTC';
+      if (!none) {
+        body = P.scheduleBody({
+          enabled: args.enabled,
+          hour: args.hour ?? current.hour,
+          minute: args.minute ?? current.minute,
+          tz: args.tz ?? current.tz,
+        });
+      }
+    }
     const data = await this.#t.json<Record<string, unknown>>(
       'PUT',
       P.computerAction(this.id, 'schedule'),
@@ -5283,6 +5405,8 @@ export class Computer {
 type SecretsState = 'delivered' | 'delivering' | 'unreported' | MandalaError;
 /** Where a computer's browser proxy is, as {@link Computer.waitForBrowserProxy} reads it. */
 type BrowserProxyState = 'applied' | 'applying' | 'unreported' | MandalaError;
+/** Where a computer's egress proxy is, as {@link Computer.waitForEgressProxy} reads it. */
+type EgressProxyState = 'applied' | 'applying' | MandalaError;
 
 export const strandedText = (id: string, err: unknown): string =>
   `${id} was not deleted at the end of its block and is still billable: ` +

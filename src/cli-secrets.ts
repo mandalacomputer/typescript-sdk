@@ -8,7 +8,7 @@
  */
 
 import { CliError } from './cli-options.js';
-import type { Output } from './cli-output.js';
+import { type Output, terminalSafe } from './cli-output.js';
 import { type CliIO, readSecretValue } from './cli-runtime.js';
 import { ConflictError } from './errors.js';
 import type { Client, Secret } from './index.js';
@@ -703,7 +703,11 @@ export async function secretsList(
   if (!list.secrets.length) io.stdout.write('no secrets in this scope\n');
   for (const s of list.secrets) {
     const used = s.lastUsedAt ? `last used ${s.lastUsedAt}` : 'never delivered';
-    io.stdout.write(`${s.id}  ${s.name}  ${s.revisionId}  updated ${s.updatedAt}  ${used}\n`);
+    // Escaped whole: the platform refuses only control characters in a name,
+    // so a bidi override could otherwise reorder the rest of the line.
+    io.stdout.write(
+      `${terminalSafe(`${s.id}  ${s.name}  ${s.revisionId}  updated ${s.updatedAt}  ${used}`)}\n`,
+    );
   }
   if (!list.delivery)
     output.diagnostic('Delivery is off on this platform: secrets can be stored but not bound.');
@@ -777,7 +781,7 @@ export async function secretsSet(
   const stored = result as Secret;
   if (output.json) return output.result({ ...shown(stored), created });
   io.stdout.write(
-    `${created ? 'created' : 'replaced'} ${stored.id}  ${stored.name}  ${stored.revisionId}\n`,
+    `${terminalSafe(`${created ? 'created' : 'replaced'} ${stored.id}  ${stored.name}  ${stored.revisionId}`)}\n`,
   );
   return 0;
 }
@@ -825,6 +829,8 @@ export async function secretsRemove(
     return output.result(
       safe ? { id: gone.id, name: gone.name, deleted: true } : { id: gone.id, deleted: true },
     );
-  io.stdout.write(safe ? `deleted ${gone.id}  ${gone.name}\n` : `deleted ${gone.id}\n`);
+  io.stdout.write(
+    `${terminalSafe(safe ? `deleted ${gone.id}  ${gone.name}` : `deleted ${gone.id}`)}\n`,
+  );
   return 0;
 }

@@ -1830,10 +1830,14 @@ describe('what a payload cannot be allowed to mean', () => {
     // a refusal that still sent the call would have spent the round trip it
     // exists to save. What each of these refusals is FOR is in building.test.ts.
     const before = rec.calls.length;
-    for (const bad of ['', 'a\0b', '\ud800', '\udfff', 'x'.repeat(64 * 1024 + 1)]) {
+    for (const bad of ['a\0b', '\ud800', '\udfff', 'x'.repeat(64 * 1024 + 1)]) {
       await expect(computer.setClipboard(bad)).rejects.toThrow(TypeError);
     }
     expect(rec.calls.length).toBe(before);
+
+    // Empty is not refused: it is how the platform is told to clear it.
+    await computer.setClipboard('');
+    expect(rec.calls.at(-1)!.body).toEqual({ text: '' });
   });
 
   it('carries the platform word off a clipboard refusal, and stops the retry', async () => {
@@ -1933,6 +1937,58 @@ describe('what a payload cannot be allowed to mean', () => {
       expect(cleared).toMatchObject({ enabled: false, hour: 0, minute: 0, tz: 'UTC' });
       expect(cleared.raw).toEqual({});
     }
+  });
+
+  it('keeps the window through a disable and a re-enable that name only enabled', async () => {
+    // The platform stores the body whole, so a toggle that sent the 04:00 UTC
+    // defaults would have replaced the window it was only meant to pause.
+    let stored: Record<string, unknown> = {
+      enabled: true,
+      hour: 23,
+      minute: 30,
+      tz: 'America/Chicago',
+    };
+    const { client: c, rec } = client((call) => {
+      if (!call.path.endsWith('/schedule')) return anyRoute(call);
+      if (call.method === 'PUT') stored = call.body as Record<string, unknown>;
+      return json(stored);
+    });
+    const computer = await c.computers.get('vm-1');
+    const off = await computer.setSchedule({ enabled: false });
+    expect(off).toMatchObject({ enabled: false, hour: 23, minute: 30, tz: 'America/Chicago' });
+    const on = await computer.setSchedule({ enabled: true });
+    expect(on).toMatchObject({ enabled: true, hour: 23, minute: 30, tz: 'America/Chicago' });
+    expect(await computer.schedule()).toMatchObject({
+      enabled: true,
+      hour: 23,
+      minute: 30,
+      tz: 'America/Chicago',
+    });
+    const puts = rec.calls.filter((call) => call.method === 'PUT').map((call) => call.body);
+    expect(puts).toEqual([
+      { enabled: false, hour: 23, minute: 30, tz: 'America/Chicago' },
+      { enabled: true, hour: 23, minute: 30, tz: 'America/Chicago' },
+    ]);
+  });
+
+  it('takes each omitted field from the current schedule, and 04:00 UTC when there is none', async () => {
+    let current: Record<string, unknown> = { enabled: true, hour: 6, minute: 15, tz: 'Asia/Tokyo' };
+    const { client: c, rec } = client((call) =>
+      call.path.endsWith('/schedule')
+        ? json(call.method === 'PUT' ? (call.body as Record<string, unknown>) : current)
+        : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    await computer.setSchedule({ enabled: true, hour: 2 });
+    expect(rec.last()!.body).toEqual({ enabled: true, hour: 2, minute: 15, tz: 'Asia/Tokyo' });
+    // No schedule reads as disabled at midnight UTC.
+    current = { enabled: false, hour: 0, minute: 0, tz: 'UTC' };
+    await computer.setSchedule({ enabled: true });
+    expect(rec.last()!.body).toEqual({ enabled: true, hour: 4, minute: 0, tz: 'UTC' });
+    // All four given: nothing to read.
+    const before = rec.calls.length;
+    await computer.setSchedule({ enabled: true, hour: 1, minute: 2, tz: 'UTC' });
+    expect(rec.calls.length).toBe(before + 1);
   });
 
   it('also treats a 200 empty object as an acknowledgement of the schedule body', async () => {
@@ -4237,6 +4293,30 @@ describe('an options object where a point was expected', () => {
     // threw a TypeError naming neither the argument nor the call.
     await computer.drag(50, 60, null as never);
     expect(rec.last().body).not.toHaveProperty('start_coordinate');
+  });
+
+  it('holds keys down for a drag, sent the way a click sends them', async () => {
+    const { client: c, rec } = client(anyRoute);
+    const computer = await c.computers.get('vm-1');
+    await computer.drag(400, 300, { x: 100, y: 100 }, { modifiers: ['shift'] });
+    expect(rec.last().body).toEqual({
+      action: 'left_click_drag',
+      coordinate: [400, 300],
+      start_coordinate: [100, 100],
+      text: 'shift',
+    });
+    await computer.click(1, 2, ['ctrl', 'shift']);
+    const clickText = (rec.last().body as Record<string, unknown>).text;
+    await computer.drag(5, 6, undefined, { modifiers: ['ctrl', 'shift'] });
+    expect((rec.last().body as Record<string, unknown>).text).toBe(clickText);
+    await computer.drag(7, 8);
+    expect(rec.last().body).not.toHaveProperty('text');
+    await expect(computer.drag(7, 8, undefined, ['shift'] as never)).rejects.toThrow(
+      /modifiers as an option/,
+    );
+    await expect(computer.drag(7, 8, undefined, { modifiers: 'shift' as never })).rejects.toThrow(
+      /drag\(\) modifiers must be an array/,
+    );
   });
 
   it('refuses an array bound to scroll()\u2019s options, which holds no modifiers', async () => {

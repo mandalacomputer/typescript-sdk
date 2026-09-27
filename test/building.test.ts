@@ -15,12 +15,10 @@ describe('clipboardBody', () => {
     expect(P.clipboardBody('hello')).toEqual({ text: 'hello' });
   });
 
-  it('refuses empty text rather than sending a 400 to find out', () => {
-    // The platform refuses it too, and the refusal is worth making here for the
-    // reason at the top of this file plus one of its own: clearing the
-    // clipboard is not what that endpoint does, and a caller who meant to clear
-    // it should be told so rather than shown a status code.
-    expect(() => P.clipboardBody('')).toThrow(/must not be empty/);
+  it('sends empty text, which is how the platform clears the clipboard', () => {
+    // The only way to say "clear": a password left on the clipboard otherwise
+    // stays there until something else replaces it.
+    expect(P.clipboardBody('')).toEqual({ text: '' });
   });
 
   it('refuses a NUL, which would otherwise land and be reported as a failure', () => {
@@ -118,15 +116,18 @@ describe('browserProxy', () => {
     expect(P.createBody({})).not.toHaveProperty('browser_proxy');
   });
 
-  it('keeps a null on update, which removes it, and refuses one on create', () => {
+  it('keeps a null on update, which removes it, and on create, which declines a template default', () => {
     expect(P.updateBody({ browserProxy: null })).toEqual({ browser_proxy: null });
     expect(P.updateBody({ browserProxy: { server, bypass: [] } })).toEqual({
       browser_proxy: { server, bypass: [] },
     });
-    // A create has nothing to remove, and `null` there is a mistake.
-    expect(() => P.createBody({ browserProxy: null as unknown as P.BrowserProxyArgs })).toThrow(
-      /browserProxy must be an object/,
-    );
+    // A template may carry a default proxy, inherited only when the field is
+    // left out, so `null` on create is the one way to ask for none.
+    expect(P.createBody({ template: 'acme/web', browserProxy: null })).toEqual({
+      template: 'acme/web',
+      browser_proxy: null,
+      start: true,
+    });
   });
 
   it('checks the shape and leaves the rules on values to the platform', () => {

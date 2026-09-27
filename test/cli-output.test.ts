@@ -2,7 +2,13 @@ import { describe, expect, it } from 'vitest';
 import { CliError } from '../src/cli-options.js';
 import { errorInfo, Output, redact, terminalSafe } from '../src/cli-output.js';
 import { runtime } from '../src/cli-runtime.js';
-import { AuthenticationError, ValidationError } from '../src/errors.js';
+import {
+  AuthenticationError,
+  ConflictError,
+  ConnectionInterruptedError,
+  UnavailableError,
+  ValidationError,
+} from '../src/errors.js';
 
 function writer(json = true) {
   let stdout = '';
@@ -125,6 +131,44 @@ describe('versioned output contract', () => {
       message: 'missing',
     });
     expect(errorInfo(new TypeError('bug'))).toEqual({ code: 'internal_error', message: 'bug' });
+  });
+
+  it('carries what a keyed call needs to find out how it ended, in JSON and in text', () => {
+    const lost = new UnavailableError(
+      'upstream failed',
+      503,
+      { error: 'upstream failed', operation_id: 'op_1', request_id: 'req-9' },
+      undefined,
+      { method: 'POST' },
+    );
+    lost.idempotencyKey = 'k-1';
+    expect(errorInfo(lost)).toMatchObject({
+      status: 503,
+      idempotency_key: 'k-1',
+      request_id: 'req-9',
+      operation_id: 'op_1',
+    });
+    const w = writer(false);
+    w.output.error(lost);
+    expect(w.read().stderr).toBe(
+      'mandala: upstream failed\n' +
+        'mandala: operation op_1; idempotency key k-1; request id req-9 ' +
+        '(read it with: mandala operations get op_1)\n',
+    );
+    // A dropped connection has no response, so only the key.
+    const dropped = new ConnectionInterruptedError('socket hang up');
+    dropped.idempotencyKey = 'k-2';
+    expect(errorInfo(dropped)).toMatchObject({ idempotency_key: 'k-2' });
+    const t = writer(false);
+    t.output.error(dropped);
+    expect(t.read().stderr).toContain(
+      '(find its operation with: mandala operations list --idempotency-key k-2)',
+    );
+    // Nothing to add when none is present.
+    const plain = errorInfo(new ConflictError('busy', 409, { error: 'busy' }));
+    expect(plain).not.toHaveProperty('idempotency_key');
+    expect(plain).not.toHaveProperty('operation_id');
+    expect(plain).not.toHaveProperty('request_id');
   });
 
   it('sends human errors only to stderr without color escapes', () => {

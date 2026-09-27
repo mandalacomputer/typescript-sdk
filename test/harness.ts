@@ -783,6 +783,7 @@ export const API_KEY = {
   workspace_id: null,
   workspace_name: null,
   manage_keys: false,
+  minted_by_key_id: null,
 };
 
 /** The mint's 201: the key, and the raw secret once. */
@@ -790,6 +791,7 @@ export const API_KEY_CREATED = {
   ...API_KEY,
   id: 'key-0f1e2d3c4b5a',
   last_used_at: null,
+  minted_by_key_id: 'key-000000000001',
   raw: `com_${'ab'.repeat(24)}`,
 };
 
@@ -800,6 +802,23 @@ export const WHOAMI = {
   role: 'owner',
   workspace: null,
   key: { ...API_KEY, id: 'key-000000000001', name: 'laptop', manage_keys: true },
+};
+
+/** One workspace, as `GET workspaces/:id` answers it (OPL-5057). */
+export const WORKSPACE = {
+  id: 'wsp-0123456789ab',
+  name: 'customers',
+  created_at: '2026-09-01T00:00:00.000Z',
+};
+
+/** One member, as `GET workspaces/:id/members` lists them (OPL-5057). */
+export const WORKSPACE_MEMBER = {
+  user_id: 'usr-0123456789abcdef',
+  email: 'dana@example.com',
+  name: 'Dana',
+  role: 'owner',
+  accepted_at: '2026-08-01T00:00:00.000Z',
+  suspended: false,
 };
 
 /** A finished lifecycle operation, as `GET operations/:id` answers it (OPL-5055). */
@@ -1057,6 +1076,9 @@ export const anyRoute: Responder = (call) => {
   if (/\/activities\/[^/]+\/results$/.test(path)) return json(ACTIVITY_RESULTS);
   if (/\/activities\/[^/]+$/.test(path)) return json(ACTIVITY);
   if (path.endsWith('/signals')) return json(SIGNAL_PAGE);
+  if (path === '/workspaces') return json([WORKSPACE]);
+  if (/^\/workspaces\/[^/]+\/members$/.test(path)) return json([WORKSPACE_MEMBER]);
+  if (/^\/workspaces\/[^/]+$/.test(path)) return json(WORKSPACE);
   if (path === '/operations') return json({ operations: [OPERATION], next_cursor: null });
   if (/^\/operations\/[^/]+$/.test(path)) return json(OPERATION);
   if (path === '/moves') return json({ moves: [MOVE_DONE] });

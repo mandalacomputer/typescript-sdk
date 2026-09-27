@@ -30,8 +30,10 @@ export const DEFAULT_BASE_URL = 'https://app.mandala.computer/api/v1';
  * The platform records a call that carries one BEFORE carrying it out, and for
  * 24 hours answers the same key with the same request from that record instead
  * of doing the call again: `409` with `code: "idempotency_in_progress"` while
- * it runs, the original answer once it has finished. A different request under
- * the same key is a `422`.
+ * it runs, the original answer once it has finished. A call it answered with a
+ * `5xx` is different: the key is marked lost, and every resend answers `409`
+ * with `code: "idempotency_outcome_unknown"`; read the computer or its
+ * operation instead. A different request under the same key is a `422`.
  */
 export const IDEMPOTENCY_KEY_HEADER = 'Idempotency-Key';
 
@@ -62,8 +64,11 @@ const KEY_UNSETTLED: ReadonlySet<unknown> = new Set([
 /**
  * The error a keyed call failed with, carrying its key where the outcome is
  * unknown — a request that may have been received, a `5xx`, or the platform
- * saying the keyed call is still running or was never heard to end — so the
- * caller can send the same call again with it and not do it twice.
+ * saying the keyed call is still running or was never heard to end. After a
+ * dropped connection or `idempotency_in_progress` the caller can send the same
+ * call again with it and not do it twice; after a `5xx` or
+ * `idempotency_outcome_unknown` a resend only answers
+ * `idempotency_outcome_unknown`, and the key finds the operation to read.
  */
 function withIdempotencyKey(error: unknown, opts: RequestOptions): unknown {
   const key = opts.headers?.[IDEMPOTENCY_KEY_HEADER];

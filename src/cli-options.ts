@@ -160,6 +160,11 @@ export const COMMANDS: readonly Command[] = [
         'browser-proxy',
         "Send the computer's browsers through this proxy URL, e.g. http://proxy.example.com:3128",
       ),
+      bool(
+        'no-browser-proxy',
+        "Create it with no browser proxy, declining a template's default proxy",
+        { conflicts: ['browser-proxy'] },
+      ),
       flag(
         'browser-proxy-bypass',
         'Hosts the browsers reach directly, comma-separated (with --browser-proxy); repeat for more',
@@ -290,8 +295,8 @@ export const COMMANDS: readonly Command[] = [
     [
       flag(
         'until',
-        'Readiness condition (default running; secrets: bound secrets delivered; browser-proxy: browsers have the proxy)',
-        { choices: ['built', 'running', 'guest', 'secrets', 'browser-proxy'] },
+        'Readiness condition (default running; secrets: bound secrets delivered; browser-proxy: browsers have the proxy; egress-proxy: the host holds the egress proxy credentials)',
+        { choices: ['built', 'running', 'guest', 'secrets', 'browser-proxy', 'egress-proxy'] },
       ),
       ...waits,
     ],
@@ -316,6 +321,13 @@ export const COMMANDS: readonly Command[] = [
     'ndjson',
   ),
   command('templates retire', 'Retire a template', ['namespace', 'name'], [version]),
+  command(
+    'templates schema',
+    'Print the JSON Schema for a mandala/v1 template document; save it and point an editor at the file',
+  ),
+  command('builds list', 'List template builds with completeness status', [], [partial]),
+  command('builds get', 'Read what became of one template build', ['build']),
+  command('builds progress', 'Read what a template build is doing, step by step', ['build']),
   command(
     'snapshots list',
     'List snapshots with completeness status',
@@ -444,11 +456,22 @@ export const COMMANDS: readonly Command[] = [
         'computer',
         'Only this computer, by name or ID (for a clone, the new computer); a deleted one by its ID',
       ),
+      flag(
+        'idempotency-key',
+        'Only the operation a call sent with this Idempotency-Key started (an error names it as idempotency_key)',
+      ),
       num('limit', 'Page size, 1 to 100 (default 20)'),
       flag('cursor', 'The next_cursor of the page before'),
     ],
   ),
   command('operations get', 'Read one lifecycle operation', ['id']),
+  command('workspaces list', "List the account's workspaces, oldest first"),
+  command('workspaces get', 'Read one workspace', ['workspace']),
+  command(
+    'workspaces members',
+    'List the people who reach a workspace; needs a key that is not confined to a workspace',
+    ['workspace'],
+  ),
   command(
     'operations wait',
     'Wait until an operation succeeds (exit 0) or fails (operation_failed); succeeded is not a booted desktop',

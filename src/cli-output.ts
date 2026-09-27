@@ -145,6 +145,25 @@ export function redact(
   return value;
 }
 
+/**
+ * What a caller needs to find out how a call whose answer was lost ended: the
+ * `Idempotency-Key` it was sent with (on an error that leaves the outcome
+ * unknown), the operation the platform named, and the request id to quote.
+ * Each only when present.
+ */
+function recoveryInfo(error: MandalaError): {
+  idempotency_key?: string;
+  request_id?: string;
+  operation_id?: string;
+} {
+  const api = error instanceof APIError ? error : undefined;
+  return {
+    ...(error.idempotencyKey === undefined ? {} : { idempotency_key: error.idempotencyKey }),
+    ...(api?.requestId === undefined ? {} : { request_id: api.requestId }),
+    ...(api?.operationId === undefined ? {} : { operation_id: api.operationId }),
+  };
+}
+
 export function errorInfo(error: unknown): {
   code: string;
   message: string;
@@ -152,6 +171,9 @@ export function errorInfo(error: unknown): {
   reason?: string;
   details?: unknown;
   usage?: string;
+  idempotency_key?: string;
+  request_id?: string;
+  operation_id?: string;
 } {
   if (error instanceof CliError)
     return {
@@ -168,6 +190,7 @@ export function errorInfo(error: unknown): {
       message: error.message,
       status: error.status,
       ...(error.reason === undefined ? {} : { reason: error.reason }),
+      ...recoveryInfo(error),
     };
   if (error instanceof Error && error.name === 'AbortError')
     return { code: 'cancelled', message: 'Cancelled' };
@@ -184,7 +207,12 @@ export function errorInfo(error: unknown): {
     // The local stages (credentials, device login) name their own failure, in
     // the same snake_case.
     const own = (error as { code?: unknown }).code;
-    return { code: typeof own === 'string' ? own : errorCode(error), message: error.message };
+    return {
+      code: typeof own === 'string' ? own : errorCode(error),
+      message: error.message,
+      // A dropped connection after a keyed call went out carries its key.
+      ...recoveryInfo(error),
+    };
   }
   // A system error from the local machine (a file that is not there, a pipe
   // closed): its errno is kept, but as a detail, so `code` stays a word.
@@ -246,6 +274,22 @@ export class Output {
       // would let one start a forged `mandala:` line. diagnostic() escapes it,
       // after redacting: a secret escaped first no longer matches itself.
       this.diagnostic(`mandala: ${info.message}`, { keepNewlines: false });
+      // How to learn how a call whose answer was lost ended.
+      const recovery = [
+        ...(info.operation_id === undefined ? [] : [`operation ${info.operation_id}`]),
+        ...(info.idempotency_key === undefined ? [] : [`idempotency key ${info.idempotency_key}`]),
+        ...(info.request_id === undefined ? [] : [`request id ${info.request_id}`]),
+      ];
+      if (recovery.length)
+        this.diagnostic(
+          `mandala: ${recovery.join('; ')}` +
+            (info.operation_id !== undefined
+              ? ` (read it with: mandala operations get ${info.operation_id})`
+              : info.idempotency_key !== undefined
+                ? ` (find its operation with: mandala operations list --idempotency-key ${info.idempotency_key})`
+                : ''),
+          { keepNewlines: false },
+        );
       if (info.usage) this.diagnostic(`\n${info.usage.trimEnd()}`);
     }
     return exitCode;

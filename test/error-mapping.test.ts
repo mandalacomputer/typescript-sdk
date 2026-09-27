@@ -510,7 +510,7 @@ it.each([undefined, 'final-body'])(
   },
 );
 
-it('keeps concurrent request IDs distinct and the CLI error envelope unchanged', async () => {
+it('keeps concurrent request IDs distinct, each in its own CLI error envelope', async () => {
   const { errorInfo } = await import('../src/cli-output.js');
   const rec = recorder((call) =>
     Response.json(
@@ -528,5 +528,7 @@ it('keeps concurrent request IDs distinct and the CLI error envelope unchanged',
     code: 'method_not_allowed',
     message: 'method not allowed',
     status: 405,
+    request_id: '/computers',
   });
+  expect(errorInfo(errors[1])).toMatchObject({ request_id: '/sizes' });
 });
