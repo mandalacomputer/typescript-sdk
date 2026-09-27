@@ -310,10 +310,29 @@ describe('refusal words and the 503 on a change', () => {
     expect(on(409, 'unsupported')).toBe(false);
     expect(on(409, 'exists')).toBe(false);
     expect(on(403, 'revoked')).toBe(false);
+    // A resize of a running computer: stopping it is the fix, never waiting.
+    expect(on(409, 'running', 'PATCH')).toBe(false);
     // A word this version does not know leaves the status answer standing.
     expect(on(409, 'a-word-from-later')).toBe(true);
     // A guest agent silent past its boot window is a 502: an unknown outcome.
     expect(isTransient(errorForStatus(502, 'x', { error: 'x' }, { method: 'POST' }))).toBe(false);
+  });
+
+  it('calls a resize refused because the computer is running permanent', async () => {
+    const { rec, client: c } = client((call) =>
+      call.method === 'PATCH'
+        ? json(
+            { error: 'stop the computer before resizing it', reason: 'running' },
+            { status: 409 },
+          )
+        : json(COMPUTER),
+    );
+    const vm = await c.computers.get('vm-1');
+    const err = await vm.update({ ramMb: 8192 }).catch((e: unknown) => e);
+    expect(rec.calls.filter((x) => x.method === 'PATCH')).toHaveLength(1);
+    expect(err).toBeInstanceOf(ConflictError);
+    expect((err as APIError).reason).toBe('running');
+    expect(isTransient(err)).toBe(false);
   });
 
   it('calls a read answered 503 transient, and a change answered 503 not', () => {

@@ -205,6 +205,15 @@ name.
   output they had, and now print one line on stderr naming `--as` and `--path`
   instead; the line never repeats what followed the `=`.
 
+### Fixed
+
+- **A 409 whose `reason` is `running` is permanent.** It is the platform's
+  refusal of something only a stopped computer can have, a resize today, and
+  nothing clears it by waiting: stop the computer, then send it again.
+  `isTransient` called it worth sending again, as it does any other
+  `ConflictError`, so a caller looping on it resent the same resize until it
+  gave up. It now answers `false`.
+
 ### Security
 
 - **The CLI's text output no longer passes a terminal the control characters
