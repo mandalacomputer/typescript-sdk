@@ -108,6 +108,10 @@ const NAMES = [
   'team/ServiceAccountKeyProd2025V2/config1',
   'apps/prod/OAuth2ClientSecretForGitHubApp',
   'k8s/ClusterAdminToken2024/v2',
+  // Forty characters, as an AWS secret access key is, and still names.
+  'services/payments/prod/DB/password/v2024',
+  'infra/terraform/AWS/state/bucket/key2024',
+  'ci/github/actions/deploy/SSH/key/ed25519',
 ];
 
 /** An AWS secret access key's documented example, which `/` cuts into runs of 13, 7 and 18. */

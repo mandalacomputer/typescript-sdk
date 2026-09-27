@@ -325,30 +325,16 @@ function randomRun(run: string): boolean {
 const BASE64 = /^[A-Za-z0-9+/]{20,}={0,2}$/;
 
 /**
- * Whether a base64 string that `/` or `+` cut into short runs is random: the
- * runs joined read as random ({@link randomRun}), or it is forty characters
- * holding all three classes, as an AWS secret access key is — unless a piece of
- * eight or more reads as camel-case words, as a relative path's do
- * (`team/ServiceAccountKeyProd2025V2/config1`).
+ * Whether a base64 string that `/` or `+` cut into short runs is random: its
+ * runs joined read as random ({@link randomRun}). A relative path passes, as
+ * its joined pieces read as words (`team/ServiceAccountKeyProd2025V2/config1`).
  *
  * A leading `/` is an absolute path, and a string with neither `/` nor `+` is
  * one run, which {@link randomRun} already reads.
  */
 function base64Value(text: string): boolean {
   if (!BASE64.test(text) || text.startsWith('/') || !/[+/]/.test(text)) return false;
-  if (randomRun(text.replace(/[+/=]/g, ''))) return true;
-  const wordy = (piece: string) =>
-    piece.length >= 8 &&
-    /[a-z]/.test(piece) &&
-    /[A-Z]/.test(piece) &&
-    camelWords(piece.replace(/[0-9]+/g, ''));
-  return (
-    text.length === 40 &&
-    /[0-9]/.test(text) &&
-    /[a-z]/.test(text) &&
-    /[A-Z]/.test(text) &&
-    !text.split(/[+/=]+/).some(wordy)
-  );
+  return randomRun(text.replace(/[+/=]/g, ''));
 }
 
 /**
