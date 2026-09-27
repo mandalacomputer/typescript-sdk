@@ -224,7 +224,9 @@ name.
   another" errors, and a create's errors about a `--secret` or
   `--secret-file` binding, now quote what was typed only when it is shaped
   like a secret id or reads as a name, and otherwise say `that name or id` or
-  name the binding by its position, in text and `--json` alike.
+  name the binding by its position, in text and `--json` alike. A
+  successful `secrets rm` of a secret whose stored name looks like a value
+  prints only its id, and its `--json` result leaves `name` out.
 
 ## [0.6.0] — 2026-09-25
 

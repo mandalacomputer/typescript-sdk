@@ -679,6 +679,51 @@ describe('secrets rm repeats the NAME only when it is safe to', () => {
     }
   });
 
+  it('does not repeat a value-shaped name it deleted, in text or --json', async () => {
+    const rows = [{ ...SECRET, id: 'csec-00000000000000cc', name: TOKEN }];
+    for (const typed of [TOKEN, 'csec-00000000000000cc']) {
+      const text = await run(['secrets', 'rm', typed], store(rows));
+      expect(text.code).toBe(0);
+      expect(text.rec.calls.some((x) => x.method === 'DELETE')).toBe(true);
+      expect(text.out + text.err).not.toContain(TOKEN);
+      expect(text.out).toBe('deleted csec-00000000000000cc\n');
+      const asJson = await run(['secrets', 'rm', typed, '--json'], store(rows));
+      expect(asJson.code).toBe(0);
+      expect(asJson.rec.calls.some((x) => x.method === 'DELETE')).toBe(true);
+      expect(asJson.out + asJson.err).not.toContain(TOKEN);
+      expect(JSON.parse(asJson.out).data).toEqual({ id: 'csec-00000000000000cc', deleted: true });
+    }
+  });
+
+  it('still names a plain name it deleted', async () => {
+    const rows = [{ ...SECRET, id: 'csec-00000000000000cc', name: 'MY_KEY' }];
+    const text = await run(['secrets', 'rm', 'MY_KEY'], store(rows));
+    expect(text.code).toBe(0);
+    expect(text.out).toBe('deleted csec-00000000000000cc  MY_KEY\n');
+    const asJson = await run(['secrets', 'rm', 'MY_KEY', '--json'], store(rows));
+    expect(JSON.parse(asJson.out).data).toEqual({
+      id: 'csec-00000000000000cc',
+      name: 'MY_KEY',
+      deleted: true,
+    });
+  });
+
+  it('does not repeat an operand the name rules refuse, though the value check passes it', async () => {
+    const passphrase = 'correct horse battery staple and a few more words to pass sixty chars';
+    expect(passphrase.length).toBeGreaterThan(60);
+    for (const typed of [passphrase, 'MY\u0007KEY']) {
+      expect(looksLikeSecretValue(typed)).toBe(false);
+      const text = await run(['secrets', 'rm', typed], store([]));
+      expect(text.code).toBe(1);
+      expect(text.out + text.err).not.toContain(typed);
+      expect(text.err).toContain('no secret with that name or id in this scope');
+      const asJson = await run(['secrets', 'rm', typed, '--json'], store([]));
+      expect(asJson.code).toBe(1);
+      expect(asJson.out + asJson.err).not.toContain(typed);
+      expect(JSON.parse(asJson.out).error.message).toContain('that name or id');
+    }
+  });
+
   it('still names an ambiguous key that reads as a name', async () => {
     const rows = [
       { ...SECRET, id: 'csec-00000000000000bb', name: 'OTHER' },

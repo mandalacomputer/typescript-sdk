@@ -772,7 +772,13 @@ export async function secretsRemove(
     }
   }
   const gone = removed as Secret;
-  if (output.json) return output.result({ id: gone.id, name: gone.name, deleted: true });
-  io.stdout.write(`deleted ${gone.id}  ${gone.name}\n`);
+  // A name that looks like a value (a token stored as a name by mistake, the
+  // likeliest reason to delete it) is left out rather than printed whole.
+  const safe = quotedOperand(gone.name) !== undefined;
+  if (output.json)
+    return output.result(
+      safe ? { id: gone.id, name: gone.name, deleted: true } : { id: gone.id, deleted: true },
+    );
+  io.stdout.write(safe ? `deleted ${gone.id}  ${gone.name}\n` : `deleted ${gone.id}\n`);
   return 0;
 }
