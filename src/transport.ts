@@ -19,9 +19,62 @@ import {
   MandalaError,
   ValidationError,
 } from './errors.js';
-import { isRecord } from './paths.js';
+import { isIdempotencyKey, isRecord } from './paths.js';
 
 export const DEFAULT_BASE_URL = 'https://app.mandala.computer/api/v1';
+
+/**
+ * The header every lifecycle call carries so that sending it again cannot do
+ * it twice (platform OPL-5127).
+ *
+ * The platform records a call that carries one BEFORE carrying it out, and for
+ * 24 hours answers the same key with the same request from that record instead
+ * of doing the call again: `409` with `code: "idempotency_in_progress"` while
+ * it runs, the original answer once it has finished. A different request under
+ * the same key is a `422`.
+ */
+export const IDEMPOTENCY_KEY_HEADER = 'Idempotency-Key';
+
+/**
+ * The `Idempotency-Key` header for ONE logical lifecycle call: the caller's
+ * key, checked here rather than refused by the platform, or a fresh random one.
+ *
+ * Called once per call, before its first attempt, and passed in the call's
+ * headers — so whatever re-sends that call re-sends the same key, and a
+ * different call (the start a launch makes after its create) gets its own.
+ */
+export function idempotencyHeaders(key?: string): Record<string, string> {
+  if (key === undefined) return { [IDEMPOTENCY_KEY_HEADER]: globalThis.crypto.randomUUID() };
+  if (!isIdempotencyKey(key)) {
+    throw new ValidationError(
+      'idempotencyKey must be 1 to 255 characters, each printable ASCII other than a space',
+    );
+  }
+  return { [IDEMPOTENCY_KEY_HEADER]: key };
+}
+
+/** The two refusals of a keyed call that say its outcome is not known yet. */
+const KEY_UNSETTLED: ReadonlySet<unknown> = new Set([
+  'idempotency_in_progress',
+  'idempotency_outcome_unknown',
+]);
+
+/**
+ * The error a keyed call failed with, carrying its key where the outcome is
+ * unknown — a request that may have been received, a `5xx`, or the platform
+ * saying the keyed call is still running or was never heard to end — so the
+ * caller can send the same call again with it and not do it twice.
+ */
+function withIdempotencyKey(error: unknown, opts: RequestOptions): unknown {
+  const key = opts.headers?.[IDEMPOTENCY_KEY_HEADER];
+  if (key === undefined || !(error instanceof MandalaError)) return error;
+  const unknownOutcome =
+    error instanceof ConnectionInterruptedError ||
+    (error instanceof APIError &&
+      (error.status >= 500 || (isRecord(error.body) && KEY_UNSETTLED.has(error.body.code))));
+  if (unknownOutcome) error.idempotencyKey = key;
+  return error;
+}
 
 /** Largest delay Node timers can represent without wrapping to one millisecond. */
 export const MAX_TIMER_MS = 2_147_483_647;
@@ -681,16 +734,19 @@ export class Transport {
         const sent = await this.#fetchRaw(method, path, opts, operation);
         return await read(sent);
       } catch (error) {
-        if (operation.signal?.aborted) throw error;
+        if (operation.signal?.aborted) throw withIdempotencyKey(error, opts);
         const delay = this.#retryDelay(method, path, error, attempt);
-        if (delay === undefined) throw error;
+        if (delay === undefined) throw withIdempotencyKey(error, opts);
         try {
           await retrySleep(delay, operation.signal);
         } catch (cause) {
           if (opts.signal?.aborted) throw opts.signal.reason;
-          throw new ConnectionInterruptedError(
-            `${method} ${path} timed out after ${timeoutMs}ms while waiting to retry.`,
-            { cause },
+          throw withIdempotencyKey(
+            new ConnectionInterruptedError(
+              `${method} ${path} timed out after ${timeoutMs}ms while waiting to retry.`,
+              { cause },
+            ),
+            opts,
           );
         }
       }

@@ -16,6 +16,21 @@ name.
 
 ### Added
 
+- **`Idempotency-Key` on every lifecycle call:** create (and `ephemeral`),
+  `clone`, `start`, `stop`, `suspend`, `restart`, `update`, `relocate`,
+  `delete`, `snapshots.restore` and `snapshots.clone` send one — a fresh random
+  key per call, or your own through the new `idempotencyKey` option (1 to 255
+  printable ASCII characters, no spaces; anything else is a `ValidationError`
+  before a request is sent). An error that leaves the outcome unknown — a
+  dropped connection or timeout after the request went out, a `5xx`, or the
+  platform's `409` `idempotency_in_progress` / `idempotency_outcome_unknown` —
+  carries the key as `err.idempotencyKey`: sending the same call again with it
+  answers the first call's result instead of doing it twice. `operations.list`
+  takes `idempotencyKey`, `Operation.idempotencyKey` says which key started one
+  (`null` when none, or on an older platform), `delete` is a documented
+  `OperationKind`, and `isTransient` is false for `idempotency_outcome_unknown`.
+  New exports: `IdempotencyOptions`, `IDEMPOTENCY_KEY_HEADER`.
+
 - **Lifecycle operations:** `client.operations.get(id)`, `list({ computerId,
   limit, cursor })` and `wait(idOrOperation, { timeoutMs, pollMs })`, over the
   platform's `GET operations` and `GET operations/{id}`. `wait` resolves on

@@ -255,6 +255,8 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
       'body:secrets',
       'body:browser_proxy',
       'body:egress_proxy',
+      // Every lifecycle call carries one (platform OPL-5127).
+      'header:Idempotency-Key',
     ],
   ],
   ['GET computers/:id', []],
@@ -268,18 +270,22 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
       'body:idle_suspend_min',
       'body:browser_proxy',
       'body:egress_proxy',
+      'header:Idempotency-Key',
     ],
   ],
-  ['DELETE computers/:id', ['query:snapshots', 'query:expect']],
-  ['POST computers/:id/start', ['query:resume_only']],
-  ['POST computers/:id/stop', ['query:force']],
-  ['POST computers/:id/suspend', []],
-  ['POST computers/:id/restart', []],
-  ['POST computers/:id/clone', ['body:name']],
+  ['DELETE computers/:id', ['query:snapshots', 'query:expect', 'header:Idempotency-Key']],
+  ['POST computers/:id/start', ['query:resume_only', 'header:Idempotency-Key']],
+  ['POST computers/:id/stop', ['query:force', 'header:Idempotency-Key']],
+  ['POST computers/:id/suspend', ['header:Idempotency-Key']],
+  ['POST computers/:id/restart', ['header:Idempotency-Key']],
+  ['POST computers/:id/clone', ['body:name', 'header:Idempotency-Key']],
   // The sizing group and nothing else. The platform reads only these three off a
   // move and ignores the rest, so a name sent here would be dropped silently —
   // which is why MoveArgs has no room for one.
-  ['POST computers/:id/move', ['body:cpu', 'body:ram_mb', 'body:disk_gb']],
+  [
+    'POST computers/:id/move',
+    ['body:cpu', 'body:ram_mb', 'body:disk_gb', 'header:Idempotency-Key'],
+  ],
   ['GET moves', []],
 
   // Computer use.
@@ -388,8 +394,11 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
   ['GET snapshots', ['query:allow_partial', 'query:include']],
   ['GET computers/:id/snapshots', []],
   ['POST computers/:id/snapshots', ['body:name', 'body:memory']],
-  ['POST snapshots/:id/restore', []],
-  ['POST snapshots/:id/clone', ['body:name', 'body:memory', 'body:inherit_secrets']],
+  ['POST snapshots/:id/restore', ['header:Idempotency-Key']],
+  [
+    'POST snapshots/:id/clone',
+    ['body:name', 'body:memory', 'body:inherit_secrets', 'header:Idempotency-Key'],
+  ],
   ['DELETE snapshots/:id', []],
   ['GET computers/:id/schedule', []],
   ['PUT computers/:id/schedule', ['body:enabled', 'body:hour', 'body:minute', 'body:tz']],
@@ -449,7 +458,7 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
   ['DELETE api-keys/:id', []],
 
   // Lifecycle operations, read only (OPL-5055).
-  ['GET operations', ['query:computer_id', 'query:cursor', 'query:limit']],
+  ['GET operations', ['query:computer_id', 'query:cursor', 'query:limit', 'query:idempotency_key']],
   ['GET operations/:id', []],
 ]);
 

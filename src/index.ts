@@ -276,6 +276,7 @@ export {
 export type {
   CallOptions,
   ComputerListOptions,
+  IdempotencyOptions,
   ListOptions,
   SnapshotCloneOptions,
   UsageOptions,
@@ -296,7 +297,7 @@ export {
   Webhooks,
 } from './resources.js';
 export type { Bytes, ContentRange, Listing, SSEEvent, TransportOptions } from './transport.js';
-export { DEFAULT_BASE_URL, MODEL_KEY_HEADER } from './transport.js';
+export { DEFAULT_BASE_URL, IDEMPOTENCY_KEY_HEADER, MODEL_KEY_HEADER } from './transport.js';
 export type { VerifyOptions, WebhookBody, WebhookHeaders } from './webhooks.js';
 export {
   replayRetentionS,

@@ -2705,9 +2705,22 @@ export function apiKeyCreateBody(args: ApiKeyCreateArgs = {}): Json {
 export const OPERATIONS_PAGE_MAX = 100;
 
 /** What one page of `GET operations` asks for. */
+/**
+ * Whether a string is an `Idempotency-Key` the platform accepts: 1 to 255
+ * characters, each printable ASCII other than the space (platform OPL-5127).
+ */
+export const isIdempotencyKey = (key: unknown): key is string =>
+  typeof key === 'string' && /^[\x21-\x7e]{1,255}$/.test(key);
+
 export type OperationListArgs = {
   /** Only this computer's operations. For a clone, that is the NEW computer. */
   computerId?: string;
+  /**
+   * Only the operation the lifecycle call sent with this `Idempotency-Key`
+   * recorded — found even when that call's answer was lost — within the key's
+   * 24 hours. See {@link MandalaError.idempotencyKey}.
+   */
+  idempotencyKey?: string;
   /** At most this many, 1 to {@link OPERATIONS_PAGE_MAX}. The platform's default is 20. */
   limit?: number;
   /** The `nextCursor` of the page before. */
@@ -2731,6 +2744,14 @@ export function operationsQuery(args: OperationListArgs = {}): Query {
       throw new ValidationError('computerId must be a computer id, with no spaces around it');
     }
     q.computer_id = id;
+  }
+  if (args.idempotencyKey !== undefined) {
+    if (!isIdempotencyKey(args.idempotencyKey)) {
+      throw new ValidationError(
+        'idempotencyKey must be 1 to 255 characters, each printable ASCII other than a space',
+      );
+    }
+    q.idempotency_key = args.idempotencyKey;
   }
   if (args.limit !== undefined) {
     if (!Number.isInteger(args.limit) || args.limit < 1 || args.limit > OPERATIONS_PAGE_MAX) {

@@ -47,6 +47,17 @@ export class ValidationError extends TypeError {
 /** Base class for every error this SDK raises. */
 export class MandalaError extends Error {
   override name = 'MandalaError';
+  /**
+   * The `Idempotency-Key` a lifecycle call was sent with, on an error that
+   * leaves its outcome unknown: a request that may have been received before
+   * the connection died or the deadline fired, a `5xx`, or the platform's
+   * `409`s saying the keyed call is still running or was never heard to end
+   * (platform OPL-5127). Send the same call again with this key to learn how
+   * it went without doing it twice — `computer.start({ idempotencyKey })` — or
+   * find its operation with `operations.list({ idempotencyKey })`.
+   * `undefined` on every other error.
+   */
+  idempotencyKey?: string;
 }
 
 /**
@@ -1096,6 +1107,20 @@ export function isTransient(err: unknown): boolean {
     err.body !== null &&
     typeof err.body === 'object' &&
     (err.body as { code?: unknown }).code === 'template_image_preparing'
+  )
+    return false;
+  // A keyed call the platform never heard end (platform OPL-5127). A 409 with
+  // no `reason`, so the ConflictError branch below would call it worth sending
+  // again — and the same key answers the same thing forever: the computer is
+  // what says whether it happened. Its sibling `idempotency_in_progress`
+  // carries `reason: "contention"` and IS worth sending again, which is the
+  // wait for the first call's answer.
+  if (
+    err instanceof APIError &&
+    err.status === 409 &&
+    err.body !== null &&
+    typeof err.body === 'object' &&
+    (err.body as { code?: unknown }).code === 'idempotency_outcome_unknown'
   )
     return false;
   // A move offer is a 409 and is NOT worth retrying: it is a decision about the

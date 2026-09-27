@@ -1932,10 +1932,21 @@ is copied, and a move until it lands. Keep `waitForGuest` (or
 [Readiness](#readiness).
 
 `client.operations.get(id)` reads one, and `client.operations.list({ computerId,
-limit, cursor })` pages through them newest first — pass `nextCursor` back as
-`cursor`. An API key confined to a workspace sees only its computers'
-operations, and anything else is a `NotFoundError`. Calls made from the
-dashboard record none.
+idempotencyKey, limit, cursor })` pages through them newest first — pass
+`nextCursor` back as `cursor`. An API key confined to a workspace sees only its
+computers' operations, and anything else is a `NotFoundError`. Calls made from
+the dashboard record none.
+
+**Every lifecycle call sends an `Idempotency-Key`** — create, clone, start,
+stop, suspend, restart, update, relocate, delete and a snapshot's restore and
+clone — a fresh one per call unless you pass `{ idempotencyKey }` yourself. The
+platform records the call before carrying it out, so if its answer is lost (a
+timeout, a dropped connection, a `5xx`) the error carries the key as
+`err.idempotencyKey`: send the same call again with it and it is not done
+twice — you get the first call's answer, or a `ConflictError` with `code:
+"idempotency_in_progress"` while it still runs — or find its operation with
+`client.operations.list({ idempotencyKey })`. Keys last 24 hours, and a key
+sent with a different request is refused with a `422`.
 
 ### Snapshots
 
