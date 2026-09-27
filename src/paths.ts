@@ -625,6 +625,7 @@ export type CreateArgs = {
    * Firefox; nothing else on the computer). Linux only. A create carrying one
    * is always a cold boot; wait for {@link Computer.waitForBrowserProxy} before
    * starting a browser that must use it. {@link Computers.launch} waits for you.
+   * A `credentialsSecretId` names a secret bound in {@link secrets} as a file.
    */
   browserProxy?: BrowserProxyArgs;
 };
@@ -642,6 +643,20 @@ export type CreateArgs = {
 export type BrowserProxyArgs = {
   server: string;
   bypass?: string[];
+  /**
+   * For an upstream that asks for a username and password: the id of a secret
+   * (`csec-` and sixteen hex characters) whose value is `user:password`. The
+   * secret must be bound to the computer as a FILE (`{secretId, file}`, at
+   * create or with {@link Computer.setSecrets}) or the platform refuses the
+   * setting with a `400`; a computer's first secrets are bound while it is
+   * stopped, and a rebind that drops that binding is refused with a `409` while
+   * the proxy names it. Only with an `http://` proxy for now.
+   *
+   * The setting is replaced whole, so leaving this out of an update REMOVES
+   * the credentials. Spread the {@link BrowserProxy} read off the computer to
+   * keep them. `null` is the same as leaving it out.
+   */
+  credentialsSecretId?: string | null;
 };
 
 /**
@@ -832,9 +847,11 @@ export type UpdateArgs = {
   idleSuspendMin?: number | null;
   /**
    * The proxy this computer's browsers are sent through, replaced whole; `null`
-   * removes it. On its own: the platform refuses it beside any other field. A
-   * running computer has it within seconds ({@link Computer.waitForBrowserProxy});
-   * a stopped or suspended one is given it as it starts.
+   * removes it. Whole means a `credentialsSecretId` left out is removed: spread
+   * {@link Computer.browserProxy} to keep it. On its own: the platform refuses
+   * it beside any other field. A running computer has it within seconds
+   * ({@link Computer.waitForBrowserProxy}); a stopped or suspended one is given
+   * it as it starts.
    */
   browserProxy?: BrowserProxyArgs | null;
 };
@@ -846,26 +863,41 @@ export type UpdateArgs = {
  * schemes a proxy may use, which hosts it may name and how many bypass entries
  * there may be are the platform's, and they are growing, so they are left to
  * its `400`, which names the rule that was broken. A copy here would refuse a
- * value the platform has since learned to accept.
+ * value the platform has since learned to accept. The credentials id is
+ * checked here because its form is an id's, not a rule that grows.
  */
 export function browserProxyBody(p: BrowserProxyArgs, what = 'browserProxy'): Json {
   if (!p || typeof p !== 'object' || Array.isArray(p)) {
-    throw new ValidationError(`${what} must be an object: {server, bypass?}`);
+    throw new ValidationError(`${what} must be an object: {server, bypass?, credentialsSecretId?}`);
   }
   const server = requireString(p.server, `${what}.server`);
   if (!server.trim()) throw new ValidationError(`${what}.server must not be empty`);
-  if (p.bypass === undefined) return { server };
-  if (!Array.isArray(p.bypass)) {
-    throw new ValidationError(`${what}.bypass must be a list of hosts`);
-  }
-  const bypass = p.bypass.map((entry, i) => {
-    if (!requireString(entry, `${what}.bypass[${i}]`).trim()) {
-      throw new ValidationError(`${what}.bypass[${i}] must not be empty`);
+  const out: Json = { server };
+  if (p.bypass !== undefined) {
+    if (!Array.isArray(p.bypass)) {
+      throw new ValidationError(`${what}.bypass must be a list of hosts`);
     }
-    return entry;
-  });
-  return { server, bypass };
+    out.bypass = p.bypass.map((entry, i) => {
+      if (!requireString(entry, `${what}.bypass[${i}]`).trim()) {
+        throw new ValidationError(`${what}.bypass[${i}] must not be empty`);
+      }
+      return entry;
+    });
+  }
+  if (p.credentialsSecretId !== undefined && p.credentialsSecretId !== null) {
+    const id = requireString(p.credentialsSecretId, `${what}.credentialsSecretId`);
+    if (!SECRET_ID.test(id)) {
+      throw new ValidationError(
+        `${what}.credentialsSecretId must be a secret's id: csec- and sixteen hex characters`,
+      );
+    }
+    out.credentials_secret_id = id;
+  }
+  return out;
 }
+
+/** A secret's id: `csec-` and sixteen lowercase hex characters. */
+const SECRET_ID = /^csec-[0-9a-f]{16}$/;
 
 /**
  * What a move is asked for: the same sizing group a resize takes, minus the two

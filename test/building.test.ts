@@ -146,6 +146,43 @@ describe('browserProxy', () => {
       });
     }
   });
+
+  it('sends a credentials id, and leaves it out when there is none', () => {
+    const credentialsSecretId = 'csec-0123456789abcdef';
+    expect(P.updateBody({ browserProxy: { server, credentialsSecretId } })).toEqual({
+      browser_proxy: { server, credentials_secret_id: credentialsSecretId },
+    });
+    expect(
+      P.createBody({ browserProxy: { server, bypass: ['a.com'], credentialsSecretId } }),
+    ).toEqual({
+      browser_proxy: { server, bypass: ['a.com'], credentials_secret_id: credentialsSecretId },
+      start: true,
+    });
+    for (const none of [undefined, null]) {
+      expect(P.updateBody({ browserProxy: { server, credentialsSecretId: none } })).toEqual({
+        browser_proxy: { server },
+      });
+    }
+  });
+
+  it('refuses a credentials id that is not a secret id', () => {
+    // Refused here rather than dropped: a proxy sent without its id is a proxy
+    // whose credentials the update removed.
+    for (const bad of [
+      '',
+      'csec-0123',
+      'csec-0123456789ABCDEF',
+      ' csec-0123456789abcdef',
+      'my-secret',
+    ]) {
+      expect(() => P.updateBody({ browserProxy: { server, credentialsSecretId: bad } })).toThrow(
+        ValidationError,
+      );
+    }
+    expect(() =>
+      P.updateBody({ browserProxy: { server, credentialsSecretId: 7 as unknown as string } }),
+    ).toThrow(/credentialsSecretId must be a string/);
+  });
 });
 
 describe('numbers that would go out as null', () => {

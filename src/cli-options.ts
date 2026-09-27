@@ -165,6 +165,10 @@ export const COMMANDS: readonly Command[] = [
         'Hosts the browsers reach directly, comma-separated (with --browser-proxy); repeat for more',
         { repeatable: true },
       ),
+      flag(
+        'browser-proxy-credentials',
+        'The id of a secret holding user:password for the proxy (with --browser-proxy); bind it with --secret-file too',
+      ),
     ],
   ),
   command('computers get', 'Get a computer by name or ID', ['computer']),
@@ -199,12 +203,17 @@ export const COMMANDS: readonly Command[] = [
   ),
   command(
     'computers browser-proxy set',
-    "Send a computer's browsers through a proxy, replacing any it has",
+    "Send a computer's browsers through a proxy, replacing any it has; its credentials are kept unless changed",
     ['computer', 'url'],
     [
       flag('bypass', 'Hosts the browsers reach directly, comma-separated; repeat for more', {
         repeatable: true,
       }),
+      flag(
+        'credentials',
+        'The id of a secret holding user:password for the proxy, bound to the computer as a file',
+      ),
+      bool('no-credentials', "Remove the proxy's credentials rather than keep them"),
     ],
   ),
   command(

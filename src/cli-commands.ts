@@ -522,6 +522,21 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
     const bypass = bypassFlag && bypassList(many(bypassFlag), bypassFlag);
     if (path === 'computers create' && bypass !== undefined && s('browser-proxy') === undefined)
       throw new CliError('invalid_arguments', '--browser-proxy-bypass requires --browser-proxy');
+    if (
+      path === 'computers create' &&
+      s('browser-proxy-credentials') !== undefined &&
+      s('browser-proxy') === undefined
+    )
+      throw new CliError(
+        'invalid_arguments',
+        '--browser-proxy-credentials requires --browser-proxy',
+      );
+    if (
+      path === 'computers browser-proxy set' &&
+      s('credentials') !== undefined &&
+      b('no-credentials')
+    )
+      throw new CliError('invalid_arguments', 'give --credentials or --no-credentials, not both');
     const create: P.CreateArgs = {
       name: s('name'),
       size: s('size'),
@@ -533,7 +548,13 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
       resolution: s('resolution'),
       start: !b('no-start'),
       browserProxy:
-        s('browser-proxy') === undefined ? undefined : { server: s('browser-proxy')!, bypass },
+        s('browser-proxy') === undefined
+          ? undefined
+          : {
+              server: s('browser-proxy')!,
+              bypass,
+              credentialsSecretId: s('browser-proxy-credentials'),
+            },
     };
     // Split and checked here; each is found by name or id only once the rest
     // of the create has passed, just before it is sent.
@@ -545,13 +566,20 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
     const deprecated = equalsDeprecation(bindings);
     if (deprecated) output.diagnostic(deprecated);
     if (path === 'computers create') P.createBody(create);
+    // The setting is replaced whole, so a set that named no credentials would
+    // remove the ones the proxy has. Unless told to change them, the current id
+    // is read off the computer just before the change and carried over.
     const proxy: P.UpdateArgs | undefined =
       path === 'computers browser-proxy set'
-        ? { browserProxy: { server: args[1]!, bypass } }
+        ? { browserProxy: { server: args[1]!, bypass, credentialsSecretId: s('credentials') } }
         : path === 'computers browser-proxy clear'
           ? { browserProxy: null }
           : undefined;
     if (proxy) P.updateBody(proxy);
+    const keepProxyCredentials =
+      path === 'computers browser-proxy set' &&
+      s('credentials') === undefined &&
+      !b('no-credentials');
     const resize = { cpu: n('cpu'), ramMb: n('ram-mb'), diskGb: n('disk-gb') };
     if (path === 'computers resize') {
       if (resize.cpu === undefined && resize.ramMb === undefined && resize.diskGb === undefined)
@@ -750,7 +778,17 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
         return output.result(computerData(await (await computer()).rename(args[1]!, call)));
       case 'computers resize':
         return output.result(computerData(await (await computer()).update(resize, call)));
-      case 'computers browser-proxy set':
+      case 'computers browser-proxy set': {
+        const c = await computer();
+        let change = proxy!;
+        if (keepProxyCredentials) {
+          // Read fresh rather than off the listing the name was resolved from.
+          const kept = (await c.refresh(call)).browserProxy?.credentialsSecretId;
+          if (kept)
+            change = { browserProxy: { ...change.browserProxy!, credentialsSecretId: kept } };
+        }
+        return output.result(computerData(await c.update(change, call)));
+      }
       case 'computers browser-proxy clear':
         return output.result(computerData(await (await computer()).update(proxy!, call)));
       case 'computers view': {

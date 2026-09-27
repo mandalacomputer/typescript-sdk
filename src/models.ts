@@ -3159,20 +3159,33 @@ export function toSshAccess(d: Record<string, unknown>): SshAccess {
 /**
  * The proxy a computer's browsers are sent through, as the platform reports it:
  * `server` in its stored spelling (lower-cased), and the bypass list as
- * stored, duplicates dropped. `bypass` is absent when there is none.
+ * stored, duplicates dropped. `bypass` is absent when there is none, and
+ * `credentialsSecretId` when the proxy is used without credentials.
+ *
+ * Its shape is {@link BrowserProxyArgs}'s, so a proxy read here can be spread,
+ * edited and passed back to {@link Computer.update} with nothing lost.
  */
 export type BrowserProxy = {
   server: string;
   bypass?: string[];
+  /**
+   * The id of the secret (`csec-` and sixteen hex characters) whose value,
+   * `user:password`, is what the browsers' traffic authenticates to the proxy
+   * with. The id only, never the value. See
+   * {@link BrowserProxyArgs.credentialsSecretId}.
+   */
+  credentialsSecretId?: string;
 };
 
 /**
  * Strict, for the reason {@link toSecretBinding} is: a change replaces the
  * setting whole, so what is read here is what a caller edits and sends back. A
- * bypass entry dropped or a server coerced on the read is one the caller never
- * saw, removed by an update that looked like it kept everything. Fields this
- * client does not know are left out rather than refused, so a platform that
- * grows the setting is still readable.
+ * bypass entry or a credentials id dropped, or a server coerced, on the read is
+ * one the caller never saw, removed by an update that looked like it kept
+ * everything: a credentials id lost that way leaves every browser on the
+ * computer answered `407` by its upstream. Fields this client does not know are
+ * left out rather than refused, so a platform that grows the setting is still
+ * readable.
  */
 export function toBrowserProxy(d: unknown, id = 'the computer'): BrowserProxy | undefined {
   if (d === undefined || d === null) return undefined;
@@ -3180,11 +3193,23 @@ export function toBrowserProxy(d: unknown, id = 'the computer'): BrowserProxy | 
   if (typeof d.server !== 'string' || !d.server) {
     throw new MandalaError(`expected ${id}'s browser_proxy to name its server`);
   }
-  if (d.bypass === undefined || d.bypass === null) return { server: d.server };
-  if (!Array.isArray(d.bypass) || !d.bypass.every((e) => typeof e === 'string' && e !== '')) {
-    throw new MandalaError(`expected ${id}'s browser_proxy bypass to be a list of hosts`);
+  const out: BrowserProxy = { server: d.server };
+  if (d.bypass !== undefined && d.bypass !== null) {
+    if (!Array.isArray(d.bypass) || !d.bypass.every((e) => typeof e === 'string' && e !== '')) {
+      throw new MandalaError(`expected ${id}'s browser_proxy bypass to be a list of hosts`);
+    }
+    if (d.bypass.length) out.bypass = [...d.bypass];
   }
-  return d.bypass.length ? { server: d.server, bypass: [...d.bypass] } : { server: d.server };
+  const creds = d.credentials_secret_id;
+  if (creds !== undefined && creds !== null) {
+    if (typeof creds !== 'string' || !creds) {
+      throw new MandalaError(
+        `expected ${id}'s browser_proxy credentials_secret_id to be a secret's id`,
+      );
+    }
+    out.credentialsSecretId = creds;
+  }
+  return out;
 }
 
 // --- secret bindings --------------------------------------------------------

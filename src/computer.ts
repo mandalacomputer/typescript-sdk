@@ -1287,7 +1287,9 @@ export class Computer {
    *
    * Decoded strictly: a value this client cannot read throws rather than being
    * dropped, because {@link update} replaces the setting whole and this is what
-   * a caller would edit and send back.
+   * a caller would edit and send back. It carries the proxy's
+   * `credentialsSecretId`, so `update({ browserProxy: { ...c.browserProxy!,
+   * bypass } })` keeps the credentials.
    */
   get browserProxy(): BrowserProxy | undefined {
     return toBrowserProxy(this.#data.browser_proxy, this.id);
@@ -1512,7 +1514,12 @@ export class Computer {
    * Snapshots already taken keep the name they were captured under.
    *
    * `browserProxy` travels alone and replaces the setting whole; `null`
-   * removes it and takes its files out of the computer. A running computer has
+   * removes it and takes its files out of the computer. Whole includes the
+   * credentials: a `credentialsSecretId` left out is removed, and the browsers'
+   * upstream then answers `407`, so start from {@link browserProxy} to change
+   * one part. The id's secret must be bound to this computer as a file
+   * (a computer's first secrets are bound while it is stopped), or the change
+   * is refused with a `400`; http:// proxies only for now. A running computer has
    * the change within seconds — {@link waitForBrowserProxy} before starting a
    * browser that must use it — and a stopped or suspended one is given it as
    * it starts. Which proxies are accepted is the platform's rule, and a value

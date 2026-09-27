@@ -1053,6 +1053,43 @@ describe('browserProxy on the computer', () => {
     expect(rec.calls[2]!.body).toEqual({ browser_proxy: null });
     expect(c.browserProxy).toBeUndefined();
   });
+
+  it('keeps the credentials id through a read, a spread and an update', async () => {
+    // The documented way to change one part of the setting is to edit what was
+    // read and send it back. The update replaces the setting whole, so an id
+    // dropped anywhere on that trip removes the credentials and every browser
+    // on the computer is then answered 407 by its upstream.
+    const creds = 'csec-0123456789abcdef';
+    const withCreds = { ...PROXY, credentials_secret_id: creds };
+    const rec = recorder(() => json(proxied(undefined, { browser_proxy: withCreds })));
+    const client = new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: rec.fetch });
+    const c = await client.computers.get('launch-42');
+    expect(c.browserProxy).toEqual({ ...PROXY, credentialsSecretId: creds });
+    await c.update({ browserProxy: { ...c.browserProxy!, bypass: ['<local>', '*.example.com'] } });
+    expect(rec.calls[1]!.body).toEqual({
+      browser_proxy: {
+        server: PROXY.server,
+        bypass: ['<local>', '*.example.com'],
+        credentials_secret_id: creds,
+      },
+    });
+    // Passed back as it was read, unchanged.
+    await c.update({ browserProxy: c.browserProxy! });
+    expect(rec.calls[2]!.body).toEqual({ browser_proxy: withCreds });
+  });
+
+  it('refuses a credentials id it cannot read rather than dropping it', async () => {
+    for (const value of ['', 7, ['csec-0123456789abcdef']]) {
+      const c = await read(
+        proxied(undefined, { browser_proxy: { ...PROXY, credentials_secret_id: value } }),
+      );
+      expect(() => c.browserProxy).toThrow(/credentials_secret_id/);
+    }
+    const none = await read(
+      proxied(undefined, { browser_proxy: { ...PROXY, credentials_secret_id: null } }),
+    );
+    expect(none.browserProxy).toEqual(PROXY);
+  });
 });
 
 describe('launch with a browser proxy', () => {
