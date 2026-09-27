@@ -92,6 +92,37 @@ export function errorCode(error: MandalaError): string {
   return 'failed';
 }
 
+/**
+ * Every character a terminal acts on rather than shows: C0 controls, DEL, C1
+ * controls, and the bidirectional marks, embeddings, overrides and isolates
+ * (U+061C, U+200E, U+200F, U+202A-U+202E, U+2066-U+2069).
+ */
+const TERMINAL_UNSAFE =
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: matching them is the point.
+  /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
+
+/**
+ * `text` with every control and bidi character replaced by a visible escape,
+ * `\uXXXX` (lowercase hex, as JSON spells one): ESC becomes `\u001b`, U+202E
+ * `\u202e`. For a string someone else chose (a team, key or computer name, a
+ * guest's filename, a platform message) that is about to reach a terminal,
+ * where a raw ESC, BEL or C1 control would be obeyed rather than shown (a
+ * clipboard write, an erased line) and a bidi override would reorder the text
+ * after it. Printable text, letters in any script and emoji included, passes
+ * unchanged. A backslash is not escaped, so a name that spells `\u001b` out
+ * reads the same as an escaped ESC; the exact string is in `--json`.
+ *
+ * `keepNewlines` leaves `\n` alone, for text that is several lines by design:
+ * a diagnostic, an indented JSON document. JSON is escaped the same way
+ * inside its strings, and `\uXXXX` there is the same value, so the document
+ * still parses to the real string.
+ */
+export function terminalSafe(text: string, { keepNewlines = false } = {}): string {
+  return text.replace(TERMINAL_UNSAFE, (c) =>
+    keepNewlines && c === '\n' ? c : `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`,
+  );
+}
+
 /** Mask credentials even when a remote error or payload repeats their values. */
 export function redact(
   value: unknown,
@@ -189,9 +220,10 @@ export class Output {
         data,
         exit_code: exitCode,
       });
+    // For a person: JSON.stringify leaves DEL, C1 and bidi characters raw.
     else
       this.io.stdout.write(
-        `${JSON.stringify(redact(data, this.io.env, this.io.secrets), null, 2)}\n`,
+        `${terminalSafe(JSON.stringify(redact(data, this.io.env, this.io.secrets), null, 2), { keepNewlines: true })}\n`,
       );
     return exitCode;
   }
@@ -209,7 +241,11 @@ export class Output {
           exit_code: exitCode,
         });
     } else {
-      this.diagnostic(`mandala: ${info.message}`);
+      // The message is escaped whole, line feed included: it often quotes a
+      // platform error or a name another party chose, and a line break in it
+      // would let one start a forged `mandala:` line. diagnostic() escapes it,
+      // after redacting: a secret escaped first no longer matches itself.
+      this.diagnostic(`mandala: ${info.message}`, { keepNewlines: false });
       if (info.usage) this.diagnostic(`\n${info.usage.trimEnd()}`);
     }
     return exitCode;
@@ -227,12 +263,24 @@ export class Output {
     else {
       const text = typeof data === 'string' ? data : JSON.stringify(data);
       this.io.stdout.write(
-        `${this.io.now().toISOString()} ${type}: ${redact(text, this.io.env, this.io.secrets)}\n`,
+        `${this.io.now().toISOString()} ${terminalSafe(type)}: ${terminalSafe(redact(text, this.io.env, this.io.secrets) as string, { keepNewlines: true })}\n`,
       );
     }
   }
 
-  diagnostic(text: string): void {
-    this.io.stderr.write(`${redact(text, this.io.env, this.io.secrets)}\n`);
+  /**
+   * A line for a person on stderr. Escaped here, once, because nearly every
+   * one quotes something another party chose: a platform error, a key or
+   * computer name, a device-login code.
+   *
+   * Redacted BEFORE it is escaped: a registered secret can hold a line feed
+   * (a PEM key), and once that is `\u000a` the secret no longer matches. So a
+   * caller passes raw text, never text it escaped itself, and sets
+   * `keepNewlines: false` when a line feed in it must not start a line.
+   */
+  diagnostic(text: string, { keepNewlines = true } = {}): void {
+    this.io.stderr.write(
+      `${terminalSafe(redact(text, this.io.env, this.io.secrets) as string, { keepNewlines })}\n`,
+    );
   }
 }

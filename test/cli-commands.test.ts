@@ -28,6 +28,8 @@ import {
   SECRET,
   SECRET_LIST,
   SNAPSHOT,
+  SSH_ACCESS,
+  SSH_KEY,
   TEMPLATE_CHECK,
   USAGE,
   WEBHOOK,
@@ -3509,7 +3511,8 @@ describe('files, rename, resize, view, and secrets bound at create', () => {
       '',
     ]);
     expect(result.err).toContain('unordered part of it');
-    expect(result.err).toContain('2 names could not be shown');
+    expect(result.err).toContain('2 names left out of the listing');
+    expect(result.err).not.toContain('shown escaped');
   });
 
   it('uploads with files upload, create-only when asked', async () => {
@@ -3594,5 +3597,188 @@ describe('files, rename, resize, view, and secrets bound at create', () => {
     const result = await h.run(argv);
     expect(result.code).toBe(1);
     expect(h.rec.calls).toEqual([]);
+  });
+});
+
+// Text output quotes names other people chose: a guest's filename, a computer
+// or key name. A terminal obeys a control character rather than showing it
+// (OSC 52 writes the clipboard, U+009D is the same OSC in C1 form) and a bidi
+// override reorders what follows, so each is printed escaped; --json keeps the
+// real string.
+describe('text output escapes control and bidi characters', () => {
+  // Every character a terminal acts on, newline aside, found one by one:
+  // written out here rather than borrowed from the code under test.
+  const rawControls = (text: string) =>
+    [...text].filter((c) => {
+      const n = c.codePointAt(0)!;
+      return (
+        (n < 0x20 && n !== 0x0a) ||
+        (n >= 0x7f && n <= 0x9f) ||
+        n === 0x61c ||
+        n === 0x200e ||
+        n === 0x200f ||
+        (n >= 0x202a && n <= 0x202e) ||
+        (n >= 0x2066 && n <= 0x2069)
+      );
+    });
+  const HOSTILE_FILE = 'a\u009d0;owned\u009c\u202etxt.exe';
+
+  it('files list shows a name holding C1 controls and U+202E escaped, and says so', async () => {
+    const listing = {
+      ...DIRECTORY,
+      entries: [{ name: HOSTILE_FILE, type: 'file', size_bytes: 1 }],
+    };
+    const respond: Responder = (call) =>
+      call.path.endsWith('/files/list') ? json(listing) : anyRoute(call);
+    const result = await harness(respond).run(['files', 'list', COMPUTER.id, '/tmp'], false);
+    expect(result.code).toBe(0);
+    for (const c of ['\u009d', '\u009c', '\u202e']) expect(result.out).not.toContain(c);
+    expect(result.out).toBe('file                   1  a\\u009d0;owned\\u009c\\u202etxt.exe\n');
+    expect(result.err).toContain('shown escaped');
+    const exact = await harness(respond).run(['files', 'list', COMPUTER.id, '/tmp']);
+    expect(exact.frames[0].data.entries[0].name).toBe(HOSTILE_FILE);
+  });
+
+  it('usage escapes a computer name', async () => {
+    const report = {
+      ...USAGE,
+      usage: {
+        ...USAGE.usage,
+        computers: [
+          { ...USAGE.usage.computers[0], name: 'x\u001b]52;c;aGk=\u0007\u001b[2K\rfake' },
+        ],
+      },
+    };
+    const result = await harness((call) =>
+      call.path === '/usage' ? json(report) : anyRoute(call),
+    ).run(['usage'], false);
+    expect(result.code).toBe(0);
+    expect(rawControls(result.out)).toEqual([]);
+    expect(result.out).toContain('x\\u001b]52;c;aGk=\\u0007\\u001b[2K\\u000dfake (vm-1)');
+  });
+
+  // Redacted line by line BEFORE it is escaped: a secret with a line feed in
+  // it, escaped first, would no longer match and would print readable.
+  it('usage redacts a secret holding a line feed that a computer name repeats', async () => {
+    const secret = '-----BEGIN KEY-----\nAAAASECRET\n-----END KEY-----';
+    const report = {
+      ...USAGE,
+      usage: {
+        ...USAGE.usage,
+        computers: [{ ...USAGE.usage.computers[0], name: `box ${secret}` }],
+      },
+    };
+    const h = harness((call) => (call.path === '/usage' ? json(report) : anyRoute(call)));
+    h.io.secrets = new Set([secret]);
+    const result = await h.run(['usage'], false);
+    expect(result.code).toBe(0);
+    expect(result.out).not.toContain('AAAASECRET');
+    expect(result.out).toContain('  box [REDACTED] (vm-1)');
+  });
+
+  it('ssh-key list escapes a key name, and keeps its columns', async () => {
+    const key = { ...SSH_KEY, name: 'k\u001b[31mred\u202e' };
+    const result = await harness((call) =>
+      call.path === '/ssh-keys' ? json([key]) : anyRoute(call),
+    ).run(['ssh-key', 'list'], false);
+    expect(result.code).toBe(0);
+    expect(rawControls(result.out)).toEqual([]);
+    expect(result.out.trimEnd().split('\n')[1]).toMatch(/ k\\u001b\[31mred\\u202e$/);
+  });
+
+  // The SSH commands quote a computer name, a key name and the platform's
+  // access error. A responder with all three hostile, and an ssh runtime whose
+  // home holds the key the fixture registers.
+  const HOSTILE_NAME = 'box\u001b]52;c;aGk=\u0007\u001b[2K\rfake\u202e';
+  const sshHarness = async (access: object, put: object = access) => {
+    const home = await tempDir();
+    fs.mkdirSync(join(home, '.ssh'));
+    fs.writeFileSync(join(home, '.ssh', 'id_ed25519.pub'), `${SSH_KEY.public_key}\n`);
+    const key = { ...SSH_KEY, name: 'k\u001b[31mred\u202e' };
+    const named = { ...COMPUTER, name: HOSTILE_NAME };
+    const respond: Responder = (call) =>
+      call.method === 'GET' && call.path === '/computers'
+        ? json([named])
+        : call.path === `/computers/${COMPUTER.id}`
+          ? json(named)
+          : call.path === `/computers/${COMPUTER.id}/ssh`
+            ? json(call.method === 'PUT' ? put : access)
+            : call.path === '/ssh-keys'
+              ? call.method === 'GET'
+                ? json([])
+                : json(key, { status: 201 })
+              : anyRoute(call);
+    const h = harness(respond);
+    h.io.ssh = {
+      home: () => home,
+      windows: false,
+      which: () => '/usr/bin/ssh',
+      run: async () => 0,
+    };
+    return { h, home };
+  };
+
+  it("ssh-access escapes the computer's name and the platform's error", async () => {
+    const { h } = await sshHarness({ ...SSH_ACCESS, error: 'boom\u001b[2K\rfake\nline' });
+    const result = await h.run(['ssh-access', COMPUTER.id], false);
+    expect(result.code).toBe(0);
+    expect(rawControls(result.out)).toEqual([]);
+    expect(result.out).toBe(
+      'SSH is on for box\\u001b]52;c;aGk=\\u0007\\u001b[2K\\u000dfake\\u202e\n' +
+        '  keys: 1 of 1 delivered\n' +
+        '  error: boom\\u001b[2K\\u000dfake\\u000aline\n',
+    );
+  });
+
+  it("ssh-key add escapes the key's name", async () => {
+    const { h, home } = await sshHarness(SSH_ACCESS);
+    const result = await h.run(
+      ['ssh-key', 'add', join(home, '.ssh', 'id_ed25519.pub'), '--name', 'x'],
+      false,
+    );
+    expect(result.code).toBe(0);
+    expect(rawControls(result.out)).toEqual([]);
+    expect(result.out).toBe(
+      `added ${SSH_KEY.id}  ${SSH_KEY.fingerprint}  k\\u001b[31mred\\u202e\n`,
+    );
+  });
+
+  it("ssh --setup escapes the key's and the computer's names", async () => {
+    const { h } = await sshHarness({ ...SSH_ACCESS, enabled: false, key_count: 0 });
+    const result = await h.run(['ssh', '--setup', COMPUTER.id], false);
+    expect(result.code).toBe(0);
+    expect(rawControls(result.out)).toEqual([]);
+    expect(result.out.split('\n').slice(0, 2)).toEqual([
+      `key ${SSH_KEY.fingerprint} (k\\u001b[31mred\\u202e) registered`,
+      'SSH is on for box\\u001b]52;c;aGk=\\u0007\\u001b[2K\\u000dfake\\u202e',
+    ]);
+  });
+
+  it("ssh --setup's refusal escapes the platform's error, line feed included", async () => {
+    const { h } = await sshHarness(SSH_ACCESS, {
+      ...SSH_ACCESS,
+      error: 'no\nmandala: SSH is on',
+    });
+    const result = await h.run(['ssh', '--setup', COMPUTER.id], false);
+    expect(result.code).not.toBe(0);
+    expect(result.err).toBe(
+      "mandala: the computer's host refused the SSH setting: no\\u000amandala: SSH is on\n",
+    );
+  });
+
+  it("escapes a record's strings in the JSON printed for a person, which still parses to them", async () => {
+    const named = { ...COMPUTER, name: 'demo\u202eexe.\u0085' };
+    const respond: Responder = (call) =>
+      call.method === 'GET' && call.path === `/computers/${COMPUTER.id}`
+        ? json(named)
+        : anyRoute(call);
+    const result = await harness(respond).run(['computers', 'get', COMPUTER.id], false);
+    expect(result.code).toBe(0);
+    expect(rawControls(result.out)).toEqual([]);
+    expect(result.out).toContain('demo\\u202eexe.\\u0085');
+    expect(JSON.parse(result.out).name).toBe(named.name);
+    const exact = await harness(respond).run(['computers', 'get', COMPUTER.id]);
+    expect(exact.out).toContain(named.name);
+    expect(exact.frames[0].data.name).toBe(named.name);
   });
 });
