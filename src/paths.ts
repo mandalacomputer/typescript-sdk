@@ -492,7 +492,31 @@ export const build = (id: string): string => `${BUILDS}/${pathId(id, 'build id')
 export const sshKey = (id: string): string => `${SSH_KEYS}/${pathId(id, 'ssh key id')}`;
 export const webhook = (id: string): string => `${WEBHOOKS}/${pathId(id, 'webhook id')}`;
 export const secret = (id: string): string => `${SECRETS}/${pathId(id, 'secret id')}`;
-export const apiKey = (id: string): string => `${API_KEYS}/${pathId(id, 'API key id')}`;
+/**
+ * An API key's id, refused when it is the key itself.
+ *
+ * A key id is `key-` and hex; an API key is `com_` and hex, and nothing that
+ * starts `com_` can be an id. Revoking the key you hold by pasting it would
+ * otherwise put the live credential into the request path, where every access
+ * log on the way records it in plain text, and the platform would answer 404
+ * and leave the key valid. Refused before any request, with a message that
+ * does not repeat the value. Surrounding whitespace and letter case are
+ * ignored for the check alone, so a pasted key with a stray space or in
+ * capitals is caught too. A full key anywhere in the value is refused as well:
+ * one behind a zero-width space or byte-order mark, in quotes, or after a
+ * label (`Bearer com_...`) is still the key, and a key id can never hold one.
+ */
+export const apiKey = (id: string): string => {
+  if (
+    typeof id === 'string' &&
+    (id.trim().toLowerCase().startsWith('com_') || /com_[0-9a-f]{48}/i.test(id))
+  ) {
+    throw new ValidationError(
+      'that is an API key, not a key id; run api-keys list to find its id (key-...)',
+    );
+  }
+  return `${API_KEYS}/${pathId(id, 'API key id')}`;
+};
 export const operation = (id: string): string => `${OPERATIONS}/${pathId(id, 'operation id')}`;
 export const webhookAction = (id: string, action: 'rotate' | 'test' | 'deliveries'): string =>
   `${webhook(id)}/${action}`;

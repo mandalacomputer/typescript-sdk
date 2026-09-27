@@ -42,6 +42,25 @@ const NO_PERMISSION =
 const NO_ESCALATION =
   'An API key cannot mint a key that manages keys. Turn that on for the new key from the dashboard.';
 
+// A raw key is `com_` and 48 hex; a key id is `key-` and hex.
+const RAW_KEY = `com_${'ab'.repeat(24)}`;
+// A pasted key with a stray space or newline, or in capitals, is still one; so
+// is a full key behind a zero-width space or byte-order mark, in quotes, or
+// after a label.
+const RAW_KEY_SHAPES = [
+  RAW_KEY,
+  ` ${RAW_KEY}\n`,
+  RAW_KEY.toUpperCase(),
+  'com_short',
+  `\u200b${RAW_KEY}`,
+  `\ufeff${RAW_KEY}`,
+  `"${RAW_KEY}"`,
+  `Bearer ${RAW_KEY}`,
+  `MANDALA_API_KEY=${RAW_KEY}`,
+];
+const RAW_KEY_SENTENCE =
+  'that is an API key, not a key id; run api-keys list to find its id (key-...)';
+
 function sdk(respond: Responder = anyRoute) {
   const rec = recorder(respond);
   return { rec, client: new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: rec.fetch }) };
@@ -169,6 +188,21 @@ describe('client.apiKeys', () => {
     await expect(client.apiKeys.revoke('')).rejects.toBeInstanceOf(ValidationError);
     expect(rec.calls).toHaveLength(1);
   });
+
+  it.each(RAW_KEY_SHAPES)(
+    'refuses an API key given as the id before any request (%j)',
+    async (raw) => {
+      const { rec, client } = sdk();
+      const error = await client.apiKeys.revoke(raw).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(ValidationError);
+      expect((error as ValidationError).message).toBe(RAW_KEY_SENTENCE);
+      expect((error as ValidationError).message.toLowerCase()).not.toContain(
+        raw.trim().toLowerCase(),
+      );
+      expect((error as ValidationError).message.toLowerCase()).not.toContain(RAW_KEY);
+      expect(rec.calls).toEqual([]);
+    },
+  );
 
   it("surfaces the platform's 403 sentence as a PermissionDeniedError", async () => {
     const { client } = sdk(() => json({ error: NO_PERMISSION, request_id: 'r1' }, { status: 403 }));
@@ -338,6 +372,24 @@ describe('mandala api-keys', () => {
     const r = await h.run(['api-keys', 'create']);
     expect(r.err).toBe(`mandala: ${NO_ESCALATION}\n`);
   });
+
+  it.each(RAW_KEY_SHAPES)(
+    'refuses an API key given as the id, without repeating it (%j)',
+    async (raw) => {
+      const h = cli();
+      const r = await h.run(['api-keys', 'revoke', raw]);
+      expect(r.code).toBe(1);
+      expect(h.rec.calls).toEqual([]);
+      expect(r.out).toBe('');
+      expect(r.err).toBe(`mandala: ${RAW_KEY_SENTENCE}\n`);
+      const j = await h.run(['api-keys', 'revoke', raw, '--json']);
+      expect(j.code).toBe(1);
+      expect(h.rec.calls).toEqual([]);
+      expect(j.out.toLowerCase()).not.toContain(RAW_KEY);
+      expect(j.err.toLowerCase()).not.toContain(RAW_KEY);
+      expect(j.json).toMatchObject({ ok: false, error: { message: RAW_KEY_SENTENCE } });
+    },
+  );
 
   it('refuses revoke without an id before any request', async () => {
     const h = cli();
