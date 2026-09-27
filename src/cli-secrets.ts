@@ -325,15 +325,30 @@ function randomRun(run: string): boolean {
 const BASE64 = /^[A-Za-z0-9+/]{20,}={0,2}$/;
 
 /**
+ * Whether one piece of a base64-shaped string, between `/` and `+`, reads as a
+ * name's: four characters or fewer, one case of letters with digits only
+ * closing it (`prod`, `NPMTOKEN`, `key2024`), digits alone, or both cases as
+ * camel-case words ({@link camelWords}).
+ */
+function namePiece(piece: string): boolean {
+  if (piece.length <= 4 || /^[a-z]+[0-9]*$|^[A-Z]+[0-9]*$|^[0-9]+$/.test(piece)) return true;
+  return /[a-z]/.test(piece) && /[A-Z]/.test(piece) && camelWords(piece.replace(/[0-9]+/g, ''));
+}
+
+/**
  * Whether a base64 string that `/` or `+` cut into short runs is random: its
- * runs joined read as random ({@link randomRun}). A relative path passes, as
- * its joined pieces read as words (`team/ServiceAccountKeyProd2025V2/config1`).
+ * runs joined read as random ({@link randomRun}). Joining erases where one
+ * piece ends and the next begins, so a relative path every piece of which
+ * reads as a name's ({@link namePiece}) passes first
+ * (`myapp/prod/DATABASE/URL`, `team/ServiceAccountKeyProd2025V2/config1`); one
+ * piece that does not is enough to read the whole.
  *
  * A leading `/` is an absolute path, and a string with neither `/` nor `+` is
  * one run, which {@link randomRun} already reads.
  */
 function base64Value(text: string): boolean {
   if (!BASE64.test(text) || text.startsWith('/') || !/[+/]/.test(text)) return false;
+  if (text.replace(/=+$/, '').split(/[+/]/).every(namePiece)) return false;
   return randomRun(text.replace(/[+/=]/g, ''));
 }
 

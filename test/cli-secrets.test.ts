@@ -112,6 +112,13 @@ const NAMES = [
   'services/payments/prod/DB/password/v2024',
   'infra/terraform/AWS/state/bucket/key2024',
   'ci/github/actions/deploy/SSH/key/ed25519',
+  // Pieces that joined lose their case and letter/digit edges, and read random.
+  'myapp/prod/DATABASE/URL',
+  'github/org/repo/NPMTOKEN',
+  'prod/GCP/SA/JSON/key/2024',
+  'prod/APIKEY/STRIPE/live2',
+  'OPENAI+ANTHROPIC/keys/prod',
+  'k8s/v2/db1/s3/prod/x509/certs',
 ];
 
 /** An AWS secret access key's documented example, which `/` cuts into runs of 13, 7 and 18. */
