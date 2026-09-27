@@ -1,4 +1,7 @@
+import { PassThrough, Readable } from 'node:stream';
 import { describe, expect, it } from 'vitest';
+import { main } from '../src/cli.js';
+import type { CliIO } from '../src/cli-runtime.js';
 import {
   bindingSpecs,
   equalsDeprecation,
@@ -6,6 +9,8 @@ import {
   scrubTypedTargets,
   withoutTypedTargets,
 } from '../src/cli-secrets.js';
+import { Client } from '../src/index.js';
+import { BASE, json, type Responder, recorder, SECRET, SECRET_LIST } from './harness.js';
 
 // Token-shaped fixtures are assembled at run time, so no literal in this file
 // reads as a leaked credential to a scanner. None of them is a real token.
@@ -521,5 +526,197 @@ describe('typed targets stay out of what a create prints', () => {
       'env [REDACTED] is reserved; file [REDACTED] is taken; ghost and MY_KEY_2 are not',
     );
     expect(scrubTypedTargets('not an error', specs)).toBe('not an error');
+  });
+});
+
+// --- what `secrets set` and `secrets rm` send and repeat (OPL-5234, OPL-5235, OPL-5214)
+
+/** `main` over a fake store: stdin piped as `stdin`, or `tty` read as a terminal. */
+async function run(
+  args: string[],
+  respond: Responder,
+  stdin: string | CliIO['stdin'] = 'the-value\n',
+) {
+  const rec = recorder(respond);
+  let out = '';
+  let err = '';
+  const sink = (add: (s: string) => void) => ({
+    write: ((s: unknown) => {
+      add(String(s));
+      return true;
+    }) as NodeJS.WritableStream['write'],
+  });
+  const code = await main(args, {
+    env: { MANDALA_API_KEY: 'com_cli_test' },
+    stdin:
+      typeof stdin === 'string'
+        ? Object.assign(Readable.from([Buffer.from(stdin)]), { isTTY: false })
+        : stdin,
+    stdout: sink((s) => {
+      out += s;
+    }),
+    stderr: sink((s) => {
+      err += s;
+    }),
+    createClient: () => new Client({ apiKey: 'com_cli_test', baseUrl: BASE, fetch: rec.fetch }),
+    now: () => new Date('2026-09-16T00:00:00Z'),
+  });
+  return { code, out, err, rec };
+}
+
+/** A store holding `rows`, which creates what it is sent and deletes what it is asked to. */
+const store =
+  (rows: (typeof SECRET)[]): Responder =>
+  (call) => {
+    if (call.path === '/secrets' && call.method === 'GET')
+      return json({ ...SECRET_LIST, secrets: rows });
+    if (call.path === '/secrets' && call.method === 'POST')
+      return json(
+        { ...SECRET, id: 'csec-00000000000000aa', name: (call.body as { name: string }).name },
+        { status: 201 },
+      );
+    if (call.method === 'DELETE') return json({ ok: true });
+    return json({ error: 'No such secret.' }, { status: 404 });
+  };
+
+/** The value typed where a NAME goes. A valid name by the platform's rules, too. */
+const TOKEN = tok('ghp_', body(36));
+
+describe('secrets set refuses a NAME that looks like a value', () => {
+  it('is flagged by the value check, and passes the name rules', () => {
+    expect(looksLikeSecretValue(TOKEN)).toBe(true);
+    expect(TOKEN.length).toBeLessThanOrEqual(60);
+  });
+
+  it('sends nothing and never repeats it, piped or --json', async () => {
+    for (const mode of [[], ['--json']]) {
+      const r = await run(['secrets', 'set', TOKEN, ...mode], store([]));
+      expect(r.code).not.toBe(0);
+      expect(r.rec.calls).toEqual([]);
+      expect(r.out + r.err).not.toContain(TOKEN);
+      expect(r.out + r.err).toContain('--no-value-check');
+      expect(r.out + r.err).toMatch(/nothing was sent/);
+    }
+    // Surrounding spaces are trimmed off a name, so they do not hide one.
+    const padded = await run(['secrets', 'set', ` ${TOKEN} `], store([]));
+    expect(padded.code).not.toBe(0);
+    expect(padded.rec.calls).toEqual([]);
+  });
+
+  it('never prompts with it at a terminal', async () => {
+    const modes: boolean[] = [];
+    const tty = Object.assign(new PassThrough({ objectMode: true }), {
+      isTTY: true,
+      setRawMode: (mode: boolean) => modes.push(mode),
+    });
+    tty.write(Buffer.from('the-value\r'));
+    const r = await run(['secrets', 'set', TOKEN], store([]), tty);
+    expect(r.code).not.toBe(0);
+    expect(r.err).not.toMatch(/Value for/);
+    expect(r.out + r.err).not.toContain(TOKEN);
+    expect(modes).toEqual([]);
+    expect(r.rec.calls).toEqual([]);
+  });
+
+  it('sends it as typed with --no-value-check', async () => {
+    const r = await run(['secrets', 'set', TOKEN, '--no-value-check'], store([]));
+    expect(r.code).toBe(0);
+    expect(r.rec.calls.find((x) => x.method === 'POST')?.body).toEqual({
+      name: TOKEN,
+      value: 'the-value',
+    });
+  });
+
+  it('takes the names people store', async () => {
+    for (const name of ['GITHUB_TOKEN', 'db-password', 'SLACK_WEBHOOK_URL', 'OPENAI_API_KEY']) {
+      const r = await run(['secrets', 'set', name], store([]));
+      expect(r.code).toBe(0);
+      expect(r.rec.calls.find((x) => x.method === 'POST')?.body).toEqual({
+        name,
+        value: 'the-value',
+      });
+    }
+  });
+});
+
+describe('secrets rm repeats the NAME only when it is safe to', () => {
+  it('does not repeat a value typed as the name, in text or --json', async () => {
+    const text = await run(['secrets', 'rm', TOKEN], store([]));
+    expect(text.code).toBe(1);
+    expect(text.out + text.err).not.toContain(TOKEN);
+    expect(text.err).toContain('no secret with that name or id in this scope');
+    const asJson = await run(['secrets', 'rm', TOKEN, '--json'], store([]));
+    expect(asJson.code).toBe(1);
+    expect(asJson.out + asJson.err).not.toContain(TOKEN);
+    expect(JSON.parse(asJson.out).error).toMatchObject({
+      code: 'not_found',
+      message: expect.stringContaining('that name or id'),
+    });
+    expect(asJson.rec.calls.some((x) => x.method === 'DELETE')).toBe(false);
+  });
+
+  it('still names an id, and a name that reads as one, it did not find', async () => {
+    for (const typed of ['csec-0123456789abcdef', 'MY_KEY']) {
+      const r = await run(['secrets', 'rm', typed], store([]));
+      expect(r.code).toBe(1);
+      expect(r.err).toContain(`no secret named ${JSON.stringify(typed)} in this scope`);
+    }
+  });
+
+  it('does not repeat it when it is one secret’s name and another’s id', async () => {
+    // A value stored as a name by mistake, and a secret whose id spells it.
+    const rows = [
+      { ...SECRET, id: TOKEN, name: 'OTHER' },
+      { ...SECRET, id: 'csec-00000000000000cc', name: TOKEN },
+    ];
+    for (const mode of [[], ['--json']]) {
+      const r = await run(['secrets', 'rm', TOKEN, ...mode], store(rows));
+      expect(r.code).not.toBe(0);
+      expect(r.out + r.err).toMatch(/ambiguous_secret|is the name of/);
+      expect(r.out + r.err).toContain('that name or id is the name of csec-00000000000000cc');
+      expect(r.out + r.err).not.toContain(TOKEN);
+      expect(r.rec.calls.some((x) => x.method === 'DELETE')).toBe(false);
+    }
+  });
+
+  it('still names an ambiguous key that reads as a name', async () => {
+    const rows = [
+      { ...SECRET, id: 'csec-00000000000000bb', name: 'OTHER' },
+      { ...SECRET, id: 'csec-00000000000000cc', name: 'csec-00000000000000bb' },
+    ];
+    const r = await run(['secrets', 'rm', 'csec-00000000000000bb'], store(rows));
+    expect(r.code).not.toBe(0);
+    expect(r.err).toContain('"csec-00000000000000bb" is the name of csec-00000000000000cc');
+  });
+});
+
+describe('a create binding a stored name that looks like a value', () => {
+  it('names the binding by position alone when refusing it', async () => {
+    const rows = [{ ...SECRET, id: 'csec-00000000000000cc', name: TOKEN }];
+    const r = await run(['computers', 'create', '--secret', TOKEN, '--secret', TOKEN], store(rows));
+    expect(r.code).not.toBe(0);
+    expect(r.err).toContain('--secret #2 binds the secret --secret #1 already binds');
+    expect(r.out + r.err).not.toContain(TOKEN);
+    expect(r.rec.calls.some((x) => x.method === 'POST')).toBe(false);
+  });
+
+  it('names it by position alone when its name cannot be a variable', async () => {
+    const dashed = tok('sk-', body(40));
+    expect(looksLikeSecretValue(dashed)).toBe(true);
+    const rows = [{ ...SECRET, id: 'csec-00000000000000cc', name: dashed }];
+    const r = await run(['computers', 'create', '--secret', dashed], store(rows));
+    expect(r.code).not.toBe(0);
+    expect(r.err).toContain('--secret #1: its name cannot be a variable name as it is');
+    expect(r.out + r.err).not.toContain(dashed);
+    expect(r.rec.calls.some((x) => x.method === 'POST')).toBe(false);
+  });
+
+  it('still quotes a key that reads as a name', async () => {
+    const r = await run(
+      ['computers', 'create', '--secret', 'OPENAI_API_KEY', '--secret', 'OPENAI_API_KEY'],
+      store([{ ...SECRET }]),
+    );
+    expect(r.code).not.toBe(0);
+    expect(r.err).toContain('--secret #2 ("OPENAI_API_KEY") binds the secret');
   });
 });

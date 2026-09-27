@@ -214,6 +214,17 @@ name.
   about names left out no longer claims every name with a control character
   was. `computers exec` still writes the command's own output unaltered, as
   `ssh` would.
+- **`secrets set` refuses a NAME that looks like a secret's value, and
+  `secrets rm` no longer repeats one.** `secrets set "$GITHUB_TOKEN"`, the
+  value typed where the name goes, stored the token as a name everyone in the
+  scope can read, and printed it in the prompt and the result. Such a NAME is
+  now refused before any prompt or request, without repeating it; a real name
+  the check misreads goes through with the new `secrets set --no-value-check`.
+  `secrets rm`'s "no secret named" and "name of one secret and the id of
+  another" errors, and a create's errors about a `--secret` or
+  `--secret-file` binding, now quote what was typed only when it is shaped
+  like a secret id or reads as a name, and otherwise say `that name or id` or
+  name the binding by its position, in text and `--json` alike.
 
 ## [0.6.0] — 2026-09-25
 

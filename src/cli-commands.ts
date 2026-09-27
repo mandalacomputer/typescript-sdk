@@ -945,7 +945,9 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
       case 'secrets list':
         return await secretsList(client, io, output, s('workspace'), signal);
       case 'secrets set':
-        return await secretsSet(client, io, output, target, s('workspace'), signal);
+        return await secretsSet(client, io, output, target, s('workspace'), signal, {
+          valueCheck: !b('no-value-check'),
+        });
       case 'secrets rm':
         return await secretsRemove(client, io, output, target, s('workspace'), signal);
       case 'files list': {
