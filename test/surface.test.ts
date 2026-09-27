@@ -255,6 +255,14 @@ async function exerciseEverything(client: Client): Promise<void> {
     template: 'base',
     browserProxy: { server: 'http://proxy.example.com:3128', bypass: ['<local>'] },
   });
+  // An egress proxy at create, with its credentials (OPL-5246).
+  await client.computers.create({
+    template: 'base',
+    egressProxy: {
+      server: 'https://proxy.example.com:3128',
+      credentialsSecretId: 'csec-0123456789abcdef',
+    },
+  });
   await client.computers.create({
     template: 'base',
     templateTransfer: 'prepare-token',
@@ -290,6 +298,8 @@ async function exerciseEverything(client: Client): Promise<void> {
   await c.update({ name: 'resized', ramMb: 8192, diskGb: 80, idleSuspendMin: 30 });
   await c.update({ browserProxy: { server: 'socks5://127.0.0.1:1080' } });
   await c.update({ browserProxy: null });
+  await c.update({ egressProxy: { server: 'socks5://proxy.example.com:1080' } });
+  await c.update({ egressProxy: null });
   // All three sizing fields in one call: the platform reads exactly these three
   // off a move body, and the parameter sweep is what proves the SDK sends them.
   // `move` on the class is the mouse pointer — see Computer.relocate.

@@ -36,6 +36,8 @@ const expectedCommands = [
   'computers resize',
   'computers browser-proxy set',
   'computers browser-proxy clear',
+  'computers egress-proxy set',
+  'computers egress-proxy clear',
   'computers view',
   'computers screenshot',
   'computers exec',

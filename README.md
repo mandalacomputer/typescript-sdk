@@ -1705,6 +1705,69 @@ until it does, and `waitForBrowserProxy()` waits on it. A stopped or suspended
 computer is given the setting as it starts. A browser already running when the
 setting changes applies it at its next start.
 
+### A proxy for all outbound traffic
+
+`egressProxy` sends ALL of a computer's outbound TCP through a proxy — `exec`,
+terminals, package managers and browsers alike. It is taken on the computer's
+host, so nothing inside the computer is configured and nothing there can opt
+out; `browserProxy`, by contrast, covers only the browsers. The server is
+`http://host:port` (a proxy that takes `CONNECT`), `https://host:port` (the
+same, spoken to over TLS) or `socks5://host:port`, with an explicit port and no
+username or password in it. There is no bypass list.
+
+```ts
+const c = await client.computers.create({
+  template: 'base',
+  egressProxy: {
+    server: 'https://proxy.example.com:3128',
+    credentialsSecretId: 'csec-0123456789abcdef', // a secret holding user:password
+  },
+});
+
+c.egressProxy;          // { server: 'https://proxy.example.com:3128', credentialsSecretId: 'csec-…' }
+c.egressProxyPending;   // true until the host holds the credentials
+await c.update({ egressProxy: { server: 'socks5://proxy.example.com:1080' } }); // no credentials now
+await c.update({ egressProxy: null }); // traffic goes out directly again
+```
+
+What to expect once it is set:
+
+- **It fails closed.** When the proxy is down or refuses, or its credentials
+  have not reached the host yet, the connection fails; nothing is sent
+  directly.
+- **UDP to the internet and ICMP are dropped.** QUIC falls back to TCP; NTP
+  and other UDP stop working.
+- **DNS lookups are not proxied.** They still go to the platform's resolver.
+- **Open connections are closed when the setting changes**, and when the
+  computer stops.
+- **A create carrying one is always a cold boot**, never a warm computer, and
+  a clone does not inherit it.
+
+`credentialsSecretId` names a secret in your store (in the computer's
+workspace, or account-wide) whose value is `user:password`. The secret is NOT
+bound to the computer and the computer never receives it: the computer's host
+holds the value and signs in to the proxy for it. With `http://` and
+`socks5://` the credentials cross the network to the proxy in clear text, so
+prefer `https://` when naming them. A secret that is not there, or does not
+hold `user:password`, is refused with a `400`. Replacing the secret's value
+reaches the host within seconds, for connections opened after it. While a
+running computer's host does not hold the value yet — just after a create or a
+change, after the host restarts, or once the secret is deleted —
+`egressProxyPending` is true and every connection is closed; it usually clears
+within seconds.
+
+In `update()` the setting travels alone (anything beside it is a
+`ValidationError` before a request is sent) and replaces the setting whole, so
+a `credentialsSecretId` left out is removed: spread `c.egressProxy` to keep
+it. A value the platform refuses is a `400` whose message says why. A host
+that cannot take the setting yet answers `409` with reason `unsupported` — as
+does one that cannot take an `https://` proxy or credentials yet — and one
+that cannot put it into effect now answers `503`, with nothing changed unless
+its message says the new setting was stored. A change answered with another
+`5xx`, or not answered at all, may or may not have taken effect: read the
+computer, and if it names credentials and `egressProxyPending` stays true,
+send the setting again.
+
 ### Growing past the host
 
 A resize is refused when the size asks for more RAM than the host the computer
@@ -2887,6 +2950,9 @@ mandala computers create --name via-proxy --browser-proxy http://proxy.example.c
 mandala computers browser-proxy set workbench socks5://127.0.0.1:1080 --bypass example.com
 mandala computers wait workbench --until browser-proxy
 mandala computers browser-proxy clear workbench
+mandala computers create --name locked-down --egress-proxy https://proxy.example.com:3128 --egress-proxy-credentials csec-0123456789abcdef
+mandala computers egress-proxy set workbench socks5://proxy.example.com:1080 --no-credentials
+mandala computers egress-proxy clear workbench
 mandala computers stop build-box && mandala computers resize build-box --cpu 4 --ram-mb 8192
 mandala computers view build-box
 ```
@@ -2948,6 +3014,17 @@ repeated. `computers browser-proxy set COMPUTER URL [--bypass LIST]` replaces a
 computer's proxy and `computers browser-proxy clear COMPUTER` removes it. The
 platform decides which URLs and entries it accepts, and its refusal is printed
 as it is.
+
+`--egress-proxy URL` sends ALL of the new computer's outbound TCP through a
+proxy (see [A proxy for all outbound traffic](#a-proxy-for-all-outbound-traffic)),
+and `--egress-proxy-credentials SECRET_ID` names the secret holding its
+`user:password`; it needs `--egress-proxy`, and the secret is not bound to the
+computer. `computers egress-proxy set COMPUTER URL [--credentials SECRET_ID |
+--no-credentials]` replaces a computer's egress proxy and `computers
+egress-proxy clear COMPUTER` removes it. Given neither credentials flag, `set`
+keeps the proxy's current credentials when the server is unchanged, and refuses
+a new server rather than send them there; `browser-proxy set` follows the same
+rule.
 
 `--size` selects a named size and cannot be combined with `--template`, `--cpu`,
 `--ram-mb`, `--disk-gb`, or `--template-transfer`. A preparation token is accepted

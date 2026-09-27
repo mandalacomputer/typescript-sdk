@@ -67,6 +67,7 @@ import type {
   BackgroundExec,
   BrowserProxy,
   DeleteResult,
+  EgressProxy,
   ExecResult,
   GuestDirectory,
   GuestWindow,
@@ -101,6 +102,7 @@ import {
   toBackgroundExec,
   toBrowserProxy,
   toDeleteResult,
+  toEgressProxy,
   toExecResult,
   toGuestDirectory,
   toHoldings,
@@ -1318,6 +1320,41 @@ export class Computer {
     return v;
   }
 
+  // --- egress proxy ---------------------------------------------------
+
+  /**
+   * The proxy ALL of this computer's outbound TCP is sent through — `exec`,
+   * terminals, package managers and browsers alike — taken on its host, so
+   * nothing inside the computer can opt out. It fails closed: when the proxy is
+   * down or refuses, the connection fails and nothing is sent directly. UDP to
+   * the internet and ICMP are dropped, and DNS lookups still go to the
+   * platform's resolver. `undefined` when none is set.
+   *
+   * Decoded strictly, as {@link browserProxy} is, and it carries the
+   * `credentialsSecretId`, so `update({ egressProxy: { ...c.egressProxy!,
+   * server } })` keeps the credentials.
+   */
+  get egressProxy(): EgressProxy | undefined {
+    return toEgressProxy(this.#data.egress_proxy, this.id);
+  }
+
+  /**
+   * Whether this running computer's {@link egressProxy} names credentials its
+   * host does not hold yet — just after a create or a change, after the host
+   * restarts, or once the secret is deleted. Every connection the computer
+   * opens meanwhile is closed, never sent directly; it usually clears within
+   * seconds. `false` on a computer that is not running, and on a platform that
+   * predates the field.
+   */
+  get egressProxyPending(): boolean {
+    const v = this.#data.egress_proxy_pending;
+    if (v === undefined || v === null) return false;
+    if (typeof v !== 'boolean') {
+      throw new MandalaError(`expected ${this.id}'s egress_proxy_pending to be a boolean`);
+    }
+    return v;
+  }
+
   /** The API response verbatim, including any fields this SDK predates. */
   get raw(): Record<string, unknown> {
     // A deep copy. A shallow one shares every nested object, and
@@ -1505,8 +1542,8 @@ export class Computer {
   }
 
   /**
-   * Change this computer's name, size, idle window or browser proxy, and
-   * return it changed.
+   * Change this computer's name, size, idle window, browser proxy or egress
+   * proxy, and return it changed.
    *
    * A name is a label — nothing is derived from it, so a rename moves no bytes
    * and breaks no reference. The platform trims whitespace and control
@@ -1530,6 +1567,18 @@ export class Computer {
    * browser that must use it — and a stopped or suspended one is given it as
    * it starts. Which proxies are accepted is the platform's rule, and a value
    * it refuses is a `400` naming why.
+   *
+   * `egressProxy` also travels alone — refused here, before any request,
+   * beside any other field — and replaces the setting whole, credentials
+   * included; `null` removes it. A running computer has the change when the
+   * answer arrives, and the connections it had open through the proxy are
+   * closed; a stopped or suspended one is given it before it starts. One
+   * naming `credentialsSecretId` closes every connection until the host holds
+   * the value ({@link egressProxyPending}). A host that cannot take the
+   * setting — or an `https://` one, or credentials — answers `409` with reason
+   * `unsupported`, and one that cannot put it into effect now a `503`. After
+   * any other `5xx`, or no answer, it may or may not have taken effect: read
+   * the computer, and send the setting again if it stays pending.
    */
   async update(args: P.UpdateArgs, opts: CallOptions & IdempotencyOptions = {}): Promise<this> {
     const answer = await this.#t.json('PATCH', P.computer(this.id), {

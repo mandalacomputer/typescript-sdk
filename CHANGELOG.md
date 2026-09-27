@@ -16,6 +16,21 @@ name.
 
 ### Added
 
+- **An egress proxy for all of a computer's outbound TCP:** `egressProxy`
+  (`{ server, credentialsSecretId? }`) on `computers.create` and
+  `Computer.update` — alone in an update, where `null` removes it — and
+  `Computer.egressProxy` / `Computer.egressProxyPending` on the read. The
+  server is `http://`, `https://` or `socks5://` with an explicit port;
+  `credentialsSecretId` names a secret holding `user:password` that the
+  computer's host signs in with and the computer never receives. It fails
+  closed, drops UDP to the internet and ICMP, and does not proxy DNS. A key an
+  egress proxy does not have (such as `bypass`), or `egressProxy` beside any
+  other field in an update, is a `ValidationError` before a request is sent.
+  The CLI gains `computers create --egress-proxy URL [--egress-proxy-credentials
+  SECRET_ID]` and `computers egress-proxy set|clear`, whose `set` keeps the
+  current credentials for an unchanged server as `browser-proxy set` does. New
+  exports: `EgressProxy`, `EgressProxyArgs`.
+
 - **`Idempotency-Key` on every lifecycle call:** create (and `ephemeral`),
   `clone`, `start`, `stop`, `suspend`, `restart`, `update`, `relocate`,
   `delete`, `snapshots.restore` and `snapshots.clone` send one — a fresh random

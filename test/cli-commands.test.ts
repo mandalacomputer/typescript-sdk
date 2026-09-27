@@ -3492,6 +3492,125 @@ describe('files, rename, resize, view, and secrets bound at create', () => {
     });
   });
 
+  it('creates with an egress proxy and its credentials, and refuses the id alone', async () => {
+    const h = harness((call) =>
+      call.method === 'POST' ? json({ ...COMPUTER }, { status: 201 }) : anyRoute(call),
+    );
+    const creds = 'csec-0123456789abcdef';
+    const result = await h.run([
+      'computers',
+      'create',
+      '--egress-proxy',
+      'https://proxy.example.com:3128',
+      '--egress-proxy-credentials',
+      creds,
+    ]);
+    expect(result.code).toBe(0);
+    expect(h.rec.last()).toMatchObject({
+      method: 'POST',
+      path: '/computers',
+      body: {
+        egress_proxy: { server: 'https://proxy.example.com:3128', credentials_secret_id: creds },
+      },
+    });
+    const bare = await h.run(['computers', 'create', '--egress-proxy', 'socks5://p.example:1080']);
+    expect(bare.code).toBe(0);
+    expect((h.rec.last()!.body as Record<string, unknown>).egress_proxy).toEqual({
+      server: 'socks5://p.example:1080',
+    });
+    const posts = h.rec.calls.length;
+    const alone = await h.run(['computers', 'create', '--egress-proxy-credentials', creds]);
+    expect(alone.code).toBe(1);
+    expect(alone.frames.at(-1)).toMatchObject({
+      ok: false,
+      error: {
+        code: 'invalid_arguments',
+        message: expect.stringContaining('--egress-proxy-credentials requires --egress-proxy'),
+      },
+    });
+    expect(h.rec.calls.length).toBe(posts);
+  });
+
+  it('sets, keeps credentials on, and clears an egress proxy', async () => {
+    // The setting is replaced whole, so a set that named no credentials would
+    // remove the proxy's and leave every connection refused by its upstream.
+    const creds = 'csec-0123456789abcdef';
+    const proxied = {
+      ...COMPUTER,
+      egress_proxy: { server: 'https://corp-proxy.example:3128', credentials_secret_id: creds },
+    };
+    const h = harness((call) =>
+      call.path === '/computers'
+        ? json([proxied])
+        : call.path === `/computers/${COMPUTER.id}`
+          ? json(proxied)
+          : anyRoute(call),
+    );
+    const set = (url: string, ...flags: string[]) =>
+      h.run(['computers', 'egress-proxy', 'set', COMPUTER.name, url, ...flags]);
+    const patches = () => h.rec.calls.filter((call) => call.method === 'PATCH').length;
+    // The same server, written with other case: kept.
+    const kept = await set('HTTPS://Corp-Proxy.example:3128');
+    expect(kept.code).toBe(0);
+    expect(h.rec.last()).toMatchObject({ method: 'PATCH', path: `/computers/${COMPUTER.id}` });
+    expect(h.rec.last()!.body).toEqual({
+      egress_proxy: { server: 'HTTPS://Corp-Proxy.example:3128', credentials_secret_id: creds },
+    });
+    // A new server without either flag: refused, nothing sent.
+    for (const url of [
+      'https://other.example:3128',
+      'http://corp-proxy.example:3128',
+      'https://corp-proxy.example:8443',
+    ]) {
+      const before = patches();
+      const refused = await set(url);
+      const frame = refused.frames.at(-1);
+      expect(refused.code, url).toBe(1);
+      expect(frame, url).toMatchObject({ ok: false, error: { code: 'invalid_arguments' } });
+      expect(JSON.stringify(frame), url).toContain(creds);
+      expect(JSON.stringify(frame), url).toContain('--no-credentials');
+      expect(patches(), url).toBe(before);
+    }
+    const other = 'csec-fedcba9876543210';
+    const given = await set('https://other.example:3128', '--credentials', other);
+    expect(given.code).toBe(0);
+    expect(h.rec.last()!.body).toEqual({
+      egress_proxy: { server: 'https://other.example:3128', credentials_secret_id: other },
+    });
+    const dropped = await set('https://corp-proxy.example:3128', '--no-credentials');
+    expect(dropped.code).toBe(0);
+    expect(h.rec.last()!.body).toEqual({
+      egress_proxy: { server: 'https://corp-proxy.example:3128' },
+    });
+    const before = patches();
+    const both = await set(
+      'https://corp-proxy.example:3128',
+      '--credentials',
+      other,
+      '--no-credentials',
+    );
+    expect(both.code).toBe(1);
+    expect(patches()).toBe(before);
+    const clear = await h.run(['computers', 'egress-proxy', 'clear', COMPUTER.id]);
+    expect(clear.code).toBe(0);
+    expect(h.rec.last()).toMatchObject({
+      method: 'PATCH',
+      path: `/computers/${COMPUTER.id}`,
+      body: { egress_proxy: null },
+    });
+    // A person reading the computer sees the setting in snake_case.
+    const shown = await harness((call) =>
+      call.path === `/computers/${COMPUTER.id}`
+        ? json({ ...proxied, egress_proxy_pending: true })
+        : anyRoute(call),
+    ).run(['computers', 'get', COMPUTER.id]);
+    expect(shown.code).toBe(0);
+    expect(shown.frames.at(-1).data).toMatchObject({
+      egress_proxy: { server: 'https://corp-proxy.example:3128', credentials_secret_id: creds },
+      egress_proxy_pending: true,
+    });
+  });
+
   it("prints the platform's refusal of a proxy as it is", async () => {
     // The rules on a proxy URL are the platform's, and they grow; the CLI
     // sends what was typed and passes the sentence back.
