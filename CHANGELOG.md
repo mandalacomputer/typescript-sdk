@@ -233,6 +233,15 @@ name.
   `isTransient` called it worth sending again, as it does any other
   `ConflictError`, so a caller looping on it resent the same resize until it
   gave up. It now answers `false`.
+- **The CLI's value check now recognises a base64 secret that `/` or `+`
+  split into short pieces**, an AWS secret access key say. It read each piece
+  on its own, and none was long enough to look random, so `secrets set` with
+  such a value as its NAME sent it and `secrets rm` repeated it in its error.
+  A base64 string of twenty characters or more holding `/` or `+` is now read
+  whole, unless every piece reads as part of a name (a word, an all-caps
+  acronym, a version or year, camel-case words such as `DbPassword` or
+  `APIKey`), so a relative path such as `myapp/prod/DATABASE/URL` still
+  passes. A real name the check refuses goes through with `--no-value-check`.
 
 ### Security
 
