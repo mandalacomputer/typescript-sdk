@@ -301,10 +301,13 @@ function prefixedWords(run: string): boolean {
  * Tuned against realistic names (`CLOUDFLARE_API_TOKEN_2024`,
  * `ServiceAccountKeyProd2025V2`, `prod-eu-west-1-kubeconfig`), none of which it
  * flags, and random tokens, most of which it does: every hex one of 24 or more,
- * and most mixed-case alphanumeric ones. A miss is not a leak by itself — the
- * value is still only bound on the caller's own computer — and a false alarm
- * blocks a real name, so it errs toward the names; one it still refuses (a
- * name holding a hash, say) goes through with `--no-value-check`.
+ * and most mixed-case alphanumeric ones. A false alarm blocks a real name, so
+ * a single run errs toward the names. A miss matters too: `secrets set` would
+ * send the value as a NAME every member of the scope can read, and `secrets rm`
+ * would repeat it in its error — so a base64-shaped string, which `/` and `+`
+ * cut into runs too short for this test, is read by {@link base64Value}, which
+ * errs toward values. A real name either test refuses goes through with
+ * `--no-value-check`.
  */
 function randomRun(run: string): boolean {
   const classes = [/[a-z]/, /[A-Z]/, /[0-9]/].filter((c) => c.test(run)).length;
@@ -316,6 +319,36 @@ function randomRun(run: string): boolean {
   const runs = run.match(/[a-z]+|[A-Z]+|[0-9]+/g) ?? [];
   const vowels = (run.match(/[aeiou]/gi) ?? []).length;
   return run.length / runs.length < 3.2 && vowels / letters < 0.3;
+}
+
+/** Standard-alphabet base64 of twenty characters or more, padding and all. */
+const BASE64 = /^[A-Za-z0-9+/]{20,}={0,2}$/;
+
+/**
+ * Whether a base64 string that `/` or `+` cut into short runs is random: the
+ * runs joined read as random ({@link randomRun}), or it is forty characters
+ * holding all three classes, as an AWS secret access key is — unless a piece of
+ * eight or more reads as camel-case words, as a relative path's do
+ * (`team/ServiceAccountKeyProd2025V2/config1`).
+ *
+ * A leading `/` is an absolute path, and a string with neither `/` nor `+` is
+ * one run, which {@link randomRun} already reads.
+ */
+function base64Value(text: string): boolean {
+  if (!BASE64.test(text) || text.startsWith('/') || !/[+/]/.test(text)) return false;
+  if (randomRun(text.replace(/[+/=]/g, ''))) return true;
+  const wordy = (piece: string) =>
+    piece.length >= 8 &&
+    /[a-z]/.test(piece) &&
+    /[A-Z]/.test(piece) &&
+    camelWords(piece.replace(/[0-9]+/g, ''));
+  return (
+    text.length === 40 &&
+    /[0-9]/.test(text) &&
+    /[a-z]/.test(text) &&
+    /[A-Z]/.test(text) &&
+    !text.split(/[+/=]+/).some(wordy)
+  );
 }
 
 /**
@@ -331,6 +364,9 @@ function randomRun(run: string): boolean {
  * ({@link prefixedWords}, stricter than a bare run's test), as every issued
  * token does. Up to four digits closing the run are a name's version or year,
  * and do not count.
+ *
+ * A base64 string that `/` or `+` split into runs too short for a random run's
+ * test is read whole ({@link base64Value}).
  */
 export function looksLikeSecretValue(text: string): boolean {
   const runs = text.split(/[^A-Za-z0-9]+/);
@@ -351,7 +387,9 @@ export function looksLikeSecretValue(text: string): boolean {
     )
       return true;
   }
-  return UUID.test(text) || runs.some((r) => AWS_KEY_ID.test(r) || randomRun(r));
+  return (
+    UUID.test(text) || runs.some((r) => AWS_KEY_ID.test(r) || randomRun(r)) || base64Value(text)
+  );
 }
 
 /** One `--secret` or `--secret-file` on `computers create`, as typed. */

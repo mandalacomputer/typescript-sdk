@@ -99,7 +99,19 @@ const NAMES = [
   '/home/user/.config/gcloud/key.json',
   '/etc/ssl/private/server-2025.key',
   '/run/mandala-secrets/user/files/openai',
+  'db-password',
+  'SLACK_WEBHOOK_URL',
+  '/etc/app/key',
+  // Relative paths: base64's alphabet, cut by `/` into pieces that read as words.
+  'config/prod/DatabasePassword2024',
+  'secrets/prod/StripeSecretKeyLive',
+  'team/ServiceAccountKeyProd2025V2/config1',
+  'apps/prod/OAuth2ClientSecretForGitHubApp',
+  'k8s/ClusterAdminToken2024/v2',
 ];
+
+/** An AWS secret access key's documented example, which `/` cuts into runs of 13, 7 and 18. */
+const AWS_SECRET_EXAMPLE = ['wJalrXUtnFEMI', 'K7MDENG', 'bPxRfiCYEXAMPLEKEY'].join('/');
 
 describe('looksLikeSecretValue', () => {
   it('passes every realistic variable name, file name and path', () => {
@@ -157,6 +169,27 @@ describe('looksLikeSecretValue', () => {
       expect(share('0123456789abcdef', n), `hex ${n}`).toBeGreaterThan(0.98);
     for (const n of [24, 32, 40]) expect(share(ALNUM, n), `alnum ${n}`).toBeGreaterThan(0.85);
     expect(share('abcdefghijklmnopqrstuvwxyz0123456789', 32)).toBeGreaterThan(0.6);
+  });
+
+  it('catches a base64 secret that `/` or `+` cut into short runs', () => {
+    expect(looksLikeSecretValue(AWS_SECRET_EXAMPLE)).toBe(true);
+    const next = seeded(5076);
+    const BASE64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+    let hit = 0;
+    let cut = 0;
+    let cutHit = 0;
+    for (let i = 0; i < 2000; i++) {
+      const key = random(next, BASE64, 40);
+      const flagged = looksLikeSecretValue(key);
+      if (flagged) hit++;
+      if (/[+/]/.test(key)) {
+        cut++;
+        if (flagged) cutHit++;
+      }
+    }
+    expect(cut).toBeGreaterThan(1000);
+    expect(cutHit / cut, 'holding / or +').toBeGreaterThan(0.93);
+    expect(hit / 2000, 'all').toBeGreaterThan(0.93);
   });
 
   it('catches a known prefix ahead of random letters and no digits, from twelve on', () => {
@@ -603,6 +636,19 @@ describe('secrets set refuses a NAME that looks like a value', () => {
     expect(padded.rec.calls).toEqual([]);
   });
 
+  it('refuses a base64 secret that `/` cuts short, and never repeats it', async () => {
+    const text = await run(['secrets', 'set', AWS_SECRET_EXAMPLE], store([]));
+    expect(text.code).not.toBe(0);
+    expect(text.rec.calls).toEqual([]);
+    expect(text.out + text.err).not.toContain(AWS_SECRET_EXAMPLE);
+    expect(text.err).toMatch(/looks like a secret's value.*nothing was sent/);
+    const asJson = await run(['secrets', 'set', AWS_SECRET_EXAMPLE, '--json'], store([]));
+    expect(asJson.code).not.toBe(0);
+    expect(asJson.rec.calls).toEqual([]);
+    expect(asJson.out + asJson.err).not.toContain(AWS_SECRET_EXAMPLE);
+    expect(JSON.parse(asJson.out).error.code).toBe('invalid_arguments');
+  });
+
   it('never prompts with it at a terminal', async () => {
     const modes: boolean[] = [];
     const tty = Object.assign(new PassThrough({ objectMode: true }), {
@@ -653,6 +699,20 @@ describe('secrets rm repeats the NAME only when it is safe to', () => {
       message: expect.stringContaining('that name or id'),
     });
     expect(asJson.rec.calls.some((x) => x.method === 'DELETE')).toBe(false);
+  });
+
+  it('does not repeat a base64 secret that `/` cuts short, in text or --json', async () => {
+    const text = await run(['secrets', 'rm', AWS_SECRET_EXAMPLE], store([]));
+    expect(text.code).toBe(1);
+    expect(text.out + text.err).not.toContain(AWS_SECRET_EXAMPLE);
+    expect(text.err).toContain('no secret with that name or id in this scope');
+    const asJson = await run(['secrets', 'rm', AWS_SECRET_EXAMPLE, '--json'], store([]));
+    expect(asJson.code).toBe(1);
+    expect(asJson.out + asJson.err).not.toContain(AWS_SECRET_EXAMPLE);
+    expect(JSON.parse(asJson.out).error).toMatchObject({
+      code: 'not_found',
+      message: expect.stringContaining('that name or id'),
+    });
   });
 
   it('still names an id, and a name that reads as one, it did not find', async () => {
