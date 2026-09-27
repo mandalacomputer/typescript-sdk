@@ -445,6 +445,17 @@ describe('mandala operations', () => {
     expect(rec.calls.some((c) => c.path === '/operations')).toBe(false);
   });
 
+  it('finds the operation a keyed call started with --idempotency-key', async () => {
+    const { rec, run } = cli(() => json({ operations: [OPERATION], next_cursor: null }));
+    const r = await run(['operations', 'list', '--idempotency-key', 'k-lost', '--json']);
+    expect(r.code).toBe(0);
+    expect(rec.last().path).toBe('/operations');
+    expect(rec.last().query).toEqual({ idempotency_key: 'k-lost' });
+    const bad = await run(['operations', 'list', '--idempotency-key', 'has space', '--json']);
+    expect(bad.json.error.code).toBe('invalid_arguments');
+    expect(rec.calls).toHaveLength(1);
+  });
+
   it('refuses a bad page size before any request', async () => {
     const { rec, run } = cli();
     const r = await run(['operations', 'list', '--limit', '500', '--json']);

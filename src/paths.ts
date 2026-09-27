@@ -94,10 +94,15 @@ export const WHOAMI = 'whoami';
 export const API_KEYS = 'api-keys';
 /**
  * Lifecycle operations (platform OPL-5055): what each accepted create, clone,
- * start, stop, suspend, restart, restore, resize and move started, and how it
- * ended. Read only, and answered by the control plane from its own table.
+ * start, stop, suspend, restart, restore, resize, move and delete started, and
+ * how it ended. Read only, and answered by the control plane from its own table.
  */
 export const OPERATIONS = 'operations';
+/**
+ * The account's workspaces (platform OPL-5057), read only: they are created,
+ * renamed and deleted in the dashboard.
+ */
+export const WORKSPACES = 'workspaces';
 
 /**
  * One id, in a path, refused when it is empty.
@@ -518,6 +523,8 @@ export const apiKey = (id: string): string => {
   return `${API_KEYS}/${pathId(id, 'API key id')}`;
 };
 export const operation = (id: string): string => `${OPERATIONS}/${pathId(id, 'operation id')}`;
+export const workspace = (id: string): string => `${WORKSPACES}/${pathId(id, 'workspace id')}`;
+export const workspaceMembers = (id: string): string => `${workspace(id)}/members`;
 export const webhookAction = (id: string, action: 'rotate' | 'test' | 'deliveries'): string =>
   `${webhook(id)}/${action}`;
 
@@ -626,15 +633,21 @@ export type CreateArgs = {
    * is always a cold boot; wait for {@link Computer.waitForBrowserProxy} before
    * starting a browser that must use it. {@link Computers.launch} waits for you.
    * A `credentialsSecretId` names a secret bound in {@link secrets} as a file.
+   *
+   * A template you published may carry a default proxy (`spec.browser_proxy`),
+   * which the computer inherits when this is left out: a cold boot like any
+   * other proxy, and a host that cannot launch one answers `409` with reason
+   * `unsupported`. `null` creates the computer with no proxy at all.
    */
-  browserProxy?: BrowserProxyArgs;
+  browserProxy?: BrowserProxyArgs | null;
   /**
    * Send ALL of this computer's outbound TCP through a proxy — `exec`,
    * terminals, package managers and browsers alike — taken on the computer's
    * host, so nothing inside the computer is configured and nothing there can
    * opt out. It fails closed, drops UDP to the internet and ICMP, and leaves
    * DNS lookups to the platform's resolver; see {@link EgressProxyArgs}. A
-   * create carrying one is always a cold boot, and a clone does not inherit it.
+   * create carrying one is never answered from the warm pool, and a clone does
+   * not inherit it.
    * A host that cannot take it yet — or an `https://` one, or one naming
    * credentials — answers `409` with reason `unsupported`.
    */
@@ -666,7 +679,9 @@ export type EgressProxyArgs = {
    *
    * The setting is replaced whole, so leaving this out of an update REMOVES
    * the credentials. Spread the {@link EgressProxy} read off the computer to
-   * keep them. `null` is the same as leaving it out.
+   * keep them, but only with the same `server`: the credentials are sent to
+   * whatever server the setting names, so when the server changes, drop this
+   * or name the new server's credentials. `null` is the same as leaving it out.
    */
   credentialsSecretId?: string | null;
 };
@@ -695,7 +710,9 @@ export type BrowserProxyArgs = {
    *
    * The setting is replaced whole, so leaving this out of an update REMOVES
    * the credentials. Spread the {@link BrowserProxy} read off the computer to
-   * keep them. `null` is the same as leaving it out.
+   * keep them, but only with the same `server`: the credentials are sent to
+   * whatever server the setting names, so when the server changes, drop this
+   * or name the new server's credentials. `null` is the same as leaving it out.
    */
   credentialsSecretId?: string | null;
 };
@@ -865,7 +882,12 @@ export function createBody(args: CreateArgs): Json {
       disk_gb: diskGb,
       resolution,
       secrets: secrets === undefined ? undefined : secretBindingsBody(secrets),
-      browser_proxy: browserProxy === undefined ? undefined : browserProxyBody(browserProxy),
+      // `null` is sent: it is how a create from a template with a default
+      // proxy asks for none, where leaving the field out inherits it.
+      browser_proxy:
+        browserProxy === undefined || browserProxy === null
+          ? browserProxy
+          : browserProxyBody(browserProxy),
       egress_proxy: egressProxy === undefined ? undefined : egressProxyBody(egressProxy),
     }),
     start,
@@ -891,18 +913,20 @@ export type UpdateArgs = {
   /**
    * The proxy this computer's browsers are sent through, replaced whole; `null`
    * removes it. Whole means a `credentialsSecretId` left out is removed: spread
-   * {@link Computer.browserProxy} to keep it. On its own: the platform refuses
-   * it beside any other field. A running computer has it within seconds
-   * ({@link Computer.waitForBrowserProxy}); a stopped or suspended one is given
-   * it as it starts.
+   * {@link Computer.browserProxy} to keep it, and drop it or name new
+   * credentials when the `server` changes, since they are sent to that server.
+   * On its own: the platform refuses it beside any other field. A running
+   * computer has it within seconds ({@link Computer.waitForBrowserProxy}); a
+   * stopped or suspended one is given it as it starts.
    */
   browserProxy?: BrowserProxyArgs | null;
   /**
    * The proxy ALL of this computer's outbound TCP is sent through, replaced
    * whole; `null` removes it and the computer's traffic goes directly again.
    * Whole means a `credentialsSecretId` left out is removed: spread
-   * {@link Computer.egressProxy} to keep it. On its own: refused here, before
-   * any request, beside any other field. Connections open through the proxy
+   * {@link Computer.egressProxy} to keep it, and drop it or name new
+   * credentials when the `server` changes, since they are sent to that server.
+   * On its own: refused here, before any request, beside any other field. Connections open through the proxy
    * are closed when the setting changes.
    */
   egressProxy?: EgressProxyArgs | null;
@@ -1632,10 +1656,9 @@ export function clipboardBody(text: string): Json {
       `clipboard text must be a string, not ${text === null ? 'null' : typeof text}`,
     );
   }
-  // Empty is refused rather than sent, which matches the platform: clearing the
-  // clipboard is not what this endpoint does, and a caller who meant to clear it
-  // should hear so rather than get a 400 back.
-  if (!text) throw new ValidationError('clipboard text must not be empty');
+  // Empty is sent: it is how the platform is told to CLEAR the clipboard, and
+  // the only way to say it (a password left there otherwise stays until
+  // something else replaces it).
   if (text.includes('\0')) {
     throw new ValidationError('clipboard text must not contain a NUL');
   }
@@ -1770,7 +1793,18 @@ export function clickBody(
  * different region — the worst shape a mistake can take, because nothing
  * reports it.
  */
-export function dragBody(toX: number, toY: number, fromX?: number, fromY?: number): Json {
+export function dragBody(
+  toX: number,
+  toY: number,
+  fromX?: number,
+  fromY?: number,
+  modifiers: readonly string[] = [],
+): Json {
+  requireModifiers(
+    modifiers,
+    'drag() modifiers',
+    "they are an option — drag(toX, toY, from, { modifiers: ['shift'], signal })",
+  );
   if ((fromX === undefined) !== (fromY === undefined)) {
     throw new ValidationError('give both fromX and fromY, or neither');
   }
@@ -1781,6 +1815,8 @@ export function dragBody(toX: number, toY: number, fromX?: number, fromY?: numbe
     coordinate: [finite(toX, 'toX'), finite(toY, 'toY')],
   };
   if (fromX !== undefined && fromY !== undefined) body.start_coordinate = [fromX, fromY];
+  // Held for the drag the way clickBody and scrollBody send them (OPL-5051).
+  if (modifiers.length) body.text = modifiers.join(MODIFIER_JOIN);
   return body;
 }
 

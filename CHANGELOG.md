@@ -9,12 +9,50 @@ This is the summary you read to decide whether to upgrade.
 
 ## [Unreleased]
 
-One behaviour change to read before upgrading, under **Changed**: the CLI's
-`--json` output is snake_case throughout, envelope included, so its
+Read **Changed** before upgrading. The largest change is the CLI's `--json`
+output, which is snake_case throughout, envelope included, so its
 `schema_version` is now 2 and `error.code` is a reason word rather than a class
-name.
+name. Two types are widened: `Whoami.user.email` and `Whoami.account.plan` are
+`string | null`, and `CreateArgs.browserProxy` takes `null`.
 
 ### Added
+
+- **`client.workspaces`: `list()`, `get(id)` and `members(id)`**, over the
+  platform's `GET workspaces`, `GET workspaces/{id}` and
+  `GET workspaces/{id}/members`. Read only. An id the key cannot see is a
+  `NotFoundError`, and `members()` for a key confined to a workspace is a
+  `PermissionDeniedError`. CLI: `workspaces list | get | members`. New
+  exports: `Workspaces`, `Workspace`, `WorkspaceMember`.
+- **`ApiKey.mintedByKeyId`** (`string | null`), on every listed key,
+  `ApiKeyCreated` and `Whoami.key`: the key that minted this one over the
+  API, kept after that key is revoked. The plain keys a manage-keys key minted
+  keep working after it is revoked, so this is how to find and revoke them.
+  `mandala api-keys list` prints `minted by <id>`.
+- **`Computer.waitForEgressProxy()`**, which waits until the computer's host
+  holds the credentials its egress proxy names (`egressProxyPending` false);
+  until then every connection the computer opens is closed. `launch()` now
+  waits for it, inside the same readiness budget, when the create or the
+  computer names `credentialsSecretId`. CLI: `computers wait --until
+  egress-proxy`.
+- **`browserProxy: null` on `computers.create()` and `launch()`**, sent as
+  `browser_proxy: null`: a template you published may carry a default proxy
+  that a create leaving the field out inherits, and `null` creates the
+  computer with none. It used to throw. CLI: `computers create
+  --no-browser-proxy`.
+- **`Computer.drag()` holds keys**: `drag(toX, toY, from, { modifiers:
+  ['shift'] })`, sent the way a click's are. New export: `DragOptions`.
+- **`APIError.code` and `APIError.operationId`**, read off the body's `code`
+  (`idempotency_in_progress`, `idempotency_outcome_unknown`, …) and
+  `operation_id` (on the `409` answers to a keyed call and a `5xx` answer to
+  one). `OperationFailedError.code` is unchanged.
+- **`DeleteResult.operationId`**: the delete's operation, from
+  `delete({ detailed: true })`.
+- **CLI: `builds list [--allow-partial]`, `builds get`, `builds progress`
+  and `templates schema`**, and `operations list --idempotency-key KEY`. A
+  failed command's `--json` error carries `idempotency_key`, `request_id` and
+  `operation_id` when present, and its text form a second `mandala:` line
+  naming them and the command to run next. `snapshots restore` prints the
+  `operation_id` it recorded.
 
 - **An egress proxy for all of a computer's outbound TCP:** `egressProxy`
   (`{ server, credentialsSecretId? }`) on `computers.create` and
@@ -39,8 +77,13 @@ name.
   before a request is sent). An error that leaves the outcome unknown — a
   dropped connection or timeout after the request went out, a `5xx`, or the
   platform's `409` `idempotency_in_progress` / `idempotency_outcome_unknown` —
-  carries the key as `err.idempotencyKey`: sending the same call again with it
-  answers the first call's result instead of doing it twice. `operations.list`
+  carries the key as `err.idempotencyKey`. After a dropped connection, a
+  timeout or `idempotency_in_progress`, sending the same call again with it
+  answers the first call's result instead of doing it twice. After a `5xx` the
+  platform marks the key lost and every resend answers
+  `idempotency_outcome_unknown`: read the computer, or its operation with
+  `operations.get(err.operationId)` or `operations.list({ idempotencyKey })`.
+  `operations.list`
   takes `idempotencyKey`, `Operation.idempotencyKey` says which key started one
   (`null` when none, or on an older platform), `delete` is a documented
   `OperationKind`, and `isTransient` is false for `idempotency_outcome_unknown`.
@@ -194,6 +237,18 @@ name.
 
 ### Changed
 
+- **`Whoami.user.email` and `Whoami.account.plan` are `string | null`.** The
+  platform answers `null` for both to a key confined to a workspace, and they
+  were decoded as `''`. Such a key reads the plan with `client.account.read()`.
+- **`setSchedule()` keeps the fields you leave out.** It reads the computer
+  first and takes each omitted `hour`, `minute` and `tz` from its schedule
+  (04:00 UTC only when it has none; a window disabled at 00:00 UTC is kept
+  like any other), so `setSchedule({ enabled: false })` and
+  `setSchedule({ enabled: true })` pause and resume the chosen window. It used
+  to send 04:00 UTC for each, replacing the window. A call naming all four
+  sends no read.
+- **`setClipboard('')` clears the clipboard** rather than throwing: an empty
+  string is how the platform is told to clear it.
 - **`computers.launch()` waits for bound secrets.** With secrets bound it now
   returns only once they have reached the desktop, inside the same readiness
   budget, so the first command on the returned computer sees them. A delivery
@@ -242,6 +297,18 @@ name.
 
 ### Fixed
 
+- **Documentation brought in line with the platform:** a custom build is
+  launchable (publish it and create from its ref, with the
+  `template_image_preparing` continuation); an egress proxy create is never
+  answered from the warm pool (not "always a cold boot"); `clone()` takes a
+  stopped or suspended source; a memory snapshot's resumed copy gets its own
+  identity and runs beside its source; `docDigest` does not change with
+  comments, key order or whitespace; publishing an invalid document lists
+  every problem in `err.body.problems`; the template schema needs an API key,
+  so save it to a file for an editor; `buildDigest` is present only for a
+  document with no `spec.from`; a suspended computer's screenshot is a JPEG up
+  to 640 pixels wide whose pixels are not screen coordinates; `running` is
+  listed among the refusal reasons; `BuildStep.status` can be `unknown`.
 - **A 409 whose `reason` is `running` is permanent.** It is the platform's
   refusal of something only a stopped computer can have, a resize today, and
   nothing clears it by waiting: stop the computer, then send it again.
@@ -260,6 +327,23 @@ name.
 
 ### Security
 
+- **`computers browser-proxy set` and `egress-proxy set` no longer repeat a
+  typed proxy URL's `user:password@`** when they refuse to carry the current
+  credentials to a different server. The refusal names only the scheme, host
+  and port, so a password typed into the URL does not reach stderr or the
+  `--json` error.
+- **The credential carry-over is documented as the server's.** The docs said
+  spreading `computer.egressProxy` or `browserProxy` with a new `server` keeps
+  the credentials, which sends the old proxy's username and password to the
+  new server. They now say to leave `credentialsSecretId` out, or name the new
+  server's secret, when the server changes.
+- **The README said a leaked manage-keys key could not mint keys that
+  survive its revocation.** The plain keys it minted do keep working after it
+  is revoked; what it cannot do is pass the permission on. Find its children
+  by `mintedByKeyId` and revoke them too.
+- **`secrets list`, `secrets set` and `secrets rm` escape a secret's name** in
+  their text output, as every other name is: the platform refuses only control
+  characters in one, so a bidi override could reorder the rest of the line.
 - **The CLI's text output no longer passes a terminal the control characters
   in names other people chose.** A team, user, workspace, key, SSH key or
   computer name, a guest's filename, and a platform error were written to the

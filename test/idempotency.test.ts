@@ -158,6 +158,21 @@ describe('an unknown outcome', () => {
       .catch((e: unknown) => e)) as APIError;
     expect(err).toBeInstanceOf(ConflictError);
     expect(err.idempotencyKey).toBe('k-409');
+    // The body's code and operation, as fields rather than only on err.body.
+    expect(err.code).toBe(code);
+    expect(err.operationId).toBe(OPERATION.id);
+  });
+
+  it('names the operation a 5xx answer to a keyed call reserved', async () => {
+    const { client } = sdk((call) =>
+      call.method === 'GET'
+        ? anyRoute(call)
+        : json({ error: 'upstream failed', operation_id: OPERATION.id }, { status: 502 }),
+    );
+    const vm = await client.computers.get('vm-1');
+    const err = (await vm.start({ idempotencyKey: 'k-502' }).catch((e: unknown) => e)) as APIError;
+    expect(err.operationId).toBe(OPERATION.id);
+    expect(err.code).toBeUndefined();
   });
 
   it('does not put the key on a refusal that released it', async () => {
@@ -169,6 +184,16 @@ describe('an unknown outcome', () => {
     const vm = await client.computers.get('vm-1');
     const err = (await vm.start({ idempotencyKey: 'k-4xx' }).catch((e: unknown) => e)) as APIError;
     expect(err.idempotencyKey).toBeUndefined();
+  });
+});
+
+describe('APIError.code and operationId', () => {
+  it('are undefined when the body names neither, or names them with no text', () => {
+    for (const body of [undefined, 'text', [], { error: 'x' }, { code: '', operation_id: 7 }]) {
+      const err = errorForStatus(409, 'x', body, { method: 'POST' });
+      expect(err.code, JSON.stringify(body)).toBeUndefined();
+      expect(err.operationId, JSON.stringify(body)).toBeUndefined();
+    }
   });
 });
 

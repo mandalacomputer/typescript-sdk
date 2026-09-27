@@ -35,6 +35,8 @@ import {
   WEBHOOK,
   WEBHOOK_CREATED,
   WEBHOOK_DELIVERY,
+  WORKSPACE,
+  WORKSPACE_MEMBER,
 } from './harness.js';
 
 const stamp = '2026-01-02T03:04:05.000Z';
@@ -1475,11 +1477,51 @@ describe('snapshots', () => {
     expect(result.frames[0].data.state).toBe('durable');
   });
 
-  it('restores the exact snapshot', async () => {
+  it('restores the exact snapshot, and names the operation it recorded', async () => {
     const h = harness();
     const result = await h.run(['snapshots', 'restore', 'snapshot-8']);
     expect(h.rec.routes()).toEqual([['POST', 'snapshots/snapshot-8/restore']]);
-    expect(result.frames[0].data).toEqual({ id: 'snapshot-8', restored: true });
+    expect(result.frames[0].data).toEqual({ id: 'snapshot-8', restored: true, operation_id: null });
+    const op = 'op_0123456789abcdef01234567';
+    const acked = harness((call) =>
+      call.path.endsWith('/restore') ? json({ ok: true, operation_id: op }) : anyRoute(call),
+    );
+    const named = await acked.run(['snapshots', 'restore', 'snapshot-8']);
+    expect(named.frames[0].data).toEqual({ id: 'snapshot-8', restored: true, operation_id: op });
+  });
+
+  it('reads builds, one build, its progress and the template schema', async () => {
+    const h = harness();
+    const listed = await h.run(['builds', 'list', '--allow-partial']);
+    expect(listed.code).toBe(0);
+    expect(h.rec.last()).toMatchObject({ method: 'GET', path: '/builds' });
+    expect(h.rec.last().query).toEqual({ allow_partial: '1' });
+    expect(listed.frames[0].data).toHaveProperty('incomplete');
+    const one = await h.run(['builds', 'get', 'bld-1']);
+    expect(one.code).toBe(0);
+    expect(h.rec.last()).toMatchObject({ method: 'GET', path: '/builds/bld-1' });
+    const progress = await h.run(['builds', 'progress', 'bld-1']);
+    expect(progress.code).toBe(0);
+    expect(h.rec.last()).toMatchObject({ method: 'GET', path: '/builds/bld-1/progress' });
+    const schema = await h.run(['templates', 'schema']);
+    expect(schema.code).toBe(0);
+    expect(h.rec.last()).toMatchObject({ method: 'GET', path: '/templates/schema' });
+  });
+
+  it('lists workspaces, reads one, and lists its members', async () => {
+    const h = harness();
+    const listed = await h.run(['workspaces', 'list']);
+    expect(listed.code).toBe(0);
+    expect(listed.frames[0].data).toEqual([WORKSPACE]);
+    const one = await h.run(['workspaces', 'get', WORKSPACE.id]);
+    expect(h.rec.last()).toMatchObject({ method: 'GET', path: `/workspaces/${WORKSPACE.id}` });
+    expect(one.frames.at(-1).data).toEqual(WORKSPACE);
+    const members = await h.run(['workspaces', 'members', WORKSPACE.id]);
+    expect(h.rec.last()).toMatchObject({
+      method: 'GET',
+      path: `/workspaces/${WORKSPACE.id}/members`,
+    });
+    expect(members.frames.at(-1).data).toEqual([WORKSPACE_MEMBER]);
   });
 
   it('clones the exact snapshot with a new computer name', async () => {
@@ -3469,6 +3511,84 @@ describe('files, rename, resize, view, and secrets bound at create', () => {
     expect(bare.rec.last()!.body).toEqual({ browser_proxy: { server: 'socks5://elsewhere:1080' } });
   });
 
+  it("never repeats a proxy URL's user:password in a refusal to carry credentials", async () => {
+    const creds = 'csec-0123456789abcdef';
+    for (const kind of ['browser-proxy', 'egress-proxy'] as const) {
+      const field = kind === 'browser-proxy' ? 'browser_proxy' : 'egress_proxy';
+      const proxied = {
+        ...COMPUTER,
+        [field]: { server: 'https://proxy-a.example:3128', credentials_secret_id: creds },
+      };
+      // One harness per run: a harness keeps everything written to it, so a
+      // later run's text would otherwise carry an earlier run's.
+      const refuse = (server: string, jsonMode: boolean) =>
+        harness((call) =>
+          call.path === `/computers/${COMPUTER.id}` ? json(proxied) : anyRoute(call),
+        ).run(['computers', kind, 'set', COMPUTER.id, server], jsonMode);
+      // The well-formed one; two whose password ends the authority early so
+      // that the URL parser reads `alice:<digits>` as host and port; and two
+      // typed without a scheme, which parse with the username as the scheme
+      // and an empty host. A scheme-plus-host quote of any of them would print
+      // the username, and for the early-ending ones the start of the password.
+      for (const [server, user, secrets] of [
+        ['http://alice:S3cret@new-proxy.example:3128', 'alice', ['S3cret']],
+        ['http://alice:4242#Zq@proxy-b.example:3128', 'alice', ['4242', 'Zq']],
+        ['http://alice:7777/xyz@proxy-b.example:3128', 'alice', ['7777', 'xyz']],
+        ['svc-ci:hunter2@10.0.0.9:3128', 'svc-ci', ['hunter2']],
+        ['alice:S3cret@proxy-b.example:3128', 'alice', ['S3cret']],
+      ] as const) {
+        for (const jsonMode of [false, true]) {
+          const r = await refuse(server, jsonMode);
+          const text = r.out + r.err;
+          const label = `${kind} ${server} json=${jsonMode}`;
+          expect(r.code, label).toBe(1);
+          // The refusal itself, not some earlier argument error.
+          expect(text, label).toContain(`are for https://proxy-a.example:3128, not the URL given;`);
+          expect(text, label).not.toContain(user);
+          for (const secret of secrets) expect(text, label).not.toContain(secret);
+        }
+      }
+      // A clean server is still named, and a schemeless one is not quoted as
+      // `<host>://`, which would misname it.
+      for (const [server, quoted] of [
+        ['http://new-proxy.example:3128', 'not http://new-proxy.example:3128;'],
+        ['new-proxy.example:3128', 'not the URL given;'],
+      ] as const) {
+        for (const jsonMode of [false, true]) {
+          const r = await refuse(server, jsonMode);
+          const label = `${kind} ${server} json=${jsonMode}`;
+          expect(r.code, label).toBe(1);
+          expect(r.out + r.err, label).toContain(quoted);
+          expect(r.out + r.err, label).not.toContain('new-proxy.example://');
+        }
+      }
+    }
+  });
+
+  it('creates with no browser proxy, declining a template default, with --no-browser-proxy', async () => {
+    const h = harness((call) =>
+      call.method === 'POST' ? json({ ...COMPUTER }, { status: 201 }) : anyRoute(call),
+    );
+    const result = await h.run([
+      'computers',
+      'create',
+      '--template',
+      'acme/web',
+      '--no-browser-proxy',
+    ]);
+    expect(result.code).toBe(0);
+    expect(h.rec.last()).toMatchObject({ method: 'POST', path: '/computers' });
+    expect(h.rec.last()!.body).toEqual({ template: 'acme/web', browser_proxy: null, start: true });
+    const both = await harness().run([
+      'computers',
+      'create',
+      '--no-browser-proxy',
+      '--browser-proxy',
+      'http://p.example:3128',
+    ]);
+    expect(both.code).not.toBe(0);
+  });
+
   it('creates with a browser proxy and its credentials', async () => {
     const h = harness((call) =>
       call.method === 'POST' ? json({ ...COMPUTER }, { status: 201 }) : anyRoute(call),
@@ -3657,6 +3777,35 @@ describe('files, rename, resize, view, and secrets bound at create', () => {
     expect(result.frames[0].data.browser_proxy).toEqual({
       server: 'http://proxy.example.com:3128',
     });
+  });
+
+  it('waits for the egress proxy credentials with computers wait --until egress-proxy', async () => {
+    let gets = 0;
+    const h = harness(() => {
+      gets++;
+      return json({
+        ...COMPUTER,
+        status: 'running',
+        egress_proxy: {
+          server: 'https://proxy.example.com:3128',
+          credentials_secret_id: 'csec-0123456789abcdef',
+        },
+        ...(gets < 5 ? { egress_proxy_pending: true } : {}),
+      });
+    });
+    const result = await h.run([
+      'computers',
+      'wait',
+      COMPUTER.id,
+      '--until',
+      'egress-proxy',
+      '--poll-ms',
+      '1',
+    ]);
+    expect(result.code).toBe(0);
+    expect(gets).toBe(5);
+    // The answer is the read that no longer reports the wait.
+    expect(result.frames[0].data).not.toHaveProperty('egress_proxy_pending');
   });
 
   it('renames through the resolved id', async () => {

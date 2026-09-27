@@ -52,10 +52,17 @@ export class MandalaError extends Error {
    * leaves its outcome unknown: a request that may have been received before
    * the connection died or the deadline fired, a `5xx`, or the platform's
    * `409`s saying the keyed call is still running or was never heard to end
-   * (platform OPL-5127). Send the same call again with this key to learn how
-   * it went without doing it twice — `computer.start({ idempotencyKey })` — or
-   * find its operation with `operations.list({ idempotencyKey })`.
-   * `undefined` on every other error.
+   * (platform OPL-5127). `undefined` on every other error.
+   *
+   * What a resend with it answers depends on which of those it was. Only
+   * after a dropped connection or timeout, or `idempotency_in_progress`, does
+   * sending the same call again with this key —
+   * `computer.start({ idempotencyKey })` — get the first call's answer
+   * without doing it twice. After a `5xx` the platform marks the key lost,
+   * and for 24 hours every resend answers `409 idempotency_outcome_unknown`,
+   * as does one after that answer itself: read the computer instead, or its
+   * operation with `operations.get(err.operationId)` or
+   * `operations.list({ idempotencyKey })`.
    */
   idempotencyKey?: string;
 }
@@ -174,6 +181,21 @@ export class APIError extends MandalaError {
    * the running check hears the same fact the caller a moment earlier heard.
    */
   readonly reason?: string;
+  /**
+   * The platform's machine-readable code for this error, from the body's
+   * `code`, when it sent one: `idempotency_in_progress`,
+   * `idempotency_outcome_unknown`, `template_image_preparing` and others.
+   * Branch on this rather than on the message. (Not
+   * {@link OperationFailedError.code}, which is an operation's.)
+   */
+  readonly code?: string;
+  /**
+   * The lifecycle operation this error is about, from the body's
+   * `operation_id`, when it named one: the `409` answers to a keyed call, and
+   * a `5xx` answer to one, carry it. Read it with `operations.get()` to learn
+   * how the call ended.
+   */
+  readonly operationId?: string;
   /** Correlation for this response, when supplied; not an idempotency key. */
   readonly requestId?: string;
   /** The received Allow and WWW-Authenticate headers, when supplied. */
@@ -193,6 +215,8 @@ export class APIError extends MandalaError {
   ) {
     super(message);
     this.reason = refusalReason(body);
+    this.code = nonblank(errorRecord(body)?.code);
+    this.operationId = nonblank(errorRecord(body)?.operation_id);
     this.retryAfterMs = retryAfterMs;
     this.requestId = nonblank(metadata.requestId) ?? nonblank(errorRecord(body)?.request_id);
     this.allow = metadata.allow;

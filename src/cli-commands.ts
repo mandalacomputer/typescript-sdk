@@ -205,6 +205,32 @@ function sameProxyServer(a: string, b: string): boolean {
   return left !== undefined && left === parts(b);
 }
 
+/**
+ * A proxy URL as a refusal may quote it: scheme, host and port only. A server
+ * typed with `user:password@` in it is refused by the platform without being
+ * repeated, and an error here must not repeat it either, since stderr and the
+ * --json error are what CI logs keep. One that will not parse is not quoted,
+ * and neither is one with an `@` anywhere in it: a password holding an
+ * unencoded `/`, `?` or `#` ends the authority early, so the URL parser reads
+ * `user:pass` as the host and port (`http://alice:12#34@proxy:3128` has host
+ * `alice:12`), and scheme-plus-host would then quote the credentials. Only
+ * a proxy scheme with a host is quoted: a server typed without one parses
+ * with whatever precedes the first `:` as its scheme and an empty host, so
+ * `svc-ci:hunter2@10.0.0.9:3128` would otherwise be quoted as `svc-ci://`.
+ */
+const PROXY_SCHEMES = new Set(['http:', 'https:', 'socks5:']);
+function proxyServerText(value: string): string {
+  if (value.includes('@')) return 'the URL given';
+  try {
+    const u = new URL(value);
+    if (u.username || u.password) return 'the URL given';
+    if (!PROXY_SCHEMES.has(u.protocol) || !u.host) return 'the URL given';
+    return terminalSafe(`${u.protocol}//${u.host}`);
+  } catch {
+    return 'the URL given';
+  }
+}
+
 const raw = (value: { raw: Record<string, unknown> }) => value.raw;
 const publicWebhook = (value: { raw: Record<string, unknown> }, secret?: string) => {
   const { secret: _secret, ...data } = value.raw;
@@ -529,7 +555,12 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
       checkWait(wait.timeoutMs ?? 60_000, wait.pollMs ?? 1_000);
     const call = { signal };
     const usageWindow = { from: s('from'), to: s('to'), signal };
-    const operationPage = { computerId: s('computer'), limit: n('limit'), cursor: s('cursor') };
+    const operationPage = {
+      computerId: s('computer'),
+      idempotencyKey: s('idempotency-key'),
+      limit: n('limit'),
+      cursor: s('cursor'),
+    };
     if (path === 'operations list') P.operationsQuery(operationPage);
     if (path === 'usage') checkUsageWindow(usageWindow.from, usageWindow.to);
     // Preparation and pure SDK validation happen before name resolution or any request.
@@ -575,7 +606,11 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
       start: !b('no-start'),
       browserProxy:
         s('browser-proxy') === undefined
-          ? undefined
+          ? // Sent as null: a template's default proxy applies only when the
+            // field is left out, so null is how a create declines it.
+            b('no-browser-proxy')
+            ? null
+            : undefined
           : {
               server: s('browser-proxy')!,
               bypass,
@@ -752,6 +787,12 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
       }
       case 'operations get':
         return output.result(raw(await client.operations.get(target, call)));
+      case 'workspaces list':
+        return output.result((await client.workspaces.list(call)).map(raw));
+      case 'workspaces get':
+        return output.result(raw(await client.workspaces.get(target, call)));
+      case 'workspaces members':
+        return output.result((await client.workspaces.members(target, call)).map(raw));
       case 'operations wait':
         return output.result(raw(await client.operations.wait(target, wait)));
       case 'usage': {
@@ -826,7 +867,7 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
             if (!sameProxyServer(current!.server, args[1]!))
               throw new CliError(
                 'invalid_arguments',
-                `the proxy's credentials (${terminalSafe(kept)}) are for ${terminalSafe(current!.server)}, not ${terminalSafe(args[1]!)}; give --credentials SECRET_ID to use credentials with the new server, or --no-credentials to set it without any`,
+                `the proxy's credentials (${terminalSafe(kept)}) are for ${proxyServerText(current!.server)}, not ${proxyServerText(args[1]!)}; give --credentials SECRET_ID to use credentials with the new server, or --no-credentials to set it without any`,
               );
             change = { browserProxy: { ...change.browserProxy!, credentialsSecretId: kept } };
           }
@@ -845,7 +886,7 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
             if (!sameProxyServer(current!.server, args[1]!))
               throw new CliError(
                 'invalid_arguments',
-                `the egress proxy's credentials (${terminalSafe(kept)}) are for ${terminalSafe(current!.server)}, not ${terminalSafe(args[1]!)}; give --credentials SECRET_ID to use credentials with the new server, or --no-credentials to set it without any`,
+                `the egress proxy's credentials (${terminalSafe(kept)}) are for ${proxyServerText(current!.server)}, not ${proxyServerText(args[1]!)}; give --credentials SECRET_ID to use credentials with the new server, or --no-credentials to set it without any`,
               );
             change = { egressProxy: { ...change.egressProxy!, credentialsSecretId: kept } };
           }
@@ -942,7 +983,9 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
                 ? await c.waitForSecrets(wait)
                 : s('until') === 'browser-proxy'
                   ? await c.waitForBrowserProxy(wait)
-                  : await c.waitUntilRunning(wait);
+                  : s('until') === 'egress-proxy'
+                    ? await c.waitForEgressProxy(wait)
+                    : await c.waitUntilRunning(wait);
         return output.result(computerData(result));
       }
       case 'templates list': {
@@ -967,6 +1010,19 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
         return output.result(
           raw(await client.builds.start(document!, { noReuse: b('no-reuse'), signal })),
         );
+      case 'templates schema':
+        return output.result(await client.templates.schema(call));
+      case 'builds list': {
+        const listing = await client.builds.listWithStatus({
+          allowPartial: b('allow-partial'),
+          signal,
+        });
+        return output.result({ items: listing.items.map(raw), incomplete: listing.incomplete });
+      }
+      case 'builds get':
+        return output.result(raw(await client.builds.get(target, call)));
+      case 'builds progress':
+        return output.result(snakeKeys(await client.builds.progress(target, call)));
       case 'templates watch': {
         watching = true;
         let last: BuildProgress | undefined;
@@ -991,9 +1047,15 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
       }
       case 'snapshots create':
         return output.result(raw(await (await computer()).snapshot(capture)));
-      case 'snapshots restore':
-        await client.snapshots.restore(target, call);
-        return output.result({ id: target, restored: true });
+      case 'snapshots restore': {
+        // The ack names the operation to read for how the restore ended.
+        const ack = await client.snapshots.restore(target, call);
+        return output.result({
+          id: target,
+          restored: true,
+          operation_id: ack.operationId ?? null,
+        });
+      }
       case 'snapshots clone':
         // `memory_dropped` rides in the record itself, so it is in the output
         // without being asked for (platform OPL-4964).

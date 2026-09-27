@@ -869,3 +869,27 @@ describe('a create binding a stored name that looks like a value', () => {
     expect(r.err).toContain('--secret #2 ("OPENAI_API_KEY") binds the secret');
   });
 });
+
+describe('secret names reach the terminal escaped', () => {
+  // The platform refuses only control characters in a name, so a bidi
+  // override is stored and would reorder the id, revision and dates after it.
+  const SPOOF = 'API‮KEY';
+  const row = { ...SECRET, name: SPOOF };
+
+  it('in list, set and rm, and as the real string under --json', async () => {
+    const list = await run(['secrets', 'list'], store([row]));
+    expect(list.code).toBe(0);
+    expect(list.out).not.toContain('‮');
+    expect(list.out).toContain('API\\u202eKEY');
+    const set = await run(['secrets', 'set', SPOOF], store([]));
+    expect(set.code).toBe(0);
+    expect(set.out).not.toContain('‮');
+    expect(set.out).toContain('API\\u202eKEY');
+    const rm = await run(['secrets', 'rm', SPOOF], store([row]));
+    expect(rm.code).toBe(0);
+    expect(rm.out).not.toContain('‮');
+    expect(rm.out).toContain('API\\u202eKEY');
+    const asJson = await run(['secrets', 'list', '--json'], store([row]));
+    expect(JSON.parse(asJson.out).data.secrets[0].name).toBe(SPOOF);
+  });
+});

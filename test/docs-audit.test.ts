@@ -181,6 +181,16 @@ describe('snapshots and holdings', () => {
     });
     // The plain form keeps its old answer.
     expect(await vm.delete({ deleteSnapshots: true, expect: 'fp' })).toBe(0);
+    expect(res.operationId).toBeUndefined();
+  });
+
+  it("names the delete's operation when the answer carries one", async () => {
+    const op = 'op_0123456789abcdef01234567';
+    const { client: c } = client((call) =>
+      call.method === 'DELETE' ? json({ ok: true, operation_id: op }) : json(COMPUTER),
+    );
+    const vm = await c.computers.get('vm-1');
+    expect((await vm.delete({ detailed: true })).operationId).toBe(op);
   });
 });
 

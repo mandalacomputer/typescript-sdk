@@ -1136,6 +1136,15 @@ describe('launch with a browser proxy', () => {
     expect(gets).toBe(3);
   });
 
+  it('does not wait for a proxy the create declined with null', async () => {
+    const waited = vi.spyOn(Computer.prototype, 'waitForBrowserProxy');
+    const rec = recorder((call) => json(call.path.endsWith('/exec') ? guest : computer()));
+    const client = new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: rec.fetch });
+    await client.computers.launch({ template: 'acme/web', browserProxy: null });
+    expect(rec.calls[0]!.body).toMatchObject({ browser_proxy: null });
+    expect(waited).not.toHaveBeenCalled();
+  });
+
   it('adds no request for a computer with none', async () => {
     const waited = vi.spyOn(Computer.prototype, 'waitForBrowserProxy');
     const rec = recorder((call) => json(call.path.endsWith('/exec') ? guest : computer()));
@@ -1143,5 +1152,99 @@ describe('launch with a browser proxy', () => {
     await client.computers.launch();
     expect(waited).not.toHaveBeenCalled();
     expect(rec.calls).toHaveLength(3);
+  });
+});
+
+const EGRESS = {
+  server: 'https://proxy.example.com:3128',
+  credentials_secret_id: 'csec-0123456789abcdef',
+};
+const egress = (pending: boolean | undefined, extra: Record<string, unknown> = {}) => ({
+  ...computer(),
+  egress_proxy: EGRESS,
+  ...(pending === undefined ? {} : { egress_proxy_pending: pending }),
+  ...extra,
+});
+
+describe('waitForEgressProxy', () => {
+  const handle = (respond: (n: number) => unknown) => {
+    let n = 0;
+    const rec = recorder(() => json(respond(++n)));
+    const client = new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: rec.fetch });
+    return { rec, get: () => client.computers.get('launch-42') };
+  };
+
+  it('polls until the host holds the credentials', async () => {
+    const { rec, get } = handle((n) => egress(n < 4));
+    const c = await get();
+    expect(c.egressProxyPending).toBe(true);
+    await expect(c.waitForEgressProxy({ pollMs: 1 })).resolves.toBe(c);
+    expect(c.egressProxyPending).toBe(false);
+    expect(rec.calls).toHaveLength(4);
+  });
+
+  it('answers at once for a computer with no proxy, or one without credentials', async () => {
+    for (const body of [computer(), { ...computer(), egress_proxy: { server: EGRESS.server } }]) {
+      const { rec, get } = handle(() => body);
+      const c = await get();
+      await c.waitForEgressProxy({ pollMs: 1 });
+      expect(rec.calls).toHaveLength(2);
+    }
+  });
+
+  it('times out naming what it waited for', async () => {
+    // A budget an in-process mock cannot miss: the message below is the one
+    // for a computer that WAS read, and a budget that expired inside the first
+    // read would get the "could not be observed" one instead.
+    const { rec, get } = handle(() => egress(true));
+    const c = await get();
+    const error = await c.waitForEgressProxy({ timeoutMs: 200, pollMs: 1 }).catch((e) => e);
+    expect(rec.calls.length).toBeGreaterThan(1);
+    expect(error).toBeInstanceOf(TimeoutError);
+    expect(error.message).toBe(
+      "launch-42's egress proxy was still waiting for its credentials after 200ms",
+    );
+  });
+
+  it('refuses a stopped computer with credentials and no start under way', async () => {
+    const { get } = handle(() => egress(undefined, { status: 'stopped', running_ram_mb: 0 }));
+    const c = await get();
+    const error = await c.waitForEgressProxy({ timeoutMs: 60_000, pollMs: 1 }).catch((e) => e);
+    expect(error).toBeInstanceOf(MandalaError);
+    expect(error).not.toBeInstanceOf(TimeoutError);
+    expect(error.message).toMatch(/launch-42 is "stopped".*call start\(\)/);
+  });
+});
+
+describe('launch with an egress proxy', () => {
+  it('waits until the host holds the credentials before returning', async () => {
+    const waited = vi.spyOn(Computer.prototype, 'waitForEgressProxy');
+    let gets = 0;
+    const rec = recorder((call) => {
+      if (call.path.endsWith('/exec')) return json(guest);
+      if (call.method === 'POST') return json(egress(true), { status: 201 });
+      gets++;
+      return json(egress(gets < 4));
+    });
+    const client = new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: rec.fetch });
+    const c = await client.computers.launch(
+      {
+        template: 'base',
+        egressProxy: { server: EGRESS.server, credentialsSecretId: EGRESS.credentials_secret_id },
+      },
+      { pollMs: 1 },
+    );
+    expect(waited).toHaveBeenCalledOnce();
+    expect(c.egressProxyPending).toBe(false);
+    expect(gets).toBe(4);
+  });
+
+  it('adds no wait for an egress proxy without credentials', async () => {
+    const waited = vi.spyOn(Computer.prototype, 'waitForEgressProxy');
+    const bare = { ...computer(), egress_proxy: { server: EGRESS.server } };
+    const rec = recorder((call) => json(call.path.endsWith('/exec') ? guest : bare));
+    const client = new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: rec.fetch });
+    await client.computers.launch({ template: 'base', egressProxy: { server: EGRESS.server } });
+    expect(waited).not.toHaveBeenCalled();
   });
 });

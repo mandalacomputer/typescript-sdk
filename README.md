@@ -120,11 +120,14 @@ the visible desktop has finished logging in. It accepts every `create()` option;
 its disk is ready. An already admitted start is waited on, and failed starts are
 reported without retrying them. With `secrets` bound, it also waits until they
 have reached the desktop, so the first command on the returned computer sees
-them; a delivery that failed throws, naming why.
+them; a delivery that failed throws, naming why. With a browser proxy it waits
+until the browsers have it (`waitForBrowserProxy()`), and with an egress proxy
+that names credentials until the host holds them (`waitForEgressProxy()`):
+until then every connection the computer opens is closed.
 
 Pass `{ timeoutMs: 600_000, signal }` as the second argument for a larger build or
 cancellation. The default readiness budget is 180,000 milliseconds, beginning
-after create returns. Disk, running, guest and secrets waits share the remaining budget,
+after create returns. Disk, running, guest, secrets and proxy waits share the remaining budget,
 including elapsed start work. Create and start retain their usual transport
 deadlines, so this is not a total wall-clock limit on launch. `pollMs` defaults
 to 3,000 for all stages.
@@ -234,22 +237,22 @@ after a successful create, and do not automatically replay after an ambiguous
 response. `isTransient` returns false for this preparation conflict because
 continuing requires the token, and the SDK never retries the create for you.
 
-A valid answer carries more than the verdict. `docDigest` identifies the whole
-document and changes with any edit at all; `buildDigest` covers only what decides
-the image, so comparing it against a previous run tells you whether an edit means
-a rebuild.
+A valid answer carries more than the verdict. `docDigest` identifies the
+document: it changes with anything that changes what the document means, a
+label included, and not with comments, key order, whitespace or YAML vs JSON.
+`buildDigest` covers only what decides the image, so comparing it against a
+previous run tells you whether an edit means a rebuild. Publishing an invalid
+document is a `400` that lists every problem too, as `err.body.problems`.
 
-A document that names a parent in `spec.from` has **no** `buildDigest` — it
-cannot be computed without the parent's — and gets `buildDigestNeeds` in its
-place, which is a sentence saying what is missing and where to get it. The two
-are never both present, so read the second when the first is absent rather than
-treating the absence as unexplained:
+`buildDigest` is present only for a document with no `spec.from`, which builds
+nothing (build steps need a parent to layer onto). A document that names a
+parent has **no** `buildDigest` — it cannot be computed without the parent's —
+and gets `buildDigestNeeds` in its place, a sentence saying what is missing.
+The two are never both present, so read the second when the first is absent
+rather than treating the absence as unexplained:
 
 ```ts
 if (!check.buildDigest) console.log(check.buildDigestNeeds);
-// the contents of acme/base's image, which only a host holding it can supply.
-// Run `gorillad -build-template <file> -dry-run` there to see this document's
-// build digest
 ```
 
 `canonical` is the document as the digests were taken over it, key order and
@@ -287,8 +290,10 @@ unpinned `namespace/name` resolves to.
 `templates.list()` is the catalogue — the images a computer can be created
 from, each with the `ref` a create names it by — and `templates.schema()` is
 the JSON Schema for a `mandala/v1` document, returned as it is so an editor or
-a validator can be pointed at it. Its `$id` is the URL it came from, so a `$ref`
-to it resolves.
+a validator can be pointed at it. The URL it is served from needs an API key,
+so an editor cannot fetch it by its `$id`: save what `templates.schema()` (or
+`mandala templates schema`) returns to a file and point the editor at the
+file.
 
 #### Retiring one
 
@@ -361,17 +366,27 @@ build. All three say the build is probably still running and point at
 `builds.progress`. Breaking out early is not one of them — that closes the stream
 and throws nothing. An account may hold eight streams open at once.
 
-**A build that declares its own family is not launchable yet.** The fleet does
-not advertise a family it built rather than shipped, so a create naming such a
-ref is refused with a `400` — a bare `APIError`, and a permanent answer: the
-message says in words that retrying the create changes nothing and that what
-would change it is publishing a new version. Deliberately not a `503`, which
-arrives as `UnavailableError`, which `isTransient` answers true for — so a
-create wrapped in a retry-on-transient loop spent its whole deadline on an
-answer that was never going to move. A `503` on this path still means the case
-that does come good: a shipped family whose only holder is unreachable.
-Publishing the document is worth doing anyway — it claims the ref, and it is
-what `builds.start` takes.
+After a successful build, launch the published template with
+`client.computers.create({ template: t.ref })`. A pinned template version
+selects the latest successful image built from that exact document; an
+unpinned ref first selects the newest published template version. Existing
+computers keep their original image when a later build becomes available.
+
+A create may need to prepare that image before it can launch. Follow the
+[template preparation guidance](#your-own-templates) for a
+`template_image_preparing` response: inspect its state and error, then make a
+deliberate continuation with the returned delay and token and all original
+create arguments. For other image refusals, inspect the response before
+deciding whether to rebuild or retry.
+
+Two of those refusals never clear, and both arrive as a `400` — a bare
+`APIError` rather than the `UnavailableError` a `503` becomes, because a retry
+loop reads a `503` as an answer worth waiting for (`isTransient` says yes to
+it) and these are not. A document that builds into a family this account may
+not build into is one: no hypervisor will launch it, and what changes the
+answer is publishing a new version, not sending the create again. A document
+that builds nothing and names an account family is the other: a create is
+served only from the families that ship with the product.
 
 ### Resolution
 
@@ -477,8 +492,10 @@ a desktop that is actually moving. Earlier versions of this SDK refused that cal
 on the grounds that a width made the flag a no-op; it is honoured now, so it is
 sent. Omit `fresh`, or pass `false`, to ask for the last frame already held.
 
-A suspended computer serves only that cached frame. Asking a suspended computer
-for a fresh capture is refused — **409**, telling you to start it first — with or
+A suspended computer serves only that cached frame: its saved desktop, a JPEG
+up to 640 pixels wide whatever the width asked for, and even with none. It is a
+stored picture rather than a screen to drive, so its pixels are **not** screen
+coordinates. Asking a suspended computer for a fresh capture is refused — **409**, telling you to start it first — with or
 without a width, so a poller that suspends its own machine should drop `fresh`
 rather than treat the 409 as the computer having vanished.
 
@@ -608,8 +625,10 @@ const onClipboard = await c.clipboard();           // '' is an empty clipboard
 `setClipboard()` takes at most 64 KiB of UTF-8; `clipboard()` returns at most
 128 KiB. They are different bounds on different channels, and the read is
 **refused rather than truncated** past its own — half a password is not less of
-an answer, it is a wrong one that looks completely normal. Empty text and a NUL
-are refused here, before the request goes out.
+an answer, it is a wrong one that looks completely normal. A NUL is refused
+here, before the request goes out. `setClipboard('')` clears the clipboard, and
+is the only way to: putting other text there only replaces one value with
+another.
 
 The platform confirms the write by reading the selection back before it answers,
 so `setClipboard()` returning means the desktop is *holding* the text rather
@@ -1686,7 +1705,15 @@ through a proxy, as a locked policy each reads when it starts. Nothing else on
 the computer uses it: `exec`, a terminal and every other program reach the
 network directly. Set it at create or with `update()`, where it travels alone,
 replaces the setting whole, and `null` removes it. Which proxies are accepted is
-the platform's rule; a value it refuses is a `400` whose message says why.
+the platform's rule; a value it refuses is a `400` whose message says why. As
+with the egress proxy below, a `credentialsSecretId` belongs to its `server`:
+when the server changes, leave it out or name the new server's secret.
+
+A template you published may carry a default proxy (`spec.browser_proxy`). A
+create from it that leaves `browserProxy` out inherits that proxy: a cold boot,
+answered `409` with reason `unsupported` by a host that cannot launch one.
+`browserProxy: null` on create makes the computer with no proxy at all
+(`mandala computers create --no-browser-proxy`).
 
 ```ts
 const c = await client.computers.launch({
@@ -1740,8 +1767,9 @@ What to expect once it is set:
 - **DNS lookups are not proxied.** They still go to the platform's resolver.
 - **Open connections are closed when the setting changes**, and when the
   computer stops.
-- **A create carrying one is always a cold boot**, never a warm computer, and
-  a clone does not inherit it.
+- **A create carrying one is never answered from the warm pool**, and a clone
+  does not inherit it. `launch()` waits for a create naming credentials until
+  the host holds them; `c.waitForEgressProxy()` does the same after a change.
 
 `credentialsSecretId` names a secret in your store (in the computer's
 workspace, or account-wide) whose value is `user:password`. The secret is NOT
@@ -1759,7 +1787,11 @@ within seconds.
 In `update()` the setting travels alone (anything beside it is a
 `ValidationError` before a request is sent) and replaces the setting whole, so
 a `credentialsSecretId` left out is removed: spread `c.egressProxy` to keep
-it. A value the platform refuses is a `400` whose message says why. A host
+it, but only with the same `server`. The credentials are sent to whatever
+server the setting names, so when the server changes, leave
+`credentialsSecretId` out or name the new server's secret; spreading the old
+setting with a new `server` hands the old proxy's username and password to the
+new one. A value the platform refuses is a `400` whose message says why. A host
 that cannot take the setting yet answers `409` with reason `unsupported` — as
 does one that cannot take an `https://` proxy or credentials yet — and one
 that cannot put it into effect now answers `503`, with nothing changed unless
@@ -1967,10 +1999,11 @@ snapshotting or cloning it throws `ConflictError`. If the copy dies,
 ### Operations
 
 Every accepted create, clone, start, stop, suspend, restart, snapshot restore,
-resize and move records a **lifecycle operation**, and its answer carries the
-id: `computer.operationId` after a create, a clone or any of those calls on the
-handle, `(await client.snapshots.restore(id)).operationId`, and
-`move.operationId` on what `relocate` accepted. It is `undefined` where the
+resize, move and delete records a **lifecycle operation**, and its answer
+carries the id: `computer.operationId` after a create, a clone or any of those
+calls on the handle, `(await client.snapshots.restore(id)).operationId`,
+`move.operationId` on what `relocate` accepted, and
+`(await c.delete({ detailed: true })).operationId`. It is `undefined` where the
 platform could not record one; the call happened either way.
 
 ```ts
@@ -2006,13 +2039,19 @@ clone — a fresh one per call unless you pass `{ idempotencyKey }` yourself. Th
 platform records the call before carrying it out, so if its answer is lost (a
 timeout, a dropped connection, a `5xx`) the error carries the key as
 `err.idempotencyKey`: send the same call again with it and it is not done
-twice — you get the first call's answer, a `ConflictError` with `code:
-"idempotency_in_progress"` while it still runs, or one with `code:
+twice — you get the first call's answer, a `ConflictError` with `err.code ===
+"idempotency_in_progress"` while it still runs, or one with `err.code ===
 "idempotency_outcome_unknown"` when the platform itself never heard how it
-ended (it answered a `5xx`): then read the computer, or its operation, to see
-whether it took effect — or find its operation with
+ended (it answered a `5xx`, after which every resend answers this): then read
+the computer, or its operation, to see whether it took effect —
+`client.operations.get(err.operationId)`, or
 `client.operations.list({ idempotencyKey })`. Keys last 24 hours, and a key
 sent with a different request is refused with a `422`.
+
+Every `APIError` carries the platform's machine-readable `code` (from the
+body's `code`, e.g. `idempotency_in_progress`) and, where the answer named one,
+the `operationId` of the lifecycle operation it is about; both are `undefined`
+when the platform sent none.
 
 ### Snapshots
 
@@ -2028,8 +2067,7 @@ const fresh = await client.snapshots.clone(live.id, 'fresh', { memory: false });
 
 A memory snapshot of a computer that **held secrets** is resumed only with
 `{ inheritSecrets: true }`: the copy holds the same credentials, bound to the same
-secrets, lands in the source's workspace, and cannot run on the same host while
-its source is running. Without it the clone is built from the disk instead, and
+secrets, and lands in the source's workspace. Without it the clone is built from the disk instead, and
 says so: check `computer.memoryDropped` (and `memoryDroppedReason`) before
 assuming the session came across. It is the clone's answer, kept on that handle
 through `waitUntilBuilt()`; a computer fetched later with `computers.get()` does
@@ -2108,8 +2146,11 @@ try {
 }
 ```
 
-A memory snapshot forks into a live twin — same processes, same open windows,
-same network identity until it is re-identified.
+A memory snapshot forks into a copy with the same processes and open windows. A
+resumed copy gets its own MAC and address, its name as hostname, a new machine
+ID and SSH host keys, and its own desktop password before its network comes up,
+so it runs beside its source; if that fails it is left stopped, and starting it
+boots its disk fresh.
 
 ```ts
 await client.snapshots.restore(snap.id);            // back onto its source
@@ -2186,8 +2227,13 @@ Taking them on a timer is a property of the computer:
 await c.setSchedule({ enabled: true, hour: 4, tz: 'America/New_York' });
 ```
 
-`c.schedule()` reads the daily schedule back. `setSchedule({ enabled: false })`
-keeps the chosen time so toggling it on again restores it; `c.clearSchedule()`
+`c.schedule()` reads the daily schedule back. `setSchedule` reads the computer
+first and keeps each of `hour`, `minute` and `tz` you leave out from its current
+schedule (04:00 UTC only when the computer has no schedule; a window disabled at
+00:00 UTC is kept like any other), so `setSchedule({ enabled: false })` keeps the
+chosen time and `setSchedule({ enabled: true })` restores it. Give all three to
+skip the read; without them, a computer whose host does not answer is refused
+rather than guessed at. `c.clearSchedule()`
 returns the computer to never having had one.
 
 `client.snapshots.list()` is every snapshot on the account;
@@ -2340,9 +2386,11 @@ await client.apiKeys.revoke(ci.id);
 is off for every key until its holder turns it on in a signed-in dashboard
 session (**Credentials** in the dashboard, the **Manage keys** checkbox), and no API
 call turns it on. Without it each call is a `PermissionDeniedError` whose
-message says exactly that. A key minted here never has the permission — asking
-for one is refused, so the SDK has no option for it — which keeps a leaked key
-that manages keys from minting a family of keys that survive its revocation.
+message says exactly that. A key minted here never has the permission (asking
+for one is refused, so the SDK has no option for it), so a leaked manage-keys
+key cannot pass the permission on. The plain keys it minted DO keep working
+after it is revoked: find them by `mintedByKeyId` and revoke them too (the
+dashboard can revoke a key's children in one step).
 
 Reach follows the key: its holder's own keys only (anybody else's answers like
 an id that does not exist, `NotFoundError`), and a key confined to a workspace
@@ -2352,6 +2400,24 @@ key naming any other scope is a `PermissionDeniedError`. Listing needs the
 viewer role, minting and revoking the member role. A key may revoke itself; the
 call that does so is the last it makes. A mint answered 503 is not retried: it
 may have happened, so list and revoke rather than send it again.
+
+### Workspaces
+
+`client.workspaces` reads the account's workspaces, which partition its
+computers: a key confined to one reaches that workspace's computers only.
+Workspaces are created, renamed and deleted in the dashboard.
+
+```ts
+const all = await client.workspaces.list();            // oldest first
+const ws = await client.workspaces.get('wsp-0123456789ab');
+const people = await client.workspaces.members(ws.id); // the account's members
+```
+
+A key confined to a workspace lists that one workspace only, and any other id
+is a `NotFoundError`, the same as one that does not exist (so is the id of a
+deleted workspace a computer may still carry). `members()` is refused to such a
+key with a `PermissionDeniedError`, because the list is the whole account's:
+use an account-wide key.
 
 ### Usage
 
@@ -2628,7 +2694,9 @@ run. No 401, 402, 403, 404 or 405 is transient, even with a contradictory reason
 Nested run reasons never grant replay permission. Stream error frames keep their
 full evidence in `raw`; thrown stream errors expose their request ID without
 turning frame reasons or the successful stream's headers into retry advice.
-The CLI JSON error envelope remains `{code, message, status}`.
+The CLI JSON error envelope is `{code, message, status}`, plus `request_id`,
+`idempotency_key` and `operation_id` when the failed call has them; the CLI's
+Operations section below says how to use them to find out how a keyed call ended.
 
 **Read `isTransient` rather than the comments above when it matters.** Three
 entries in that list are things a caller must not replay blind, and two of them
@@ -2653,7 +2721,9 @@ for it, and it is the part a program is allowed to depend on — `err.message` i
 prose and is rewritten. For ordinary request refusals, `contention` and `starting` clear on their
 own, `unavailable` means the computer is not running and only starting it helps,
 `unsupported` means this computer cannot do it at all, `exists` means a
-create-only upload found its path taken, and `revoked` is about the
+create-only upload found its path taken, `running` means the computer is
+running and this call needs it stopped (stop it: waiting never helps), and
+`revoked` is about the
 caller rather than the computer — the authority the request arrived with no
 longer holds, so sending it again unchanged is refused the same way (a 401 means
 present a credential again; a 403 means the role changed and signing in again
@@ -2801,12 +2871,15 @@ network access and never prompt for input; `logout` needs no network.
 
 | Command group | Available commands |
 | --- | --- |
-| `computers` | `list`, `create`, `get`, `start`, `stop`, `suspend`, `restart`, `delete`, `clone`, `rename`, `resize`, `view`, `screenshot`, `exec`, `wait` |
-| `templates` | `list`, `get`, `validate`, `publish`, `build`, `watch`, `retire` |
+| `computers` | `list`, `create`, `get`, `start`, `stop`, `suspend`, `restart`, `delete`, `clone`, `rename`, `resize`, `browser-proxy set`, `browser-proxy clear`, `egress-proxy set`, `egress-proxy clear`, `view`, `screenshot`, `exec`, `wait` |
+| `templates` | `list`, `get`, `validate`, `publish`, `build`, `watch`, `retire`, `schema` |
+| `builds` | `list`, `get`, `progress` |
 | `snapshots` | `list`, `create`, `restore`, `clone`, `delete`, `holdings`, `schedule get`, `schedule set`, `schedule clear`, `retention` |
 | `webhooks` | `list`, `create`, `get`, `update`, `delete`, `rotate`, `test`, `deliveries` |
 | `secrets` | `list`, `set`, `rm` |
 | `api-keys` | `list`, `create`, `revoke` |
+| `operations` | `list`, `get`, `wait` |
+| `workspaces` | `list`, `get`, `members` |
 | `files` | `list`, `upload`, `download` |
 | `agent` | `run` |
 | `ssh-key` | `list`, `add`, `rm` |
@@ -2864,6 +2937,7 @@ with the key under `raw`. It is shown once.
 
 ```sh
 mandala operations list --computer demo    # newest first; --limit, --cursor
+mandala operations list --idempotency-key KEY   # the operation a keyed call started
 mandala operations get op_...
 mandala operations wait op_...              # exit 0 on succeeded
 ```
@@ -2872,6 +2946,22 @@ mandala operations wait op_...              # exit 0 on succeeded
 failed; the operation itself, with the platform's `error.code`, is under
 `error.details.operation`. `succeeded` means the platform's step finished, not
 that the desktop has booted — follow with `computers wait`.
+
+A failed command's error carries what is needed to find out how a call whose
+answer was lost ended, when present: `idempotency_key`, `operation_id` and
+`request_id` in the `--json` error object, and a second `mandala:` line on
+stderr naming them and the command to run next.
+
+### Workspaces
+
+```sh
+mandala workspaces list                   # oldest first; a scoped key sees its own
+mandala workspaces get wsp-...
+mandala workspaces members wsp-...        # needs a key not confined to a workspace
+```
+
+Read only: workspaces are created, renamed and deleted in the dashboard. An id
+the key cannot see is `not_found`, the same as one that does not exist.
 
 ### Account quota and historical usage
 
@@ -2947,11 +3037,13 @@ printf 'pwd\nls -la\n' | mandala computers exec workbench
 mandala computers exec workbench -c 'make build' --cwd /home/user/project --background --json
 mandala computers rename workbench build-box
 mandala computers create --name via-proxy --browser-proxy http://proxy.example.com:3128 --browser-proxy-bypass '<local>,*.internal'
+mandala computers create --name direct --template acme/web --no-browser-proxy  # decline a template's default proxy
 mandala computers browser-proxy set workbench socks5://127.0.0.1:1080 --bypass example.com
 mandala computers wait workbench --until browser-proxy
 mandala computers browser-proxy clear workbench
 mandala computers create --name locked-down --egress-proxy https://proxy.example.com:3128 --egress-proxy-credentials csec-0123456789abcdef
 mandala computers egress-proxy set workbench socks5://proxy.example.com:1080 --no-credentials
+mandala computers wait workbench --until egress-proxy
 mandala computers egress-proxy clear workbench
 mandala computers stop build-box && mandala computers resize build-box --cpu 4 --ram-mb 8192
 mandala computers view build-box
@@ -2961,8 +3053,10 @@ Create starts the computer by default; `--no-start` leaves it stopped. It return
 after provisioning responds. Use `computers wait` for readiness: `built` waits
 for the disk copy, `running` waits for the VM, `guest` waits for the guest
 agent, `secrets` waits until a computer's bound secrets have reached its
-desktop (at once for one with none bound), and `browser-proxy` waits until its
-browsers have its proxy (at once for one with none). The default is `running`. `--timeout-ms` bounds the readiness wait and
+desktop (at once for one with none bound), `browser-proxy` waits until its
+browsers have its proxy (at once for one with none), and `egress-proxy` waits
+until its host holds the egress proxy's credentials (at once for one with none).
+The default is `running`. `--timeout-ms` bounds the readiness wait and
 `--poll-ms` controls its polling interval; neither changes the initial computer
 lookup's request budget. The SDK also provides [`computers.launch()`](#use) for
 creating and waiting in one call.
@@ -3075,9 +3169,13 @@ with `snapshots holdings`; the CLI never selects a purge fingerprint for you.
 mandala templates list
 mandala templates validate ./devbox.yaml
 mandala templates publish ./devbox.yaml --json
-mandala templates get system base --version 1.0.0
+mandala templates get system base --version 1.2.0
 mandala templates build ./devbox.yaml --no-reuse --json
 mandala templates watch bld-example --json
+mandala templates schema > mandala-v1.schema.json   # point an editor at the file
+mandala builds list --allow-partial
+mandala builds get bld-example
+mandala builds progress bld-example                 # step by step, read once
 mandala snapshots list --computer vm-example --include-unfinished --json
 mandala snapshots create workbench --name before-upgrade
 mandala snapshots schedule set workbench --hour 4 --minute 30 --tz UTC
@@ -3097,11 +3195,14 @@ version. Retire without `--version` retires every version of that template name.
 Snapshot create and delete wait for completion by default. Both accept
 `--timeout-ms`, `--poll-ms`, and `--no-wait`. With `--no-wait`, capture may return
 `state: "capturing"`; deletion reports `accepted: true, waited: false`. Acceptance
-is not proof of completion. `snapshots restore` restores the specified snapshot;
+is not proof of completion. `snapshots restore` restores the specified snapshot
+and prints the `operation_id` it recorded;
 `snapshots clone SNAPSHOT --name NAME` creates a new computer from one; add `--disk-only` to build
 a memory snapshot's clone from its disk, or `--inherit-secrets` to resume one of a computer that
-held secrets (the output's `memory_dropped` says when a session did not come across). Schedule set uses
-04:00 UTC when time flags are omitted; `--disabled` disables the specified window.
+held secrets (the output's `memory_dropped` says when a session did not come across). Schedule set
+takes each time flag left out (`--hour`, `--minute`, `--tz`) from the computer's current schedule,
+and uses 04:00 UTC only when the computer has no schedule; `--disabled` keeps the current window
+and stops capture, so a later `schedule set` without time flags turns the same window back on.
 `schedule clear` removes it. Retention is read-only.
 
 Webhook create accepts repeatable `--event` and `--computer` filters,

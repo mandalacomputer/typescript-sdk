@@ -33,6 +33,7 @@ import {
   Templates,
   Usage,
   Webhooks,
+  Workspaces,
 } from './resources.js';
 import { DEFAULT_BASE_URL, Transport, type TransportOptions } from './transport.js';
 
@@ -60,6 +61,7 @@ export class Client {
   readonly sizes: Sizes;
   readonly usage: Usage;
   readonly webhooks: Webhooks;
+  readonly workspaces: Workspaces;
   readonly #t: Transport;
 
   /**
@@ -81,6 +83,7 @@ export class Client {
     this.sizes = new Sizes(this.#t);
     this.usage = new Usage(this.#t);
     this.webhooks = new Webhooks(this.#t);
+    this.workspaces = new Workspaces(this.#t);
   }
 
   get baseUrl(): string {
@@ -98,6 +101,7 @@ export type {
 } from './agent.js';
 export type {
   DeleteOptions,
+  DragOptions,
   FileChunk,
   ScrollOptions,
   WaitForOptions,
@@ -232,6 +236,8 @@ export type {
   WebhookDelivery,
   Whoami,
   WindowResult,
+  Workspace,
+  WorkspaceMember,
 } from './models.js';
 export type {
   ActivitiesArgs,
@@ -297,6 +303,7 @@ export {
   Templates,
   Usage,
   Webhooks,
+  Workspaces,
 } from './resources.js';
 export type { Bytes, ContentRange, Listing, SSEEvent, TransportOptions } from './transport.js';
 export { DEFAULT_BASE_URL, IDEMPOTENCY_KEY_HEADER, MODEL_KEY_HEADER } from './transport.js';

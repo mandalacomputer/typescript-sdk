@@ -286,6 +286,7 @@ async function exerciseEverything(client: Client): Promise<void> {
   await c.waitForGuest();
   await c.waitForSecrets();
   await c.waitForBrowserProxy();
+  await c.waitForEgressProxy();
   await c.start();
   await c.start({ resumeOnly: true });
   await c.stop();
@@ -338,6 +339,7 @@ async function exerciseEverything(client: Client): Promise<void> {
   await c.doubleClick(1, 2);
   await c.tripleClick(1, 2);
   await c.drag(9, 9, { x: 1, y: 2 });
+  await c.drag(9, 9, { x: 1, y: 2 }, { modifiers: ['shift'] });
   await c.mouseDown(1, 2);
   await c.mouseUp();
   await c.scroll(1, 2, { direction: 'up' });
@@ -534,6 +536,11 @@ async function exerciseEverything(client: Client): Promise<void> {
   await client.apiKeys.list();
   const minted = await client.apiKeys.create({ name: 'ci', workspaceId: 'wsp-1' });
   await client.apiKeys.revoke(minted.id);
+
+  // The account's workspaces (OPL-5057), read only.
+  await client.workspaces.list();
+  await client.workspaces.get('wsp-0123456789ab');
+  await client.workspaces.members('wsp-0123456789ab');
 
   // Lifecycle operations (OPL-5055): a read, a page with every parameter it
   // sends, and the wait over the read.

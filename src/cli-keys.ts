@@ -35,6 +35,9 @@ const keyLine = (k: ApiKey): string =>
       scopeText(k),
       k.manageKeys ? 'manages keys' : '-',
       k.lastUsedAt ? `last used ${k.lastUsedAt}` : 'never used',
+      // Only a key minted over the API names its minter; one made in the
+      // dashboard has none, and says nothing rather than a placeholder.
+      ...(k.mintedByKeyId ? [`minted by ${k.mintedByKeyId}`] : []),
     ].join('  '),
   );
 

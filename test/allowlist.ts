@@ -187,11 +187,6 @@ export const UNIMPLEMENTED: ReadonlySet<string> = new Set([
   // here, and a second, worse OpenAI client inside this SDK would be a
   // maintenance obligation with no user.
   'POST chat/completions',
-  // The account's workspaces, read only (OPL-5057). Listed to stay in step
-  // with the surface; no client method yet.
-  'GET workspaces',
-  'GET workspaces/:id',
-  'GET workspaces/:id/members',
 ]);
 
 /**

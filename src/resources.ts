@@ -35,6 +35,8 @@ import type {
   WebhookCreated,
   WebhookDelivery,
   Whoami,
+  Workspace,
+  WorkspaceMember,
 } from './models.js';
 import {
   belongsToComputer,
@@ -67,6 +69,8 @@ import {
   toWebhookCreated,
   toWebhookDelivery,
   toWhoami,
+  toWorkspace,
+  toWorkspaceMember,
   unmatchableRows,
 } from './models.js';
 import * as P from './paths.js';
@@ -125,13 +129,17 @@ export type CallOptions = { signal?: AbortSignal };
  *
  * Every lifecycle call sends an `Idempotency-Key`: a fresh random one per call
  * unless you pass your own here. Pass one when you may send the SAME call again
- * after losing its answer — a crash, a timeout, a `5xx` — and it will not be
- * done twice: for 24 hours the platform answers the same key and request with
- * the first call's answer, or `ConflictError` with `code:
- * "idempotency_in_progress"` while it still runs. An error whose outcome is
- * unknown carries the key it was sent with as `idempotencyKey`, and
- * `operations.list({ idempotencyKey })` finds the call's operation. 1 to 255
- * characters, each printable ASCII other than a space.
+ * after losing its answer — a crash, a timeout, a dropped connection — and it
+ * will not be done twice: for 24 hours the platform answers the same key and
+ * request with the first call's answer, or `ConflictError` with `code:
+ * "idempotency_in_progress"` while it still runs. A call answered with a `5xx`
+ * is not replayable this way: the platform marks its key lost, and a resend
+ * answers `ConflictError` with `code: "idempotency_outcome_unknown"`. Then,
+ * and after that answer, read the computer, or the operation with
+ * `operations.get(err.operationId)` or `operations.list({ idempotencyKey })`.
+ * An error whose outcome is unknown carries the key it was sent with as
+ * `idempotencyKey`. 1 to 255 characters, each printable ASCII other than a
+ * space.
  */
 export type IdempotencyOptions = { idempotencyKey?: string };
 
@@ -152,8 +160,11 @@ export type SnapshotCloneOptions = CallOptions &
      * new computer holds the SAME credentials, bound to the same secrets at the
      * revisions its memory holds, and gets current values at its next reboot.
      * Without it such a clone is built from the disk and says so — see
-     * {@link Computer.memoryDropped}. It lands in the source's workspace, and a
-     * resumed copy cannot run on the same host while its source is running.
+     * {@link Computer.memoryDropped}. It lands in the source's workspace. A
+     * resumed copy gets its own MAC and address, its name as hostname, a new
+     * machine ID and SSH host keys, and its own desktop password before its
+     * network comes up, so it runs beside its source; if that fails it is left
+     * stopped.
      */
     inheritSecrets?: boolean;
   };
@@ -291,8 +302,8 @@ export class Computers {
    * An admitted start is waited on, and a failed start is never retried.
    *
    * `timeoutMs` defaults to 180,000 and is one readiness budget beginning after
-   * create returns. Disk, running, guest, secrets and browser proxy waits share the remaining time;
-   * elapsed start work also consumes it. Create and start keep their usual
+   * create returns. Disk, running, guest, secrets, browser proxy and egress
+   * proxy waits share the remaining time; elapsed start work also consumes it. Create and start keep their usual
    * transport deadlines, so this is not a total wall-clock limit on launch.
    * `pollMs` defaults to 3,000 for every stage. `signal` cancels all stages.
    *
@@ -301,7 +312,9 @@ export class Computers {
    * returned computer sees them; a delivery that failed throws, naming why.
    * One with a browser proxy is waited on until its guest has it
    * ({@link Computer.waitForBrowserProxy}), so a browser opened on the returned
-   * computer uses it.
+   * computer uses it. One whose egress proxy names credentials is waited on
+   * until its host holds them ({@link Computer.waitForEgressProxy}): until then
+   * every connection the computer opens is closed.
    *
    * The returned computer is persistent. Failure never deletes it. SDK errors
    * after creation retain their type and include its id; cancellation retains
@@ -381,13 +394,24 @@ export class Computers {
       // is on disk, and a browser opened in between goes out directly. Told
       // one is set, as the secrets wait is, so a read that leaves the setting
       // out is not taken for "none" and returned on.
-      if (args.browserProxy !== undefined || computer.browserProxy !== undefined) {
+      // `null` asked for no proxy (a template's default declined), so only an
+      // object is one to wait for.
+      if (
+        (args.browserProxy !== undefined && args.browserProxy !== null) ||
+        computer.browserProxy !== undefined
+      ) {
         await computer.waitForBrowserProxy({
           timeoutMs: remaining(),
           pollMs,
           signal,
           expectBrowserProxy: true,
         });
+      }
+      // Just after a create every connection is closed until the host holds
+      // the proxy's credentials (egress_proxy_pending), so a command run on
+      // the returned computer would fail to reach anything.
+      if (args.egressProxy?.credentialsSecretId || computer.egressProxy?.credentialsSecretId) {
+        await computer.waitForEgressProxy({ timeoutMs: remaining(), pollMs, signal });
       }
       signal?.throwIfAborted();
       return computer;
@@ -843,8 +867,11 @@ export class Snapshots {
    * Create a new computer from a snapshot, leaving the original untouched.
    *
    * Cloning a memory snapshot forks it: the new machine resumes from the
-   * captured RAM rather than booting, so it starts as a live twin of the
-   * original — same hostname and network identity until it is re-identified.
+   * captured RAM rather than booting, with the same processes and open windows.
+   * A resumed copy gets its own MAC and address, its name as hostname, a new
+   * machine ID and SSH host keys, and its own desktop password before its
+   * network comes up, so it runs beside its source; if that fails it is left
+   * stopped, and starting it boots its disk fresh.
    *
    * Returns as soon as the computer exists, which is before its disk does. A
    * snapshot has to be copied out — and one taken incrementally is collapsed out
@@ -1202,7 +1229,9 @@ export class Templates {
    * Returned rather than wrapped in a type, because it is a schema: what a
    * caller does with it is point an editor or a validator at it, and a shape of
    * our own over the top would be a second, worse description of the same
-   * thing. Its `$id` is the URL it came from, so a `$ref` to it resolves.
+   * thing. The URL it is served from needs an API key, so an editor cannot
+   * fetch it by its `$id`: save what this returns to a file and point the
+   * editor at the file.
    */
   async schema(opts: CallOptions = {}): Promise<Record<string, unknown>> {
     const data = await this.#t.json('GET', P.TEMPLATE_SCHEMA, { signal: opts.signal });
@@ -1216,8 +1245,9 @@ export class Templates {
    *
    * Side-effect free and claims no ref, so it is safe on a draft and safe to
    * call repeatedly. Worth doing while iterating: a document that is wrong
-   * comes back with EVERY problem at once, where {@link publish} reports the
-   * first thing that stops it.
+   * comes back with EVERY problem at once and claims no ref. ({@link publish}
+   * refuses an invalid document with a `400` listing every problem too, in
+   * `err.body.problems`.)
    *
    * Does not throw for an invalid document. That is not leniency — an invalid
    * document is the answer to the question this method asks, and the platform
@@ -2230,7 +2260,8 @@ function namedSecret(secrets: readonly Secret[], name: string): Secret | undefin
  * (Credentials, "Manage keys"), and nothing a key can call turns it on —
  * without it each method is a {@link PermissionDeniedError} whose message
  * says so. A key minted here never has the permission, so a leaked key that
- * manages keys cannot mint a family of keys that do.
+ * manages keys cannot pass the permission on. The plain keys it minted DO keep
+ * working after it is revoked: see {@link ApiKeys.revoke}.
  *
  * Reach: the holder's own keys on the account this key acts on — never
  * another person's, which answer like an id that does not exist. A key
@@ -2278,6 +2309,10 @@ export class ApiKeys {
    * itself, and the call that does so is the last one it makes. An id out of
    * this key's reach is a {@link NotFoundError}, the same as one that does not
    * exist.
+   *
+   * It revokes that one key only. The plain keys it minted keep working after
+   * it is revoked: find them by {@link ApiKey.mintedByKeyId} and revoke them
+   * too (the dashboard can revoke a key's children in one step).
    */
   async revoke(keyId: string, opts: CallOptions = {}): Promise<void> {
     await this.#t.json('DELETE', P.apiKey(keyId), { signal: opts.signal });
@@ -2285,12 +2320,65 @@ export class ApiKeys {
 }
 
 /**
+ * The account's workspaces, read only (platform OPL-5057): they are created,
+ * renamed and deleted in the dashboard. A workspace partitions the account's
+ * computers; a key confined to one reaches that workspace's computers only.
+ */
+export class Workspaces {
+  #t: Transport;
+
+  /** @internal */
+  constructor(transport: Transport) {
+    this.#t = transport;
+  }
+
+  /**
+   * The account's workspaces, oldest first. A key confined to a workspace
+   * lists that one workspace and no other; an account-wide key sees them all.
+   */
+  async list(opts: CallOptions = {}): Promise<Workspace[]> {
+    const data = await this.#t.jsonArray('GET', P.WORKSPACES, { signal: opts.signal });
+    return data.map((row, i) => toWorkspace(row, `workspace ${i}`));
+  }
+
+  /**
+   * One workspace. An id this key cannot see is a {@link NotFoundError}, the
+   * same as one that does not exist: another account's, and for a key confined
+   * to a workspace, any workspace but its own. So is the id of a deleted
+   * workspace a computer may still name.
+   */
+  async get(workspaceId: string, opts: CallOptions = {}): Promise<Workspace> {
+    const path = P.workspace(workspaceId);
+    return toWorkspace(
+      await this.#t.json('GET', path, { signal: opts.signal }),
+      `the workspace from GET ${path}`,
+    );
+  }
+
+  /**
+   * The people who reach a workspace, oldest member first: the account's
+   * accepted members, since everybody on the account reaches every workspace
+   * at their account role (invitations not yet accepted are left out).
+   *
+   * A key confined to a workspace is refused with a
+   * {@link PermissionDeniedError}, because the list is the whole account's:
+   * use an account-wide key.
+   */
+  async members(workspaceId: string, opts: CallOptions = {}): Promise<WorkspaceMember[]> {
+    const data = await this.#t.jsonArray('GET', P.workspaceMembers(workspaceId), {
+      signal: opts.signal,
+    });
+    return data.map((row, i) => toWorkspaceMember(row, `workspace member ${i}`));
+  }
+}
+
+/**
  * The lifecycle operations this account's API calls started (platform OPL-5055).
  *
  * Every accepted create, clone, start, stop, suspend, restart, snapshot
- * restore, resize and move records one and answers its id: as
- * {@link Computer.operationId}, {@link LifecycleAck.operationId} or
- * {@link Move.operationId}. A refused call records nothing, since its error is
+ * restore, resize, move and delete records one and answers its id: as
+ * {@link Computer.operationId}, {@link LifecycleAck.operationId},
+ * {@link Move.operationId} or {@link DeleteResult.operationId}. A refused call records nothing, since its error is
  * its outcome, and calls made from the dashboard record none. Operations are
  * kept for a limited time, after which a read is a {@link NotFoundError}.
  *
