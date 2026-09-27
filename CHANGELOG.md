@@ -239,9 +239,9 @@ name.
   such a value as its NAME sent it and `secrets rm` repeated it in its error.
   A base64 string of twenty characters or more holding `/` or `+` is now read
   whole, unless every piece reads as part of a name (a word, an all-caps
-  acronym, a version or year, camel-case words), so a relative path such as
-  `myapp/prod/DATABASE/URL` still passes. A real name the check refuses goes
-  through with `--no-value-check`.
+  acronym, a version or year, camel-case words such as `DbPassword` or
+  `APIKey`), so a relative path such as `myapp/prod/DATABASE/URL` still
+  passes. A real name the check refuses goes through with `--no-value-check`.
 
 ### Security
 

@@ -126,6 +126,16 @@ const NAMES = [
   'acme/prod2eu/SMTP/PASSWORD',
   'myapp/prod/OAUTH2CLIENTSECRET',
   'myapp/prod/S3BUCKETKEY',
+  // A mixed-case piece that reads as camel-case words, after a leading acronym.
+  'myapp/DATABASE/DbPassword',
+  'myapp/DATABASE/JSONWebKey',
+  'prod/DATABASE/DbPassword',
+  'acme/prod/DATABASE/APIKey',
+  'myapp/staging/REDIS/HMACKey',
+  'myapp/DATABASE/TLSCert',
+  // A mixed-case piece of four characters or fewer.
+  'myapp/prod/DATABASE/iOS',
+  'mobile/prod/DATABASE/tvOS',
 ];
 
 /** An AWS secret access key's documented example, which `/` cuts into runs of 13, 7 and 18. */

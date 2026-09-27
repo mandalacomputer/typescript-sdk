@@ -328,11 +328,17 @@ const BASE64 = /^[A-Za-z0-9+/]{20,}={0,2}$/;
  * Whether one piece of a base64-shaped string, between `/` and `+`, reads as a
  * name's: four characters or fewer, one case of letters with digits anywhere
  * (`prod`, `NPMTOKEN`, `key2024`, `v1beta1`, `S3BUCKETKEY`), digits alone, or
- * both cases as camel-case words ({@link camelWords}).
+ * both cases as camel-case words ({@link camelWords}) once a leading acronym is
+ * dropped (`DbPassword`, `APIKey`, `HMACKey`). An acronym elsewhere (`macOS`,
+ * `iOSKey`) is not dropped: dropping every one let too many random pieces
+ * through, so a name holding one goes through with `--no-value-check`.
  */
 function namePiece(piece: string): boolean {
   if (piece.length <= 4 || /^[a-z0-9]+$|^[A-Z0-9]+$/.test(piece)) return true;
-  return /[a-z]/.test(piece) && /[A-Z]/.test(piece) && camelWords(piece.replace(/[0-9]+/g, ''));
+  // A leading acronym (`APIKey`, `HMACKey`, `TLSCert`) is one word, as a
+  // camel-case name spells it, so it goes before the words are read.
+  const words = piece.replace(/[0-9]+/g, '').replace(/^[A-Z]+(?=[A-Z][a-z])/, '');
+  return /[a-z]/.test(piece) && /[A-Z]/.test(piece) && camelWords(words);
 }
 
 /**
