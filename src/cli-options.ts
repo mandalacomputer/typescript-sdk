@@ -373,7 +373,13 @@ export const COMMANDS: readonly Command[] = [
     'secrets set',
     'Create or replace a secret; the value is read from stdin or a hidden prompt, never argv',
     ['name'],
-    [secretScope],
+    [
+      secretScope,
+      bool(
+        'no-value-check',
+        "Send NAME as typed, even one that looks like a secret's value rather than a name",
+      ),
+    ],
   ),
   command('secrets rm', 'Delete a secret by name or id', ['name'], [secretScope]),
   command(

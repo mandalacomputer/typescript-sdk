@@ -47,16 +47,37 @@ async function scopeRows(
 }
 
 /**
+ * A secret's name or id as typed, quoted for an error to repeat, or `undefined`
+ * when it may be a value typed where the name was meant: then an error says
+ * `that name or id` instead.
+ *
+ * Quoted only when it is shaped like an id, or when it is a name the platform
+ * would take that {@link looksLikeSecretValue} does not flag. The operand is
+ * never among the values masked out of what the CLI prints, so a token typed
+ * as `secrets rm "$GITHUB_TOKEN"` would otherwise be printed whole.
+ */
+function quotedOperand(typed: string): string | undefined {
+  if (SECRET_ID.test(typed)) return JSON.stringify(typed);
+  try {
+    P.secretName(typed);
+  } catch {
+    return undefined;
+  }
+  return looksLikeSecretValue(typed.trim()) ? undefined : JSON.stringify(typed);
+}
+
+/**
  * The secret a name OR an id means, for the one command that accepts either.
  *
  * A name that spells a different secret's id is ambiguous, and refused: guessing
- * wrong deletes the wrong credential.
+ * wrong deletes the wrong credential. The refusal quotes the key only when
+ * {@link quotedOperand} finds it safe to repeat, unless the caller names it.
  */
 function byNameOrId(
   secrets: readonly Secret[],
   key: string,
   unchanged = 'nothing was deleted',
-  shownAs = JSON.stringify(key),
+  shownAs = quotedOperand(key) ?? 'that name or id',
 ): Secret | undefined {
   const named = byName(secrets, key);
   const identified = secrets.find((s) => s.id === key);
@@ -532,8 +553,10 @@ export async function secretBindings(
         `${position}: no secret by that name or id in this scope; nothing was created`,
       );
     // Resolved to a stored secret's name or id, or shaped like an id: a name
-    // the user needs to see, not a value.
-    const label = `${position} (${JSON.stringify(key)})`;
+    // the user needs to see. Still quoted only when it does not look like a
+    // value, since a value stored as a name by mistake resolves too.
+    const shownKey = quotedOperand(key);
+    const label = shownKey ? `${position} (${shownKey})` : position;
     const as = target ?? found?.name;
     const env = flag === '--secret';
     const name = env ? '--as VAR' : '--path FILE';
@@ -545,8 +568,11 @@ export async function secretBindings(
     if (target === undefined && !(env ? P.SECRET_ENV : P.SECRET_FILE).test(as))
       throw new CliError(
         'invalid_arguments',
-        `${flag} ${JSON.stringify(key)}: its name cannot be ${env ? 'a variable' : 'a file'} name as it is; ` +
-          `name one: ${flag} ${JSON.stringify(key)} ${name}`,
+        shownKey
+          ? `${flag} ${shownKey}: its name cannot be ${env ? 'a variable' : 'a file'} name as it is; ` +
+              `name one: ${flag} ${shownKey} ${name}`
+          : `${position}: its name cannot be ${env ? 'a variable' : 'a file'} name as it is; ` +
+              `name one with ${name}`,
       );
     const secretId = found?.id ?? key;
     once(`id:${secretId}`, label, 'the secret');
@@ -647,6 +673,12 @@ export async function secretsList(
  * who asked for that. A create that loses a race for the name becomes a replace.
  * A 503 is NOT retried: a write answered 503 may already have happened, so the
  * error says so and the caller decides.
+ *
+ * A NAME that {@link looksLikeSecretValue} flags — the value typed where the
+ * name goes, `secrets set "$GITHUB_TOKEN"` — is refused before any prompt or
+ * request, without quoting it: sent, it would be stored as a name every member
+ * of the scope can read, and printed in the prompt and the result. `valueCheck`
+ * false (`--no-value-check`) sends a real name the heuristic misreads.
  */
 export async function secretsSet(
   client: Client,
@@ -655,7 +687,15 @@ export async function secretsSet(
   name: string,
   workspace: string | undefined,
   signal: AbortSignal,
+  { valueCheck = true }: { valueCheck?: boolean } = {},
 ): Promise<number> {
+  if (valueCheck && looksLikeSecretValue(name.trim()))
+    throw new CliError(
+      'invalid_arguments',
+      "the NAME given to secrets set looks like a secret's value, not a name; nothing was sent. " +
+        'Give the name as NAME and pipe the value on stdin or type it at the prompt; ' +
+        'if it is a name after all, send it as typed with --no-value-check',
+    );
   const trimmed = P.secretName(name);
   const ws = scope(workspace);
   // Checked before the value is asked for, so a mistyped scope is not found
@@ -710,8 +750,16 @@ export async function secretsRemove(
   let removed: Secret | undefined;
   for (let attempt = 1; !removed; attempt++) {
     const current = byNameOrId(await scopeRows(client, ws, signal), nameOrId);
-    if (!current)
-      throw new CliError('not_found', `no secret named ${JSON.stringify(nameOrId)} in this scope`);
+    if (!current) {
+      // Quoted only when safe to repeat: the operand may be the value itself.
+      const shownAs = quotedOperand(nameOrId);
+      throw new CliError(
+        'not_found',
+        shownAs
+          ? `no secret named ${shownAs} in this scope`
+          : 'no secret with that name or id in this scope',
+      );
+    }
     try {
       await client.secrets.delete(
         current.id,
@@ -724,7 +772,13 @@ export async function secretsRemove(
     }
   }
   const gone = removed as Secret;
-  if (output.json) return output.result({ id: gone.id, name: gone.name, deleted: true });
-  io.stdout.write(`deleted ${gone.id}  ${gone.name}\n`);
+  // A name that looks like a value (a token stored as a name by mistake, the
+  // likeliest reason to delete it) is left out rather than printed whole.
+  const safe = quotedOperand(gone.name) !== undefined;
+  if (output.json)
+    return output.result(
+      safe ? { id: gone.id, name: gone.name, deleted: true } : { id: gone.id, deleted: true },
+    );
+  io.stdout.write(safe ? `deleted ${gone.id}  ${gone.name}\n` : `deleted ${gone.id}\n`);
   return 0;
 }
