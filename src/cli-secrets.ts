@@ -326,12 +326,12 @@ const BASE64 = /^[A-Za-z0-9+/]{20,}={0,2}$/;
 
 /**
  * Whether one piece of a base64-shaped string, between `/` and `+`, reads as a
- * name's: four characters or fewer, one case of letters with digits only
- * closing it (`prod`, `NPMTOKEN`, `key2024`), digits alone, or both cases as
- * camel-case words ({@link camelWords}).
+ * name's: four characters or fewer, one case of letters with digits anywhere
+ * (`prod`, `NPMTOKEN`, `key2024`, `v1beta1`, `S3BUCKETKEY`), digits alone, or
+ * both cases as camel-case words ({@link camelWords}).
  */
 function namePiece(piece: string): boolean {
-  if (piece.length <= 4 || /^[a-z]+[0-9]*$|^[A-Z]+[0-9]*$|^[0-9]+$/.test(piece)) return true;
+  if (piece.length <= 4 || /^[a-z0-9]+$|^[A-Z0-9]+$/.test(piece)) return true;
   return /[a-z]/.test(piece) && /[A-Z]/.test(piece) && camelWords(piece.replace(/[0-9]+/g, ''));
 }
 
@@ -341,14 +341,15 @@ function namePiece(piece: string): boolean {
  * piece ends and the next begins, so a relative path every piece of which
  * reads as a name's ({@link namePiece}) passes first
  * (`myapp/prod/DATABASE/URL`, `team/ServiceAccountKeyProd2025V2/config1`); one
- * piece that does not is enough to read the whole.
+ * piece that does not is enough to read the whole. Padding stays on the last
+ * piece, since a name does not end in `=`.
  *
  * A leading `/` is an absolute path, and a string with neither `/` nor `+` is
  * one run, which {@link randomRun} already reads.
  */
 function base64Value(text: string): boolean {
   if (!BASE64.test(text) || text.startsWith('/') || !/[+/]/.test(text)) return false;
-  if (text.replace(/=+$/, '').split(/[+/]/).every(namePiece)) return false;
+  if (text.split(/[+/]/).every(namePiece)) return false;
   return randomRun(text.replace(/[+/=]/g, ''));
 }
 

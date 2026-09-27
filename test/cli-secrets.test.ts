@@ -119,6 +119,13 @@ const NAMES = [
   'prod/APIKEY/STRIPE/live2',
   'OPENAI+ANTHROPIC/keys/prod',
   'k8s/v2/db1/s3/prod/x509/certs',
+  // One case with digits inside a piece: a version, a service, a region.
+  'myapp/staging/REDIS/URL/v1beta1',
+  'myapp/prod/DATABASE/URL/v2beta',
+  'myapp/s3cache/DATABASE/URL',
+  'acme/prod2eu/SMTP/PASSWORD',
+  'myapp/prod/OAUTH2CLIENTSECRET',
+  'myapp/prod/S3BUCKETKEY',
 ];
 
 /** An AWS secret access key's documented example, which `/` cuts into runs of 13, 7 and 18. */
@@ -201,6 +208,22 @@ describe('looksLikeSecretValue', () => {
     expect(cut).toBeGreaterThan(1000);
     expect(cutHit / cut, 'holding / or +').toBeGreaterThan(0.93);
     expect(hit / 2000, 'all').toBeGreaterThan(0.93);
+  });
+
+  it('catches a padded base64 secret, as `openssl rand -base64 32` prints', () => {
+    const next = seeded(5076);
+    const BASE64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+    let cut = 0;
+    let cutHit = 0;
+    for (let i = 0; i < 2000; i++) {
+      const key = `${random(next, BASE64, 43)}=`;
+      if (!/[+/]/.test(key)) continue;
+      cut++;
+      if (looksLikeSecretValue(key)) cutHit++;
+    }
+    expect(cut).toBeGreaterThan(1000);
+    expect(cutHit / cut, 'holding / or +').toBeGreaterThan(0.93);
+    expect(looksLikeSecretValue(`${AWS_SECRET_EXAMPLE}Xw==`)).toBe(true);
   });
 
   it('catches a known prefix ahead of random letters and no digits, from twelve on', () => {
