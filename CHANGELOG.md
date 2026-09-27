@@ -227,6 +227,13 @@ name.
   name the binding by its position, in text and `--json` alike. A
   successful `secrets rm` of a secret whose stored name looks like a value
   prints only its id, and its `--json` result leaves `name` out.
+- **`apiKeys.revoke()` refuses an API key passed where its id goes** (and
+  `mandala api-keys revoke`). Revoking the key you hold by pasting it
+  (`com_...`) put the live key into the request path, where access logs record
+  it, and the platform answered 404 and left the key valid. Any value starting
+  `com_` now rejects with a `ValidationError` ("that is an API key, not a key
+  id; run api-keys list to find its id (key-...)") before any request, and
+  neither the error nor the CLI repeats the value.
 
 ## [0.6.0] — 2026-09-25
 
