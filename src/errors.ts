@@ -147,9 +147,10 @@ export class APIError extends MandalaError {
   /**
    * The platform's own word for what KIND of refusal this is, where it sent one
    * (platform OPL-3898): `contention`, `starting`, `unavailable`,
-   * `unsupported`, `revoked` or `exists`. `undefined` for most errors, and always will be — the
-   * platform is explicit that an absent value means unclassified rather than
-   * "none of the four", which is what makes it safe to classify more later.
+   * `unsupported`, `revoked`, `exists` or `running`. `undefined` for most
+   * errors, and always will be — the platform is explicit that an absent value
+   * means unclassified rather than "none of these", which is what makes it safe
+   * to classify more later.
    *
    * `message` is unchanged and is still the sentence for a person. This is the
    * part a program is allowed to depend on, and {@link isTransient} is the first
@@ -228,11 +229,21 @@ const REASON_CLEARS: ReadonlySet<string> = new Set(['contention', 'starting']);
  * {@link isTransient} calls worth sending again. {@link FileExistsError} is the
  * class it arrives as.
  */
+/**
+ * `running` is a computer that IS running, asked for something only a stopped one
+ * can have: a resize, today (platform OPL-5050). The mirror of `unavailable`, and
+ * kept apart from it for that reason: nothing clears either by waiting and both
+ * are fixed by an action on the computer, but the action is the opposite one.
+ * Stopping the computer is the fix. Without it here this would be an ordinary
+ * {@link ConflictError}, which {@link isTransient} calls worth sending again, and
+ * a caller looping on that would resend the same resize until it gave up.
+ */
 const REASON_PERMANENT: ReadonlySet<string> = new Set([
   'unavailable',
   'unsupported',
   'revoked',
   'exists',
+  'running',
 ]);
 
 /**
