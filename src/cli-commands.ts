@@ -185,6 +185,26 @@ function bypassList(values: string[] | undefined, flagName: string): string[] | 
   return entries;
 }
 
+/**
+ * Whether two proxy URLs name the same server: the scheme, host and port,
+ * compared without case, as the platform stores a server. A proxy's
+ * credentials are sent to its server on every request, so they are carried
+ * over only to the server they were set for; `false` when either will not
+ * parse, which refuses the carry rather than guessing.
+ */
+function sameProxyServer(a: string, b: string): boolean {
+  const parts = (value: string) => {
+    try {
+      const u = new URL(value);
+      return `${u.protocol.toLowerCase()}//${u.hostname.toLowerCase()}:${u.port}`;
+    } catch {
+      return undefined;
+    }
+  };
+  const left = parts(a);
+  return left !== undefined && left === parts(b);
+}
+
 const raw = (value: { raw: Record<string, unknown> }) => value.raw;
 const publicWebhook = (value: { raw: Record<string, unknown> }, secret?: string) => {
   const { secret: _secret, ...data } = value.raw;
@@ -522,6 +542,21 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
     const bypass = bypassFlag && bypassList(many(bypassFlag), bypassFlag);
     if (path === 'computers create' && bypass !== undefined && s('browser-proxy') === undefined)
       throw new CliError('invalid_arguments', '--browser-proxy-bypass requires --browser-proxy');
+    if (
+      path === 'computers create' &&
+      s('browser-proxy-credentials') !== undefined &&
+      s('browser-proxy') === undefined
+    )
+      throw new CliError(
+        'invalid_arguments',
+        '--browser-proxy-credentials requires --browser-proxy',
+      );
+    if (
+      path === 'computers browser-proxy set' &&
+      s('credentials') !== undefined &&
+      b('no-credentials')
+    )
+      throw new CliError('invalid_arguments', 'give --credentials or --no-credentials, not both');
     const create: P.CreateArgs = {
       name: s('name'),
       size: s('size'),
@@ -533,7 +568,13 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
       resolution: s('resolution'),
       start: !b('no-start'),
       browserProxy:
-        s('browser-proxy') === undefined ? undefined : { server: s('browser-proxy')!, bypass },
+        s('browser-proxy') === undefined
+          ? undefined
+          : {
+              server: s('browser-proxy')!,
+              bypass,
+              credentialsSecretId: s('browser-proxy-credentials'),
+            },
     };
     // Split and checked here; each is found by name or id only once the rest
     // of the create has passed, just before it is sent.
@@ -545,13 +586,21 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
     const deprecated = equalsDeprecation(bindings);
     if (deprecated) output.diagnostic(deprecated);
     if (path === 'computers create') P.createBody(create);
+    // The setting is replaced whole, so a set that named no credentials would
+    // remove the ones the proxy has. Unless told to change them, the current id
+    // is read off the computer just before the change and carried over, but
+    // only to the same server: a new server without either flag is refused.
     const proxy: P.UpdateArgs | undefined =
       path === 'computers browser-proxy set'
-        ? { browserProxy: { server: args[1]!, bypass } }
+        ? { browserProxy: { server: args[1]!, bypass, credentialsSecretId: s('credentials') } }
         : path === 'computers browser-proxy clear'
           ? { browserProxy: null }
           : undefined;
     if (proxy) P.updateBody(proxy);
+    const keepProxyCredentials =
+      path === 'computers browser-proxy set' &&
+      s('credentials') === undefined &&
+      !b('no-credentials');
     const resize = { cpu: n('cpu'), ramMb: n('ram-mb'), diskGb: n('disk-gb') };
     if (path === 'computers resize') {
       if (resize.cpu === undefined && resize.ramMb === undefined && resize.diskGb === undefined)
@@ -750,7 +799,26 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
         return output.result(computerData(await (await computer()).rename(args[1]!, call)));
       case 'computers resize':
         return output.result(computerData(await (await computer()).update(resize, call)));
-      case 'computers browser-proxy set':
+      case 'computers browser-proxy set': {
+        const c = await computer();
+        let change = proxy!;
+        if (keepProxyCredentials) {
+          // Read fresh rather than off the listing the name was resolved from.
+          const current = (await c.refresh(call)).browserProxy;
+          const kept = current?.credentialsSecretId;
+          if (kept) {
+            // The credentials are sent to the proxy on every request, so they
+            // follow only an unchanged server; a new one must be told which.
+            if (!sameProxyServer(current!.server, args[1]!))
+              throw new CliError(
+                'invalid_arguments',
+                `the proxy's credentials (${terminalSafe(kept)}) are for ${terminalSafe(current!.server)}, not ${terminalSafe(args[1]!)}; give --credentials SECRET_ID to use credentials with the new server, or --no-credentials to set it without any`,
+              );
+            change = { browserProxy: { ...change.browserProxy!, credentialsSecretId: kept } };
+          }
+        }
+        return output.result(computerData(await c.update(change, call)));
+      }
       case 'computers browser-proxy clear':
         return output.result(computerData(await (await computer()).update(proxy!, call)));
       case 'computers view': {

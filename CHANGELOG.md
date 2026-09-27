@@ -141,6 +141,21 @@ name.
   a platform that predates the field the wait falls back to the receipt as
   above. Either way the wait can return before the values land. The CLI's
   `computers wait --until secrets` runs it.
+- **A browser proxy's credentials:** `credentialsSecretId` on `BrowserProxy`
+  and `BrowserProxyArgs`, the id of a secret whose value is `user:password`
+  for an upstream that asks for one. It is read back and sent on, so
+  `update({ browserProxy: { ...computer.browserProxy!, bypass } })` keeps the
+  credentials; before this, that read-modify-write removed them, and every
+  browser on the computer was then answered `407` by its upstream. The secret
+  must be bound to the computer as a file, and an update that leaves the id
+  out removes the credentials, since the setting is replaced whole. A value
+  that is not a secret's id is refused before any request. The CLI's
+  `computers browser-proxy set` keeps the proxy's current credentials when
+  the server is unchanged, unless given `--credentials SECRET_ID` or
+  `--no-credentials`; a set that names a different server with neither is
+  refused before any request, since the credentials are sent to the proxy on
+  every request and belong to the server they were set for. `computers create`
+  takes `--browser-proxy-credentials SECRET_ID`.
 
 ### Changed
 

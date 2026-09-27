@@ -3337,6 +3337,161 @@ describe('files, rename, resize, view, and secrets bound at create', () => {
     });
   });
 
+  it('keeps, replaces or removes the credentials of a proxy it sets', async () => {
+    // The setting is replaced whole, so a set that named no credentials would
+    // remove the proxy's and leave every browser answered 407 by its upstream.
+    const creds = 'csec-0123456789abcdef';
+    const proxied = {
+      ...COMPUTER,
+      browser_proxy: { server: 'http://p:1', credentials_secret_id: creds },
+    };
+    const h = harness((call) =>
+      call.path === '/computers'
+        ? json([proxied])
+        : call.path === `/computers/${COMPUTER.id}`
+          ? json(proxied)
+          : anyRoute(call),
+    );
+    const kept = await h.run([
+      'computers',
+      'browser-proxy',
+      'set',
+      COMPUTER.name,
+      'http://p:1',
+      '--bypass',
+      'a.com',
+    ]);
+    expect(kept.code).toBe(0);
+    expect(h.rec.last()).toMatchObject({ method: 'PATCH', path: `/computers/${COMPUTER.id}` });
+    expect(h.rec.last()!.body).toEqual({
+      browser_proxy: { server: 'http://p:1', bypass: ['a.com'], credentials_secret_id: creds },
+    });
+    const other = 'csec-fedcba9876543210';
+    const replaced = await h.run([
+      'computers',
+      'browser-proxy',
+      'set',
+      COMPUTER.id,
+      'http://p:1',
+      '--credentials',
+      other,
+    ]);
+    expect(replaced.code).toBe(0);
+    expect(h.rec.last()!.body).toEqual({
+      browser_proxy: { server: 'http://p:1', credentials_secret_id: other },
+    });
+    const removed = await h.run([
+      'computers',
+      'browser-proxy',
+      'set',
+      COMPUTER.id,
+      'http://p:1',
+      '--no-credentials',
+    ]);
+    expect(removed.code).toBe(0);
+    expect(h.rec.last()!.body).toEqual({ browser_proxy: { server: 'http://p:1' } });
+    // And a person reading the computer sees which secret the proxy uses.
+    const shown = await harness((call) =>
+      call.path === `/computers/${COMPUTER.id}` ? json(proxied) : anyRoute(call),
+    ).run(['computers', 'get', COMPUTER.id], false);
+    expect(shown.code).toBe(0);
+    expect(shown.out).toContain(`"credentials_secret_id": "${creds}"`);
+  });
+
+  it("carries a proxy's credentials only to the server they were set for", async () => {
+    // The forwarder sends user:password to the proxy on every request, so a set
+    // that names another server must not take the current credentials with it.
+    const creds = 'csec-0123456789abcdef';
+    const proxied = {
+      ...COMPUTER,
+      browser_proxy: { server: 'http://corp-proxy.example:3128', credentials_secret_id: creds },
+    };
+    const h = harness((call) =>
+      call.path === '/computers'
+        ? json([proxied])
+        : call.path === `/computers/${COMPUTER.id}`
+          ? json(proxied)
+          : anyRoute(call),
+    );
+    const set = (url: string, ...flags: string[]) =>
+      h.run(['computers', 'browser-proxy', 'set', COMPUTER.id, url, ...flags]);
+    const patches = () => h.rec.calls.filter((call) => call.method === 'PATCH').length;
+    // The same server, written with other case and a trailing slash: kept.
+    const same = await set('HTTP://Corp-Proxy.example:3128/', '--bypass', 'a.com');
+    expect(same.code).toBe(0);
+    expect(h.rec.last()!.body).toEqual({
+      browser_proxy: {
+        server: 'HTTP://Corp-Proxy.example:3128/',
+        bypass: ['a.com'],
+        credentials_secret_id: creds,
+      },
+    });
+    for (const url of [
+      'http://other.example:3128',
+      'http://corp-proxy.example:8080',
+      'socks5://corp-proxy.example:3128',
+      'https://corp-proxy.example:3128',
+      'not a url',
+    ]) {
+      const before = patches();
+      const refused = await set(url);
+      // Frames accumulate across runs in one harness; this run's is the last.
+      const frame = refused.frames.at(-1);
+      expect(refused.code, url).toBe(1);
+      expect(frame, url).toMatchObject({ ok: false, error: { code: 'invalid_arguments' } });
+      expect(JSON.stringify(frame), url).toContain(creds);
+      expect(JSON.stringify(frame), url).toContain('--no-credentials');
+      expect(patches(), url).toBe(before);
+    }
+    const other = 'csec-fedcba9876543210';
+    const given = await set('http://other.example:3128', '--credentials', other);
+    expect(given.code).toBe(0);
+    expect(h.rec.last()!.body).toEqual({
+      browser_proxy: { server: 'http://other.example:3128', credentials_secret_id: other },
+    });
+    const dropped = await set('http://other.example:3128', '--no-credentials');
+    expect(dropped.code).toBe(0);
+    expect(h.rec.last()!.body).toEqual({ browser_proxy: { server: 'http://other.example:3128' } });
+    // A proxy with no credentials: any server, as before.
+    const bare = harness((call) =>
+      call.path === `/computers/${COMPUTER.id}`
+        ? json({ ...COMPUTER, browser_proxy: { server: 'http://corp-proxy.example:3128' } })
+        : anyRoute(call),
+    );
+    const moved = await bare.run([
+      'computers',
+      'browser-proxy',
+      'set',
+      COMPUTER.id,
+      'socks5://elsewhere:1080',
+    ]);
+    expect(moved.code).toBe(0);
+    expect(bare.rec.last()!.body).toEqual({ browser_proxy: { server: 'socks5://elsewhere:1080' } });
+  });
+
+  it('creates with a browser proxy and its credentials', async () => {
+    const h = harness((call) =>
+      call.method === 'POST' ? json({ ...COMPUTER }, { status: 201 }) : anyRoute(call),
+    );
+    const creds = 'csec-0123456789abcdef';
+    const result = await h.run([
+      'computers',
+      'create',
+      '--browser-proxy',
+      'http://proxy.example.com:3128',
+      '--browser-proxy-credentials',
+      creds,
+    ]);
+    expect(result.code).toBe(0);
+    expect(h.rec.last()).toMatchObject({
+      method: 'POST',
+      path: '/computers',
+      body: {
+        browser_proxy: { server: 'http://proxy.example.com:3128', credentials_secret_id: creds },
+      },
+    });
+  });
+
   it("prints the platform's refusal of a proxy as it is", async () => {
     // The rules on a proxy URL are the platform's, and they grow; the CLI
     // sends what was typed and passes the sentence back.
@@ -3592,6 +3747,21 @@ describe('files, rename, resize, view, and secrets bound at create', () => {
     [['computers', 'browser-proxy', 'set', 'vm', 'http://p:1', '--bypass', ',']],
     [['computers', 'browser-proxy', 'set', 'vm', 'http://p:1', '--bypass', 'a.com,']],
     [['computers', 'create', '--browser-proxy', 'http://p:1', '--browser-proxy-bypass', ' ']],
+    [['computers', 'create', '--browser-proxy-credentials', 'csec-0123456789abcdef']],
+    [['computers', 'create', '--browser-proxy', 'http://p:1', '--browser-proxy-credentials', 'x']],
+    [['computers', 'browser-proxy', 'set', 'vm', 'http://p:1', '--credentials', 'csec-01']],
+    [
+      [
+        'computers',
+        'browser-proxy',
+        'set',
+        'vm',
+        'http://p:1',
+        '--credentials',
+        'csec-0123456789abcdef',
+        '--no-credentials',
+      ],
+    ],
   ])('%j makes no requests', async (argv) => {
     const h = harness();
     const result = await h.run(argv);
