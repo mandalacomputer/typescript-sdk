@@ -96,12 +96,41 @@ export async function apiKeysRevoke(
   return output.result({ id, revoked: true });
 }
 
+/**
+ * The person and account lines of `whoami`. The platform withholds the user's
+ * name and email and the account's name and plan from a workspace-scoped key
+ * (it is the credential handed to an end customer), so for one of those an
+ * empty field is left out and named at the end of its line rather than
+ * printed as `<>`, `(unnamed)` or `plan ,`. An unscoped answer prints exactly
+ * as it always has.
+ */
+function whoamiPersonAccount(w: Whoami): [string, string] {
+  const { user, account } = w;
+  if (!w.workspace) {
+    return [
+      `${user.name ? `${user.name} ` : ''}<${user.email}> (${user.id})`,
+      `Account: ${account.name ?? '(unnamed)'} (${account.id}), plan ${account.plan}, ${account.status}`,
+    ];
+  }
+  const withheld = (fields: string[]) =>
+    fields.length ? ` (${fields.join(' and ')} withheld from a workspace-scoped key)` : '';
+  const person =
+    user.name || user.email
+      ? `${user.name ? `${user.name} ` : ''}${user.email ? `<${user.email}> ` : ''}(${user.id})`
+      : `User ${user.id}`;
+  return [
+    person + withheld([...(user.name ? [] : ['name']), ...(user.email ? [] : ['email'])]),
+    `Account: ${account.name ? `${account.name} (${account.id})` : account.id}` +
+      `${account.plan ? `, plan ${account.plan}` : ''}, ${account.status}` +
+      withheld([...(account.name ? [] : ['name']), ...(account.plan ? [] : ['plan'])]),
+  ];
+}
+
 function whoamiText(w: Whoami): string {
   const k = w.key;
   return (
     [
-      `${w.user.name ? `${w.user.name} ` : ''}<${w.user.email}> (${w.user.id})`,
-      `Account: ${w.account.name ?? '(unnamed)'} (${w.account.id}), plan ${w.account.plan}, ${w.account.status}`,
+      ...whoamiPersonAccount(w),
       `Role: ${w.role}`,
       `Scope: ${w.workspace ? `workspace ${w.workspace.name} (${w.workspace.id})` : 'the whole account'}`,
       k
