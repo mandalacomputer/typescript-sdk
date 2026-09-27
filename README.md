@@ -1943,8 +1943,11 @@ clone — a fresh one per call unless you pass `{ idempotencyKey }` yourself. Th
 platform records the call before carrying it out, so if its answer is lost (a
 timeout, a dropped connection, a `5xx`) the error carries the key as
 `err.idempotencyKey`: send the same call again with it and it is not done
-twice — you get the first call's answer, or a `ConflictError` with `code:
-"idempotency_in_progress"` while it still runs — or find its operation with
+twice — you get the first call's answer, a `ConflictError` with `code:
+"idempotency_in_progress"` while it still runs, or one with `code:
+"idempotency_outcome_unknown"` when the platform itself never heard how it
+ended (it answered a `5xx`): then read the computer, or its operation, to see
+whether it took effect — or find its operation with
 `client.operations.list({ idempotencyKey })`. Keys last 24 hours, and a key
 sent with a different request is refused with a `422`.
 
