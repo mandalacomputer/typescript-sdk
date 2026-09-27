@@ -552,7 +552,13 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
         '--browser-proxy-credentials requires --browser-proxy',
       );
     if (
-      path === 'computers browser-proxy set' &&
+      path === 'computers create' &&
+      s('egress-proxy-credentials') !== undefined &&
+      s('egress-proxy') === undefined
+    )
+      throw new CliError('invalid_arguments', '--egress-proxy-credentials requires --egress-proxy');
+    if (
+      (path === 'computers browser-proxy set' || path === 'computers egress-proxy set') &&
       s('credentials') !== undefined &&
       b('no-credentials')
     )
@@ -575,6 +581,10 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
               bypass,
               credentialsSecretId: s('browser-proxy-credentials'),
             },
+      egressProxy:
+        s('egress-proxy') === undefined
+          ? undefined
+          : { server: s('egress-proxy')!, credentialsSecretId: s('egress-proxy-credentials') },
     };
     // Split and checked here; each is found by name or id only once the rest
     // of the create has passed, just before it is sent.
@@ -595,10 +605,14 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
         ? { browserProxy: { server: args[1]!, bypass, credentialsSecretId: s('credentials') } }
         : path === 'computers browser-proxy clear'
           ? { browserProxy: null }
-          : undefined;
+          : path === 'computers egress-proxy set'
+            ? { egressProxy: { server: args[1]!, credentialsSecretId: s('credentials') } }
+            : path === 'computers egress-proxy clear'
+              ? { egressProxy: null }
+              : undefined;
     if (proxy) P.updateBody(proxy);
     const keepProxyCredentials =
-      path === 'computers browser-proxy set' &&
+      (path === 'computers browser-proxy set' || path === 'computers egress-proxy set') &&
       s('credentials') === undefined &&
       !b('no-credentials');
     const resize = { cpu: n('cpu'), ramMb: n('ram-mb'), diskGb: n('disk-gb') };
@@ -819,7 +833,27 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
         }
         return output.result(computerData(await c.update(change, call)));
       }
+      case 'computers egress-proxy set': {
+        const c = await computer();
+        let change = proxy!;
+        if (keepProxyCredentials) {
+          // browser-proxy set's rule: read fresh, and carry the id over only
+          // to an unchanged server, since the proxy is signed in to with it.
+          const current = (await c.refresh(call)).egressProxy;
+          const kept = current?.credentialsSecretId;
+          if (kept) {
+            if (!sameProxyServer(current!.server, args[1]!))
+              throw new CliError(
+                'invalid_arguments',
+                `the egress proxy's credentials (${terminalSafe(kept)}) are for ${terminalSafe(current!.server)}, not ${terminalSafe(args[1]!)}; give --credentials SECRET_ID to use credentials with the new server, or --no-credentials to set it without any`,
+              );
+            change = { egressProxy: { ...change.egressProxy!, credentialsSecretId: kept } };
+          }
+        }
+        return output.result(computerData(await c.update(change, call)));
+      }
       case 'computers browser-proxy clear':
+      case 'computers egress-proxy clear':
         return output.result(computerData(await (await computer()).update(proxy!, call)));
       case 'computers view': {
         const c = await computer();

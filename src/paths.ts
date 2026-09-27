@@ -628,6 +628,47 @@ export type CreateArgs = {
    * A `credentialsSecretId` names a secret bound in {@link secrets} as a file.
    */
   browserProxy?: BrowserProxyArgs;
+  /**
+   * Send ALL of this computer's outbound TCP through a proxy — `exec`,
+   * terminals, package managers and browsers alike — taken on the computer's
+   * host, so nothing inside the computer is configured and nothing there can
+   * opt out. It fails closed, drops UDP to the internet and ICMP, and leaves
+   * DNS lookups to the platform's resolver; see {@link EgressProxyArgs}. A
+   * create carrying one is always a cold boot, and a clone does not inherit it.
+   * A host that cannot take it yet — or an `https://` one, or one naming
+   * credentials — answers `409` with reason `unsupported`.
+   */
+  egressProxy?: EgressProxyArgs;
+};
+
+/**
+ * A proxy for ALL of a computer's outbound TCP.
+ *
+ * `server` is the proxy's URL with an explicit port: `http://host:port` (one
+ * that takes `CONNECT`), `https://host:port` (the same, spoken to over TLS) or
+ * `socks5://host:port`. Never a username or password in it: the setting is
+ * returned by every read of the computer. Which schemes and hosts are accepted
+ * is the platform's rule, not this client's: a value it refuses comes back as
+ * a `400` whose message says why. There is no bypass list — every connection
+ * goes through the proxy.
+ */
+export type EgressProxyArgs = {
+  server: string;
+  /**
+   * For an upstream that asks for a username and password: the id of a secret
+   * (`csec-` and sixteen hex characters) whose value is `user:password`. The
+   * secret is NOT bound to the computer and the computer never receives it:
+   * the computer's host holds the value and signs in to the proxy for it.
+   * With `http://` and `socks5://` the credentials cross the network to the
+   * proxy in clear text, so prefer `https://` when naming them. Until the host
+   * has the value a running computer reports
+   * {@link Computer.egressProxyPending} and its connections are closed.
+   *
+   * The setting is replaced whole, so leaving this out of an update REMOVES
+   * the credentials. Spread the {@link EgressProxy} read off the computer to
+   * keep them. `null` is the same as leaving it out.
+   */
+  credentialsSecretId?: string | null;
 };
 
 /**
@@ -775,6 +816,7 @@ export function createBody(args: CreateArgs): Json {
     templateTransfer,
     secrets,
     browserProxy,
+    egressProxy,
   } = args;
   // Defaulted after validation, not by destructuring: `start = true` fills in
   // only for `undefined`, so a `"false"` kept its own shape and went onto the
@@ -824,6 +866,7 @@ export function createBody(args: CreateArgs): Json {
       resolution,
       secrets: secrets === undefined ? undefined : secretBindingsBody(secrets),
       browser_proxy: browserProxy === undefined ? undefined : browserProxyBody(browserProxy),
+      egress_proxy: egressProxy === undefined ? undefined : egressProxyBody(egressProxy),
     }),
     start,
   };
@@ -854,6 +897,15 @@ export type UpdateArgs = {
    * it as it starts.
    */
   browserProxy?: BrowserProxyArgs | null;
+  /**
+   * The proxy ALL of this computer's outbound TCP is sent through, replaced
+   * whole; `null` removes it and the computer's traffic goes directly again.
+   * Whole means a `credentialsSecretId` left out is removed: spread
+   * {@link Computer.egressProxy} to keep it. On its own: refused here, before
+   * any request, beside any other field. Connections open through the proxy
+   * are closed when the setting changes.
+   */
+  egressProxy?: EgressProxyArgs | null;
 };
 
 /**
@@ -898,6 +950,43 @@ export function browserProxyBody(p: BrowserProxyArgs, what = 'browserProxy'): Js
 
 /** A secret's id: `csec-` and sixteen lowercase hex characters. */
 const SECRET_ID = /^csec-[0-9a-f]{16}$/;
+
+const EGRESS_PROXY_KEYS = new Set(['server', 'credentialsSecretId']);
+
+/**
+ * An egress proxy as the wire takes it, checked for shape only, as
+ * {@link browserProxyBody} is — the rules on the server are the platform's.
+ * Unlike that one, a key this client does not know is refused rather than
+ * dropped: `bypass` copied over from a browser proxy has no meaning here, and
+ * a dropped `credentials_secret_id` spelled the wire's way would send the
+ * setting without the credentials its caller named.
+ */
+export function egressProxyBody(p: EgressProxyArgs, what = 'egressProxy'): Json {
+  if (!p || typeof p !== 'object' || Array.isArray(p)) {
+    throw new ValidationError(`${what} must be an object: {server, credentialsSecretId?}`);
+  }
+  for (const key of Object.keys(p)) {
+    if (EGRESS_PROXY_KEYS.has(key)) continue;
+    throw new ValidationError(
+      key === 'bypass'
+        ? `${what} has no bypass list: every connection the computer opens goes through the proxy`
+        : `${what}.${key} is not a field of an egress proxy; give {server, credentialsSecretId?}`,
+    );
+  }
+  const server = requireString(p.server, `${what}.server`);
+  if (!server.trim()) throw new ValidationError(`${what}.server must not be empty`);
+  const out: Json = { server };
+  if (p.credentialsSecretId !== undefined && p.credentialsSecretId !== null) {
+    const id = requireString(p.credentialsSecretId, `${what}.credentialsSecretId`);
+    if (!SECRET_ID.test(id)) {
+      throw new ValidationError(
+        `${what}.credentialsSecretId must be a secret's id: csec- and sixteen hex characters`,
+      );
+    }
+    out.credentials_secret_id = id;
+  }
+  return out;
+}
 
 /**
  * What a move is asked for: the same sizing group a resize takes, minus the two
@@ -980,6 +1069,10 @@ export function updateBody(args: UpdateArgs): Json {
       args.browserProxy === undefined || args.browserProxy === null
         ? args.browserProxy
         : browserProxyBody(args.browserProxy),
+    egress_proxy:
+      args.egressProxy === undefined || args.egressProxy === null
+        ? args.egressProxy
+        : egressProxyBody(args.egressProxy),
   });
   if (args.name !== undefined && !requireString(args.name, 'name').trim()) {
     // On create an omitted name means "you pick one"; in an update an empty one
@@ -988,8 +1081,20 @@ export function updateBody(args: UpdateArgs): Json {
   }
   if (!Object.keys(body).length) {
     throw new ValidationError(
-      'nothing to update: give at least one of name, cpu, ramMb, diskGb, idleSuspendMin, browserProxy',
+      'nothing to update: give at least one of name, cpu, ramMb, diskGb, idleSuspendMin, browserProxy, egressProxy',
     );
+  }
+  // The platform refuses it beside anything else with a 400; said here, before
+  // a request, since nothing about it depends on the computer's state.
+  if (args.egressProxy !== undefined) {
+    const beside = (
+      ['name', 'cpu', 'ramMb', 'diskGb', 'idleSuspendMin', 'browserProxy'] as const
+    ).filter((k) => args[k] !== undefined);
+    if (beside.length) {
+      throw new ValidationError(
+        `egressProxy travels alone: send it in an update of its own, not beside ${beside.join(', ')}`,
+      );
+    }
   }
   return body;
 }

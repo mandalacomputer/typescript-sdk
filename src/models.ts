@@ -3212,6 +3212,52 @@ export function toBrowserProxy(d: unknown, id = 'the computer'): BrowserProxy | 
   return out;
 }
 
+// --- egress proxy -----------------------------------------------------------
+
+/**
+ * The proxy ALL of a computer's outbound TCP is sent through, as the platform
+ * reports it: `server` in its stored spelling (lower-cased), and
+ * `credentialsSecretId` when the proxy is signed in to with a secret's value.
+ *
+ * Its shape is {@link EgressProxyArgs}'s, so a proxy read here can be spread,
+ * edited and passed back to {@link Computer.update} with nothing lost.
+ */
+export type EgressProxy = {
+  server: string;
+  /**
+   * The id of the secret (`csec-` and sixteen hex characters) whose value,
+   * `user:password`, the computer's host signs in to the proxy with. The id
+   * only, never the value. See {@link EgressProxyArgs.credentialsSecretId}.
+   */
+  credentialsSecretId?: string;
+};
+
+/**
+ * Strict, for {@link toBrowserProxy}'s reason: an update replaces the setting
+ * whole, so a credentials id dropped on the read is one the caller's next
+ * update removes without knowing — and the computer's connections are then
+ * refused by its upstream. Fields this client does not know are left out
+ * rather than refused, so a platform that grows the setting is still readable.
+ */
+export function toEgressProxy(d: unknown, id = 'the computer'): EgressProxy | undefined {
+  if (d === undefined || d === null) return undefined;
+  if (!isRecord(d)) throw new MandalaError(`expected ${id}'s egress_proxy to be an object`);
+  if (typeof d.server !== 'string' || !d.server) {
+    throw new MandalaError(`expected ${id}'s egress_proxy to name its server`);
+  }
+  const out: EgressProxy = { server: d.server };
+  const creds = d.credentials_secret_id;
+  if (creds !== undefined && creds !== null) {
+    if (typeof creds !== 'string' || !creds) {
+      throw new MandalaError(
+        `expected ${id}'s egress_proxy credentials_secret_id to be a secret's id`,
+      );
+    }
+    out.credentialsSecretId = creds;
+  }
+  return out;
+}
+
 // --- secret bindings --------------------------------------------------------
 
 /**

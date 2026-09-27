@@ -169,6 +169,14 @@ export const COMMANDS: readonly Command[] = [
         'browser-proxy-credentials',
         'The id of a secret holding user:password for the proxy (with --browser-proxy); bind it with --secret-file too',
       ),
+      flag(
+        'egress-proxy',
+        "Send ALL of the computer's outbound TCP through this proxy URL, e.g. https://proxy.example.com:3128; it fails closed",
+      ),
+      flag(
+        'egress-proxy-credentials',
+        'The id of a secret holding user:password for the egress proxy (with --egress-proxy); not bound to the computer',
+      ),
     ],
   ),
   command('computers get', 'Get a computer by name or ID', ['computer']),
@@ -219,6 +227,23 @@ export const COMMANDS: readonly Command[] = [
   command(
     'computers browser-proxy clear',
     "Remove a computer's browser proxy; its browsers go out directly",
+    ['computer'],
+  ),
+  command(
+    'computers egress-proxy set',
+    "Send ALL of a computer's outbound TCP through a proxy, replacing any it has; its credentials are kept when the server is unchanged",
+    ['computer', 'url'],
+    [
+      flag(
+        'credentials',
+        "The id of a secret holding user:password for the proxy; the computer's host signs in with it",
+      ),
+      bool('no-credentials', "Remove the proxy's credentials rather than keep them"),
+    ],
+  ),
+  command(
+    'computers egress-proxy clear',
+    "Remove a computer's egress proxy; its traffic goes out directly",
     ['computer'],
   ),
   command(
