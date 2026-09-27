@@ -231,9 +231,11 @@ name.
   `mandala api-keys revoke`). Revoking the key you hold by pasting it
   (`com_...`) put the live key into the request path, where access logs record
   it, and the platform answered 404 and left the key valid. Any value starting
-  `com_` now rejects with a `ValidationError` ("that is an API key, not a key
-  id; run api-keys list to find its id (key-...)") before any request, and
-  neither the error nor the CLI repeats the value.
+  `com_`, or holding a full key anywhere (behind a zero-width space or
+  byte-order mark, in quotes, after `Bearer`), now rejects with a
+  `ValidationError` ("that is an API key, not a key id; run api-keys list to
+  find its id (key-...)") before any request, and neither the error nor the
+  CLI repeats the value.
 
 ## [0.6.0] — 2026-09-25
 

@@ -502,10 +502,15 @@ export const secret = (id: string): string => `${SECRETS}/${pathId(id, 'secret i
  * and leave the key valid. Refused before any request, with a message that
  * does not repeat the value. Surrounding whitespace and letter case are
  * ignored for the check alone, so a pasted key with a stray space or in
- * capitals is caught too.
+ * capitals is caught too. A full key anywhere in the value is refused as well:
+ * one behind a zero-width space or byte-order mark, in quotes, or after a
+ * label (`Bearer com_...`) is still the key, and a key id can never hold one.
  */
 export const apiKey = (id: string): string => {
-  if (typeof id === 'string' && id.trim().toLowerCase().startsWith('com_')) {
+  if (
+    typeof id === 'string' &&
+    (id.trim().toLowerCase().startsWith('com_') || /com_[0-9a-f]{48}/i.test(id))
+  ) {
     throw new ValidationError(
       'that is an API key, not a key id; run api-keys list to find its id (key-...)',
     );
