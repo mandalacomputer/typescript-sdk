@@ -3966,6 +3966,7 @@ export type OperationKind =
   | 'restore'
   | 'resize'
   | 'move'
+  | 'delete'
   | (string & {});
 
 /**
@@ -3976,8 +3977,14 @@ export type OperationState = 'pending' | 'running' | 'succeeded' | 'failed' | (s
 
 /**
  * One lifecycle operation (platform OPL-5055): what an accepted create, clone,
- * start, stop, suspend, restart, restore, resize or move started, and how it
- * ended. {@link Operations.wait} polls one to its end.
+ * start, stop, suspend, restart, restore, resize, move or delete started, and
+ * how it ended. {@link Operations.wait} polls one to its end.
+ *
+ * A call sent with an `Idempotency-Key` — every lifecycle call this SDK makes
+ * — is recorded `pending` before the platform carries it out (platform
+ * OPL-5127), so `operations.list({ idempotencyKey })` finds it even when its
+ * answer was lost. It ends as that answer says, or `failed` with `code:
+ * "lost"` when the platform never heard how it went.
  *
  * `succeeded` MEANS THE PLATFORM FINISHED ITS STEP, not that the desktop inside
  * has booted: a create or a start that succeeded is a guest that was started.
@@ -4004,6 +4011,11 @@ export type Operation = {
    * sentence for a person.
    */
   error: { code: string; message: string } | null;
+  /**
+   * The `Idempotency-Key` the call that started it was sent with, and `null`
+   * for one sent without — or read from a platform that does not report it.
+   */
+  idempotencyKey: string | null;
   createdAt: string;
   /** When `state` or `error` last changed. */
   updatedAt: string;
@@ -4052,6 +4064,7 @@ export function toOperation(d: unknown, what = 'an operation'): Operation {
     computerId: nullableText(d.computer_id, `${what}'s computer_id`),
     state: d.state,
     error,
+    idempotencyKey: nullableText(d.idempotency_key, `${what}'s idempotency_key`),
     createdAt: str(d.created_at),
     updatedAt: str(d.updated_at),
     finishedAt: stamp(d.finished_at) ?? null,

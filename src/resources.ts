@@ -70,7 +70,7 @@ import {
   unmatchableRows,
 } from './models.js';
 import * as P from './paths.js';
-import type { Listing, SSEEvent, Transport } from './transport.js';
+import { idempotencyHeaders, type Listing, type SSEEvent, type Transport } from './transport.js';
 import {
   checkWait,
   deadlineSignal,
@@ -119,26 +119,44 @@ export type ComputerListOptions = ListOptions & { state?: P.ComputerState };
 export type CallOptions = { signal?: AbortSignal };
 
 /**
+ * What a lifecycle call — create, clone, start, stop, suspend, restart,
+ * restore, update, relocate, delete — accepts beside {@link CallOptions}
+ * (platform OPL-5127).
+ *
+ * Every lifecycle call sends an `Idempotency-Key`: a fresh random one per call
+ * unless you pass your own here. Pass one when you may send the SAME call again
+ * after losing its answer — a crash, a timeout, a `5xx` — and it will not be
+ * done twice: for 24 hours the platform answers the same key and request with
+ * the first call's answer, or `ConflictError` with `code:
+ * "idempotency_in_progress"` while it still runs. An error whose outcome is
+ * unknown carries the key it was sent with as `idempotencyKey`, and
+ * `operations.list({ idempotencyKey })` finds the call's operation. 1 to 255
+ * characters, each printable ASCII other than a space.
+ */
+export type IdempotencyOptions = { idempotencyKey?: string };
+
+/**
  * How {@link Snapshots.clone} treats a MEMORY snapshot (platform OPL-4964).
  * Ignored for a disk snapshot, which has no session to resume.
  */
-export type SnapshotCloneOptions = CallOptions & {
-  /**
-   * `false` builds the new computer from the snapshot's disk alone: a fresh
-   * boot with its own network identity, the way out when the saved session is
-   * what is broken. Defaults to `true`, which resumes the session.
-   */
-  memory?: boolean;
-  /**
-   * Consent to resuming a memory snapshot of a computer that held secrets. The
-   * new computer holds the SAME credentials, bound to the same secrets at the
-   * revisions its memory holds, and gets current values at its next reboot.
-   * Without it such a clone is built from the disk and says so — see
-   * {@link Computer.memoryDropped}. It lands in the source's workspace, and a
-   * resumed copy cannot run on the same host while its source is running.
-   */
-  inheritSecrets?: boolean;
-};
+export type SnapshotCloneOptions = CallOptions &
+  IdempotencyOptions & {
+    /**
+     * `false` builds the new computer from the snapshot's disk alone: a fresh
+     * boot with its own network identity, the way out when the saved session is
+     * what is broken. Defaults to `true`, which resumes the session.
+     */
+    memory?: boolean;
+    /**
+     * Consent to resuming a memory snapshot of a computer that held secrets. The
+     * new computer holds the SAME credentials, bound to the same secrets at the
+     * revisions its memory holds, and gets current values at its next reboot.
+     * Without it such a clone is built from the disk and says so — see
+     * {@link Computer.memoryDropped}. It lands in the source's workspace, and a
+     * resumed copy cannot run on the same host while its source is running.
+     */
+    inheritSecrets?: boolean;
+  };
 
 /**
  * The one computer a route promised, refused when the payload was not one.
@@ -253,9 +271,13 @@ export class Computers {
    * comes back rather than being thrown away with the exception — check
    * `startError` if it matters, and `start()` may work on a second attempt.
    */
-  async create(args: P.CreateArgs = {}, opts: CallOptions = {}): Promise<Computer> {
+  async create(
+    args: P.CreateArgs = {},
+    opts: CallOptions & IdempotencyOptions = {},
+  ): Promise<Computer> {
     const data = await this.#t.json('POST', P.COMPUTERS, {
       body: P.createBody(args),
+      headers: idempotencyHeaders(opts.idempotencyKey),
       signal: opts.signal,
     });
     return oneComputer(this.#t, data, 'POST', P.COMPUTERS);
@@ -448,6 +470,7 @@ export class Computers {
     // exists to prevent.
     const data = await this.#t.json('POST', P.COMPUTERS, {
       body: P.createBody(args),
+      headers: idempotencyHeaders(),
       signal: opts.signal,
     });
     const computer = new EphemeralComputer(this.#t, computerRecord(data, 'POST', P.COMPUTERS));
@@ -804,9 +827,15 @@ export class Snapshots {
    * platform recorded for it, already `succeeded`; it is absent where none
    * could be recorded, and the restore happened either way.
    */
-  async restore(snapshotId: string, opts: CallOptions = {}): Promise<LifecycleAck> {
+  async restore(
+    snapshotId: string,
+    opts: CallOptions & IdempotencyOptions = {},
+  ): Promise<LifecycleAck> {
     return toLifecycleAck(
-      await this.#t.json('POST', P.snapshotAction(snapshotId, 'restore'), { signal: opts.signal }),
+      await this.#t.json('POST', P.snapshotAction(snapshotId, 'restore'), {
+        headers: idempotencyHeaders(opts.idempotencyKey),
+        signal: opts.signal,
+      }),
     );
   }
 
@@ -837,6 +866,7 @@ export class Snapshots {
     const path = P.snapshotAction(snapshotId, 'clone');
     const data = await this.#t.json('POST', path, {
       body: P.snapshotCloneBody(name, opts),
+      headers: idempotencyHeaders(opts.idempotencyKey),
       signal: opts.signal,
     });
     return oneComputer(this.#t, data, 'POST', path);

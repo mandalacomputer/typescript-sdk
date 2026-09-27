@@ -123,7 +123,7 @@ import {
   wire,
 } from './models.js';
 import * as P from './paths.js';
-import type { CallOptions } from './resources.js';
+import type { CallOptions, IdempotencyOptions } from './resources.js';
 import {
   type BackgroundResult,
   captureBody,
@@ -141,6 +141,7 @@ import {
 import {
   type Bytes,
   bodyByteLength,
+  idempotencyHeaders,
   MODEL_KEY_HEADER,
   type Query,
   type Transport,
@@ -272,7 +273,8 @@ export type DeleteOptions = {
   deleteSnapshots?: boolean;
   /** The fingerprint from {@link Computer.holdings}. */
   expect?: string;
-} & CallOptions;
+} & CallOptions &
+  IdempotencyOptions;
 
 /**
  * A window of a guest file, and where it sits in the whole one.
@@ -1381,7 +1383,9 @@ export class Computer {
    * timeout. Read `status`, or {@link runningRamMb}, rather than either. Call
    * plain `start()` when the intent was to boot the computer.
    */
-  async start(opts: { resumeOnly?: boolean } & CallOptions = {}): Promise<this> {
+  async start(
+    opts: { resumeOnly?: boolean } & CallOptions & IdempotencyOptions = {},
+  ): Promise<this> {
     return this.#power('start', opts, P.startQuery(opts.resumeOnly));
   }
 
@@ -1396,7 +1400,7 @@ export class Computer {
    * lose whatever had not been written to disk, so it is not the default and
    * should not be the first attempt.
    */
-  async stop(opts: { force?: boolean } & CallOptions = {}): Promise<this> {
+  async stop(opts: { force?: boolean } & CallOptions & IdempotencyOptions = {}): Promise<this> {
     return this.#power('stop', opts, P.stopQuery(opts.force));
   }
 
@@ -1411,7 +1415,7 @@ export class Computer {
    * clear on their own — a capture or a clone reading the disk, a migration in
    * flight, or somebody driving the guest at that moment.
    */
-  async suspend(opts: CallOptions = {}): Promise<this> {
+  async suspend(opts: CallOptions & IdempotencyOptions = {}): Promise<this> {
     return this.#power('suspend', opts);
   }
 
@@ -1436,7 +1440,7 @@ export class Computer {
    * Either way the wait can return before the values land, so a command that
    * must not run without its secrets checks for them itself.
    */
-  async restart(opts: CallOptions = {}): Promise<this> {
+  async restart(opts: CallOptions & IdempotencyOptions = {}): Promise<this> {
     return this.#power('restart', opts);
   }
 
@@ -1460,7 +1464,7 @@ export class Computer {
   // builder's union has to be restated. Four values, all four of them power.
   async #power(
     action: 'start' | 'stop' | 'suspend' | 'restart',
-    opts: CallOptions = {},
+    opts: CallOptions & IdempotencyOptions = {},
     query?: Query,
   ): Promise<this> {
     // Use a computer response directly, and refresh after an acknowledgement
@@ -1468,6 +1472,7 @@ export class Computer {
     // leaving the computer stopped; only the returned state tells us otherwise.
     const answer = await this.#t.json('POST', P.computerAction(this.id, action), {
       query,
+      headers: idempotencyHeaders(opts.idempotencyKey),
       signal: opts.signal,
     });
     this.#operationId = operationIdOf(answer);
@@ -1486,11 +1491,12 @@ export class Computer {
    * copying a disk runs for minutes, so the clone comes back `"building"` and
    * fills in behind you. Follow with {@link waitUntilBuilt} before starting it.
    */
-  async clone(name?: string, opts: CallOptions = {}): Promise<Computer> {
+  async clone(name?: string, opts: CallOptions & IdempotencyOptions = {}): Promise<Computer> {
     const path = P.computerAction(this.id, 'clone');
     const data = P.computerPayload(
       await this.#t.json('POST', path, {
         body: P.nameBody(name),
+        headers: idempotencyHeaders(opts.idempotencyKey),
         signal: opts.signal,
       }),
     );
@@ -1525,9 +1531,10 @@ export class Computer {
    * it starts. Which proxies are accepted is the platform's rule, and a value
    * it refuses is a `400` naming why.
    */
-  async update(args: P.UpdateArgs, opts: CallOptions = {}): Promise<this> {
+  async update(args: P.UpdateArgs, opts: CallOptions & IdempotencyOptions = {}): Promise<this> {
     const answer = await this.#t.json('PATCH', P.computer(this.id), {
       body: P.updateBody(args),
+      headers: idempotencyHeaders(opts.idempotencyKey),
       signal: opts.signal,
     });
     this.#operationId = operationIdOf(answer);
@@ -1580,9 +1587,10 @@ export class Computer {
    * `relocate` because a `move(x, y)` that sometimes migrated a virtual machine
    * between hosts would be the worst overload in this file.
    */
-  async relocate(args: P.MoveArgs, opts: CallOptions = {}): Promise<Move> {
+  async relocate(args: P.MoveArgs, opts: CallOptions & IdempotencyOptions = {}): Promise<Move> {
     const data = await this.#t.json('POST', P.computerAction(this.id, 'move'), {
       body: P.moveBody(args),
+      headers: idempotencyHeaders(opts.idempotencyKey),
       signal: opts.signal,
     });
     if (!P.isRecord(data)) {
@@ -1921,6 +1929,7 @@ export class Computer {
   ): Promise<number | DeleteResult | undefined> {
     const res = await this.#t.json<unknown>('DELETE', P.computer(this.id), {
       query: P.deleteQuery(opts),
+      headers: idempotencyHeaders(opts.idempotencyKey),
       signal: opts.signal,
     });
     if (opts.detailed === true) return toDeleteResult(res);

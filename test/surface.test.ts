@@ -534,6 +534,7 @@ async function exerciseEverything(client: Client): Promise<void> {
     limit: 5,
     cursor: 'op_00000000000000000000000a',
   });
+  await client.operations.list({ idempotencyKey: 'create-7f3a' });
   await client.operations.wait('op_0123456789abcdef01234567');
 
   // Last, and both shapes: the purge is what `expect` binds, and a delete that

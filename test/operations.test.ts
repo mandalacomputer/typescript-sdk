@@ -59,6 +59,8 @@ describe('client.operations.get', () => {
       computerId: 'vm-2',
       state: 'succeeded',
       error: null,
+      // Absent from this answer, as from a platform that predates the field.
+      idempotencyKey: null,
       createdAt: OPERATION.created_at,
       updatedAt: OPERATION.updated_at,
       finishedAt: OPERATION.finished_at,
