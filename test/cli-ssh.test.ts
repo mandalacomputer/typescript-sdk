@@ -1026,6 +1026,30 @@ describe('mandala ssh-key, ssh-access, ssh-config', () => {
     expect(JSON.parse(written.out).data.host).toBe('vm-1');
     expect(fs.readFileSync(join(written.home, '.ssh', 'config'), 'utf8')).toContain('Host vm-1\n');
   });
+
+  it.each([
+    ['vm-1', 'dev'],
+    ['vm-2', 'Dev'],
+  ])(
+    'uses the id as the Host for %s when another name differs only in case (OpenSSH folds it)',
+    async (id, name) => {
+      const respond = (call: Call) =>
+        call.path === '/computers'
+          ? json([
+              { ...COMPUTER, name: 'dev' },
+              { ...COMPUTER, id: 'vm-2', name: 'Dev' },
+            ])
+          : anyRoute(call);
+      const r = await cli(['ssh-config', id], { respond });
+      expect(r.code).toBe(0);
+      expect(r.err).toBe(
+        `mandala: another computer is also named ${name}; using Host ${id} instead\n`,
+      );
+      expect(r.out).toContain(`# >>> mandala computer ${id} >>>\nHost ${id}\n  HostName ${id}\n`);
+      const asJson = await cli(['ssh-config', id, '--json'], { respond });
+      expect(JSON.parse(asJson.out).data.host).toBe(id);
+    },
+  );
 });
 
 describe('ssh-config under a name ssh would read as another destination', () => {
@@ -1052,6 +1076,7 @@ describe('ssh-config under a name ssh would read as another destination', () => 
     'LOCALHOST',
     'mandala-gateway',
     'vm-2',
+    'VM-2',
   ])('writes %s under the computer id, and says so', async (name) => {
     const r = await cli(['ssh-config', 'vm-1'], { respond: named(name) });
     expect(r.code).toBe(0);

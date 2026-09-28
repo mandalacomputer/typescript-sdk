@@ -857,17 +857,19 @@ export async function sshConfigCommand(
   const gw = gateway(io.env, home);
   let host = hostAlias(computer.name, computer.id);
   // A name two computers share would send `ssh <name>` to whichever block
-  // came first, so the id stands in for it.
+  // came first, so the id stands in for it. OpenSSH matches `Host` patterns
+  // without regard to case, so `dev` and `Dev` count as shared too.
   // Without a complete listing a shared name cannot be ruled out.
   // A name ssh would also read as some other destination is refused too: a
   // block under it would take over every connection the user makes there, so
   // a computer named github.com would send their pushes to it (OPL-5392,
   // mandala-py's rule).
   if (host !== computer.id) {
+    const folded = computer.name.toLowerCase();
     const reason =
       !listing || listing.incomplete !== null
         ? "could not check other computers' names"
-        : listing.items.some((c) => c.name === computer.name && c.id !== computer.id)
+        : listing.items.some((c) => c.name.toLowerCase() === folded && c.id !== computer.id)
           ? `another computer is also named ${computer.name}`
           : namesAnotherDestination(computer.name, listing.items)
             ? `the name ${computer.name} cannot be a Host, since ssh would also use it for another destination`
