@@ -17,9 +17,11 @@ import {
   gateway,
   hostAlias,
   identityOptions,
+  isInetAtonAddress,
   keyPath,
   knownHostsPath,
   mergeConfig,
+  namesAnotherDestination,
   pinnedKnownHosts,
   proxyCommand,
   readPublicKey,
@@ -424,6 +426,40 @@ Host ${host}
     expect(hostAlias('', 'vm-2')).toBe('vm-2');
     expect(hostAlias('-x', 'vm-2')).toBe('vm-2');
     expect(hostAlias('dev.box_1', 'vm-2')).toBe('dev.box_1');
+  });
+
+  it.each([
+    ['10.0.0.5', true],
+    ['10.5', true],
+    ['0x0A.0.0.5', true],
+    ['0X0a.0.0.5', true],
+    ['012.0.0.5', true],
+    ['00.1', true],
+    ['167772165', true],
+    ['1.16777215', true],
+    ['1.2.65535', true],
+    ['1.16777216', false],
+    ['1.2.65536', false],
+    ['1.2.3.256', false],
+    ['256.1', false],
+    ['08.0.0.1', false],
+    ['0x', false],
+    ['0x.0.0.1', false],
+    ['1..2', false],
+    ['1.2.3.', false],
+    ['1.2.3.4.5', false],
+    ['', false],
+  ])('reads %s as an IPv4 address the way inet_aton does: %s', (text, want) => {
+    expect(isInetAtonAddress(text)).toBe(want);
+  });
+
+  it('refuses a name ssh would read as another destination, and only such a name', () => {
+    const taken = ['github.com', 'GitHub.COM', 'github.com.', 'foo.xn--p1ai', '10.5', '0x1f'];
+    for (const name of taken) expect(namesAnotherDestination(name, []), name).toBe(true);
+    for (const name of ['demo', 'ubuntu-24.04', 'py3.12', 'web-1', '1.2.3.4.5', 'x.y2'])
+      expect(namesAnotherDestination(name, []), name).toBe(false);
+    expect(namesAnotherDestination('VM-2', [{ id: 'vm-2' }])).toBe(true);
+    expect(namesAnotherDestination('vm-3', [{ id: 'vm-2' }])).toBe(false);
   });
 
   it('merges: appends once, replaces in place, keeps everything else byte for byte', () => {
@@ -989,6 +1025,107 @@ describe('mandala ssh-key, ssh-access, ssh-config', () => {
     });
     expect(JSON.parse(written.out).data.host).toBe('vm-1');
     expect(fs.readFileSync(join(written.home, '.ssh', 'config'), 'utf8')).toContain('Host vm-1\n');
+  });
+});
+
+describe('ssh-config under a name ssh would read as another destination', () => {
+  const named = (name: string) => (call: Call) =>
+    call.path === '/computers'
+      ? json([
+          { ...COMPUTER, name },
+          { ...COMPUTER, id: 'vm-2', name: 'other' },
+        ])
+      : anyRoute(call);
+
+  it.each([
+    'github.com',
+    'GitHub.COM',
+    'github.com.',
+    'corp.internal',
+    'foo.xn--p1ai',
+    '10.0.0.5',
+    '10.5',
+    '0x0A.0.0.5',
+    '167772165',
+    '0x0A000005',
+    'localhost',
+    'LOCALHOST',
+    'mandala-gateway',
+    'vm-2',
+  ])('writes %s under the computer id, and says so', async (name) => {
+    const r = await cli(['ssh-config', 'vm-1'], { respond: named(name) });
+    expect(r.code).toBe(0);
+    expect(r.err).toBe(
+      `mandala: the name ${name} cannot be a Host, since ssh would also use it for another destination; using Host vm-1 instead\n`,
+    );
+    // The computer's own block, not the gateway's (whose Host is mandala-gateway).
+    expect(r.out).toContain('# >>> mandala computer vm-1 >>>\nHost vm-1\n  HostName vm-1\n');
+    const asJson = await cli(['ssh-config', 'vm-1', '--json'], { respond: named(name) });
+    const data = JSON.parse(asJson.out).data;
+    expect(data.host).toBe('vm-1');
+    expect(data.config).toContain('\nHost vm-1\n');
+  });
+
+  it.each(['demo', 'ubuntu-24.04', 'py3.12', 'web-1', '1.2.3.4.5'])(
+    'keeps %s as the Host',
+    async (name) => {
+      const r = await cli(['ssh-config', 'vm-1', '--json'], { respond: named(name) });
+      expect(r.code).toBe(0);
+      expect(r.err).toBe('');
+      expect(JSON.parse(r.out).data.host).toBe(name);
+    },
+  );
+
+  it('replaces a block an earlier version wrote under the name', async () => {
+    const home = await tempDir();
+    const kh = knownHostsPath(home);
+    const file = join(home, '.ssh', 'config');
+    fs.mkdirSync(join(home, '.ssh'));
+    const mine = 'Host work\n  User me\n';
+    fs.writeFileSync(
+      file,
+      mergeConfig(mine, configSnippet('github.com', 'vm-1', gateway({}), kh, 'github.com')),
+    );
+    expect(fs.readFileSync(file, 'utf8')).toContain('\nHost github.com\n');
+    const r = await cli(['ssh-config', 'vm-1', '--write'], {
+      home,
+      respond: named('github.com'),
+    });
+    expect(r.code).toBe(0);
+    expect(r.out).toBe(`wrote Host vm-1 in ${file}\nconnect with: ssh vm-1\n`);
+    const after = fs.readFileSync(file, 'utf8');
+    expect(after).toContain('\nHost vm-1\n  HostName vm-1\n');
+    expect(after).not.toContain('Host github.com');
+    expect(after.startsWith(mine)).toBe(true);
+    expect(after.match(/# >>> mandala computer vm-1 >>>/g)).toHaveLength(1);
+  });
+
+  it('says only that the names could not be checked when the listing is partial', async () => {
+    const r = await cli(['ssh-config', 'vm-1'], {
+      respond: (call) =>
+        call.path === '/computers'
+          ? json([{ ...COMPUTER, name: 'github.com' }], { headers: { 'X-GC-Incomplete': '1' } })
+          : anyRoute(call),
+    });
+    expect(r.code).toBe(0);
+    expect(r.err).toBe(
+      "mandala: could not check other computers' names; using Host vm-1 instead\n",
+    );
+  });
+
+  it('says only that the name is shared when another computer has it too', async () => {
+    const r = await cli(['ssh-config', 'vm-1'], {
+      respond: (call) =>
+        call.path === '/computers'
+          ? json([
+              { ...COMPUTER, name: 'github.com' },
+              { ...COMPUTER, id: 'vm-2', name: 'github.com' },
+            ])
+          : anyRoute(call),
+    });
+    expect(r.err).toBe(
+      'mandala: another computer is also named github.com; using Host vm-1 instead\n',
+    );
   });
 });
 
