@@ -154,7 +154,7 @@ export const COMMANDS: readonly Command[] = [
       }),
       bool(
         'no-value-check',
-        "Send each --as, --path and deprecated =VAR or =FILE as typed, even one that looks like a secret's value rather than a name",
+        "Send each --as, --path and deprecated =VAR or =FILE as typed, even one that looks like a secret's value rather than a name. The check is best-effort: it can miss a URL-safe base64 or short key",
       ),
       flag(
         'browser-proxy',
@@ -423,7 +423,7 @@ export const COMMANDS: readonly Command[] = [
       secretScope,
       bool(
         'no-value-check',
-        "Send NAME as typed, even one that looks like a secret's value rather than a name",
+        "Send NAME as typed, even one that looks like a secret's value rather than a name. The check is best-effort: it can miss a URL-safe base64 or short key",
       ),
     ],
   ),
