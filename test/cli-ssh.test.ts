@@ -1027,29 +1027,27 @@ describe('mandala ssh-key, ssh-access, ssh-config', () => {
     expect(fs.readFileSync(join(written.home, '.ssh', 'config'), 'utf8')).toContain('Host vm-1\n');
   });
 
+  // OpenSSH matches `Host` patterns case-sensitively (`ssh -G dev` and
+  // `ssh -G Dev` pick different blocks, in either order), so names that differ
+  // only in case are two working aliases and each keeps its own.
   it.each([
     ['vm-1', 'dev'],
     ['vm-2', 'Dev'],
-  ])(
-    'uses the id as the Host for %s when another name differs only in case (OpenSSH folds it)',
-    async (id, name) => {
-      const respond = (call: Call) =>
-        call.path === '/computers'
-          ? json([
-              { ...COMPUTER, name: 'dev' },
-              { ...COMPUTER, id: 'vm-2', name: 'Dev' },
-            ])
-          : anyRoute(call);
-      const r = await cli(['ssh-config', id], { respond });
-      expect(r.code).toBe(0);
-      expect(r.err).toBe(
-        `mandala: another computer is also named ${name}; using Host ${id} instead\n`,
-      );
-      expect(r.out).toContain(`# >>> mandala computer ${id} >>>\nHost ${id}\n  HostName ${id}\n`);
-      const asJson = await cli(['ssh-config', id, '--json'], { respond });
-      expect(JSON.parse(asJson.out).data.host).toBe(id);
-    },
-  );
+  ])('keeps %s under its own name %s when another name differs only in case', async (id, name) => {
+    const respond = (call: Call) =>
+      call.path === '/computers'
+        ? json([
+            { ...COMPUTER, name: 'dev' },
+            { ...COMPUTER, id: 'vm-2', name: 'Dev' },
+          ])
+        : anyRoute(call);
+    const r = await cli(['ssh-config', id], { respond });
+    expect(r.code).toBe(0);
+    expect(r.err).toBe('');
+    expect(r.out).toContain(`# >>> mandala computer ${id} >>>\nHost ${name}\n  HostName ${id}\n`);
+    const asJson = await cli(['ssh-config', id, '--json'], { respond });
+    expect(JSON.parse(asJson.out).data.host).toBe(name);
+  });
 });
 
 describe('ssh-config under a name ssh would read as another destination', () => {
