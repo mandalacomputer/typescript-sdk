@@ -9,6 +9,20 @@ This is the summary you read to decide whether to upgrade.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`mandala secrets set` takes a path-shaped name whose last piece an
+  acronym closes or splits again**, such as `myapp/DATABASE/RedisURL`, and
+  likewise `MongoURI`, `NeonDBURL`, `ZoomJWT`, `SSHKeyEd25519`, `Ed25519Key`
+  and `PyPIToken` there. The CLI's value check refused them as looking like a
+  secret's value.
+- **The value check catches more pasted base64 keys**: one whose first
+  character is `/`, which it read as an absolute path, and one inside quotes,
+  after `Bearer ` or `NAME=`, or ahead of a `,` or `;`.
+- The check is best-effort, and the `--no-value-check` help now says so: a
+  URL-safe base64 key (`-` and `_`) or a short one can get past it, and a real
+  name it misreads goes through with `--no-value-check`.
+
 ## [0.7.0] — 2026-09-27
 
 Read **Changed** before upgrading. The largest change is the CLI's `--json`

@@ -136,6 +136,27 @@ const NAMES = [
   // A mixed-case piece of four characters or fewer.
   'myapp/prod/DATABASE/iOS',
   'mobile/prod/DATABASE/tvOS',
+  // Both cases as words an acronym closes or sits between: refused while only
+  // a leading acronym was dropped.
+  'RedisURL',
+  'MongoURI',
+  'NeonDBURL',
+  'ZoomJWT',
+  'SSHKeyEd25519',
+  'Ed25519Key',
+  'PyPIToken',
+  'myapp/DATABASE/RedisURL',
+  'myapp/DATABASE/MongoURI',
+  'myapp/DATABASE/NeonDBURL',
+  'myapp/DATABASE/ZoomJWT',
+  'myapp/DATABASE/SSHKeyEd25519',
+  'myapp/DATABASE/Ed25519Key',
+  'myapp/DATABASE/PyPIToken',
+  'team/prod/SSHKeyEd25519',
+  'ci/PyPIToken',
+  // An absolute path in base64's alphabet alone, twenty characters and more.
+  '/srv/myapp/secrets/DatabasePassword',
+  '/srv/app/config/StripeSecretKeyLive',
 ];
 
 /** An AWS secret access key's documented example, which `/` cuts into runs of 13, 7 and 18. */
@@ -218,6 +239,40 @@ describe('looksLikeSecretValue', () => {
     expect(cut).toBeGreaterThan(1000);
     expect(cutHit / cut, 'holding / or +').toBeGreaterThan(0.93);
     expect(hit / 2000, 'all').toBeGreaterThan(0.93);
+  });
+
+  it('catches a base64 secret whose first character is `/`', () => {
+    expect(looksLikeSecretValue(`/${AWS_SECRET_EXAMPLE.slice(1)}`)).toBe(true);
+    const next = seeded(5076);
+    const BASE64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+    let hit = 0;
+    for (let i = 0; i < 2000; i++) if (looksLikeSecretValue(`/${random(next, BASE64, 39)}`)) hit++;
+    expect(hit / 2000).toBeGreaterThan(0.93);
+  });
+
+  it('catches a base64 secret inside quotes, after Bearer or NAME=, or ahead of , or ;', () => {
+    const padded = `${AWS_SECRET_EXAMPLE}Xw==`;
+    for (const key of [AWS_SECRET_EXAMPLE, padded])
+      for (const wrapped of [
+        `"${key}"`,
+        `'${key}'`,
+        `Bearer ${key}`,
+        `AWS_SECRET_ACCESS_KEY=${key}`,
+        `${key},`,
+        `${key};`,
+      ])
+        expect(looksLikeSecretValue(wrapped), wrapped).toBe(true);
+    const next = seeded(5076);
+    const BASE64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+    let cut = 0;
+    let cutHit = 0;
+    for (let i = 0; i < 2000; i++) {
+      const key = random(next, BASE64, 40);
+      if (!/[+/]/.test(key)) continue;
+      cut++;
+      if (looksLikeSecretValue(`"${key}"`) && looksLikeSecretValue(`KEY=${key};`)) cutHit++;
+    }
+    expect(cutHit / cut, 'holding / or +').toBeGreaterThan(0.93);
   });
 
   it('catches a padded base64 secret, as `openssl rand -base64 32` prints', () => {

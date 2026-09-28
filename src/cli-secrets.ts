@@ -146,14 +146,14 @@ function camelWords(run: string): boolean {
 
 /**
  * Two-letter words a camel-case name really holds (`Id`, `In`, `Db`, `Pg`,
- * `Cd`): the only ones {@link wordSegment} takes, as a random body is mostly
+ * `Cd`, the `Ed` of `Ed25519`): the only ones {@link wordSegment} takes, as a random body is mostly
  * pairs. Each one lets a random body through a little more often, so this
  * holds English words and the abbreviations names are made of, not every
  * pair someone might type.
  */
 const SHORT_WORDS = new Set(
   (
-    'ad ai an as at az be by ca cd cf ci db dc de do dr ec eu ex fr gc gh gl go hr id if ' +
+    'ad ai an as at az be by ca cd cf ci db dc de do dr ec ed eu ex fr gc gh gl go hr id if ' +
     'in io ip is it jp js kv lb me ml mq ms mx my nd no of ok on or os pg pk pr py qa rb ' +
     're ro rw rx sa sf so tf to ts tx ui uk up us ux vm vs we wg wp ws'
   ).split(' '),
@@ -321,40 +321,67 @@ function randomRun(run: string): boolean {
   return run.length / runs.length < 3.2 && vowels / letters < 0.3;
 }
 
-/** Standard-alphabet base64 of twenty characters or more, padding and all. */
+/**
+ * Standard-alphabet base64 of twenty characters or more, padding and all.
+ *
+ * The check is best-effort. URL-safe base64 (`-` and `_` for `+` and `/`)
+ * reads as a name's separators, and a key under twenty characters is too short
+ * to tell from a name, so neither is caught here; and a real name the check
+ * misreads goes through with `--no-value-check`.
+ */
 const BASE64 = /^[A-Za-z0-9+/]{20,}={0,2}$/;
 
 /**
  * Whether one piece of a base64-shaped string, between `/` and `+`, reads as a
- * name's: four characters or fewer, one case of letters with digits anywhere
- * (`prod`, `NPMTOKEN`, `key2024`, `v1beta1`, `S3BUCKETKEY`), digits alone, or
- * both cases as camel-case words ({@link camelWords}) once a leading acronym is
- * dropped (`DbPassword`, `APIKey`, `HMACKey`). An acronym elsewhere (`macOS`,
- * `iOSKey`) is not dropped: dropping every one let too many random pieces
- * through, so a name holding one goes through with `--no-value-check`.
+ * name's: four characters or fewer (the empty one ahead of an absolute path's
+ * `/` among them), one case of letters with digits anywhere (`prod`,
+ * `NPMTOKEN`, `key2024`, `v1beta1`, `S3BUCKETKEY`), digits alone, or both
+ * cases as words:
+ * - camel-case words ({@link camelWords}) once a leading acronym is dropped
+ *   (`DbPassword`, `APIKey`, `HMACKey`); or
+ * - split into segments at its capitals and digits, as {@link prefixedWords}
+ *   splits a run, every segment a word ({@link wordSegment}) and one of them a
+ *   lowercase word of three letters or more, so an acronym may close the
+ *   piece or sit between words (`RedisURL`, `NeonDBURL`, `SSHKeyEd25519`,
+ *   `PyPIToken`).
+ *
+ * A random piece split at its capitals is mostly pairs and lone capitals, so
+ * the second reading costs the catch rate of random 40-character keys under a
+ * tenth of a point. A piece neither reading takes makes the whole string be
+ * read as one run, and a name that then reads as random goes through with
+ * `--no-value-check`.
  */
 function namePiece(piece: string): boolean {
   if (piece.length <= 4 || /^[a-z0-9]+$|^[A-Z0-9]+$/.test(piece)) return true;
+  if (!/[a-z]/.test(piece) || !/[A-Z]/.test(piece)) return false;
   // A leading acronym (`APIKey`, `HMACKey`, `TLSCert`) is one word, as a
   // camel-case name spells it, so it goes before the words are read.
-  const words = piece.replace(/[0-9]+/g, '').replace(/^[A-Z]+(?=[A-Z][a-z])/, '');
-  return /[a-z]/.test(piece) && /[A-Z]/.test(piece) && camelWords(words);
+  const letters = piece.replace(/[0-9]+/g, '');
+  if (camelWords(letters.replace(/^[A-Z]+(?=[A-Z][a-z])/, ''))) return true;
+  const segments = piece
+    .split(/[0-9]+/)
+    .flatMap((run) => run.match(/[A-Z]{2,}s(?![a-z])|[A-Z]?[a-z]+|[A-Z]+(?![a-z])/g) ?? []);
+  return (
+    segments.some((s) => /^[A-Z]?[a-z]{2,}$/.test(s)) &&
+    segments.every((s, i) => wordSegment(s, i === segments.length - 1))
+  );
 }
 
 /**
  * Whether a base64 string that `/` or `+` cut into short runs is random: its
  * runs joined read as random ({@link randomRun}). Joining erases where one
- * piece ends and the next begins, so a relative path every piece of which
- * reads as a name's ({@link namePiece}) passes first
- * (`myapp/prod/DATABASE/URL`, `team/ServiceAccountKeyProd2025V2/config1`); one
- * piece that does not is enough to read the whole. Padding stays on the last
- * piece, since a name does not end in `=`.
+ * piece ends and the next begins, so a path every piece of which reads as a
+ * name's ({@link namePiece}) passes first (`myapp/prod/DATABASE/URL`,
+ * `team/ServiceAccountKeyProd2025V2/config1`, and an absolute path, whose
+ * empty first piece is a name's); one piece that does not is enough to read
+ * the whole. Padding stays on the last piece, since a name does not end in
+ * `=`.
  *
- * A leading `/` is an absolute path, and a string with neither `/` nor `+` is
- * one run, which {@link randomRun} already reads.
+ * A string with neither `/` nor `+` is one run, which {@link randomRun}
+ * already reads.
  */
 function base64Value(text: string): boolean {
-  if (!BASE64.test(text) || text.startsWith('/') || !/[+/]/.test(text)) return false;
+  if (!BASE64.test(text) || !/[+/]/.test(text)) return false;
   if (text.split(/[+/]/).every(namePiece)) return false;
   return randomRun(text.replace(/[+/=]/g, ''));
 }
@@ -374,7 +401,12 @@ function base64Value(text: string): boolean {
  * and do not count.
  *
  * A base64 string that `/` or `+` split into runs too short for a random run's
- * test is read whole ({@link base64Value}).
+ * test is read whole ({@link base64Value}), and so is one inside quotes, after
+ * `Bearer ` or `NAME=`, or ahead of a `,` or `;`: the text is cut at every
+ * character base64 does not use, and at an `=` that more base64 follows, so
+ * padding stays on the key it closes.
+ *
+ * Best-effort: see {@link BASE64} for what it does not catch.
  */
 export function looksLikeSecretValue(text: string): boolean {
   const runs = text.split(/[^A-Za-z0-9]+/);
@@ -396,7 +428,9 @@ export function looksLikeSecretValue(text: string): boolean {
       return true;
   }
   return (
-    UUID.test(text) || runs.some((r) => AWS_KEY_ID.test(r) || randomRun(r)) || base64Value(text)
+    UUID.test(text) ||
+    runs.some((r) => AWS_KEY_ID.test(r) || randomRun(r)) ||
+    text.split(/[^A-Za-z0-9+/=]+|=+(?=[A-Za-z0-9+/])/).some(base64Value)
   );
 }
 
