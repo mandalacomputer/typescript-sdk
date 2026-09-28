@@ -408,6 +408,56 @@ export const hostAlias = (name: string, computerId: string): string =>
   name && /^[A-Za-z0-9._-]+$/.test(name) && !name.startsWith('-') ? name : computerId;
 
 /**
+ * Whether the resolver reads `text` as an IPv4 address, in any form
+ * `inet_aton` takes: one to four dot-separated parts, each decimal, `0x` hex
+ * or leading-`0` octal, the last filling the bytes the others leave, so `10.5`
+ * is 10.0.0.5 and `167772165` is too. Pure: no DNS.
+ */
+export function isInetAtonAddress(text: string): boolean {
+  const parts = text.split('.');
+  if (parts.length > 4) return false;
+  const values: number[] = [];
+  for (const part of parts) {
+    const lower = part.toLowerCase();
+    if (/^0x[0-9a-f]+$/.test(lower)) values.push(Number.parseInt(lower.slice(2), 16));
+    else if (/^0[0-7]*$/.test(lower)) values.push(Number.parseInt(lower, 8));
+    else if (/^[1-9][0-9]*$/.test(lower)) values.push(Number(lower));
+    else return false;
+  }
+  const last = values.length - 1;
+  const tail = values[last] ?? Number.NaN;
+  return values.slice(0, last).every((v) => v <= 255) && tail < 256 ** (4 - last);
+}
+
+/**
+ * Whether ssh would also read `name`, as a `Host`, as some other destination.
+ *
+ * OpenSSH matches `Host` patterns without regard to case, so these are
+ * compared lowercased: the gateway's own alias, `localhost`, a bare number
+ * (`ssh 167772165` is 10.0.0.5), any IPv4 address in the forms the resolver
+ * reads, a dotted name shaped like a hostname (its last label empty, as in
+ * `github.com.`, all letters like a top-level domain, or an `xn--` one), and
+ * any listed computer's id, which is that computer's Host when its own name
+ * cannot be one. A dotted name whose last label has a digit, such as
+ * `ubuntu-24.04`, names no other place: no top-level domain has one. This is
+ * mandala-py's rule (OPL-5392).
+ */
+export function namesAnotherDestination(
+  name: string,
+  computers: readonly { id: string }[],
+): boolean {
+  const folded = name.toLowerCase();
+  if (folded === GATEWAY_ALIAS || folded === 'localhost') return true;
+  if (/^(?:[0-9]+|0x[0-9a-f]*)$/.test(folded)) return true;
+  if (folded.includes('.')) {
+    if (isInetAtonAddress(folded)) return true;
+    const last = folded.slice(folded.lastIndexOf('.') + 1);
+    if (!last || /^[a-z]+$/.test(last) || last.startsWith('xn--')) return true;
+  }
+  return computers.some((c) => c.id.toLowerCase() === folded);
+}
+
+/**
  * The `~/.ssh/config` blocks for one computer, markers included: the gateway,
  * which `ProxyJump` does honour options for, and the computer, jumping through
  * it. `ssh <name>`, `scp`, `sftp` and VS Code's Remote-SSH all read them.
@@ -809,13 +859,19 @@ export async function sshConfigCommand(
   // A name two computers share would send `ssh <name>` to whichever block
   // came first, so the id stands in for it.
   // Without a complete listing a shared name cannot be ruled out.
+  // A name ssh would also read as some other destination is refused too: a
+  // block under it would take over every connection the user makes there, so
+  // a computer named github.com would send their pushes to it (OPL-5392,
+  // mandala-py's rule).
   if (host !== computer.id) {
     const reason =
       !listing || listing.incomplete !== null
         ? "could not check other computers' names"
         : listing.items.some((c) => c.name === computer.name && c.id !== computer.id)
           ? `another computer is also named ${computer.name}`
-          : undefined;
+          : namesAnotherDestination(computer.name, listing.items)
+            ? `the name ${computer.name} cannot be a Host, since ssh would also use it for another destination`
+            : undefined;
     if (reason) {
       host = computer.id;
       output.diagnostic(`mandala: ${reason}; using Host ${computer.id} instead`);

@@ -25,6 +25,22 @@ This is the summary you read to decide whether to upgrade.
 - The check is best-effort, and the `--no-value-check` help now says so: a
   URL-safe base64 key (`-` and `_`) or a short one can get past it, and a real
   name it misreads goes through with `--no-value-check`.
+- **`mandala ssh-config` no longer writes a computer's name as its `Host`
+  when ssh would also read that name as another destination**: a dotted
+  name shaped like a hostname (one ending in a dot, as `github.com.` does, or
+  in an all-letter or `xn--` label, as `github.com` and `corp.internal` do),
+  an IPv4 address in any form the resolver reads (`10.5` is `10.0.0.5`), a
+  bare decimal or `0x` number, `localhost`, the gateway's alias
+  `mandala-gateway`, or another computer's id, compared without regard to
+  case as OpenSSH does. A block under such a name took over every connection
+  made there, so a computer a teammate named `github.com` received the
+  pushes meant for GitHub. The block uses the computer's id instead, and a
+  note on stderr says so; for such a name the `--json` output's `host` and
+  `config` carry the id rather than the name, and `--write` replaces a block
+  written earlier under the name with one under the id, so `ssh <name>`
+  stops reaching that computer and `ssh <id>` does. Other names, dotted ones
+  such as `ubuntu-24.04` or `py3.12` included, are used as before. This is
+  the rule `mandala-py ssh-config` already follows.
 
 ## [0.7.0] — 2026-09-27
 

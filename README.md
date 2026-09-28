@@ -3460,9 +3460,8 @@ every account you are an owner or member of. Each person holds eight.
 gateway, with its pinned key, and a `Host dev` block that jumps through it.
 `--write` adds it to `~/.ssh/config` between marker comments, replacing the
 block it wrote before for that computer and leaving everything else alone (a
-missing file is created with mode 0600). When the name cannot be a `Host`, or
-another computer has the same name, the block is written under the computer's
-id instead. After that, every OpenSSH tool knows the computer by name:
+missing file is created with mode 0600). After that, every OpenSSH tool knows
+the computer by name:
 
 ```sh
 mandala ssh-config dev --write
@@ -3470,6 +3469,17 @@ ssh dev
 scp report.csv dev:/home/user/
 sftp dev
 ```
+
+The block is written under the computer's id instead of its name when the name
+cannot be a `Host` (it holds a space or a `*`, say). It is too, with a note on
+stderr saying why, when another computer has the same name, when the list of
+your computers could not be read in full to check that, or when ssh would also
+read the name as another destination: a hostname such as `github.com` or
+`corp.internal`, an IP address in any form (`10.5` is `10.0.0.5`), a bare
+number, `localhost`, the gateway's `mandala-gateway`, or another computer's id,
+compared without regard to case. A block under such a name would take over
+every connection you make there. Connect with `ssh <id>` then (`--json`'s
+`host` says which); a dotted name such as `ubuntu-24.04` is kept.
 
 In VS Code, with the Remote-SSH extension, run **Remote-SSH: Connect to
 Host…** and pick `dev`; it reads the same file. **Add New SSH Host** also
