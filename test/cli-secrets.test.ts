@@ -154,6 +154,14 @@ const NAMES = [
   'myapp/DATABASE/PyPIToken',
   'team/prod/SSHKeyEd25519',
   'ci/PyPIToken',
+  // A two-letter word ahead of one acronym: refused under a path while the
+  // piece had to hold a word of three letters.
+  'MySQLURL',
+  'MySQLDSN',
+  'MyDBURL',
+  'myapp/DATABASE/MySQLURL',
+  'myapp/DATABASE/MySQLDSN',
+  'myapp/DATABASE/MyDBURL',
   // An absolute path in base64's alphabet alone, twenty characters and more.
   '/srv/myapp/secrets/DatabasePassword',
   '/srv/app/config/StripeSecretKeyLive',
@@ -165,6 +173,19 @@ const AWS_SECRET_EXAMPLE = ['wJalrXUtnFEMI', 'K7MDENG', 'bPxRfiCYEXAMPLEKEY'].jo
 describe('looksLikeSecretValue', () => {
   it('passes every realistic variable name, file name and path', () => {
     for (const name of NAMES) expect(looksLikeSecretValue(name), name).toBe(false);
+  });
+
+  it('reads a base64 piece of two-letter words alone as a value, acronym or not', () => {
+    // Every segment of these pieces is a word, so only the second reading's
+    // want of a three-letter word, and the narrow shape it lets pass without
+    // one (one two-letter word, then one acronym), keep them from a name's.
+    for (const value of [
+      'AsBeByDoGo/InIsOnUpTo',
+      'OnUpSQL/AsByURL/DoGoDSN',
+      'SQLMy/URLAs/DSNGo/JWTUp',
+      'MyDbUpIs+SQLOnAs+GoURLs',
+    ])
+      expect(looksLikeSecretValue(value), value).toBe(true);
   });
 
   it('catches the token formats issuers hand out, including those shaped like a name', () => {

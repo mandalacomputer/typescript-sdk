@@ -343,13 +343,16 @@ const BASE64 = /^[A-Za-z0-9+/]{20,}={0,2}$/;
  *   splits a run, every segment a word ({@link wordSegment}) and one of them a
  *   lowercase word of three letters or more, so an acronym may close the
  *   piece or sit between words (`RedisURL`, `NeonDBURL`, `SSHKeyEd25519`,
- *   `PyPIToken`).
+ *   `PyPIToken`) — or else the whole piece one two-letter word from
+ *   {@link SHORT_WORDS} and one acronym of three capitals or more after it
+ *   (`MySQLURL`, `MyDBURL`).
  *
  * A random piece split at its capitals is mostly pairs and lone capitals, so
  * the second reading costs the catch rate of random 40-character keys under a
- * tenth of a point. A piece neither reading takes makes the whole string be
- * read as one run, and a name that then reads as random goes through with
- * `--no-value-check`.
+ * tenth of a point. The word of three letters it asks for is what keeps it
+ * there: a piece made of pairs alone (`AsBeByDoGo`) is a value's. A piece
+ * neither reading takes makes the whole string be read as one run, and a name
+ * that then reads as random goes through with `--no-value-check`.
  */
 function namePiece(piece: string): boolean {
   if (piece.length <= 4 || /^[a-z0-9]+$|^[A-Z0-9]+$/.test(piece)) return true;
@@ -361,8 +364,12 @@ function namePiece(piece: string): boolean {
   const segments = piece
     .split(/[0-9]+/)
     .flatMap((run) => run.match(/[A-Z]{2,}s(?![a-z])|[A-Z]?[a-z]+|[A-Z]+(?![a-z])/g) ?? []);
+  // A two-letter word ahead of one acronym (`MySQLURL`, `MyDBURL`) holds no
+  // word of three letters, so it is taken by its shape alone: the pair must
+  // still be one of SHORT_WORDS, which `wordSegment` checks below.
+  const shortWordAcronym = /^[A-Z][a-z][A-Z]{3,}$/.test(piece);
   return (
-    segments.some((s) => /^[A-Z]?[a-z]{2,}$/.test(s)) &&
+    (shortWordAcronym || segments.some((s) => /^[A-Z]?[a-z]{2,}$/.test(s))) &&
     segments.every((s, i) => wordSegment(s, i === segments.length - 1))
   );
 }

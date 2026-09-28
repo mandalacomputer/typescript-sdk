@@ -16,6 +16,9 @@ This is the summary you read to decide whether to upgrade.
   likewise `MongoURI`, `NeonDBURL`, `ZoomJWT`, `SSHKeyEd25519`, `Ed25519Key`
   and `PyPIToken` there. The CLI's value check refused them as looking like a
   secret's value.
+- **`mandala secrets set` takes a path piece made of a two-letter word and
+  an acronym**, such as `myapp/DATABASE/MySQLURL`, and likewise `MySQLDSN` and
+  `MyDBURL` there, which the value check refused as a secret's value.
 - **The value check catches more pasted base64 keys**: one whose first
   character is `/`, which it read as an absolute path, and one inside quotes,
   after `Bearer ` or `NAME=`, or ahead of a `,` or `;`.
