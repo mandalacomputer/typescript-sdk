@@ -65,7 +65,13 @@ This is the summary you read to decide whether to upgrade.
   first. A note on stderr says so, and `--json`'s `host` and `config` carry
   the id. The computer's own earlier block never counts, and `--write` still
   replaces it where it stands. The file is only read, in print mode too; one
-  that is missing or cannot be read holds no blocks.
+  that is missing or cannot be read holds no blocks. When the id itself is
+  already another computer's `Host` there (one named after this computer's
+  id, say), there is no other name to use, so `ssh-config` refuses, in every
+  mode, with a `conflict` error naming that computer: it prints and writes
+  nothing, since a second block under the id would never be reached and
+  `ssh <id>` would go to the other computer. Remove that block, then run
+  again.
 
 ## [0.7.0] — 2026-09-27
 

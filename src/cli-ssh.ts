@@ -857,23 +857,18 @@ export async function sshAccessCommand(
 }
 
 /**
- * Whether a block in the ssh config at `file`, written for a computer other
- * than `computerId`, has `name` as its `Host` or its id, compared without
- * regard to case as the listed ids are. A file that is missing or cannot be
- * read holds no blocks.
+ * The blocks in the ssh config at `file` written for computers other than
+ * `computerId`, as `writtenHosts` reads them. A file that is missing or
+ * cannot be read holds none.
  */
-function namesAWrittenBlock(name: string, computerId: string, file: string): boolean {
+function otherWrittenBlocks(file: string, computerId: string): { id: string; host: string }[] {
   let text: string | undefined;
   try {
     text = readIfThere(file);
   } catch {
-    return false;
+    return [];
   }
-  const folded = name.toLowerCase();
-  return writtenHosts(text ?? '').some(
-    (b) =>
-      b.id !== computerId && (b.host.toLowerCase() === folded || b.id.toLowerCase() === folded),
-  );
+  return writtenHosts(text ?? '').filter((b) => b.id !== computerId);
 }
 
 /** `mandala ssh-config <computer> [--write]`. */
@@ -902,22 +897,33 @@ export async function sshConfigCommand(
   // `ssh <name>` whenever it came first. This computer's own block is the one
   // --write replaces, so it never counts.
   const file = path.join(home, '.ssh', 'config');
+  const others = otherWrittenBlocks(file, computer.id);
+  const folded = computer.name.toLowerCase();
+  let reason: string | undefined;
   if (host !== computer.id) {
-    const reason =
+    reason =
       !listing || listing.incomplete !== null
         ? "could not check other computers' names"
         : listing.items.some((c) => c.name === computer.name && c.id !== computer.id)
           ? `another computer is also named ${computer.name}`
           : namesAnotherDestination(computer.name, listing.items)
             ? `the name ${computer.name} cannot be a Host, since ssh would also use it for another destination`
-            : namesAWrittenBlock(computer.name, computer.id, file)
+            : others.some((b) => b.host.toLowerCase() === folded || b.id.toLowerCase() === folded)
               ? `a block in ~/.ssh/config already uses the name ${computer.name} for another computer`
               : undefined;
-    if (reason) {
-      host = computer.id;
-      output.diagnostic(`mandala: ${reason}; using Host ${computer.id} instead`);
-    }
+    if (reason) host = computer.id;
   }
+  // The id is the last Host there is. When another computer's block already
+  // has it as its Host (one named after this computer's id, say), a second
+  // block under it would never be reached: `ssh <id>` would go to that other
+  // computer. Refused, whatever put the id here, before anything is written.
+  const holder = others.find((b) => b.host.toLowerCase() === host.toLowerCase());
+  if (holder)
+    throw new CliError(
+      'conflict',
+      `a block in ~/.ssh/config for computer ${holder.id} already uses Host ${host}; remove that block, then run again`,
+    );
+  if (reason) output.diagnostic(`mandala: ${reason}; using Host ${computer.id} instead`);
   const knownHosts = knownHostsPath(home);
   ensureKnownHosts(gw, knownHosts);
   const snippet = configSnippet(computer.name, computer.id, gw, knownHosts, host);

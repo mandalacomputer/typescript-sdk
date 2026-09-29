@@ -1285,6 +1285,60 @@ describe('ssh-config under a name a block in ~/.ssh/config already uses', () => 
     expect(r2.err).toBe('');
     expect(JSON.parse(r2.out).data.host).toBe('dev');
   });
+
+  describe('when another block already has the id as its Host', () => {
+    const refusal =
+      'a block in ~/.ssh/config for computer vm-other already uses Host vm-1; remove that block, then run again';
+    /** Every mode refuses: nothing printed, nothing written, the file as it was. */
+    const refusesEveryMode = async (home: string, file: string, respond: Responder) => {
+      const before = fs.readFileSync(file, 'utf8');
+      for (const mode of [[], ['--write']]) {
+        const r = await cli(['ssh-config', 'vm-1', ...mode], { home, respond });
+        expect(r.code).toBe(1);
+        expect(r.out).toBe('');
+        expect(r.err).toBe(`mandala: ${refusal}\n`);
+        expect(fs.readFileSync(file, 'utf8')).toBe(before);
+      }
+      const asJson = await cli(['ssh-config', 'vm-1', '--json'], { home, respond });
+      expect(asJson.code).toBe(1);
+      const parsed = JSON.parse(asJson.out || asJson.err);
+      expect(parsed.data).toBeUndefined();
+      expect(parsed.error).toMatchObject({ code: 'conflict', message: refusal });
+      expect(fs.readFileSync(file, 'utf8')).toBe(before);
+      expect(writtenHosts(fs.readFileSync(file, 'utf8'))).toEqual([
+        { id: 'vm-other', host: expect.stringMatching(/^vm-1$/i) },
+      ]);
+    };
+
+    it.each(['vm-1', 'VM-1'])(
+      'refuses when the name falls back to the id a block uses as Host %s',
+      async (written) => {
+        // vm-other, from another account, is named vm-1; this computer, vm-1,
+        // is named vm-other. The name clashes with that block's id, and the id
+        // with its Host.
+        const { home, file } = await homeWith(written);
+        await refusesEveryMode(home, file, named('vm-other'));
+      },
+    );
+
+    it.each([
+      ['the listing is partial', () => json([COMPUTER], { headers: { 'X-GC-Incomplete': '1' } })],
+      ['the name cannot be a Host', () => json([{ ...COMPUTER, name: 'my box' }])],
+      [
+        'the name is shared',
+        () =>
+          json([
+            { ...COMPUTER, name: 'dev' },
+            { ...COMPUTER, id: 'vm-2', name: 'dev' },
+          ]),
+      ],
+    ])('refuses when the id is the Host because %s', async (_, listing) => {
+      const { home, file } = await homeWith('vm-1');
+      await refusesEveryMode(home, file, (call) =>
+        call.path === '/computers' ? listing() : anyRoute(call),
+      );
+    });
+  });
 });
 
 describe('ssh-config without a complete listing', () => {
