@@ -94,8 +94,9 @@ This is the summary you read to decide whether to upgrade.
   that way (or delete the later `# >>> mandala … >>>` block by hand). A copy
   followed by a line of your own before the next `Host` or `Match` line is
   left in place, since that line belongs to the copy's `Host` and removing
-  the copy would apply it to other hosts. A copy whose `# <<< mandala … <<<`
-  line was deleted is left in place, with every copy after it.
+  the copy would apply it to other hosts. A later copy whose
+  `# <<< mandala … <<<` line was deleted is left in place, with every copy
+  after it.
 - **`mandala ssh-config --write` no longer replaces a byte that is not valid
   UTF-8 anywhere in `~/.ssh/config` with U+FFFD.** It refuses with
   `invalid_arguments`, naming the file, and leaves it byte for byte as it

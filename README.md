@@ -3517,9 +3517,10 @@ For a computer that no longer exists, delete its block, markers included.
 `--write` also removes any later copy of the block of the computer it is run
 for, or of the gateway's block (an earlier version could append one to a
 `~/.ssh/config` saved with CRLF line endings) unless a line of your own
-follows that copy before the next `Host` or `Match` line, and it refuses a
-`~/.ssh/config` holding a byte that is not valid UTF-8, leaving the file
-unchanged.
+follows that copy before the next `Host` or `Match` line, or a later copy
+whose `# <<< mandala … <<<` line was deleted, which is left in place with
+every copy after it. It refuses a `~/.ssh/config` holding a byte that is not
+valid UTF-8, leaving the file unchanged.
 
 In VS Code, with the Remote-SSH extension, run **Remote-SSH: Connect to
 Host…** and pick `dev`; it reads the same file. **Add New SSH Host** also

@@ -723,9 +723,9 @@ function withoutLaterCopies(text: string, label: string, from: number): string {
  * config, which it did not read as holding the first) is removed, with the
  * blank line before it, unless an unmarked directive follows it before the
  * next `Host` or `Match` line: removing that copy would move the directive
- * under another stanza, so it is left as it is. A begin marker with no end
- * marker of its own is left as it is, with every copy after it: it reads the
- * next copy's end marker as its own, so removing that copy would hide the
+ * under another stanza, so it is left as it is. A later begin marker with no
+ * end marker of its own is left as it is, with every copy after it: it reads
+ * the next copy's end marker as its own, so removing that copy would hide the
  * aliases under it from {@link writtenHosts}. Another label's copies are left
  * as they are.
  */
