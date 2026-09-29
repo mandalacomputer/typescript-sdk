@@ -392,4 +392,32 @@ describe('the key an error from launch() carries', () => {
     expect((err as MandalaError).idempotencyKey).toBe(launchKey);
     expect((err as MandalaError).idempotencyKey).not.toBe(startKey);
   });
+
+  // A start that fails naming its operation: the error then names two
+  // operations' handles, and each must stay the one the docs say it is — the
+  // key replays launch's create, the operation id is the failed start's.
+  it('is the create key beside the failed start’s own operation id', async () => {
+    const { rec, client: c } = client((call) =>
+      call.method === 'POST' && call.path === '/computers/vm-1/start'
+        ? json(
+            { error: 'The start was not heard to end.', operation_id: 'op-start' },
+            { status: 500 },
+          )
+        : respond(call),
+    );
+    const err = await c.computers
+      .launch({ template: 'base', start: false }, { timeoutMs: 60_000, pollMs: 10 })
+      .catch((e) => e);
+    expect(err).toBeInstanceOf(APIError);
+    expect((err as APIError).status).toBe(500);
+    expect((err as APIError).operationId).toBe('op-start');
+    const create = rec.calls.find((x) => x.method === 'POST' && x.path === '/computers');
+    const start = rec.calls.find((x) => x.method === 'POST' && x.path === '/computers/vm-1/start');
+    const launchKey = create?.headers[IDEMPOTENCY_KEY_HEADER];
+    const startKey = start?.headers[IDEMPOTENCY_KEY_HEADER];
+    expect(launchKey).toBeDefined();
+    expect(startKey).toBeDefined();
+    expect((err as MandalaError).idempotencyKey).toBe(launchKey);
+    expect((err as MandalaError).idempotencyKey).not.toBe(startKey);
+  });
 });

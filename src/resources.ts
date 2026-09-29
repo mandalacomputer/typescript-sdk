@@ -325,7 +325,11 @@ export class Computers {
    * that later start, so passing it back to launch replays the create (the
    * same computer) and runs the rest again. The start's own key is never
    * handed out as a launch key: sent on a create, it would make a second
-   * computer. See {@link IdempotencyOptions}.
+   * computer. The create succeeded, so `operations.list({ idempotencyKey })`
+   * with that key finds the create's operation, not the failed stage's; when
+   * the error names an `operationId`, that one is the failed stage's own, and
+   * `operations.get(err.operationId)` reads how it ended. See
+   * {@link IdempotencyOptions}.
    *
    * A computer with secrets bound is also waited on until they have reached
    * its desktop ({@link Computer.waitForSecrets}), so a command run on the

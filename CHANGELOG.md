@@ -24,7 +24,9 @@ This is the summary you read to decide whether to upgrade.
   never took yours, although this changelog said it did. An error `launch()`
   throws carries the create's key as `err.idempotencyKey`, even when its own
   start failed, so resending `launch()` with it replays the same computer
-  rather than creating a second.
+  rather than creating a second. That key finds the create's operation, not
+  the failed stage's; an `err.operationId` the error names is the failed
+  stage's own, read with `operations.get()`.
 - **`RateLimitError` carries `limit`, `remaining` and `resetSeconds`** from the
   refusal's `RateLimit-*` headers. New export: `RateLimitInfo`.
 - **`AgentResult.stepsTaken`**: every step of an `agentOnce()` run, from the

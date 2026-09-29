@@ -2093,6 +2093,16 @@ it), which releases the key, and a resend is carried out. Either way, sending
 the same call again under the same key is safe after any `5xx`. Keys last 24
 hours, and a key sent with a different request is refused with a `422`.
 
+An error from `launch()` is the exception to all of that. Its
+`err.idempotencyKey` is the key of launch's create, which succeeded, even when
+the stage that failed was the start launch made afterwards. It is for resending
+`launch()`: the create is replayed (the same computer, never a second) and the
+rest runs again. It does not find the failed stage —
+`client.operations.list({ idempotencyKey })` with it finds the create's
+operation, which says nothing about the start. When the error names an
+`operationId`, that is the failed stage's own operation: read it with
+`client.operations.get(err.operationId)`.
+
 A replayed answer — the first call's, sent back with `Idempotent-Replayed:
 true` — is stored without the desktop credentials the original carried. A
 computer returned by a replayed create, clone, update or rename therefore has

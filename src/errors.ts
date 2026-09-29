@@ -67,6 +67,15 @@ export class MandalaError extends Error {
    * resend is then carried out. Sending the same call again under the same key
    * is safe after ANY `5xx`: it is carried out if the key was released and
    * answered `idempotency_outcome_unknown` if not.
+   *
+   * An error from `computers.launch()` is the exception: this is the key of
+   * launch's CREATE, which succeeded, even when the stage that failed was the
+   * start launch made afterwards. It is for resending `launch()`, which
+   * replays the create (the same computer) and runs the rest again, not for
+   * finding the failed stage: `operations.list({ idempotencyKey })` with it
+   * finds the create's operation, which says nothing about how the start
+   * ended. When the error names an `operationId`, that is the failed stage's
+   * own operation, so read it with `operations.get(err.operationId)`.
    */
   idempotencyKey?: string;
 }
