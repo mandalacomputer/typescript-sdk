@@ -685,11 +685,11 @@ function stanzaEndsAt(text: string, at: number): boolean {
 /**
  * `text` without any block for `label` that starts at `from` or later, save
  * one whose last stanza goes on past its end marker (see
- * {@link stanzaEndsAt}), which is left where it stands, and save a begin
- * marker with no end marker of its own, which is left with everything after
- * it up to the next marked block. Each removed block
- * goes with its end marker's line break and, when a blank line comes before
- * it, that blank line: the shape an append left.
+ * {@link stanzaEndsAt}), which is left where it stands. A begin marker for
+ * `label` with no end marker of its own stops the removal there: it and every
+ * copy after it are left as they are. Each removed block goes with its end
+ * marker's line break and, when a blank line comes before it, that blank
+ * line: the shape an append left.
  */
 function withoutLaterCopies(text: string, label: string, from: number): string {
   let out = text;
@@ -697,14 +697,11 @@ function withoutLaterCopies(text: string, label: string, from: number): string {
   for (let found = findBlock(out, label, at); found; found = findBlock(out, label, at)) {
     let [start, end] = found;
     // A begin marker whose end marker was lost runs on to a later copy's end
-    // marker, over whatever stands between. When another block begins inside
-    // the span, the span is not one block: go on from that inner marker, so a
-    // whole copy after it is judged by itself and nothing between is removed.
-    const inner = out.slice(start, end).indexOf('\n# >>> mandala ');
-    if (inner >= 0) {
-      at = start + inner + 1;
-      continue;
-    }
+    // marker, over whatever stands between, so another block begins inside
+    // the span. Stop there: removing the later copy would take the end marker
+    // the orphan borrows, and with it the orphan's aliases from writtenBlocks
+    // (so from the name-clash checks) while OpenSSH still reads its stanza.
+    if (out.slice(start, end).includes('\n# >>> mandala ')) break;
     if (!stanzaEndsAt(out, end)) {
       at = end;
       continue;
@@ -727,8 +724,10 @@ function withoutLaterCopies(text: string, label: string, from: number): string {
  * blank line before it, unless an unmarked directive follows it before the
  * next `Host` or `Match` line: removing that copy would move the directive
  * under another stanza, so it is left as it is. A begin marker with no end
- * marker of its own is left with what follows it, up to the next marked block.
- * Another label's copies are left as they are.
+ * marker of its own is left as it is, with every copy after it: it reads the
+ * next copy's end marker as its own, so removing that copy would hide the
+ * aliases under it from {@link writtenHosts}. Another label's copies are left
+ * as they are.
  */
 export function mergeConfig(current: string, snippet: string): string {
   let text = current;
