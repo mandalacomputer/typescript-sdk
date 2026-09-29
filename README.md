@@ -3460,8 +3460,9 @@ every account you are an owner or member of. Each person holds eight.
 gateway, with its pinned key, and a `Host dev` block that jumps through it.
 `--write` adds it to `~/.ssh/config` between marker comments, replacing the
 block it wrote before for that computer and leaving everything else alone (a
-missing file is created with mode 0600). After that, every OpenSSH tool knows
-the computer by name:
+missing file is created with mode 0600, and one saved with CRLF line endings is
+written back with LF ones). After that, every OpenSSH tool knows the computer
+by name:
 
 ```sh
 mandala ssh-config dev --write
@@ -3488,11 +3489,26 @@ which); a dotted name such as `ubuntu-24.04` is kept. If another computer's
 block in `~/.ssh/config` already has the id itself as its `Host` (a computer
 named after this one's id, say), there is nothing left to fall back to:
 `ssh-config` refuses with a `conflict` error naming that computer, and prints
-and writes nothing. Remove that block, then run it again.
+and writes nothing. Remove that block, then run it again. A block you edited
+by hand counts under every alias of every `Host` line in it, read as OpenSSH
+reads them (`Host dev other # mine` holds both `dev` and `other`); a negated
+`!pattern` does not count, and a wildcard is compared as written.
 
-`--write` replaces only the block of the computer it is run for, so a block an
-earlier version of the CLI wrote under such a name stays in `~/.ssh/config`
-until you run `mandala ssh-config <computer> --write` again for that computer.
+One case has a way out instead: two computers each named after the other's id
+(`vm-1` named `vm-other`, and `vm-other`, in another account, named `vm-1`).
+Whichever is written second would refuse, and removing the other block only
+moves the refusal to that computer, so the one arrangement that lasts is both
+under their ids. `--write` makes it in one go: it writes this computer under
+its id and changes the other block's `Host` line, and nothing else in it, to
+that computer's id, with a note on stderr. Printing or `--json` without
+`--write` refuses and says so. When the other block has more than the one
+alias the CLI writes, or its id is another block's `Host`, it is refused as
+above.
+
+Apart from that one case, `--write` replaces only the block of the computer it
+is run for, so a block an earlier version of the CLI wrote under such a name
+stays in `~/.ssh/config` until you run `mandala ssh-config <computer> --write`
+again for that computer.
 To find one, read the `Host` line after each `# >>> mandala computer <id> >>>`
 marker in `~/.ssh/config`, and run `--write` again for any whose `Host` is a
 hostname, an IP address, a bare number, `localhost`, `mandala-gateway`, another
