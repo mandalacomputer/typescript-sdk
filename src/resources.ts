@@ -2,7 +2,9 @@
 
 import { Computer, EphemeralComputer, strandedText } from './computer.js';
 import {
+  type APIError,
   ConflictError,
+  type isTransient,
   MandalaError,
   NotFoundError,
   OperationFailedError,
@@ -124,7 +126,8 @@ export type CallOptions = { signal?: AbortSignal };
 
 /**
  * What a lifecycle call — create, clone, start, stop, suspend, restart,
- * restore, update, relocate, delete — accepts beside {@link CallOptions}
+ * restore, update, rename, relocate, delete, and the create inside `launch`
+ * and `ephemeral` — accepts beside {@link CallOptions}
  * (platform OPL-5127).
  *
  * Every lifecycle call sends an `Idempotency-Key`: a fresh random one per call
@@ -132,11 +135,21 @@ export type CallOptions = { signal?: AbortSignal };
  * after losing its answer — a crash, a timeout, a dropped connection — and it
  * will not be done twice: for 24 hours the platform answers the same key and
  * request with the first call's answer, or `ConflictError` with `code:
- * "idempotency_in_progress"` while it still runs. A call answered with a `5xx`
- * is not replayable this way: the platform marks its key lost, and a resend
- * answers `ConflictError` with `code: "idempotency_outcome_unknown"`. Then,
- * and after that answer, read the computer, or the operation with
- * `operations.get(err.operationId)` or `operations.list({ idempotencyKey })`.
+ * "idempotency_in_progress"` while it still runs. A replayed answer carries no
+ * desktop credentials (`vnc`); `refresh()` the computer for them.
+ *
+ * A `5xx` that names an `operation_id` is an unknown outcome: the key is
+ * spent, and for 24 hours a resend answers `ConflictError` with `code:
+ * "idempotency_outcome_unknown"`. Then, and after that answer, read the
+ * computer, or the operation with `operations.get(err.operationId)` or
+ * `operations.list({ idempotencyKey })`. A `5xx` that names none may have been
+ * refused before it was sent anywhere, which releases the key, and a resend is
+ * carried out. One made in front of the platform (such as a `524` from the
+ * edge) can arrive while the first call is still running: a resend then
+ * answers `ConflictError` with `code: "idempotency_in_progress"`, and that
+ * call's own answer once it has ended. Resending the same call under the same
+ * key is safe after ANY `5xx`. Keys are kept per credential scope.
+ *
  * An error whose outcome is unknown carries the key it was sent with as
  * `idempotencyKey`. 1 to 255 characters, each printable ASCII other than a
  * space.
@@ -286,12 +299,28 @@ export class Computers {
     args: P.CreateArgs = {},
     opts: CallOptions & IdempotencyOptions = {},
   ): Promise<Computer> {
-    const data = await this.#t.json('POST', P.COMPUTERS, {
-      body: P.createBody(args),
-      headers: idempotencyHeaders(opts.idempotencyKey),
-      signal: opts.signal,
-    });
-    return oneComputer(this.#t, data, 'POST', P.COMPUTERS);
+    return (await this.#create(args, opts)).computer;
+  }
+
+  /** {@link create}, also saying whether the answer was a replay of an earlier call's. */
+  async #create(
+    args: P.CreateArgs,
+    opts: CallOptions & IdempotencyOptions,
+  ): Promise<{ computer: Computer; replayed: boolean }> {
+    let replayed = false;
+    const data = await this.#t.json(
+      'POST',
+      P.COMPUTERS,
+      {
+        body: P.createBody(args),
+        headers: idempotencyHeaders(opts.idempotencyKey),
+        signal: opts.signal,
+      },
+      (_, headers) => {
+        replayed = headers.get('idempotent-replayed')?.trim().toLowerCase() === 'true';
+      },
+    );
+    return { computer: oneComputer(this.#t, data, 'POST', P.COMPUTERS), replayed };
   }
 
   /**
@@ -299,13 +328,38 @@ export class Computers {
    *
    * Accepts every {@link create} argument unchanged. `start: false` defers the
    * start until the disk is built; launch still starts it before returning.
-   * An admitted start is waited on, and a failed start is never retried.
+   * An admitted start is waited on, and a failed start is not retried within
+   * one call; a launch resent under its key reads the computer afresh and
+   * starts it again.
    *
    * `timeoutMs` defaults to 180,000 and is one readiness budget beginning after
    * create returns. Disk, running, guest, secrets, browser proxy and egress
    * proxy waits share the remaining time; elapsed start work also consumes it. Create and start keep their usual
    * transport deadlines, so this is not a total wall-clock limit on launch.
    * `pollMs` defaults to 3,000 for every stage. `signal` cancels all stages.
+   *
+   * `idempotencyKey` is sent on the create only, so a launch resent under the
+   * same key after its answer was lost does not create a second computer; the
+   * start launch may make afterwards gets a key of its own. An error from the
+   * create itself is the create's error, and follows the ordinary rules of
+   * {@link IdempotencyOptions}: after a dropped connection a resend replays,
+   * and after a `5xx` naming an `operation_id` the key is spent, so read
+   * `operations.list({ idempotencyKey })` or `operations.get(err.operationId)`.
+   *
+   * An error thrown AFTER the create returned — its message starts `launch of
+   * <id> failed:` — that carries an `idempotencyKey` carries the CREATE's key
+   * (the one given, or the one made when none was) even when the stage that
+   * failed was that later start, so passing it back to launch replays the
+   * create (the same computer) and runs the rest again. A replayed create
+   * answer (`Idempotent-Replayed: true`) is the first attempt's, so launch
+   * reads the computer afresh before acting on it: a start that attempt
+   * reported failed is sent again rather than thrown again, and a computer
+   * stopped or suspended since is started. The start's own key is
+   * never handed out as a launch key: sent on a create, it would make a second
+   * computer. That create succeeded, so `operations.list({ idempotencyKey })`
+   * with the key finds the create's operation, not the failed stage's; when
+   * such an error names an `operationId`, that one is the failed stage's own,
+   * and `operations.get(err.operationId)` reads how it ended.
    *
    * A computer with secrets bound is also waited on until they have reached
    * its desktop ({@link Computer.waitForSecrets}), so a command run on the
@@ -321,11 +375,17 @@ export class Computers {
    * the caller's original reason. Use {@link ephemeral} for scoped cleanup.
    * Guest readiness does not guarantee a visible desktop has finished logging in.
    */
-  async launch(args: P.CreateArgs = {}, opts: WaitOptions = {}): Promise<Computer> {
-    const { timeoutMs = 180_000, pollMs = 3_000, signal } = opts;
+  async launch(
+    args: P.CreateArgs = {},
+    opts: WaitOptions & IdempotencyOptions = {},
+  ): Promise<Computer> {
+    const { timeoutMs = 180_000, pollMs = 3_000, signal, idempotencyKey } = opts;
     checkWait(timeoutMs, pollMs);
     signal?.throwIfAborted();
-    const computer = await this.create(args, { signal });
+    // Settled here rather than in create, so an error from a later stage can
+    // be handed back with the key that replays THIS create.
+    const launchKey = idempotencyKey ?? globalThis.crypto.randomUUID();
+    const { computer, replayed } = await this.#create(args, { signal, idempotencyKey: launchKey });
     const id = computer.id;
     const deadline = performance.now() + timeoutMs;
     const remaining = (): number => {
@@ -335,21 +395,33 @@ export class Computers {
       return left;
     };
     try {
-      let startAdmitted = (computer.runningRamMb ?? 0) > 0;
+      // A replayed create is the FIRST call's answer, up to 24 hours old: its
+      // `start_error`, status and held RAM describe that attempt, not now. A
+      // computer it said was running may have been stopped or suspended since,
+      // and a start it said failed may be worth sending again. So nothing is
+      // read from it until the computer has been read afresh.
+      let stale = replayed;
+      let startAdmitted = !stale && (computer.runningRamMb ?? 0) > 0;
       let delayMs = 0;
       for (;;) {
         signal?.throwIfAborted();
-        if (computer.buildFailed) {
-          await computer.waitUntilBuilt({ timeoutMs: 0, pollMs, signal });
+        // A stale answer goes straight to the refresh below, which clears it.
+        if (!stale) {
+          // Both terminal states: waitUntilBuilt throws on either at once,
+          // with the sentence the other waits use.
+          if (computer.buildFailed || computer.halfRemoved) {
+            await computer.waitUntilBuilt({ timeoutMs: 0, pollMs, signal });
+          }
+          if (computer.startError) {
+            throw new MandalaError(`did not start: ${computer.startError}`);
+          }
+          const status = computer.raw.status;
+          if (status === 'running' || status === 'stopped' || status === 'suspended') break;
         }
-        if (computer.startError) {
-          throw new MandalaError(`did not start: ${computer.startError}`);
-        }
-        const status = computer.raw.status;
-        if (status === 'running' || status === 'stopped' || status === 'suspended') break;
         if (delayMs > 0) await sleep(Math.min(delayMs, remaining()), signal);
         try {
           await computer.refresh({ signal: deadlineSignal(remaining(), signal) });
+          stale = false;
           // A later stopped row must not erase an earlier admitted attempt.
           startAdmitted ||= (computer.runningRamMb ?? 0) > 0;
           delayMs = pollMs;
@@ -421,6 +493,10 @@ export class Computers {
       if (err instanceof MandalaError) {
         // Keep API status, response body, causes and the original error identity.
         err.message = `launch of ${id} failed: ${err.message}`;
+        // Every error here came after the create. One carrying a key carries
+        // the start's, and a launch resent under it would create a second
+        // computer; the create's replays this one.
+        if (err.idempotencyKey !== undefined) err.idempotencyKey = launchKey;
       }
       throw err;
     }
@@ -473,17 +549,23 @@ export class Computers {
    *
    * A 404 from the cleanup is not one of these: the block deleted the machine
    * itself, nothing is billable, and its error stands alone.
+   *
+   * `idempotencyKey`, in either spelling's options, is sent on the create, as
+   * {@link create} sends it. See {@link IdempotencyOptions}.
    */
-  async ephemeral(args?: P.CreateArgs, opts?: CallOptions): Promise<EphemeralComputer>;
+  async ephemeral(
+    args?: P.CreateArgs,
+    opts?: CallOptions & IdempotencyOptions,
+  ): Promise<EphemeralComputer>;
   async ephemeral<T>(
     args: P.CreateArgs,
     fn: (computer: EphemeralComputer) => Promise<T>,
-    opts?: CallOptions,
+    opts?: CallOptions & IdempotencyOptions,
   ): Promise<T>;
   async ephemeral<T>(
     args: P.CreateArgs = {},
-    fnOrOpts?: ((computer: EphemeralComputer) => Promise<T>) | CallOptions,
-    rest: CallOptions = {},
+    fnOrOpts?: ((computer: EphemeralComputer) => Promise<T>) | (CallOptions & IdempotencyOptions),
+    rest: CallOptions & IdempotencyOptions = {},
   ): Promise<T | EphemeralComputer> {
     // The callback is optional and the options follow it, so the second
     // argument is whichever of the two the caller supplied.
@@ -494,7 +576,7 @@ export class Computers {
     // exists to prevent.
     const data = await this.#t.json('POST', P.COMPUTERS, {
       body: P.createBody(args),
-      headers: idempotencyHeaders(),
+      headers: idempotencyHeaders(opts.idempotencyKey),
       signal: opts.signal,
     });
     const computer = new EphemeralComputer(this.#t, computerRecord(data, 'POST', P.COMPUTERS));
@@ -1283,12 +1365,29 @@ export class Templates {
    *
    * A ref you have RETIRED stays spoken for and cannot be republished, identical
    * bytes included. See {@link retire}.
+   *
+   * RETRYING A PUBLISH CONFLICT DOES NOT HELP. Every {@link ConflictError} this
+   * raises — a different document under the ref, a retired ref, or one of the
+   * account's two template ceilings — answers the same way however often it is
+   * sent, so it carries a permanent {@link APIError.reason} (`exists` where the
+   * platform sent none) and {@link isTransient} answers false. Bump
+   * `metadata.version`, or retire a template you no longer launch with.
    */
   async publish(document: string, opts: CallOptions = {}): Promise<PublishedTemplate> {
-    const data = await this.#t.json('POST', P.TEMPLATES, {
-      raw: new TextEncoder().encode(P.templateDocument(document)),
-      signal: opts.signal,
-    });
+    const data = await this.#t
+      .json('POST', P.TEMPLATES, {
+        raw: new TextEncoder().encode(P.templateDocument(document)),
+        signal: opts.signal,
+      })
+      .catch((err: unknown) => {
+        // None of this route's 409s clears by waiting, and none carried a
+        // reason, so isTransient read them as an ordinary conflict worth
+        // sending again. A reason the platform DID send is kept as it came.
+        if (err instanceof ConflictError && err.reason === undefined) {
+          (err as { reason?: string }).reason = 'exists';
+        }
+        throw err;
+      });
     if (!P.isRecord(data)) throw new MandalaError(`expected a template from POST ${P.TEMPLATES}`);
     return toPublishedTemplate(data);
   }
@@ -1388,9 +1487,21 @@ export class Builds {
    * machine, so a build may only write into `golden-<your account id>` or that
    * and a `-` and a name of your choosing.
    *
+   * `spec.from` has to name a `system/...` template; anything else is a `400`.
+   *
+   * A document may name secrets for its build steps under `spec.secrets` (on by
+   * default), by id and the variable to read each `as` — never by value. They
+   * are resolved in the key's scope (the workspace's own first, then the
+   * account's), each at the revision current when the build is submitted, and
+   * there may be at most 32; `templates.validate()` does not check that limit.
+   * A malformed reference is a `400` saying what is wrong, and one that does not
+   * resolve a `400` that does not say which (so a secret you cannot see cannot
+   * be probed for); neither is worth retrying.
+   *
    * A {@link ConflictError} means a hypervisor is busy — one build runs per host
-   * at a time — rather than that anything is wrong with the document, and is
-   * worth retrying.
+   * at a time — or that a secret's value could not be read just now, rather than
+   * that anything is wrong with the document, and is worth retrying. So is a
+   * `503` for secrets not being available on the platform yet.
    *
    * `noReuse` builds again even when an image already carries this document's
    * build digest. Identical documents normally share an image, which is what
@@ -1929,8 +2040,9 @@ export class Webhooks {
    * Every paid plan allows ten subscriptions per account; the eleventh is a
    * `ConflictError` naming the cap, and an account with no plan gets a
    * `PlanLimitError`. Acknowledge each delivery with a 2xx before doing the
-   * work: an attempt is cut at ten seconds, and anything but a 2xx is retried
-   * eight times over about fourteen hours before the delivery is `exhausted`
+   * work: an attempt is cut at ten seconds, and anything but a 2xx is tried
+   * again — eight attempts (seven retries) over about fourteen hours — before
+   * the delivery is `exhausted`
    * — visible in {@link deliveries}, never dropped silently. An endpoint that
    * keeps failing is disabled after a day; `update({ enabled: true })` starts
    * it again.

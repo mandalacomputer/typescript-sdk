@@ -903,7 +903,13 @@ export type UpdateArgs = {
   /** Needs the computer stopped. Disks grow only. */
   diskGb?: number;
   /**
-   * Minutes untouched before the host suspends this computer.
+   * Minutes untouched before the host suspends this computer, at most 10080
+   * (a week); more is a `400`, and a negative number is refused here.
+   *
+   * `0` means never suspend: no idle suspend and no eviction under memory
+   * pressure. How many computers may be pinned that way is capped by the plan
+   * (Solo 0, Studio 1, Fleet 4), and pinning one past the cap is a
+   * `PlanLimitError` (402).
    *
    * `null` follows the host's own window. Meaningful, so it survives the
    * undefined filter — which is why this is `number | null` and absent means
@@ -1369,15 +1375,23 @@ export function execBody(args: ExecArgs): Json {
 /**
  * The shell command that puts a URL on the guest's screen.
  *
- * The browser is named rather than asked for: Firefox, not `xdg-open` or one of
- * the other portable wrappers. Naming it keeps the choice in one place — this
- * function is the only thing that decides which browser the guest opens, so a
- * change of image, or of which browser we want, is a change here rather than in
- * every caller.
+ * The browser is chosen from what the image has installed, in the foreground,
+ * before anything is detached: `firefox-esr`, then `firefox`, then `chromium`.
+ * The images do not agree on one name. The Debian-based ones carry
+ * `firefox-esr` (and `chromium`), and the Omarchy one carries only `chromium`,
+ * so a command naming `firefox` alone launched nothing there (OPL-3705).
+ *
+ * The choice is made before the launch is detached because a detached launch
+ * cannot fail: with its output discarded and `&` on the end, the shell exits 0
+ * whether or not the program it named exists. An image with none of the three
+ * therefore exits 127 with a sentence on stderr instead, and {@link
+ * Computer.open} turns that into an error.
  *
  * Detached, because a browser does not exit on its own: in the foreground the
  * call would block until the timeout killed it and come back as a failure,
  * having opened the window anyway.
+ *
+ * The same command, byte for byte, as the Python SDK's and the MCP server's.
  */
 export function openUrlCommand(url: string): string {
   const trimmed = url.trim();
@@ -1386,7 +1400,11 @@ export function openUrlCommand(url: string): string {
   // cannot stop the browser reading a leading dash as a flag, and no URL starts
   // with one, so that is refused outright rather than quoted.
   if (trimmed.startsWith('-')) throw new ValidationError(`url must not start with '-': ${trimmed}`);
-  return `nohup firefox ${shellQuote(trimmed)} >/dev/null 2>&1 &`;
+  return (
+    'b=$(command -v firefox-esr || command -v firefox || command -v chromium) || ' +
+    "{ echo 'no browser (firefox-esr, firefox or chromium) on this image' >&2; exit 127; }; " +
+    `nohup "$b" ${shellQuote(trimmed)} >/dev/null 2>&1 &`
+  );
 }
 
 /** POSIX single-quoting: the only characters that survive are the ones inside. */
@@ -2810,7 +2828,12 @@ export function secretDeleteQuery(args: SecretDeleteArgs): Record<string, string
  * comes back with `manageKeys: false`.
  */
 export type ApiKeyCreateArgs = {
-  /** A label for the Credentials page; trimmed, and cut to 60 characters by the platform. */
+  /**
+   * A label for the Credentials page; trimmed, and cut to 60 characters by the
+   * platform. A name containing control, bidirectional or invisible formatting
+   * characters (U+200B, U+2060, U+202E, …) is refused with a `400`; the joiners
+   * U+200C and U+200D and the emoji variation selectors are allowed.
+   */
   name?: string;
   /**
    * Confine the new key to one workspace of this account. Omitted, an
@@ -2860,6 +2883,11 @@ export type OperationListArgs = {
    * Only the operation the lifecycle call sent with this `Idempotency-Key`
    * recorded — found even when that call's answer was lost — within the key's
    * 24 hours. See {@link MandalaError.idempotencyKey}.
+   *
+   * Keys are kept per credential scope, so this finds only operations reserved
+   * by a credential of the same scope as the one listing: the same key sent by
+   * another workspace's credential, or by an account-wide one, is a different
+   * key and is not found.
    */
   idempotencyKey?: string;
   /** At most this many, 1 to {@link OPERATIONS_PAGE_MAX}. The platform's default is 20. */

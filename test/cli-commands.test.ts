@@ -907,7 +907,9 @@ describe('computer commands use distinct SDK requests', () => {
 
   it('deletes with the caller-supplied snapshot fingerprint', async () => {
     const h = harness((call) =>
-      call.method === 'DELETE' ? json({ snapshots_deleted: 3 }) : anyRoute(call),
+      call.method === 'DELETE'
+        ? json({ ok: true, snapshots_deleted: 3, computer_deleted: true })
+        : anyRoute(call),
     );
     const result = await h.run([
       'computers',
@@ -923,7 +925,62 @@ describe('computer commands use distinct SDK requests', () => {
       ['DELETE', `computers/${COMPUTER.id}`],
     ]);
     expect(h.rec.last().query).toEqual({ snapshots: 'delete', expect: 'fingerprint-7' });
-    expect(result.frames[0].data).toEqual({ id: COMPUTER.id, deleted: true, snapshots_deleted: 3 });
+    expect(result.code).toBe(0);
+    expect(result.frames[0].data).toEqual({
+      id: COMPUTER.id,
+      ok: true,
+      deleted: true,
+      computer_deleted: true,
+      snapshots_deleted: 3,
+      purge: null,
+      error: null,
+    });
+  });
+
+  it('reports a purge the platform answered ok: false as not done, and exits 1', async () => {
+    // The 202 a queued purge answers: the computer is gone, some copies are
+    // still queued. Printed as `deleted: true` and exit 0 before (OPL-5435).
+    const h = harness((call) =>
+      call.method === 'DELETE'
+        ? json(
+            {
+              ok: false,
+              snapshots_deleted: 1,
+              computer_deleted: true,
+              error: '2 snapshot copies are still being deleted',
+              purge: {
+                selected: 3,
+                confirmed: 1,
+                queued: 2,
+                failed: 0,
+                unknown: 0,
+                remaining: 2,
+                unselected: 0,
+                complete: false,
+              },
+            },
+            { status: 202 },
+          )
+        : anyRoute(call),
+    );
+    const result = await h.run([
+      'computers',
+      'delete',
+      COMPUTER.name,
+      '--delete-snapshots',
+      '--expect',
+      'fingerprint-7',
+    ]);
+    expect(result.code).toBe(1);
+    expect(result.frames[0].ok).toBe(false);
+    expect(result.frames[0].data).toMatchObject({
+      id: COMPUTER.id,
+      ok: false,
+      computer_deleted: true,
+      snapshots_deleted: 1,
+      error: '2 snapshot copies are still being deleted',
+      purge: { selected: 3, queued: 2, complete: false },
+    });
   });
 
   it('writes screenshot bytes exactly and returns a file result', async () => {
@@ -951,6 +1008,25 @@ describe('computer commands use distinct SDK requests', () => {
     expect(h.rec.last().query).toEqual({ w: '640', fresh: '1' });
     expect(await readFile(path)).toEqual(Buffer.from(bytes));
     expect(result.frames[0].data).toEqual({ path, bytes: bytes.length });
+  });
+
+  it("says when a screenshot is a suspended computer's saved frame", async () => {
+    const path = join(await tempDir(), 'saved.jpg');
+    const bytes = Uint8Array.from([255, 216, 255]);
+    const respond: Responder = (call) =>
+      call.path.endsWith('/screenshot')
+        ? new Response(bytes, {
+            headers: { 'content-type': 'image/jpeg', 'x-gc-frame': 'suspended' },
+          })
+        : anyRoute(call);
+    const json = await harness(respond).run(['computers', 'screenshot', COMPUTER.id, '-o', path]);
+    expect(json.frames[0].data).toEqual({ path, bytes: bytes.length, suspended: true });
+    const text = await harness(respond).run(
+      ['computers', 'screenshot', COMPUTER.id, '-o', path],
+      false,
+    );
+    expect(text.code).toBe(0);
+    expect(text.err).toMatch(/saved frame of a suspended computer/);
   });
 
   it('sends a screenshot region, scale, format and quality', async () => {
@@ -1055,7 +1131,7 @@ describe('computer ID precedence and lookup uncertainty', () => {
     const h = harness((call) => {
       if (call.path === '/computers') return json([other]);
       if (call.method === 'GET' && call.path === `/computers/${target}`) return json(lost);
-      return json({ snapshots_deleted: 0 });
+      return json({ ok: true, snapshots_deleted: 0 });
     });
     const result = await h.run(['computers', 'delete', target]);
     expect(result.code).toBe(0);
@@ -1069,7 +1145,7 @@ describe('computer ID precedence and lookup uncertainty', () => {
 
   it('uses a listed exact ID even when another computer has that name', async () => {
     const h = harness((call) =>
-      call.path === '/computers' ? json([other, lost]) : json({ snapshots_deleted: 0 }),
+      call.path === '/computers' ? json([other, lost]) : json({ ok: true, snapshots_deleted: 0 }),
     );
     const result = await h.run(['computers', 'delete', target]);
     expect(result.code).toBe(0);
@@ -1115,7 +1191,7 @@ describe('computer ID precedence and lookup uncertainty', () => {
     const h = harness((call) => {
       if (call.path === '/computers') return json([other]);
       if (call.method === 'GET') return json({ error: 'no such ID' }, { status: 404 });
-      return json({ snapshots_deleted: 0 });
+      return json({ ok: true, snapshots_deleted: 0 });
     });
     const result = await h.run(['computers', 'delete', target]);
     expect(result.code).toBe(0);
@@ -1336,6 +1412,62 @@ globalThis.fetch = async (input) => new Response(JSON.stringify(String(input).en
       data: { exit_code: 0.5 },
     });
   }, 40_000);
+});
+
+describe('sizes', () => {
+  it('lists every named size with its shape and whether the plan allows it', async () => {
+    const h = harness(() =>
+      json([
+        {
+          id: 'small',
+          label: 'Small',
+          template: 'system/base@1.2.0',
+          cpu: 2,
+          ram_mb: 4096,
+          disk_gb: 20,
+          allowed: true,
+          cheapest_plan: 'solo',
+          extra: 'not printed',
+        },
+        {
+          id: 'large',
+          label: 'Large',
+          template: 'system/base@1.2.0',
+          cpu: 8,
+          ram_mb: 16384,
+          disk_gb: 80,
+          allowed: false,
+        },
+      ]),
+    );
+    const result = await h.run(['sizes', 'list']);
+    expect(h.rec.routes()).toEqual([['GET', 'sizes']]);
+    expect(result.code).toBe(0);
+    expect(result.frames[0].data).toEqual({
+      items: [
+        {
+          id: 'small',
+          label: 'Small',
+          template: 'system/base@1.2.0',
+          cpu: 2,
+          ram_mb: 4096,
+          disk_gb: 20,
+          allowed: true,
+          cheapest_plan: 'solo',
+        },
+        {
+          id: 'large',
+          label: 'Large',
+          template: 'system/base@1.2.0',
+          cpu: 8,
+          ram_mb: 16384,
+          disk_gb: 80,
+          allowed: false,
+          cheapest_plan: null,
+        },
+      ],
+    });
+  });
 });
 
 describe('templates', () => {

@@ -54,15 +54,46 @@ export class MandalaError extends Error {
    * `409`s saying the keyed call is still running or was never heard to end
    * (platform OPL-5127). `undefined` on every other error.
    *
-   * What a resend with it answers depends on which of those it was. Only
-   * after a dropped connection or timeout, or `idempotency_in_progress`, does
-   * sending the same call again with this key —
-   * `computer.start({ idempotencyKey })` — get the first call's answer
-   * without doing it twice. After a `5xx` the platform marks the key lost,
-   * and for 24 hours every resend answers `409 idempotency_outcome_unknown`,
-   * as does one after that answer itself: read the computer instead, or its
-   * operation with `operations.get(err.operationId)` or
-   * `operations.list({ idempotencyKey })`.
+   * What a resend with it answers depends on which of those it was. After a
+   * dropped connection or timeout, or `idempotency_in_progress`, sending the
+   * same call again with this key — `computer.start({ idempotencyKey })` —
+   * gets the first call's answer without doing it twice. After a `5xx` that
+   * names an `operation_id` the outcome is unknown and the key is spent: for 24
+   * hours every resend answers `409 idempotency_outcome_unknown`, as does one
+   * after that answer itself, so read the computer instead, or its operation
+   * with `operations.get(err.operationId)` or
+   * `operations.list({ idempotencyKey })`. A `5xx` that names none may have
+   * been refused before it was sent anywhere, which releases the key, and a
+   * resend is then carried out. A `5xx` made in front of the platform (such as
+   * a `524` from the edge) names none either, and can arrive while the first
+   * call is still running: a resend then answers `409
+   * idempotency_in_progress`, and once that call ends, gets its own answer.
+   * Sending the same call again under the same key is safe after ANY `5xx`:
+   * it is carried out if the key was released, answered
+   * `idempotency_in_progress` or the first call's answer if that call is still
+   * running or has since ended, and answered `idempotency_outcome_unknown` if
+   * the outcome is unknown.
+   *
+   * An error from `computers.launch()` thrown AFTER launch's create returned —
+   * one whose message starts `launch of <id> failed:` — that carries this key
+   * (a dropped connection, a `5xx` or an unsettled `409`) is the exception:
+   * this is the key of launch's CREATE, which succeeded, even when the stage
+   * that failed was the start launch made afterwards. Such an error without
+   * one (a start refused with a `4xx`, or a wait that timed out) still means
+   * the computer exists: use it, or resend with the key you passed yourself,
+   * never with the absent key, which would make a second. It is for resending
+   * `launch()`, which replays the create (the same computer) and runs the rest
+   * again — reading the computer afresh first, so a start the first attempt
+   * reported failed is sent again and a computer stopped or suspended since is
+   * started — not for finding the failed stage: `operations.list({
+   * idempotencyKey })` with it finds the create's operation, which says
+   * nothing about how the start ended. When such an error names an
+   * `operationId`, that is the failed stage's own operation, so read it with
+   * `operations.get(err.operationId)`. An error from launch's create itself
+   * (no `launch of` prefix) follows the ordinary rules above: after a dropped
+   * connection a resend replays, and after a `5xx` naming an `operation_id` the
+   * key is spent, so read `operations.list({ idempotencyKey })` or
+   * `operations.get(err.operationId)`.
    */
   idempotencyKey?: string;
 }
@@ -147,6 +178,24 @@ export type ErrorMetadata = {
    * may not have happened).
    */
   method?: string;
+  /** The `RateLimit-*` headers, where the response carried readable ones. */
+  rateLimit?: RateLimitInfo;
+};
+
+/**
+ * The budget a metered response reported in its `RateLimit-Limit`,
+ * `RateLimit-Remaining` and `RateLimit-Reset` headers. Each is absent when the
+ * header was missing or not a non-negative integer. All three describe the same
+ * budget — the per-key half of the account's, or the account-wide figure when
+ * that is the one binding — so `limit - remaining` is what has been spent of it.
+ */
+export type RateLimitInfo = {
+  /** The budget binding on the request. */
+  limit?: number;
+  /** What is left of it after the request. */
+  remaining?: number;
+  /** Seconds until it has refilled. */
+  resetSeconds?: number;
 };
 
 const nonblank = (value: unknown): string | undefined =>
@@ -307,12 +356,58 @@ export class AuthenticationError extends APIError {
  * 402 — the account's plan does not cover this request.
  *
  * Raised for computer-count caps, per-computer size ceilings, account-wide RAM
- * and storage pools, OS entitlements, and the API rate budget. Not a retry:
- * `message` carries the platform's explanation of which limit was hit, and a
- * person has to act on it.
+ * and storage pools, and OS entitlements. Not a retry: `message` carries the
+ * platform's explanation of which limit was hit, and a person has to act on
+ * it. The API rate budget is not one of these: running out of it is a `429`,
+ * {@link RateLimitError}.
+ *
+ * Never raised by the agent routes ({@link ModelProviderError} is their 402).
  */
 export class PlanLimitError extends APIError {
   override name = 'PlanLimitError';
+}
+
+/**
+ * 402 from the agent loop — the MODEL PROVIDER refused billing on the account
+ * behind your `X-Model-Key`, not a Mandala plan limit.
+ *
+ * `agent()` and `agentOnce()` raise this where any other route would raise
+ * {@link PlanLimitError}. Nothing inside an agent run can answer 402 on the
+ * platform's own behalf: its mid-run rechecks cover the credential, the role
+ * and the account's standing and answer 401 or 403 with `reason: "revoked"`.
+ * A 402 there is the model API's own status (its `billing_error`), relayed for
+ * the key you passed, so the fix is on that account and not on your plan.
+ *
+ * Not transient: {@link isTransient} answers false, as it does for every 402.
+ * {@link APIError.body} carries what the run had already spent and done.
+ */
+export class ModelProviderError extends APIError {
+  override name = 'ModelProviderError';
+}
+
+/** The sentence a relayed model-provider 402 is raised with. */
+export const MODEL_BILLING_MESSAGE =
+  'the model provider refused billing on the account behind X-Model-Key ' +
+  '(not a Mandala plan limit)';
+
+/**
+ * The error an agent route's 402 becomes: a {@link ModelProviderError}, never a
+ * {@link PlanLimitError}. Every other error is returned unchanged.
+ */
+export function modelProviderRefusal(err: APIError): APIError {
+  if (err.status !== 402 || err instanceof ModelProviderError) return err;
+  return new ModelProviderError(
+    `${MODEL_BILLING_MESSAGE}: ${err.message}`,
+    err.status,
+    err.body,
+    err.retryAfterMs,
+    {
+      requestId: err.requestId,
+      allow: err.allow,
+      wwwAuthenticate: err.wwwAuthenticate,
+      method: err.method,
+    },
+  );
 }
 
 /** 403 — authenticated, but the key's role on the account is too low. */
@@ -568,9 +663,32 @@ export class RangeNotSatisfiableError extends APIError {
  *
  * `retryAfterMs` is present when the platform supplied a valid `Retry-After`
  * header. Wait helpers honour it rather than immediately adding more load.
+ *
+ * `limit`, `remaining` and `resetSeconds` are the refusal's `RateLimit-*`
+ * headers — see {@link RateLimitInfo}. The platform sends them on successful
+ * metered responses too; this SDK does not surface those, and a caller who
+ * wants them reads them in a `fetch` passed to the client (see the README).
  */
 export class RateLimitError extends APIError {
   override name = 'RateLimitError';
+  /** `RateLimit-Limit`: the budget binding on the request, when sent. */
+  readonly limit?: number;
+  /** `RateLimit-Remaining`: what was left of it, when sent. */
+  readonly remaining?: number;
+  /** `RateLimit-Reset`: seconds until it has refilled, when sent. */
+  readonly resetSeconds?: number;
+  constructor(
+    message: string,
+    status: number,
+    body?: unknown,
+    retryAfterMs?: number,
+    metadata: ErrorMetadata = {},
+  ) {
+    super(message, status, body, retryAfterMs, metadata);
+    this.limit = metadata.rateLimit?.limit;
+    this.remaining = metadata.rateLimit?.remaining;
+    this.resetSeconds = metadata.rateLimit?.resetSeconds;
+  }
 }
 
 /**
@@ -1104,19 +1222,31 @@ function withoutRefusalReason(body: unknown): unknown {
  * standing unchanged (platform OPL-3898).
  *
  * **AUTHORIZATION IS NOT SETTLED AT THE START OF A LONG CALL.** An
- * {@link AuthenticationError}, a {@link PermissionDeniedError} or a {@link PlanLimitError}
- * can arrive from a request that authenticated perfectly well when it was sent:
- * the API rechecks the credential, the role, the account's standing and the plan
- * before each step of work it is about to do, so a key revoked, a member
- * demoted, an account suspended or a plan downgraded during the wait refuses the
- * request part of the way through. `agent` and `agentStream` are where this is
- * most visible — they can stop after billed steps, see
+ * {@link AuthenticationError} or a {@link PermissionDeniedError} can arrive
+ * from a request that authenticated perfectly well when it was sent: the API
+ * rechecks the credential, the role and the account's standing before each step
+ * of work it is about to do, so a key revoked, a member demoted or an account
+ * suspended during the wait refuses the request part of the way through, with a
+ * 401 or 403 carrying `reason: "revoked"`. `agent` and `agentStream` are where
+ * this is most visible — they can stop after billed steps, see
  * {@link APIError.body} — and the long writes are where it matters most:
  * `create`, `move`, a template publish and the webhook create and update can all
  * be refused after the body has been read and the work prepared. The durable
  * write has not happened in those cases; an agent run's completed steps HAVE.
  *
- * None of the three is transient, and this function says so. That is not a
+ * On the agent routes a 402, 504 or 529 is the MODEL API's status for the
+ * account behind `X-Model-Key` (billing, timeout, overloaded), relayed — not a
+ * Mandala plan limit, which is why a 402 there is a {@link ModelProviderError}.
+ * A 403 there without `reason: "revoked"` may likewise be the model key's own
+ * `permission_error`. A 403 that arrives as the run's `error` event — a
+ * refusal after the run started — reaches `agent()`'s thrown error without
+ * that word (see {@link withoutRefusalReason}); `agentStream()`'s `error` event
+ * keeps it as `raw.reason`. A 403 answered before the stream opens is the HTTP
+ * response itself and keeps {@link APIError.reason} on both `agent()` and
+ * `agentStream()` (which throws it rather than yielding an `error` event), as
+ * `agentOnce()`'s HTTP error always does.
+ *
+ * None of these is transient, and this function says so. That is not a
  * change — it never called them transient — but the reason is now a real one
  * rather than an accident of where authorization happened: the credential is no
  * longer valid for that account, so replaying the same request with the same key

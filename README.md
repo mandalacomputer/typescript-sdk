@@ -117,8 +117,10 @@ try {
 returns when its guest agent answers. Guest readiness does not guarantee that
 the visible desktop has finished logging in. It accepts every `create()` option;
 `start: false` is sent unchanged to create, then launch starts the computer after
-its disk is ready. An already admitted start is waited on, and failed starts are
-reported without retrying them. With `secrets` bound, it also waits until they
+its disk is ready. An already admitted start is waited on, and a failed start is
+reported without being retried in that call (a launch resent under the same key
+reads the computer afresh and may start it again; see [Operations](#operations)).
+With `secrets` bound, it also waits until they
 have reached the desktop, so the first command on the returned computer sees
 them; a delivery that failed throws, naming why. With a browser proxy it waits
 until the browsers have it (`waitForBrowserProxy()`), and with an egress proxy
@@ -271,7 +273,10 @@ refusing.
 changes nothing, so a pipeline that republishes on every commit is safe.
 Publishing a *different* document under the same ref is a `ConflictError`; bump
 `metadata.version`. What counts as different is the digest, so a changed label is
-a change.
+a change. Retrying does not help with that conflict, nor with a retired ref or
+either of the account's template ceilings: every `ConflictError` from
+`publish()` carries a permanent `reason` (`exists` where the platform sent none),
+so `isTransient` answers `false` for it.
 
 Read one back — yours or `system`, so you can see what you are layering onto:
 
@@ -321,9 +326,9 @@ concluding you mistyped something.
 
 ### Building one
 
-A document that declares `spec.build` steps has to be compiled into an image
-before anything can launch it. That is minutes of work — an agent image is
-roughly fifteen — so it never blocks:
+A document that declares `spec.build` steps or `spec.env` has to be compiled
+into an image before anything can launch it. That is minutes of work — an agent
+image is roughly fifteen — so it never blocks:
 
 ```ts
 const build = await client.builds.start(doc);
@@ -342,10 +347,21 @@ two situations with two remedies — one has an image, the other has a step to f
 Identical documents share an image, which is what makes a repeated build cheap;
 `builds.start(doc, { noReuse: true })` builds again regardless. The namespace
 and the `spec.family` both have to be yours, and either one that is not is a
-`PermissionDeniedError`; a `ConflictError` means the host is busy — one build
-runs per host at a time — and is worth retrying. `builds.get(id)` is the job,
-`builds.progress(id)` is what it is doing and stays readable after it has
-finished, and `builds.list()` is every build the fleet still holds a record of.
+`PermissionDeniedError`; `spec.from` has to name a `system/...` template, or it
+is a `400`. A `ConflictError` means the host is busy — one build runs per host at
+a time — or that a secret's value could not be read just now, and is worth
+retrying. `builds.get(id)` is the job, `builds.progress(id)` is what it is doing
+and stays readable after it has finished, and `builds.list()` is every build the
+fleet still holds a record of.
+
+A build's steps can read secrets: list them under `spec.secrets` (on by
+default), each by its id and the variable to read it `as`, never by value. They
+are resolved in your key's scope — a workspace's own first, then the account's —
+each frozen at the revision current when the build is submitted, and a document
+may name at most 32 (`templates.validate()` does not check that limit). A
+malformed reference is a `400` that says what is wrong; one that does not
+resolve is a `400` that does not say which; neither is worth retrying. A `503`
+saying secrets are not available is worth retrying, like the `409` above.
 
 For a terminal, stream it instead of polling:
 
@@ -724,17 +740,19 @@ survive, because the command runs through `bash -lc`. On Windows they **replace*
 it: `cmd.exe /c` sources no profile, so the command sees exactly what you passed
 and nothing else, `PATH` and `SystemRoot` included. Pass what it needs there.
 
-Or call `open()` and let the SDK write that line — it names a browser that
-actually works on the image, quotes the URL, and detaches the launch:
+Or call `open()` and let the SDK write that line — it picks the browser from
+what the image has installed (`firefox-esr`, then `firefox`, then `chromium`),
+quotes the URL, and detaches the launch:
 
 ```ts
 await c.open('https://example.com');
 ```
 
-> Firefox by name, rather than `xdg-open` or one of the other portable
-> wrappers: naming it puts the choice in one place. `open()` is the only thing
-> that decides which browser the guest opens, so if that ever needs to be a
-> different one, it changes there and your callers do not.
+> The images do not share one browser name: the Debian-based ones carry
+> `firefox-esr` and the Omarchy one only `chromium`, so the line above that
+> names `firefox` opens nothing there, and still exits 0. `open()` looks
+> before it detaches, and throws a `MandalaError` when the image has none of
+> the three rather than returning a result that reads as success.
 
 Linux only, and the platform is what says so. A desktop-session exec on a
 Windows guest is refused before the computer is asked whether it is running,
@@ -1254,8 +1272,8 @@ Timestamp verification alone does not prevent processing retries twice.
 
 **Acknowledge with a 2xx before doing the work.** An attempt is cut at ten
 seconds and counted as a failure. Anything else — a non-2xx, a timeout, a
-redirect (never followed) — is retried eight times over about fourteen hours,
-then the delivery is `exhausted` and visible in `deliveries()`, never dropped
+redirect (never followed) — is tried again, eight attempts (seven retries) over
+about fourteen hours, then the delivery is `exhausted` and visible in `deliveries()`, never dropped
 silently. No ordering is promised: order by `seq` per computer if you care. An
 endpoint that runs out of attempts and has accepted nothing for a day is
 disabled with `disabledReason: 'failing'`; `update(id, { enabled: true })`
@@ -1520,10 +1538,25 @@ the run having gone wrong.
 
 **A run can be refused part-way through, after billed steps.** Authorization is
 not settled once at the start of a call this long: the API rechecks the
-credential, the role, the account's standing and the plan before each model call
-and each tool, so a key revoked, a member demoted, an account suspended or a plan
-downgraded mid-run stops the loop with a **401**, **403** or **402**. The steps
+credential, the role and the account's standing before each model call and each
+tool, so a key revoked, a member demoted or an account suspended mid-run stops
+the loop with a **401** or **403** carrying `reason: "revoked"`. The steps
 already taken stand — on your key, and on that desktop.
+
+A **402**, **504** or **529** on these routes is the *model API's* status for the
+account behind your `modelKey` — billing, timeout, overloaded — relayed as it
+came. Your Mandala plan is not the cause, so `agent()` and `agentOnce()` raise a
+402 as `ModelProviderError` rather than `PlanLimitError`. A 403 without
+`reason: "revoked"` may likewise be the model key's own `permission_error`.
+
+A 403 can come two ways, and they read differently. One that arrives as the
+run's `error` event — a refusal after the run started — reaches `agent()`'s
+thrown error without `reason`: it withholds that word (see below), so
+`err.reason` and `err.body.reason` are `undefined` there, a revocation included,
+and only `agentStream()`'s `error` event keeps it, as `raw.reason`. One answered
+before the stream opens is the HTTP response itself: it keeps `err.reason` on
+both `agent()` and `agentStream()`, and `agentStream()` throws it rather than
+yielding an `error` event. `agentOnce()`'s HTTP error always keeps `err.reason`.
 
 The refusal reports what was already spent and already done, and this SDK hands
 that over rather than flattening it into a sentence:
@@ -1538,9 +1571,10 @@ for await (const ev of c.agentStream({ prompt, modelKey })) {
 ```
 
 `agent()` and `agentOnce()` throw instead, and the same accounting is on the
-error's `body`. None of those three statuses is a transport failure: the
-credential is no longer valid for that account, so replaying the same request
-with the same key spends again and is refused again. `isTransient` answers false
+error's `body`. None of those statuses is a transport failure: the credential is
+no longer valid for that account, or the model key's account refused, so
+replaying the same request with the same key spends again and is refused again.
+`isTransient` answers false
 for a mid-run refusal, and cannot be talked out of it by the frame — a `reason`
 word arriving on a stream is retry advice about one request, which a run that has
 already clicked things is not, so it is withheld from the thrown error (the
@@ -1553,8 +1587,13 @@ the body has been read and the work prepared. For those the durable write has
 
 `agent()` is itself the stream, read to its `done`. `agentOnce()` is the same
 run as a single non-streaming request — simpler, and worse for anything long,
-since nothing is reported until the whole run is over and a proxy between you
-and the platform may well close a request held open for minutes.
+since nothing is reported until the whole run is over. **On the hosted API it
+cannot outlive about 120 seconds**: the edge cuts a non-streaming request off
+there with a body-less `524`, raised as `GatewayTimeoutError`, the run is
+stopped part-way, and its usage and steps are not reported. Use `agent()` or
+`agentStream()` for anything that may take longer. When it does answer, its
+result's `stepsTaken` lists every step the run took; the streaming `done` frame
+does not carry that list, since each step arrived as its own event.
 
 #### Using an OpenAI client with your own model key
 
@@ -1697,6 +1736,11 @@ suspended out from under itself.
 ```ts
 await c.update({ idleSuspendMin: 120 });      // or null to follow the host
 ```
+
+`idleSuspendMin` is at most 10080 minutes (a week); more, or a negative number,
+is refused. `0` means never suspend — no idle suspend and no eviction under
+memory pressure — and how many computers may be pinned that way is capped by
+the plan (Solo 0, Studio 1, Fleet 4): one past the cap is a `PlanLimitError`.
 
 ### A proxy for the browsers
 
@@ -1956,7 +2000,10 @@ in every list response is a credential in every log line that ever captured one.
 `(await c.refresh()).vnc` is how a listed computer gets one. It is also
 `undefined` when the platform could not reach the host, because a URL built over
 a missing credential is indistinguishable from a working one and answers 401
-forever.
+forever. And it is `undefined` on a *replayed* answer: a create, clone, update or
+rename resent under the same `idempotencyKey` gets the first call's answer back
+(`Idempotent-Replayed: true`) with its desktop credentials stripped, so
+`refresh()` there too.
 
 ### Readiness
 
@@ -2031,22 +2078,63 @@ is copied, and a move until it lands. Keep `waitForGuest` (or
 idempotencyKey, limit, cursor })` pages through them newest first — pass
 `nextCursor` back as `cursor`. An API key confined to a workspace sees only its
 computers' operations, and anything else is a `NotFoundError`. Calls made from
-the dashboard record none.
+the dashboard record none. Keys are kept per credential scope, so
+`list({ idempotencyKey })` finds only operations reserved by a credential of the
+same scope: the same key used by another workspace's credential, or by an
+account-wide one, is a different key.
 
 **Every lifecycle call sends an `Idempotency-Key`** — create, clone, start,
-stop, suspend, restart, update, relocate, delete and a snapshot's restore and
-clone — a fresh one per call unless you pass `{ idempotencyKey }` yourself. The
-platform records the call before carrying it out, so if its answer is lost (a
-timeout, a dropped connection, a `5xx`) the error carries the key as
-`err.idempotencyKey`: send the same call again with it and it is not done
-twice — you get the first call's answer, a `ConflictError` with `err.code ===
-"idempotency_in_progress"` while it still runs, or one with `err.code ===
-"idempotency_outcome_unknown"` when the platform itself never heard how it
-ended (it answered a `5xx`, after which every resend answers this): then read
-the computer, or its operation, to see whether it took effect —
+stop, suspend, restart, update, rename, relocate, delete and a snapshot's
+restore and clone, and the create inside `launch()` and `ephemeral()` — a fresh
+one per call unless you pass `{ idempotencyKey }` yourself. The platform records
+the call before carrying it out, so if its answer is lost (a timeout, a dropped
+connection, a `5xx`) the error carries the key as `err.idempotencyKey`: send the
+same call again with it and it is not done twice — you get the first call's
+answer, or a `ConflictError` with `err.code === "idempotency_in_progress"` while
+it still runs.
+
+A `5xx` depends on whether it names an `operation_id` (`err.operationId`). One
+that does is an unknown outcome: the key is spent, and for 24 hours every resend
+answers a `ConflictError` with `err.code === "idempotency_outcome_unknown"`, so
+read the computer, or its operation, to see whether it took effect —
 `client.operations.get(err.operationId)`, or
-`client.operations.list({ idempotencyKey })`. Keys last 24 hours, and a key
-sent with a different request is refused with a `422`.
+`client.operations.list({ idempotencyKey })`. One that names none may have been
+refused before it was sent anywhere (no host for it, a host too busy to take
+it), which releases the key, and a resend is carried out. A `5xx` made in front
+of the platform (such as a `524` from the edge) names none either, and can
+arrive while the first call is still running: a resend then answers a
+`ConflictError` with `err.code === "idempotency_in_progress"`, and once that
+call ends, its own answer. Whichever it was, sending the same call again under
+the same key is safe after any `5xx`. Keys last 24 hours, and a key sent with a
+different request is refused with a `422`.
+
+An error `launch()` throws after its create returned (its message starts
+`launch of <id> failed:`) that carries an `err.idempotencyKey` — a dropped
+connection, a `5xx` or an unsettled `409` — is the exception to all of that.
+That key is the key of launch's create, which succeeded, even when the stage
+that failed was the start launch made afterwards. It is for resending
+`launch()`: the create is replayed (the same computer, never a second) and the
+rest runs again. A replayed create answer is the first attempt's, so launch
+reads the computer afresh before acting on it: a start that attempt reported
+failed is sent again rather than thrown again, and a computer stopped or
+suspended since is started. One without a key — a start refused with a `4xx`
+such as `402` or `409`, or a wait that timed out — still means the computer
+`<id>` exists: use it (`client.computers.get(id)`), or resend `launch()` with
+the key you passed yourself, never with the absent `err.idempotencyKey`, which
+would make a second computer. It does not find the failed stage —
+`client.operations.list({ idempotencyKey })` with it finds the create's
+operation, which says nothing about the start. When the error names an
+`operationId`, that is the failed stage's own operation: read it with
+`client.operations.get(err.operationId)`. An error from launch's create itself
+carries no such prefix and follows the ordinary rules above: after a dropped
+connection a resend replays, and after a `5xx` naming an `operation_id` the key
+is spent, so read `client.operations.list({ idempotencyKey })` or
+`client.operations.get(err.operationId)`.
+
+A replayed answer — the first call's, sent back with `Idempotent-Replayed:
+true` — is stored without the desktop credentials the original carried. A
+computer returned by a replayed create, clone, update or rename therefore has
+no `vnc`; `await c.refresh()` fetches it.
 
 Every `APIError` carries the platform's machine-readable `code` (from the
 body's `code`, e.g. `idempotency_in_progress`) and, where the answer named one,
@@ -2091,6 +2179,12 @@ Every refusal is still immediate and still the exception it always was: a
 `ConflictError` for a capture already running or a disk still being copied, a
 `PlanLimitError` for an allowance that will not stretch, a `MandalaError` for a
 memory snapshot of a computer that is not running.
+
+And an `UnavailableError` (503) while another manual capture on the account is
+being admitted, or when admission could not be confirmed — in which case the
+capture may have started. Manual captures on one account are admitted one at a
+time, so issue them one after another. After an `UnavailableError`, list the
+snapshots and look for a `capturing` row for that computer before retrying.
 
 **Returning is the snapshot being usable, not the computer being free.** The
 capture's claim on the *computer* is released only after the snapshot has been
@@ -2616,6 +2710,8 @@ import {
   APIError,            //   any unsuccessful response
   AuthenticationError, //     401 — a credential was refused
   PlanLimitError,      //     402 — your plan will not allow this. Not a retry.
+  ModelProviderError,  //     402 from agent()/agentOnce() — the model key's account
+                       //           refused billing; not your plan. Not a retry.
   PermissionDeniedError,//    403 — the key's role is too low
   NotFoundError,       //     404 — no such computer, snapshot, guest file, or route
   MethodNotAllowedError,//    405 — method unsupported; see err.allow
@@ -2627,10 +2723,12 @@ import {
   ComputerNotRunningError,//    409 — a noWake transfer on a computer not running
   TooLargeError,       //     413 — more file than one request moves
   RangeNotSatisfiableError,// 416 — that range names no byte the file has
-  RateLimitError,      //     429 — retry after retryAfterMs when present
+  RateLimitError,      //     429 — retry after retryAfterMs when present; also
+                       //           limit, remaining, resetSeconds (RateLimit-*)
   UnavailableError,    //     503 — could not answer now. A READ can be asked again;
                        //           a CHANGE may or may not have happened
-  GatewayTimeoutError, //     504/524 — a proxy gave up; work may carry on
+  GatewayTimeoutError, //     504/524 — a proxy gave up; work may carry on (not
+                       //           for agentOnce(): its 524 stops the run)
   OriginResponseError, //     520 — it answered, unreadably; work may have happened
   OriginUnreachableError,//   521-523 — a proxy could not reach it. NOT in
                        //     `isTransient`: the outcome is unknown, not "nothing happened"
@@ -2677,6 +2775,24 @@ try {
   }
   throw err;
 }
+```
+
+The API stamps `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`
+(seconds) on every metered response, successes included. On a `RateLimitError`
+they are `limit`, `remaining` and `resetSeconds`. The SDK does not surface them on
+a success; to watch the budget before you are refused, read them in a `fetch`
+you hand the client:
+
+```ts
+let remaining: number | undefined; // what is left, as of the last metered answer
+const client = new Client({
+  fetch: async (input, init) => {
+    const res = await fetch(input, init);
+    const header = res.headers.get('RateLimit-Remaining');
+    if (header !== null) remaining = Number(header);
+    return res;
+  },
+});
 ```
 
 A missing guest file uses the existing `NotFoundError`, just like a missing
@@ -3145,7 +3261,9 @@ to poll or stop it.
 
 Screenshot always writes the image bytes to the required `-o`/`--output` file.
 Its JSON result reports `{ "path": "screen.png", "bytes": 12345 }`; it never
-embeds or JSON-encodes the image. `--width` scales the requested image, and
+embeds or JSON-encodes the image. On a suspended computer the image is the frame
+saved as it was suspended, not a live capture: the result then carries
+`"suspended": true`, and without `--json` a note says so on stderr. `--width` scales the requested image, and
 `--fresh` requests a new capture. `--region X,Y,WIDTH,HEIGHT` crops in screen
 pixels, `--scale` shrinks by a factor (not with `--width`), `--format` picks
 `png` or `jpeg`, and `--quality` sets a JPEG's quality.
@@ -3159,13 +3277,20 @@ the CLI talks to, and prints its URL; `--no-open` only prints it. The page uses
 your browser's own dashboard sign-in, so the URL carries no credential.
 
 Lifecycle commands act on the specified computer. `computers stop --force`
-forces power off. `computers delete` keeps snapshots unless you pass both
+forces power off. `computers start --resume-only` resumes only if a saved session
+exists; on a stopped computer with none it succeeds without booting, so check the
+`status` it prints. `computers delete` keeps snapshots unless you pass both
 `--delete-snapshots` and `--expect FINGERPRINT`. Obtain and inspect the fingerprint
 with `snapshots holdings`; the CLI never selects a purge fingerprint for you.
+The result reports `ok`, `computer_deleted`, `snapshots_deleted`, `purge` and
+`error`. A purge the platform could not finish — copies still queued, or some
+refused — answers `ok: false`, and the command then exits 1 (with a note on
+stderr without `--json`): read `snapshots holdings` again before retrying.
 
 ### Templates, snapshots, webhooks, and secrets
 
 ```sh
+mandala sizes list                                  # the names computers create --size takes
 mandala templates list
 mandala templates validate ./devbox.yaml
 mandala templates publish ./devbox.yaml --json
@@ -3185,6 +3310,10 @@ mandala secrets list --workspace ws-example
 printf %s "$OPENAI_API_KEY" | mandala secrets set OPENAI_API_KEY
 mandala secrets rm OPENAI_API_KEY
 ```
+
+`sizes list` prints each named size's `id`, `label`, `template`, `cpu`,
+`ram_mb`, `disk_gb`, whether your plan `allowed` it, and the `cheapest_plan` that
+does; pass the `id` to `computers create --size`.
 
 Template validate, publish, and build read a file, or `-` for piped stdin. Build
 returns a job immediately; pass the returned `id` to `templates watch` to stream

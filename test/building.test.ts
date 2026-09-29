@@ -6,6 +6,10 @@
  * stack trace at the call site rather than from a 400 a round trip later.
  */
 
+import { spawnSync } from 'node:child_process';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { ValidationError } from '../src/errors.js';
 import * as P from '../src/paths.js';
@@ -468,12 +472,64 @@ describe('snapshotBody', () => {
 });
 
 describe('openUrlCommand', () => {
-  it('names a browser rather than asking for one', () => {
-    // Firefox by name, so the choice of browser lives in this one function
-    // rather than in whatever the guest's default handler resolves to.
+  it('picks the browser the image has, in the foreground, and fails loudly without one', () => {
+    // Byte for byte the command the Python SDK and the MCP server send, so
+    // the three clients open the same browser on the same image (OPL-3705).
     expect(P.openUrlCommand('https://example.com')).toBe(
-      "nohup firefox 'https://example.com' >/dev/null 2>&1 &",
+      'b=$(command -v firefox-esr || command -v firefox || command -v chromium) || ' +
+        "{ echo 'no browser (firefox-esr, firefox or chromium) on this image' >&2; exit 127; }; " +
+        `nohup "$b" 'https://example.com' >/dev/null 2>&1 &`,
     );
+  });
+
+  // Run for real under /bin/sh with a PATH holding only stubs, so what is
+  // proved is the choice the shell makes, not the string this file expects.
+  describe.skipIf(process.platform === 'win32')('run by a shell', () => {
+    const run = async (browsers: string[]) => {
+      const dir = await mkdtemp(join(tmpdir(), 'mandala-open-'));
+      const log = join(dir, 'opened');
+      // nohup is a stub too: a runner's real PATH can hold a real browser.
+      await writeFile(join(dir, 'nohup'), '#!/bin/sh\nexec "$@"\n', { mode: 0o755 });
+      for (const b of browsers) {
+        await writeFile(join(dir, b), `#!/bin/sh\necho "${b} $1" > '${log}'\n`, {
+          mode: 0o755,
+        });
+      }
+      const res = spawnSync('/bin/sh', ['-c', P.openUrlCommand('https://example.com/?q=1&r=2')], {
+        env: { PATH: dir },
+        encoding: 'utf8',
+      });
+      let opened = '';
+      for (let i = 0; i < 100 && browsers.length && !opened; i++) {
+        opened = await readFile(log, 'utf8').catch(() => '');
+        if (!opened) await new Promise((r) => setTimeout(r, 20));
+      }
+      await rm(dir, { recursive: true, force: true });
+      return { status: res.status, stderr: res.stderr, opened: opened.trim() };
+    };
+
+    it('opens chromium where it is the only browser, as on the Omarchy image', async () => {
+      expect(await run(['chromium'])).toEqual({
+        status: 0,
+        stderr: '',
+        opened: 'chromium https://example.com/?q=1&r=2',
+      });
+    });
+
+    it('prefers firefox-esr, then firefox, over chromium', async () => {
+      expect((await run(['firefox-esr', 'firefox', 'chromium'])).opened).toBe(
+        'firefox-esr https://example.com/?q=1&r=2',
+      );
+      expect((await run(['firefox', 'chromium'])).opened).toBe(
+        'firefox https://example.com/?q=1&r=2',
+      );
+    });
+
+    it('exits 127 with a sentence when the image has none of the three', async () => {
+      const res = await run([]);
+      expect(res.status).toBe(127);
+      expect(res.stderr).toBe('no browser (firefox-esr, firefox or chromium) on this image\n');
+    });
   });
 
   it('quotes a URL so it reaches the browser as one argument', () => {

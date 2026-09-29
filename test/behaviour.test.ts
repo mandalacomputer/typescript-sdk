@@ -2110,7 +2110,31 @@ describe('exec', () => {
     await (await c.computers.get('vm-1')).open('https://example.com');
     const body = rec.last().body as { command: string; session: string };
     expect(body.session).toBe('desktop');
-    expect(body.command).toMatch(/^nohup firefox .* >\/dev\/null 2>&1 &$/);
+    expect(body.command).toMatch(/nohup "\$b" .* >\/dev\/null 2>&1 &$/);
+  });
+
+  it('throws when the launch exits non-zero, as on an image with no browser', async () => {
+    // What the command answers where none of firefox-esr, firefox or chromium
+    // is installed. Returned as a result, it read as an open that worked.
+    const said = 'no browser (firefox-esr, firefox or chromium) on this image\n';
+    const { client: c } = client((call) =>
+      call.path.endsWith('/exec')
+        ? json({ ...EXEC_OK, exit_code: 127, stderr_b64: Buffer.from(said).toString('base64') })
+        : anyRoute(call),
+    );
+    const err = await (await c.computers.get('vm-1')).open('https://example.com').catch((e) => e);
+    expect(err).toBeInstanceOf(MandalaError);
+    expect((err as Error).message).toBe(
+      'could not open a browser on vm-1: no browser (firefox-esr, firefox or chromium) on this image',
+    );
+  });
+
+  it('names the exit status when a failed launch said nothing', async () => {
+    const { client: c } = client((call) =>
+      call.path.endsWith('/exec') ? json({ ...EXEC_OK, exit_code: 2 }) : anyRoute(call),
+    );
+    const err = await (await c.computers.get('vm-1')).open('https://example.com').catch((e) => e);
+    expect((err as Error).message).toBe('could not open a browser on vm-1: the launch exited 2');
   });
 
   it('does not report ok for an exec answer that named no exit code', async () => {

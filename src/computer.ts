@@ -19,16 +19,15 @@ import {
   verifyArtifact,
 } from './artifacts.js';
 import {
-  // TYPE-ONLY, both of them, and kept rather than dropped. Every reference to
-  // either in this file is a `{@link}` in a doc comment — `APIError.reason` on
-  // the two clipboard methods, `isTransient` on the retry advice beside them —
-  // so as values they are dead, and `verbatimModuleSyntax` was emitting a
-  // runtime import for two bindings nothing calls. Deleting them instead would
-  // cost the links: `{@link}` resolves through a type import and not through
-  // nothing, and the alternative is qualifying every target by module path.
-  // The inline modifier rather than a second import statement, matching the
-  // `./agent.js` line above.
-  type APIError,
+  // `isTransient`, `ModelProviderError` and `PlanLimitError` are TYPE-ONLY,
+  // and kept rather than dropped: every reference to them in this file is a
+  // `{@link}` in a doc comment, so as values they are dead, and
+  // `verbatimModuleSyntax` would emit a runtime import for bindings nothing
+  // calls. Deleting them instead would cost the links: `{@link}` resolves
+  // through a type import and not through nothing. `APIError` is a value: the
+  // agent loop tests an error against it. The inline modifier rather than a
+  // second import statement, matching the `./agent.js` line above.
+  APIError,
   ComputerNotRunningError,
   ConflictError,
   ConnectionError,
@@ -37,7 +36,10 @@ import {
   FileExistsError,
   type isTransient,
   MandalaError,
+  type ModelProviderError,
+  modelProviderRefusal,
   NotFoundError,
+  type PlanLimitError,
   RangeNotSatisfiableError,
   TimeoutError,
   TooLargeError,
@@ -75,6 +77,7 @@ import type {
   Move,
   Point,
   Schedule,
+  ScreenshotInfo,
   SecretBinding,
   SecretBindings,
   SecretsApplied,
@@ -802,6 +805,12 @@ export class Computer {
    * one whose session has been written to disk — see {@link isSuspended}. A
    * computer made by cloning starts as `"building"` while its disk is copied,
    * and becomes `"build-failed"` if that copy never finished.
+   *
+   * `"half-removed"` is a computer whose deletion stopped part-way and took its
+   * disk with it: its files were partly removed, every call that needs a disk
+   * is refused, it will never start again, and deleting it again is what
+   * clears it — see {@link halfRemoved}. Read these as a closed set and
+   * anything outside it as not startable.
    */
   get status(): string {
     return str(this.#data.status);
@@ -894,6 +903,16 @@ export class Computer {
    */
   get buildFailed(): boolean {
     return this.#statusIs('build-failed');
+  }
+
+  /**
+   * True if this computer's files were partly removed: a deletion stopped
+   * part-way. It cannot be started or used again, and nothing clears it but
+   * {@link delete}. Every wait throws on it at once rather than polling to its
+   * timeout.
+   */
+  get halfRemoved(): boolean {
+    return this.#statusIs('half-removed');
   }
 
   /**
@@ -1144,6 +1163,12 @@ export class Computer {
    * Also `undefined` when the platform could not reach the host holding this
    * computer, since a URL built over a missing credential answers 401 forever
    * rather than failing where it was built.
+   *
+   * And `undefined` on a computer from a REPLAYED answer: a create, clone,
+   * update or rename resent under the same `idempotencyKey` gets the first
+   * call's answer back (`Idempotent-Replayed: true`), which the platform
+   * stores without `vnc` or any of its tokens and URLs. {@link refresh}
+   * fetches it.
    */
   get vnc(): VncConnect | undefined {
     return toVncConnect(this.#data.vnc);
@@ -1946,8 +1971,11 @@ export class Computer {
     }
   }
 
-  /** Give this computer a new name. Sugar over {@link update}. */
-  async rename(name: string, opts: CallOptions = {}): Promise<this> {
+  /**
+   * Give this computer a new name. Sugar over {@link update}, and keyed the same
+   * way: pass `idempotencyKey` to send the same rename again safely.
+   */
+  async rename(name: string, opts: CallOptions & IdempotencyOptions = {}): Promise<this> {
     return this.update({ name }, opts);
   }
 
@@ -2018,6 +2046,23 @@ export class Computer {
   }
 
   /**
+   * The failure for a state no wait can outlast — a disk copy that never
+   * finished, or a computer whose files were partly removed — or `undefined`.
+   * Nothing recovers either into a startable computer, so no later reading
+   * could overturn it.
+   */
+  #terminalFailure(): MandalaError | undefined {
+    if (this.buildFailed) return this.#buildFailure();
+    if (this.halfRemoved) {
+      return new MandalaError(
+        `${this.id} is half-removed: its files were partly removed, it cannot be started ` +
+          'or used again, and delete() is what clears it',
+      );
+    }
+    return undefined;
+  }
+
+  /**
    * A lifecycle state a guest probe cannot recover from, or `undefined`.
    *
    * The states are the ones that do not become "the guest answers" by being
@@ -2031,7 +2076,8 @@ export class Computer {
    * SDKs answered it as opposites until now.
    */
   #guestWaitFailure(): MandalaError | undefined {
-    if (this.buildFailed) return this.#buildFailure();
+    const terminal = this.#terminalFailure();
+    if (terminal) return terminal;
     if (this.startError) {
       return new MandalaError(`${this.id} did not start: ${this.startError}`);
     }
@@ -2092,7 +2138,8 @@ export class Computer {
    * Wait until a cloned computer's disk has been copied.
    *
    * Returns immediately for anything not being built, so it is safe to call on
-   * any computer. Throws `MandalaError` if the copy failed, and `TimeoutError`
+   * any computer — except a {@link halfRemoved} one, which it throws on at
+   * once. Throws `MandalaError` if the copy failed, and `TimeoutError`
    * if it is still going when the timeout runs out — the computer keeps building
    * either way; only the waiting stops.
    *
@@ -2127,7 +2174,8 @@ export class Computer {
     let polled = false;
     let delayMs = pollMs;
     for (;;) {
-      if (this.buildFailed) throw this.#buildFailure();
+      const terminal = this.#terminalFailure();
+      if (terminal) throw terminal;
       // A READABLE status that is not `building`, not merely the absence of
       // one. `#statusIs` is a strict comparison precisely so a coerced value
       // cannot classify — `String(['building'])` is `'building'` — and this
@@ -2225,9 +2273,9 @@ export class Computer {
    * something inside the guest to be ready.
    *
    * Throws rather than waiting out the timeout for states that will not become
-   * "running" on their own — a failed build, a stopped machine, and a suspended
-   * session nobody has resumed. "Nobody has" is the platform's word rather than
-   * an inference from `status`: a start that has been admitted holds its memory
+   * "running" on their own — a failed build, a half-removed computer, a stopped
+   * machine, and a suspended session nobody has resumed. "Nobody has" is the
+   * platform's word rather than an inference from `status`: a start that has been admitted holds its memory
    * before its process exists, and reads as stopped or suspended meanwhile, so
    * this waits for one of those and refuses only a computer the platform says
    * is holding nothing. A host that does not say is waited on.
@@ -2340,7 +2388,8 @@ export class Computer {
       // the full timeout to say so helps nobody. Unqualified, unlike the two
       // POWER states below: nothing can be admitted for a machine with no disk,
       // so no reading could change this answer.
-      if (this.buildFailed) throw this.#buildFailure();
+      const terminal = this.#terminalFailure();
+      if (terminal) throw terminal;
       // The power refusals need a reading OF THEIR OWN, on the same terms the
       // success above needs one (Codex review of #80; python-sdk #81 had the
       // same shape). They are claims about what the platform is doing NOW, and
@@ -2436,10 +2485,11 @@ export class Computer {
    * session 0 and replies well before anyone has logged in. When you need the
    * desktop rather than the machine, poll {@link screenshot}.
    *
-   * Throws rather than waiting out the timeout on a failed build, a boot that
-   * failed, or a machine that is stopped — nothing inside any of those will
-   * ever answer, and `start()` is the fix for the last two. A *suspended*
-   * computer is not refused here, unlike in {@link waitUntilRunning}: running a
+   * Throws rather than waiting out the timeout on a failed build, a
+   * half-removed computer, a boot that failed, or a machine that is stopped —
+   * nothing inside any of those will ever answer, and `start()` is the fix for
+   * the last two (`delete()` is the only one for a half-removed computer). A
+   * *suspended* computer is not refused here, unlike in {@link waitUntilRunning}: running a
    * command resumes one, so the probe both wakes the machine and gets its
    * answer — which is a side effect worth knowing about on a wait that reads as
    * passive.
@@ -2728,6 +2778,10 @@ export class Computer {
     // knows secrets are bound reads that second case as silence, not "none".
     const unreported = bound == null && expectSecrets;
     if (!unreported && (!Array.isArray(bound) || bound.length === 0)) return 'delivered';
+    // Before the not-running refusals below, whose "call start()" cannot help
+    // a computer that will never start again.
+    const removed = this.halfRemoved ? this.#terminalFailure() : undefined;
+    if (removed) return removed;
     if (this.isBuilding) return unreported ? 'unreported' : 'delivering';
     if (!this.#statusIs('running')) {
       // Both refusals come before the silence about bindings is waited past:
@@ -2844,7 +2898,8 @@ export class Computer {
     // From here the caller has a proxy to wait for, whether the read carried
     // it or left it out ('unreported').
     const waiting = set ? 'applying' : 'unreported';
-    if (this.buildFailed) return this.#buildFailure();
+    const terminal = this.#terminalFailure();
+    if (terminal) return terminal;
     // The platform never reports the setting pending on a computer that is not
     // running, so a false here means only "not running yet" until it is.
     if (this.isBuilding) return waiting;
@@ -2914,7 +2969,8 @@ export class Computer {
   #egressProxyState(startFailed = ''): EgressProxyState {
     if (this.egressProxyPending) return 'applying';
     if (!this.egressProxy?.credentialsSecretId) return 'applied';
-    if (this.buildFailed) return this.#buildFailure();
+    const terminal = this.#terminalFailure();
+    if (terminal) return terminal;
     if (this.isBuilding) return 'applying';
     if (!this.#statusIs('running')) {
       if (startFailed && this.#statusIs('stopped') && !this.#startAdmitted()) {
@@ -3310,11 +3366,36 @@ export class Computer {
    * {@link ConflictError} whose `reason` is `unavailable` — not transient;
    * start the computer for a screen that can be shaped. `width` and
    * `format: 'jpeg'` alone are still answered with the saved picture.
+   *
+   * The bytes alone do not say which of the two they are. Call
+   * {@link screenshotWithInfo} to learn whether a frame is a suspended
+   * computer's saved one.
    */
   async screenshot(
     width?: number,
     opts: { fresh?: boolean } & P.ScreenshotShape & CallOptions = {},
   ): Promise<Uint8Array> {
+    return (await this.screenshotWithInfo(width, opts)).bytes;
+  }
+
+  /**
+   * {@link screenshot}, with what the response said about the picture: its
+   * media type and whether it is a suspended computer's SAVED frame.
+   *
+   * The platform marks the saved frame with `X-GC-Frame: suspended`, and
+   * `suspended` is that marker. A saved frame is the desktop as it was
+   * suspended — a stored picture, not the screen now, and not coordinates to
+   * click on. Same arguments and same refusals as {@link screenshot}.
+   *
+   * ```ts
+   * const shot = await c.screenshotWithInfo();
+   * if (shot.suspended) console.warn('saved frame; start() the computer for a live one');
+   * ```
+   */
+  async screenshotWithInfo(
+    width?: number,
+    opts: { fresh?: boolean } & P.ScreenshotShape & CallOptions = {},
+  ): Promise<ScreenshotInfo> {
     const { fresh, signal, format, quality, region, scale } = opts;
     const res = await this.#t.bytes('GET', P.computerAction(this.id, 'screenshot'), {
       query: P.screenshotQuery(width, fresh, { format, quality, region, scale }),
@@ -3331,7 +3412,7 @@ export class Computer {
           `got ${res.contentType}`,
       );
     }
-    return res.bytes;
+    return { bytes: res.bytes, contentType: res.contentType, suspended: res.frame === 'suspended' };
   }
 
   /**
@@ -4197,9 +4278,15 @@ export class Computer {
    * await c.open('https://example.com');
    * ```
    *
-   * Sugar over {@link exec} with `desktop: true`: it names a browser that works
-   * on the image, quotes the URL, and detaches the launch so the call returns in
+   * Sugar over {@link exec} with `desktop: true`: it picks the browser from
+   * what the image has installed — `firefox-esr`, then `firefox`, then
+   * `chromium` — quotes the URL, and detaches the launch so the call returns in
    * well under a second instead of blocking until `timeoutS`.
+   *
+   * Throws {@link MandalaError} when the launch command does not exit zero,
+   * which is what an image with none of those three browsers answers: nothing
+   * was opened, and the error says so rather than a result that reads as
+   * success.
    *
    * The result describes the *launch*, not the page — a zero exit means the shell
    * started the browser, not that the URL resolved. On a cold browser the window
@@ -4221,11 +4308,23 @@ export class Computer {
    * arrived would have been refused here for a command it could have run.
    */
   async open(url: string, opts: { timeoutS?: number } & CallOptions = {}): Promise<ExecResult> {
-    return this.exec(P.openUrlCommand(url), {
+    const res = await this.exec(P.openUrlCommand(url), {
       timeoutS: opts.timeoutS ?? 30,
       desktop: true,
       signal: opts.signal,
     });
+    // The launch is detached only after the browser has been found, so a
+    // non-zero exit here is a launch that did not happen — most often an image
+    // with no browser the command knows. Returned, it read as an open that
+    // worked.
+    if (!res.ok) {
+      const said = res.stderrText.trim();
+      throw new MandalaError(
+        `could not open a browser on ${this.id}: ` +
+          (said || (res.timedOut ? 'the launch timed out' : `the launch exited ${res.exitCode}`)),
+      );
+    }
+    return res;
   }
 
   // --- files ----------------------------------------------------------
@@ -4717,6 +4816,13 @@ export class Computer {
    * will not stretch, 400 for a memory snapshot of a computer that is not
    * running. A 202 means the capture started.
    *
+   * And a 503 (`UnavailableError`) while another manual capture on the account
+   * is being admitted, or when admission could not be confirmed — in which case
+   * the capture MAY have started. Manual captures on one account are admitted
+   * one at a time, so issue them sequentially. After an `UnavailableError`,
+   * list snapshots and look for a `capturing` row for this computer before
+   * retrying.
+   *
    * Throws {@link MandalaError} if the capture FAILS. There is no response left
    * to carry that news by then, so the platform drops the `capturing` row and
    * stores nothing; the row disappearing is the whole signal, and it is the one
@@ -4974,6 +5080,10 @@ export class Computer {
    * computer with no schedule at all takes the 04:00 UTC defaults. When the
    * computer's host does not answer that read, the call is refused with
    * {@link MandalaError} rather than guessing; give all three to skip it.
+   *
+   * That read does not refresh this handle, which keeps what it held — a
+   * create's {@link startError} included. The schedule the platform stored is
+   * written into {@link snapshotSchedule}.
    */
   async setSchedule(
     args: {
@@ -4992,9 +5102,15 @@ export class Computer {
       // window disabled at midnight UTC. The computer record carries
       // `snapshot_schedule` only when a schedule exists, so it is the one read
       // that tells "none" apart from that window.
-      await this.refresh(opts);
-      const projected = this.snapshotSchedule;
-      if (projected === undefined && this.unreachable) {
+      // Read into a local rather than through refresh(): a refresh replaces the
+      // whole record, and with it a create's `start_error`, which the waits
+      // fail fast on. Only the schedule is wanted here.
+      const path = P.computer(this.id);
+      const record = P.computerPayload(await this.#t.json('GET', path, { signal: opts.signal }));
+      if (!record.id) throw new MandalaError(`expected a computer from GET ${path}`);
+      const read = new Computer(this.#t, record);
+      const projected = read.snapshotSchedule;
+      if (projected === undefined && read.unreachable) {
         // A record the host did not answer lacks the field for that reason
         // alone; defaulting here would move a real window to 04:00 UTC.
         throw new MandalaError(
@@ -5019,7 +5135,11 @@ export class Computer {
     // What was asked for, when the platform acknowledges with no body. It
     // applied this and said so with a 2xx; echoing it beats decoding `{}` into
     // a midnight nobody chose.
-    return toSchedule(P.isRecord(data) && Object.keys(data).length ? data : body);
+    const stored = P.isRecord(data) && Object.keys(data).length ? data : body;
+    // So the handle's own reading is not left describing the schedule this
+    // call just replaced.
+    this.#data.snapshot_schedule = { ...stored };
+    return toSchedule(stored);
   }
 
   /**
@@ -5027,7 +5147,8 @@ export class Computer {
    *
    * `setSchedule({ enabled: false })` keeps the chosen time so toggling back on
    * restores it, and keeps the scheduler's bookkeeping with it. Clearing returns
-   * the computer to never having had a schedule.
+   * the computer to never having had a schedule, and {@link snapshotSchedule}
+   * reads `undefined` afterwards.
    */
   async clearSchedule(opts: CallOptions = {}): Promise<Schedule> {
     const data = await this.#t.json<Record<string, unknown>>(
@@ -5048,6 +5169,7 @@ export class Computer {
     // 2xx to, and "there is no schedule now" is true whatever the body said —
     // refusing would fail a working call against a platform that acknowledges
     // with `"cleared"` or `[]`, and learn nothing by it.
+    delete this.#data.snapshot_schedule;
     return toSchedule(P.isRecord(data) ? data : {});
   }
 
@@ -5107,9 +5229,10 @@ export class Computer {
    * {@link secrets} read answered to change only that list: a 409 if it has
    * changed since. A 409 also answers while a delivery is still in progress or
    * another operation (a stop, a snapshot, a suspend) holds the computer; those
-   * clear once it finishes. On an image that supports it, new shells and
-   * `exec(…, { desktop: true })` on a running computer see a changed variable
-   * within seconds; programs already running keep what they started with.
+   * clear once it finishes. On an image that supports it, new shells and every
+   * `exec` on a running computer — plain (as root) or `{ desktop: true }` —
+   * see the current bound variables, a changed one within seconds; programs
+   * already running keep what they started with.
    */
   async setSecrets(
     secrets: P.SecretBindingArgs[],
@@ -5232,15 +5355,33 @@ export class Computer {
    * {@link AgentResult.finished}.
    *
    * **A RUN CAN BE REFUSED PART-WAY THROUGH, AFTER BILLED STEPS.** Authorization
-   * is not settled once at the start of a call this long: the API rechecks it
-   * before each model call and each tool, so a key revoked, a member demoted, an
-   * account suspended or a plan downgraded mid-run stops the loop with a 401,
-   * 403 or 402 — and the steps already taken stand, on your key and on that
-   * desktop. None of those three is a transport failure and none is worth
-   * retrying unchanged; {@link APIError.body} carries the `usage` and the
-   * completed steps the refusal reported, so read those before deciding what to
-   * do next. {@link agentStream} surfaces the same facts as `usage` and `steps`
-   * on its `error` event.
+   * is not settled once at the start of a call this long: the API rechecks the
+   * credential, the role and the account's standing before each model call and
+   * each tool, so a key revoked, a member demoted or an account suspended mid-run
+   * stops the loop with a 401 or 403 carrying `reason: "revoked"` — and the
+   * steps already taken stand, on your key and on that desktop.
+   *
+   * **A 402, 504 OR 529 HERE IS THE MODEL API'S STATUS**, for the account behind
+   * `modelKey` (billing, timeout, overloaded), relayed — never a Mandala plan
+   * limit. A 402 is raised as {@link ModelProviderError}, not
+   * {@link PlanLimitError}; a 403 without `reason: "revoked"` may likewise be
+   * the model key's own `permission_error`.
+   *
+   * **A 403 THAT ARRIVES AS THE RUN'S `error` EVENT LOSES ITS `reason` HERE.**
+   * For a refusal after the run started, this method withholds `reason` from
+   * the error it throws (a word meaning "send it again" is not true of a run
+   * that has already acted), so `err.reason` and `err.body.reason` are
+   * `undefined` on it, a revocation included; {@link agentStream}'s `error`
+   * event keeps it as `raw.reason`. A 403 answered before the stream opens is
+   * the HTTP response itself and keeps `err.reason` on both this method and
+   * {@link agentStream} (which throws it rather than yielding an `error`
+   * event). {@link agentOnce}'s HTTP error always keeps `err.reason`.
+   *
+   * None of these is a transport failure and none is worth retrying unchanged;
+   * {@link APIError.body} carries the `usage` and the completed steps the
+   * refusal reported, so read those before deciding what to do next.
+   * {@link agentStream} surfaces the same facts as `usage` and `steps` on its
+   * `error` event.
    */
   async agent(args: AgentArgs): Promise<AgentResult> {
     // Named here as well, though agentStream checks the same argument a line
@@ -5266,8 +5407,13 @@ export class Computer {
         // surface where the difference is money and a desktop in an unknown
         // state. `agentStream` hands the same facts back as `usage` and `steps`.
         const message = `the agent run failed: ${ev.error}`;
+        // A 402 on this route is the model API's billing refusal for the
+        // caller's model key, never the plan: nothing inside a run answers 402
+        // on the platform's behalf.
         throw ev.status
-          ? errorForEventStatus(ev.status, message, ev.raw, { method: 'POST' })
+          ? modelProviderRefusal(
+              errorForEventStatus(ev.status, message, ev.raw, { method: 'POST' }),
+            )
           : new MandalaError(message);
       }
     }
@@ -5300,12 +5446,16 @@ export class Computer {
    * one would turn a forward-compatible addition into an outage.
    *
    * An `error` event can be a mid-run refusal rather than a model or guest
-   * failure: authorization is rechecked before each model call and each tool, so
-   * a key revoked, a member demoted, an account suspended or a plan downgraded
-   * while the run is going stops it with a `status` of 401, 403 or 402. Its
-   * `usage` and `steps` say what had already been spent and done, which is the
+   * failure: the credential, the role and the account's standing are rechecked
+   * before each model call and each tool, so a key revoked, a member demoted or
+   * an account suspended while the run is going stops it with a `status` of 401
+   * or 403 and `reason: "revoked"` in its `raw`. A `status` of 402, 504 or 529
+   * is the model API's own (billing, timeout, overloaded) for the account behind
+   * `modelKey`, relayed — never a Mandala plan limit — and a 403 without
+   * `reason: "revoked"` may be the model key's `permission_error`. Its `usage`
+   * and `steps` say what had already been spent and done, which is the
    * difference between a run that did nothing and one that did four things and
-   * was then refused. Do not retry those three unchanged.
+   * was then refused. Do not retry any of those unchanged.
    *
    * Throws `MandalaError` if the response ends without `done` or `error` —
    * the same refusal {@link agent} makes, made here because this is where it
@@ -5360,22 +5510,29 @@ export class Computer {
    * The agent loop, without streaming — one request, one result.
    *
    * Simpler than {@link agent} and worse for anything long: nothing is reported
-   * until the whole run is over, and a reverse proxy between you and the
-   * platform may well close a request held open for minutes. Prefer
-   * {@link agent} unless you specifically need a single non-streaming call.
+   * until the whole run is over.
+   *
+   * **ON THE HOSTED API IT CANNOT OUTLIVE ABOUT 120 SECONDS.** The edge cuts a
+   * non-streaming request off there with a body-less `524`, raised as
+   * {@link GatewayTimeoutError}; the run is stopped part-way once the dropped
+   * connection reaches the platform, and its usage and steps are not reported
+   * anywhere. Use {@link agent} or {@link agentStream} for anything that may
+   * take longer.
    *
    * This form can be refused mid-run too, and here the refusal is the response:
-   * a 401, 403 or 402 raised from a call that authenticated when it was sent
-   * means the run was stopped between two of its steps, with the steps before it
-   * billed and done. {@link APIError.body} carries what the platform reported
-   * about them. Do not retry those three unchanged.
+   * a 401 or 403 with `reason: "revoked"` raised from a call that authenticated
+   * when it was sent means the run was stopped between two of its steps, with
+   * the steps before it billed and done. A 402 is the model API's billing
+   * refusal for the account behind `modelKey`, raised as
+   * {@link ModelProviderError} rather than {@link PlanLimitError}; a 504 or 529
+   * the platform answered with a body is likewise the model API's.
+   * {@link APIError.body} carries what the platform reported about the steps.
+   * Do not retry any of those unchanged.
    */
   async agentOnce(args: AgentArgs): Promise<AgentResult> {
     const modelKey = requireModelKey(args.modelKey, 'agentOnce()');
-    const data = await this.#t.json<Record<string, unknown>>(
-      'POST',
-      P.computerAction(this.id, 'agent'),
-      {
+    const data = await this.#t
+      .json<Record<string, unknown>>('POST', P.computerAction(this.id, 'agent'), {
         body: P.agentBody({
           prompt: args.prompt,
           stream: false,
@@ -5390,8 +5547,12 @@ export class Computer {
         // ordinary deadline would end every run over a minute at exactly the
         // same place. A caller's own signal is what stops one early.
         noTimeout: true,
-      },
-    );
+      })
+      .catch((err: unknown) => {
+        // The HTTP form of agent()'s mapping: this route's 402 is the model
+        // API's billing refusal for the caller's key, not a plan limit.
+        throw err instanceof APIError ? modelProviderRefusal(err) : err;
+      });
     if (!P.isRecord(data) || data.stop == null) {
       throw new MandalaError(
         `expected an agent result from POST ${P.computerAction(this.id, 'agent')}`,

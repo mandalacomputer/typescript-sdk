@@ -915,21 +915,46 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
       }
       case 'computers delete': {
         const c = await computer();
-        const snapshotsDeleted = await c.delete(deletion);
-        return output.result({
-          id: c.id,
-          deleted: true,
-          snapshots_deleted: snapshotsDeleted ?? null,
-        });
+        // Detailed, so a purge the platform answered 202 with `ok: false` —
+        // copies still queued, or refused — is reported as not done rather
+        // than as `deleted: true` and exit 0.
+        const result = await c.delete({ ...deletion, detailed: true });
+        if (!result.ok && !json)
+          output.diagnostic(
+            `mandala: the delete of ${c.id} did not complete${result.error ? `: ${result.error}` : ''}`,
+            { keepNewlines: false },
+          );
+        return output.result(
+          {
+            id: c.id,
+            ok: result.ok,
+            deleted: result.computerDeleted ?? result.ok,
+            computer_deleted: result.computerDeleted ?? null,
+            snapshots_deleted: result.snapshotsDeleted ?? null,
+            purge: result.purge === undefined ? null : snakeKeys(result.purge),
+            error: result.error ?? null,
+          },
+          result.ok ? 0 : 1,
+        );
       }
       case 'computers screenshot': {
-        const bytes = await (await computer()).screenshot(n('width'), {
+        const shotInfo = await (await computer()).screenshotWithInfo(n('width'), {
           fresh: b('fresh'),
           ...shot,
           signal,
         });
-        await writeFile(s('output')!, bytes, { signal });
-        return output.result({ path: s('output'), bytes: bytes.length });
+        await writeFile(s('output')!, shotInfo.bytes, { signal });
+        // A suspended computer answers with the frame it saved as it was
+        // suspended, and the file alone cannot say so.
+        if (shotInfo.suspended && !json)
+          output.diagnostic(
+            'mandala: this is the saved frame of a suspended computer, not a live capture; start it for a live one',
+          );
+        return output.result({
+          path: s('output'),
+          bytes: shotInfo.bytes.length,
+          ...(shotInfo.suspended ? { suspended: true } : {}),
+        });
       }
       case 'computers exec': {
         const c = await computer();
@@ -987,6 +1012,21 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
                     ? await c.waitForEgressProxy(wait)
                     : await c.waitUntilRunning(wait);
         return output.result(computerData(result));
+      }
+      case 'sizes list': {
+        const sizes = await client.sizes.list(call);
+        return output.result({
+          items: sizes.map((size) => ({
+            id: size.id,
+            label: size.label,
+            template: size.template,
+            cpu: size.cpu,
+            ram_mb: size.ramMb,
+            disk_gb: size.diskGb,
+            allowed: size.allowed,
+            cheapest_plan: size.cheapestPlan ?? null,
+          })),
+        });
       }
       case 'templates list': {
         const listing = await client.templates.listWithStatus(call);

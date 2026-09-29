@@ -1528,7 +1528,8 @@ export type Snapshot = {
    * Where these bytes have got to, and what may be done with them.
    *
    * - `"capturing"` — still being taken, and NOT a snapshot yet: restore, clone
-   *   and delete all answer 404 on one, and a listing puts these first. THE ID
+   *   and delete all answer 404 on one, and one can appear anywhere in a
+   *   listing, so read `state` on every row. THE ID
    *   IS ALREADY THE SNAPSHOT'S OWN — allocated before the copy starts and kept
    *   when it lands — so this is the row to poll rather than a stand-in that
    *   gets replaced by something under another id (platform OPL-4562). It used
@@ -2225,6 +2226,23 @@ export function toDeleteResult(d: unknown): DeleteResult {
     raw: { ...r },
   };
 }
+
+/**
+ * A screenshot with what the response said about it, from
+ * `Computer.screenshotWithInfo()`.
+ */
+export type ScreenshotInfo = {
+  /** The image, exactly as {@link Computer.screenshot} returns it. */
+  bytes: Uint8Array;
+  /** Its media type, e.g. `image/png` or `image/jpeg`. */
+  contentType: string;
+  /**
+   * True when this is a suspended computer's SAVED frame (`X-GC-Frame:
+   * suspended`): a stored picture of the desktop as it was suspended, not a
+   * live capture, and its pixels are not screen coordinates to click on.
+   */
+  suspended: boolean;
+};
 
 /**
  * The outcome of a shell command run inside the guest.
@@ -3982,7 +4000,7 @@ export type Whoami = {
   /**
    * The key itself. `null` is possible but not expected. On a Connected app's
    * access token this is the app's hidden key: `prefix` is `oauth`, and `name`
-   * the app's name.
+   * is `Connected app: <client_name>`, up to 100 characters.
    */
   key: ApiKey | null;
   raw: Record<string, unknown>;
