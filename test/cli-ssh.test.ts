@@ -1696,6 +1696,38 @@ describe('ssh-config over a config holding a duplicate block', () => {
         `Host *\n  ServerAliveInterval 30\n${tail}`,
     );
   });
+
+  // A begin marker whose end marker is gone runs on to a later copy's end
+  // marker; what stands between is not part of any copy.
+  it('keeps what stands after a copy that lost its end marker, removing the whole copy after it', () => {
+    const snippet = (host: string, id: string) => configSnippet(host, id, gateway({}), KH, host);
+    const [gw, vm1] = blocksOf(snippet('old', 'vm-1'));
+    const [, brokenFull] = blocksOf(snippet('broken', 'vm-1'));
+    const broken = brokenFull.slice(0, brokenFull.lastIndexOf('\n'));
+    expect(broken).not.toContain('<<<');
+    const [, vm2] = blocksOf(snippet('a', 'vm-2'));
+    const [, later] = blocksOf(snippet('later', 'vm-1'));
+    const text =
+      `${WORK}\n${gw}\n\n${vm1}\n\n${broken}\n\n${vm2}\n\n` + `Host mine\n  User x\n\n${later}\n`;
+    const [newGw, newVm1] = blocksOf(snippet('dev', 'vm-1'));
+    const merged = mergeConfig(text, snippet('dev', 'vm-1'));
+    expect(merged).toBe(
+      `${WORK}\n${newGw}\n\n${newVm1}\n\n${broken}\n\n${vm2}\n\nHost mine\n  User x\n`,
+    );
+    expect(merged).not.toContain('Host later');
+    expect(mergeConfig(merged, snippet('dev', 'vm-1'))).toBe(merged);
+  });
+
+  it('keeps a hand-written stanza after a stray gateway begin marker', () => {
+    const snippet = (host: string) => configSnippet(host, 'vm-1', gateway({}), KH, host);
+    const prod = 'Host prod\n  ProxyJump bastion\n  StrictHostKeyChecking yes\n';
+    const stray = `\n# >>> mandala gateway >>>\n# half\n\n${prod}`;
+    const text = `${mergeConfig(WORK, snippet('old'))}${stray}\n${snippet('stale')}`;
+    const merged = mergeConfig(text, snippet('dev'));
+    expect(merged).toBe(`${mergeConfig(WORK, snippet('dev'))}${stray}`);
+    expect(merged).not.toContain('stale');
+    expect(mergeConfig(merged, snippet('dev'))).toBe(merged);
+  });
 });
 
 describe('ssh-config over a config that is not UTF-8', () => {
