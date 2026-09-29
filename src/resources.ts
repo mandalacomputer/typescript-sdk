@@ -319,8 +319,13 @@ export class Computers {
    *
    * `idempotencyKey` is sent on the create only, so a launch resent under the
    * same key after its answer was lost does not create a second computer; the
-   * start launch may make afterwards gets a key of its own. See
-   * {@link IdempotencyOptions}.
+   * start launch may make afterwards gets a key of its own. An error launch
+   * throws that carries an `idempotencyKey` carries the CREATE's key — the one
+   * given, or the one made when none was — even when the stage that failed was
+   * that later start, so passing it back to launch replays the create (the
+   * same computer) and runs the rest again. The start's own key is never
+   * handed out as a launch key: sent on a create, it would make a second
+   * computer. See {@link IdempotencyOptions}.
    *
    * A computer with secrets bound is also waited on until they have reached
    * its desktop ({@link Computer.waitForSecrets}), so a command run on the
@@ -343,7 +348,10 @@ export class Computers {
     const { timeoutMs = 180_000, pollMs = 3_000, signal, idempotencyKey } = opts;
     checkWait(timeoutMs, pollMs);
     signal?.throwIfAborted();
-    const computer = await this.create(args, { signal, idempotencyKey });
+    // Settled here rather than in create, so an error from a later stage can
+    // be handed back with the key that replays THIS create.
+    const launchKey = idempotencyKey ?? globalThis.crypto.randomUUID();
+    const computer = await this.create(args, { signal, idempotencyKey: launchKey });
     const id = computer.id;
     const deadline = performance.now() + timeoutMs;
     const remaining = (): number => {
@@ -441,6 +449,10 @@ export class Computers {
       if (err instanceof MandalaError) {
         // Keep API status, response body, causes and the original error identity.
         err.message = `launch of ${id} failed: ${err.message}`;
+        // Every error here came after the create. One carrying a key carries
+        // the start's, and a launch resent under it would create a second
+        // computer; the create's replays this one.
+        if (err.idempotencyKey !== undefined) err.idempotencyKey = launchKey;
       }
       throw err;
     }

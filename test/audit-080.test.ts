@@ -6,11 +6,13 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import type { Computer } from '../src/index.js';
 import {
   APIError,
   AuthenticationError,
   Client,
   ConflictError,
+  IDEMPOTENCY_KEY_HEADER,
   isTransient,
   MandalaError,
   ModelProviderError,
@@ -148,6 +150,45 @@ describe('a half-removed computer', () => {
     const computer = await c.computers.get('vm-1');
     const started = performance.now();
     const err = await computer[wait]({ timeoutMs: 2_000, pollMs: 10 }).then(
+      () => 'returned',
+      (e) => e,
+    );
+    expect(err).toBeInstanceOf(MandalaError);
+    expect(err).not.toBeInstanceOf(TimeoutError);
+    expect((err as Error).message).toMatch(SAYS);
+    expect(performance.now() - started).toBeLessThan(1_500);
+  });
+
+  // The three waits launch runs after the guest answers, each on a record that
+  // names what it would otherwise wait for: without the half-removed check
+  // each would refuse with "call start()", which cannot help.
+  it.each([
+    [
+      'waitForSecrets',
+      { secrets: [{ secret_id: 'csec-0123456789abcdef', revision_id: 'csr-1', env: 'TOKEN' }] },
+      (vm: Computer) => vm.waitForSecrets({ timeoutMs: 2_000, pollMs: 10, expectSecrets: true }),
+    ],
+    [
+      'waitForBrowserProxy',
+      { browser_proxy: { server: 'http://proxy.example.com:3128' } },
+      (vm: Computer) =>
+        vm.waitForBrowserProxy({ timeoutMs: 2_000, pollMs: 10, expectBrowserProxy: true }),
+    ],
+    [
+      'waitForEgressProxy',
+      {
+        egress_proxy: {
+          server: 'https://proxy.example.com:3128',
+          credentials_secret_id: 'csec-0123456789abcdef',
+        },
+      },
+      (vm: Computer) => vm.waitForEgressProxy({ timeoutMs: 2_000, pollMs: 10 }),
+    ],
+  ] as const)('fails %s at once rather than asking for a start', async (_, extra, wait) => {
+    const { client: c } = client(() => json({ ...HALF, ...extra }));
+    const computer = await c.computers.get('vm-1');
+    const started = performance.now();
+    const err = await wait(computer).then(
       () => 'returned',
       (e) => e,
     );
@@ -310,5 +351,45 @@ describe('RateLimitError', () => {
     );
     const err = (await c.computers.create({ template: 'base' }).catch((e) => e)) as RateLimitError;
     expect([err.limit, err.remaining, err.resetSeconds]).toEqual([undefined, undefined, undefined]);
+  });
+});
+
+describe('the key an error from launch() carries', () => {
+  const STOPPED = { ...COMPUTER, status: 'stopped', running_ram_mb: 0 };
+  // The create succeeds and comes back stopped; the start launch then makes
+  // is refused before it reached anything (a 5xx naming no operation), which
+  // releases the start's key.
+  const respond = (call: Parameters<Responder>[0]) =>
+    call.method === 'POST' && call.path === '/computers'
+      ? json(STOPPED)
+      : call.method === 'GET' && call.path === '/computers/vm-1'
+        ? json(STOPPED)
+        : call.method === 'POST' && call.path === '/computers/vm-1/start'
+          ? json({ error: 'No hypervisor could answer that right now.' }, { status: 503 })
+          : anyRoute(call);
+
+  it.each([
+    ['given', 'launch-key-1'],
+    ['made', undefined],
+  ] as const)('is the create key it was %s, never the start’s', async (_, key) => {
+    const { rec, client: c } = client(respond);
+    const err = await c.computers
+      .launch(
+        { template: 'base', start: false },
+        { timeoutMs: 60_000, pollMs: 10, idempotencyKey: key },
+      )
+      .catch((e) => e);
+    expect(err).toBeInstanceOf(APIError);
+    expect((err as APIError).status).toBe(503);
+    const create = rec.calls.find((x) => x.method === 'POST' && x.path === '/computers');
+    const start = rec.calls.find((x) => x.method === 'POST' && x.path === '/computers/vm-1/start');
+    const launchKey = create?.headers[IDEMPOTENCY_KEY_HEADER];
+    const startKey = start?.headers[IDEMPOTENCY_KEY_HEADER];
+    expect(launchKey).toBeDefined();
+    expect(startKey).toBeDefined();
+    expect(startKey).not.toBe(launchKey);
+    if (key !== undefined) expect(launchKey).toBe(key);
+    expect((err as MandalaError).idempotencyKey).toBe(launchKey);
+    expect((err as MandalaError).idempotencyKey).not.toBe(startKey);
   });
 });

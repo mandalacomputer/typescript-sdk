@@ -21,7 +21,10 @@ This is the summary you read to decide whether to upgrade.
   `cheapest_plan`.
 - **`idempotencyKey` on `launch()`** (sent on its create only), on both
   `ephemeral()` forms and on `rename()`. `ephemeral()` always sent a key but
-  never took yours, although this changelog said it did.
+  never took yours, although this changelog said it did. An error `launch()`
+  throws carries the create's key as `err.idempotencyKey`, even when its own
+  start failed, so resending `launch()` with it replays the same computer
+  rather than creating a second.
 - **`RateLimitError` carries `limit`, `remaining` and `resetSeconds`** from the
   refusal's `RateLimit-*` headers. New export: `RateLimitInfo`.
 - **`AgentResult.stepsTaken`**: every step of an `agentOnce()` run, from the
