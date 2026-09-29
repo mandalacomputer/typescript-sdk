@@ -1290,6 +1290,22 @@ describe('launch waits for the desktop session', () => {
     expect((guestProbe.body as { session?: string }).session).toBeUndefined();
   });
 
+  it('does not return on a desktop probe that timed out in the guest', async () => {
+    let probes = 0;
+    const rec = recorder((call) => {
+      if (isDesktopProbe(call)) {
+        probes++;
+        return probes === 1
+          ? json({ exit_code: -1, timed_out: true, stdout_b64: '', stderr_b64: '' })
+          : json(guest);
+      }
+      return json(call.path.endsWith('/exec') ? guest : desktopComputer());
+    });
+    const client = new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: rec.fetch });
+    await client.computers.launch({}, { pollMs: 1 });
+    expect(probes).toBe(2);
+  });
+
   it.each([
     ['an explicitly empty desktop', { desktop: '' }],
     ['a computer whose os was not reported', { os: undefined }],
@@ -1380,6 +1396,25 @@ describe('computer.waitForDesktop', () => {
       "launch-42's desktop session was not active within 50ms (it may still be logging in, or " +
         'nobody is logged in)',
     );
+  });
+
+  // A probe whose in-guest session lookup outlived its five seconds answers 200
+  // with `timed_out` set: no evidence of a session, so it is not an answer.
+  const UNFINISHED = { exit_code: -1, timed_out: true, stdout_b64: '', stderr_b64: '' };
+
+  it('polls through a probe that timed out and returns on one that finished', async () => {
+    const answers = [json(UNFINISHED), json(guest)];
+    const { rec, c } = await get(() => answers.shift()!);
+    await expect(c.waitForDesktop({ timeoutMs: 60_000, pollMs: 1 })).resolves.toBe(c);
+    expect(rec.calls.filter((call) => call.path.endsWith('/exec'))).toHaveLength(2);
+  });
+
+  it('times out naming the desktop session when every probe times out', async () => {
+    const { rec, c } = await get(() => json(UNFINISHED));
+    const error = await c.waitForDesktop({ timeoutMs: 50, pollMs: 1 }).catch((e) => e);
+    expect(error).toBeInstanceOf(TimeoutError);
+    expect(error.message).toContain('desktop session was not active within 50ms');
+    expect(rec.calls.filter((call) => call.path.endsWith('/exec')).length).toBeGreaterThan(1);
   });
 
   it('refuses nonsense numbers before asking anything', async () => {

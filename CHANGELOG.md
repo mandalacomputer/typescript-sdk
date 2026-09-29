@@ -21,7 +21,8 @@ This is the summary you read to decide whether to upgrade.
 ### Added
 
 - **`computer.waitForDesktop()`** polls a no-output `true` in the desktop
-  session until it is accepted. It returns at once for a Windows guest or a
+  session until it finishes with exit 0. A probe that times out inside the
+  guest is polled through, not taken as a session. It returns at once for a Windows guest or a
   computer whose `os` is not reported. An absent `computer.desktop` is an X11
   desktop and is waited on.
 

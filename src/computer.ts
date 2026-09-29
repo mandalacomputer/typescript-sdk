@@ -2692,14 +2692,17 @@ export class Computer {
       if (Date.now() < deadline) {
         try {
           probed = true;
-          await this.exec(DESKTOP_PROBE, {
+          const res = await this.exec(DESKTOP_PROBE, {
             desktop: true,
             timeoutS: 5,
             signal: deadlineSignal(deadline - Date.now(), signal),
           });
-          // Whatever `true` exited with, the session it ran in exists: the
-          // platform answers the missing session as a refusal, never a result.
-          return this;
+          // Only a `true` that FINISHED with 0 is evidence of a session. The
+          // platform answers a missing session as a refusal, but only once its
+          // in-guest lookup completes: a lookup still running at the probe's
+          // five seconds comes back as a result with `timedOut` set, which
+          // says nothing either way, so it is polled through like a refusal.
+          if (res.ok) return this;
         } catch (err) {
           if (signal?.aborted) throw err;
           // A computer that is not running will not grow a desktop by being
