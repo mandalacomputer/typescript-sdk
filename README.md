@@ -2112,11 +2112,14 @@ connection, a `5xx` or an unsettled `409` — is the exception to all of that.
 That key is the key of launch's create, which succeeded, even when the stage
 that failed was the start launch made afterwards. It is for resending
 `launch()`: the create is replayed (the same computer, never a second) and the
-rest runs again. One without a key — a start refused with a `4xx` such as `402`
-or `409`, or a wait that timed out — still means the computer `<id>` exists: use
-it (`client.computers.get(id)`), or resend `launch()` with the key you passed
-yourself, never with the absent `err.idempotencyKey`, which would make a second
-computer. It does not find the failed stage —
+rest runs again. A replayed create answer is the first attempt's, so launch
+reads the computer afresh before acting on it: a start that attempt reported
+failed is sent again rather than thrown again, and a computer stopped or
+suspended since is started. One without a key — a start refused with a `4xx`
+such as `402` or `409`, or a wait that timed out — still means the computer
+`<id>` exists: use it (`client.computers.get(id)`), or resend `launch()` with
+the key you passed yourself, never with the absent `err.idempotencyKey`, which
+would make a second computer. It does not find the failed stage —
 `client.operations.list({ idempotencyKey })` with it finds the create's
 operation, which says nothing about the start. When the error names an
 `operationId`, that is the failed stage's own operation: read it with

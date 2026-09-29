@@ -1102,11 +1102,11 @@ export class Transport {
     method: string,
     path: string,
     opts: RequestOptions = {},
-    responseStatus?: (status: number) => void,
+    responseStatus?: (status: number, headers: Headers) => void,
   ): Promise<T> {
     return this.#exchange(method, path, opts, async (sent) => {
       const value = (await this.#decode<T>(sent, method, path, opts.signal)) as T;
-      responseStatus?.(sent.resp.status);
+      responseStatus?.(sent.resp.status, sent.resp.headers);
       return value;
     });
   }

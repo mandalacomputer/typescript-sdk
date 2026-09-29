@@ -299,12 +299,28 @@ export class Computers {
     args: P.CreateArgs = {},
     opts: CallOptions & IdempotencyOptions = {},
   ): Promise<Computer> {
-    const data = await this.#t.json('POST', P.COMPUTERS, {
-      body: P.createBody(args),
-      headers: idempotencyHeaders(opts.idempotencyKey),
-      signal: opts.signal,
-    });
-    return oneComputer(this.#t, data, 'POST', P.COMPUTERS);
+    return (await this.#create(args, opts)).computer;
+  }
+
+  /** {@link create}, also saying whether the answer was a replay of an earlier call's. */
+  async #create(
+    args: P.CreateArgs,
+    opts: CallOptions & IdempotencyOptions,
+  ): Promise<{ computer: Computer; replayed: boolean }> {
+    let replayed = false;
+    const data = await this.#t.json(
+      'POST',
+      P.COMPUTERS,
+      {
+        body: P.createBody(args),
+        headers: idempotencyHeaders(opts.idempotencyKey),
+        signal: opts.signal,
+      },
+      (_, headers) => {
+        replayed = headers.get('idempotent-replayed')?.trim().toLowerCase() === 'true';
+      },
+    );
+    return { computer: oneComputer(this.#t, data, 'POST', P.COMPUTERS), replayed };
   }
 
   /**
@@ -332,7 +348,11 @@ export class Computers {
    * <id> failed:` — that carries an `idempotencyKey` carries the CREATE's key
    * (the one given, or the one made when none was) even when the stage that
    * failed was that later start, so passing it back to launch replays the
-   * create (the same computer) and runs the rest again. The start's own key is
+   * create (the same computer) and runs the rest again. A replayed create
+   * answer (`Idempotent-Replayed: true`) is the first attempt's, so launch
+   * reads the computer afresh before acting on it: a start that attempt
+   * reported failed is sent again rather than thrown again, and a computer
+   * stopped or suspended since is started. The start's own key is
    * never handed out as a launch key: sent on a create, it would make a second
    * computer. That create succeeded, so `operations.list({ idempotencyKey })`
    * with the key finds the create's operation, not the failed stage's; when
@@ -363,7 +383,7 @@ export class Computers {
     // Settled here rather than in create, so an error from a later stage can
     // be handed back with the key that replays THIS create.
     const launchKey = idempotencyKey ?? globalThis.crypto.randomUUID();
-    const computer = await this.create(args, { signal, idempotencyKey: launchKey });
+    const { computer, replayed } = await this.#create(args, { signal, idempotencyKey: launchKey });
     const id = computer.id;
     const deadline = performance.now() + timeoutMs;
     const remaining = (): number => {
@@ -373,23 +393,33 @@ export class Computers {
       return left;
     };
     try {
-      let startAdmitted = (computer.runningRamMb ?? 0) > 0;
+      // A replayed create is the FIRST call's answer, up to 24 hours old: its
+      // `start_error`, status and held RAM describe that attempt, not now. A
+      // computer it said was running may have been stopped or suspended since,
+      // and a start it said failed may be worth sending again. So nothing is
+      // read from it until the computer has been read afresh.
+      let stale = replayed;
+      let startAdmitted = !stale && (computer.runningRamMb ?? 0) > 0;
       let delayMs = 0;
       for (;;) {
         signal?.throwIfAborted();
-        // Both terminal states: waitUntilBuilt throws on either at once, with
-        // the sentence the other waits use.
-        if (computer.buildFailed || computer.halfRemoved) {
-          await computer.waitUntilBuilt({ timeoutMs: 0, pollMs, signal });
+        // A stale answer goes straight to the refresh below, which clears it.
+        if (!stale) {
+          // Both terminal states: waitUntilBuilt throws on either at once,
+          // with the sentence the other waits use.
+          if (computer.buildFailed || computer.halfRemoved) {
+            await computer.waitUntilBuilt({ timeoutMs: 0, pollMs, signal });
+          }
+          if (computer.startError) {
+            throw new MandalaError(`did not start: ${computer.startError}`);
+          }
+          const status = computer.raw.status;
+          if (status === 'running' || status === 'stopped' || status === 'suspended') break;
         }
-        if (computer.startError) {
-          throw new MandalaError(`did not start: ${computer.startError}`);
-        }
-        const status = computer.raw.status;
-        if (status === 'running' || status === 'stopped' || status === 'suspended') break;
         if (delayMs > 0) await sleep(Math.min(delayMs, remaining()), signal);
         try {
           await computer.refresh({ signal: deadlineSignal(remaining(), signal) });
+          stale = false;
           // A later stopped row must not erase an earlier admitted attempt.
           startAdmitted ||= (computer.runningRamMb ?? 0) > 0;
           delayMs = pollMs;

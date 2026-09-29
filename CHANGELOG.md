@@ -26,6 +26,10 @@ This is the summary you read to decide whether to upgrade.
   an `err.idempotencyKey` (a dropped connection, a 5xx or an unsettled 409)
   carries the create's key, even when its own start failed, so resending
   `launch()` with it replays the same computer rather than creating a second.
+  On a replayed create (`Idempotent-Replayed: true`) launch reads the computer
+  afresh before acting, so a start the first attempt reported failed is sent
+  again rather than thrown again, and a computer stopped or suspended since is
+  started.
   One without a key (a start refused with a 4xx such as 402 or 409, or a wait
   that timed out) means the computer `<id>` exists: use it (`computers.get(id)`)
   or resend `launch()` with the key you passed yourself, never with the absent

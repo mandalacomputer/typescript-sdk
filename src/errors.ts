@@ -83,7 +83,9 @@ export class MandalaError extends Error {
    * the computer exists: use it, or resend with the key you passed yourself,
    * never with the absent key, which would make a second. It is for resending
    * `launch()`, which replays the create (the same computer) and runs the rest
-   * again, not for finding the failed stage: `operations.list({
+   * again — reading the computer afresh first, so a start the first attempt
+   * reported failed is sent again and a computer stopped or suspended since is
+   * started — not for finding the failed stage: `operations.list({
    * idempotencyKey })` with it finds the create's operation, which says
    * nothing about how the start ended. When such an error names an
    * `operationId`, that is the failed stage's own operation, so read it with

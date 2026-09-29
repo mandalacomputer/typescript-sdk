@@ -472,6 +472,104 @@ describe('the key an error from launch() carries', () => {
   });
 });
 
+describe('launch() resent under its key, when the create is replayed', () => {
+  // The platform stores a create's whole 2xx answer and hands it back to a
+  // resend under the same key (Idempotent-Replayed: true), start_error,
+  // status and held RAM included. That answer describes the first attempt,
+  // up to 24 hours ago, so launch must read the computer afresh before acting
+  // on it, or the documented recovery (resend launch with the key) could
+  // never converge.
+  const replayed = (body: unknown) =>
+    json(body, {
+      status: 201,
+      headers: { 'content-type': 'application/json', 'Idempotent-Replayed': 'true' },
+    });
+  // GET answers `before` until a start is sent, then a running computer.
+  const flow = (create: Response, before: Record<string, unknown>) => {
+    let started = false;
+    return (call: Parameters<Responder>[0]) => {
+      if (call.method === 'POST' && call.path === '/computers') return create.clone();
+      if (call.method === 'POST' && call.path === '/computers/vm-1/start') {
+        started = true;
+        return json({ ...COMPUTER, status: 'running', running_ram_mb: 4096 });
+      }
+      if (call.method === 'GET' && call.path === '/computers/vm-1') {
+        return json(started ? { ...COMPUTER, status: 'running', running_ram_mb: 4096 } : before);
+      }
+      return anyRoute(call);
+    };
+  };
+  const starts = (rec: ReturnType<typeof recorder>) =>
+    rec.calls.filter((x) => x.method === 'POST' && x.path === '/computers/vm-1/start').length;
+
+  it('starts a computer suspended since the recorded answer said running', async () => {
+    const { rec, client: c } = client(
+      flow(replayed({ ...COMPUTER, status: 'running', running_ram_mb: 4096 }), {
+        ...COMPUTER,
+        status: 'suspended',
+        running_ram_mb: 0,
+      }),
+    );
+    const computer = await c.computers.launch(
+      { template: 'base' },
+      { timeoutMs: 60_000, pollMs: 10, idempotencyKey: 'K' },
+    );
+    expect(computer.status).toBe('running');
+    expect(starts(rec)).toBe(1);
+  });
+
+  it('starts again rather than rethrowing the recorded start_error', async () => {
+    const { rec, client: c } = client(
+      flow(
+        replayed({
+          computer: { ...COMPUTER, status: 'stopped', running_ram_mb: 0 },
+          start_error: 'no room',
+        }),
+        { ...COMPUTER, status: 'stopped', running_ram_mb: 0 },
+      ),
+    );
+    const computer = await c.computers.launch(
+      { template: 'base' },
+      { timeoutMs: 60_000, pollMs: 10, idempotencyKey: 'K' },
+    );
+    expect(computer.status).toBe('running');
+    expect(starts(rec)).toBe(1);
+  });
+
+  it('still throws a fresh create’s start_error, and sends no start', async () => {
+    const { rec, client: c } = client(
+      flow(
+        json(
+          {
+            computer: { ...COMPUTER, status: 'stopped', running_ram_mb: 0 },
+            start_error: 'no room',
+          },
+          { status: 201 },
+        ),
+        { ...COMPUTER, status: 'stopped', running_ram_mb: 0 },
+      ),
+    );
+    const err = await c.computers
+      .launch({ template: 'base' }, { timeoutMs: 60_000, pollMs: 10, idempotencyKey: 'K' })
+      .catch((e) => e);
+    expect(err).toBeInstanceOf(MandalaError);
+    expect((err as Error).message).toBe('launch of vm-1 failed: did not start: no room');
+    expect(starts(rec)).toBe(0);
+  });
+
+  it('trusts a fresh create’s running answer without a start', async () => {
+    const { rec, client: c } = client(
+      flow(json({ ...COMPUTER, status: 'running', running_ram_mb: 4096 }, { status: 201 }), {
+        ...COMPUTER,
+        status: 'running',
+        running_ram_mb: 4096,
+      }),
+    );
+    await c.computers.launch({ template: 'base' }, { timeoutMs: 60_000, pollMs: 10 });
+    expect(starts(rec)).toBe(0);
+  });
+});
+
 describe('the reason word on an agent route’s 403', () => {
   // The docs tell a caller who must tell a revocation from the model key's own
   // permission_error which surface keeps the word: agent() withholds it from a
