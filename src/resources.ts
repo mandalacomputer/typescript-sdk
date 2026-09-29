@@ -333,8 +333,8 @@ export class Computers {
    * starts it again.
    *
    * `timeoutMs` defaults to 180,000 and is one readiness budget beginning after
-   * create returns. Disk, running, guest, secrets, browser proxy and egress
-   * proxy waits share the remaining time; elapsed start work also consumes it. Create and start keep their usual
+   * create returns. Disk, running, guest, secrets, browser proxy, egress
+   * proxy and desktop waits share the remaining time; elapsed start work also consumes it. Create and start keep their usual
    * transport deadlines, so this is not a total wall-clock limit on launch.
    * `pollMs` defaults to 3,000 for every stage. `signal` cancels all stages.
    *
@@ -368,12 +368,14 @@ export class Computers {
    * ({@link Computer.waitForBrowserProxy}), so a browser opened on the returned
    * computer uses it. One whose egress proxy names credentials is waited on
    * until its host holds them ({@link Computer.waitForEgressProxy}): until then
-   * every connection the computer opens is closed.
+   * every connection the computer opens is closed. A Linux computer is waited
+   * on until its desktop session exists ({@link Computer.waitForDesktop}), so
+   * `exec(..., { desktop: true })` on the returned computer is not refused as
+   * "no active desktop session".
    *
    * The returned computer is persistent. Failure never deletes it. SDK errors
    * after creation retain their type and include its id; cancellation retains
    * the caller's original reason. Use {@link ephemeral} for scoped cleanup.
-   * Guest readiness does not guarantee a visible desktop has finished logging in.
    */
   async launch(
     args: P.CreateArgs = {},
@@ -485,6 +487,12 @@ export class Computers {
       if (args.egressProxy?.credentialsSecretId || computer.egressProxy?.credentialsSecretId) {
         await computer.waitForEgressProxy({ timeoutMs: remaining(), pollMs, signal });
       }
+      // The guest agent answers, and the secrets land, seconds before the
+      // desktop user is logged in, and a desktop command run in between is
+      // refused with a 409 that cannot say "still booting". Last, so every
+      // wait above has had that time too. Returns at once for a computer that
+      // is not reported as Linux.
+      await computer.waitForDesktop({ timeoutMs: remaining(), pollMs, signal });
       signal?.throwIfAborted();
       return computer;
     } catch (err) {

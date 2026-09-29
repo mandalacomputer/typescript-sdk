@@ -189,6 +189,13 @@ export const DEFAULT_RESOLUTION = `${SCREEN_WIDTH}x${SCREEN_HEIGHT}x24`;
 export const GUEST_PROBE = 'exit 0';
 
 /**
+ * What {@link Computer.waitForDesktop} runs in the desktop session to decide it
+ * exists. Linux only — that wait never asks a Windows guest — so the shell
+ * builtin needs no cmd.exe spelling.
+ */
+const DESKTOP_PROBE = 'true';
+
+/**
  * Trim and refuse a missing Anthropic key before it becomes an empty header.
  *
  * A {@link ValidationError} rather than a bare {@link MandalaError}: nothing has
@@ -2641,6 +2648,81 @@ export class Computer {
                 // make its first request.
                 `${this.id}'s ${timeoutMs}ms deadline had elapsed before its guest could be ` +
                 `probed, so nothing was asked of it. Call waitForGuest with a longer timeout.`,
+        );
+      }
+      await sleepUntilNextPoll(delayMs, deadline, signal);
+    }
+  }
+
+  /**
+   * Wait until this computer's desktop session exists, by running a trivial
+   * command in it.
+   *
+   * {@link waitForGuest} establishes that the guest agent answers, which is
+   * earlier than the desktop user being logged in: for a few seconds after it,
+   * `exec(..., { desktop: true })` is refused with a {@link ConflictError} that
+   * says no desktop session is active. That refusal carries no
+   * {@link APIError.reason} on purpose — the same sentence also describes a
+   * guest where nobody will ever log in — so only a caller that knows the
+   * computer has just booted can wait it out. This is that wait.
+   * {@link Computers.launch} calls it for you.
+   *
+   * The probe is `true`, run in the desktop session with no output. Refusals
+   * that describe the moment are polled through as the other waits here poll
+   * them; one that says the computer is not running (`reason: "unavailable"`)
+   * and anything about the request itself are thrown at once.
+   *
+   * Linux only. Returns at once, asking nothing, for a Windows guest (whose
+   * desktop session this API does not reach), for a computer whose {@link os}
+   * was not reported, and for one whose {@link desktop} is an explicit `''`.
+   * An ABSENT {@link desktop} is waited on: the platform leaves the field out
+   * for an X11 desktop, which is what most Linux templates run, so reading the
+   * absence as "no desktop" would skip the wait exactly where it is needed.
+   *
+   * Like {@link waitForGuest}, the probe resumes a suspended computer.
+   */
+  async waitForDesktop(opts: WaitOptions = {}): Promise<this> {
+    const { timeoutMs = 180_000, pollMs = 3_000, signal } = opts;
+    checkWait(timeoutMs, pollMs);
+    if (this.os !== 'linux' || this.desktop === '') return this;
+    const deadline = Date.now() + timeoutMs;
+    let probed = false;
+    for (;;) {
+      let delayMs = pollMs;
+      if (Date.now() < deadline) {
+        try {
+          probed = true;
+          await this.exec(DESKTOP_PROBE, {
+            desktop: true,
+            timeoutS: 5,
+            signal: deadlineSignal(deadline - Date.now(), signal),
+          });
+          // Whatever `true` exited with, the session it ran in exists: the
+          // platform answers the missing session as a refusal, never a result.
+          return this;
+        } catch (err) {
+          if (signal?.aborted) throw err;
+          // A computer that is not running will not grow a desktop by being
+          // asked again; start() is the fix, and three minutes of polling
+          // would hide it.
+          if (err instanceof APIError && err.status === 409 && err.reason === 'unavailable') {
+            throw err;
+          }
+          // The no-desktop 409 (no reason) is what this wait is for; a 5xx,
+          // a 429 or a `contention` 409 is the moment too. A 4xx about the
+          // request is not, and must not become a timeout.
+          if (!isDeadlineAbort(err) && !isTransientForPoll(err)) throw err;
+          delayMs = retryDelay(pollMs, err);
+        }
+      }
+      if (Date.now() >= deadline) {
+        throw new TimeoutError(
+          probed
+            ? `${this.id}'s desktop session was not active within ${timeoutMs}ms (it may still ` +
+                'be logging in, or nobody is logged in)'
+            : `${this.id}'s ${timeoutMs}ms deadline had elapsed before its desktop session ` +
+                'could be probed, so nothing was asked of it. Call waitForDesktop with a longer ' +
+                'timeout.',
         );
       }
       await sleepUntilNextPoll(delayMs, deadline, signal);

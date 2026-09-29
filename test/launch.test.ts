@@ -1248,3 +1248,143 @@ describe('launch with an egress proxy', () => {
     expect(waited).not.toHaveBeenCalled();
   });
 });
+
+describe('launch waits for the desktop session', () => {
+  const NO_DESKTOP = {
+    error:
+      'no active desktop session in the guest (it may still be booting, or nobody is logged in)',
+  };
+  const isDesktopProbe = (call: { path: string; body: unknown }) =>
+    call.path.endsWith('/exec') && (call.body as { session?: string }).session === 'desktop';
+  const desktopComputer = (extra: Record<string, unknown> = {}) => ({
+    ...computer(),
+    os: 'linux',
+    desktop: 'x11',
+    ...extra,
+  });
+
+  // The platform leaves `desktop` out for X11, which is what most Linux
+  // templates run: the absence is the case this wait matters most for.
+  it.each([
+    ['an X11 desktop (field absent)', { desktop: undefined }],
+    ['a Wayland desktop', { desktop: 'wayland' }],
+  ])('returns only after a desktop probe on %s stops being refused', async (_label, extra) => {
+    let probes = 0;
+    const rec = recorder((call) => {
+      if (isDesktopProbe(call)) {
+        probes++;
+        return probes <= 2 ? json(NO_DESKTOP, { status: 409 }) : json(guest);
+      }
+      return json(call.path.endsWith('/exec') ? guest : desktopComputer(extra));
+    });
+    const client = new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: rec.fetch });
+    const c = await client.computers.launch({}, { pollMs: 1 });
+    expect(c.id).toBe('launch-42');
+    expect(probes).toBe(3);
+    // The last thing launch asked was the desktop probe that answered.
+    expect(isDesktopProbe(rec.last())).toBe(true);
+    expect(rec.last().body).toEqual({ command: 'true', session: 'desktop', timeout_s: 5 });
+    // And the guest probe came first, in the agent's own session.
+    const guestProbe = rec.calls.find((call) => call.path.endsWith('/exec'))!;
+    expect(guestProbe.body).toMatchObject({ command: 'exit 0' });
+    expect((guestProbe.body as { session?: string }).session).toBeUndefined();
+  });
+
+  it.each([
+    ['an explicitly empty desktop', { desktop: '' }],
+    ['a computer whose os was not reported', { os: undefined }],
+    ['a Windows guest', { os: 'windows', desktop: 'x11' }],
+  ])('asks nothing of %s', async (_label, extra) => {
+    const waited = vi.spyOn(Computer.prototype, 'waitForDesktop');
+    const rec = recorder((call) =>
+      json(call.path.endsWith('/exec') ? guest : desktopComputer(extra)),
+    );
+    const client = new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: rec.fetch });
+    await client.computers.launch({}, { pollMs: 1 });
+    expect(waited).toHaveBeenCalledOnce();
+    expect(rec.calls.filter(isDesktopProbe)).toHaveLength(0);
+    expect(rec.routes()).toEqual([
+      ['POST', 'computers'],
+      ['GET', 'computers/launch-42'],
+      ['POST', 'computers/launch-42/exec'],
+    ]);
+  });
+
+  it.each([
+    [403, { error: 'forbidden' }],
+    [409, { error: 'computer is not running', reason: 'unavailable' }],
+  ])('throws a %i from the probe at once', async (status, body) => {
+    const rec = recorder((call) => {
+      if (isDesktopProbe(call)) return json(body, { status });
+      return json(call.path.endsWith('/exec') ? guest : desktopComputer());
+    });
+    const client = new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: rec.fetch });
+    const error = await client.computers.launch({}, { pollMs: 1 }).catch((e) => e);
+    expect(error).not.toBeInstanceOf(TimeoutError);
+    expect(error.status).toBe(status);
+    expect(error.message).toContain('launch of launch-42 failed');
+    expect(rec.calls.filter(isDesktopProbe)).toHaveLength(1);
+  });
+
+  it('spends only what is left of the launch budget on refusals that never stop', async () => {
+    let now = 0;
+    vi.spyOn(performance, 'now').mockImplementation(() => now);
+    const waited = vi.spyOn(Computer.prototype, 'waitForDesktop');
+    const rec = recorder((call) => {
+      if (isDesktopProbe(call)) return json(NO_DESKTOP, { status: 409 });
+      // Each read before the desktop wait spends 30 of the 250ms budget.
+      if (!call.path.endsWith('/exec')) now += 30;
+      return json(call.path.endsWith('/exec') ? guest : desktopComputer());
+    });
+    const client = new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: rec.fetch });
+    const error = await client.computers.launch({}, { timeoutMs: 250, pollMs: 1 }).catch((e) => e);
+    expect(error).toBeInstanceOf(TimeoutError);
+    expect(error.message).toContain('launch of launch-42 failed');
+    expect(error.message).toContain('desktop session was not active');
+    expect(waited).toHaveBeenCalledOnce();
+    expect(waited.mock.calls[0]![0]!.timeoutMs).toBeLessThan(250);
+    expect(rec.calls.filter(isDesktopProbe).length).toBeGreaterThan(1);
+  });
+});
+
+describe('computer.waitForDesktop', () => {
+  const get = async (respond: Parameters<typeof recorder>[0], extra = {}) => {
+    const rec = recorder((call) =>
+      call.method === 'GET'
+        ? json({ ...computer(), os: 'linux', desktop: 'wayland', ...extra })
+        : respond(call),
+    );
+    const client = new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: rec.fetch });
+    return { rec, c: await client.computers.get('launch-42') };
+  };
+
+  it('polls through a moment that clears and returns on the first answer', async () => {
+    const answers = [
+      json({ error: 'bad gateway' }, { status: 502 }),
+      json({ error: 'busy', reason: 'contention' }, { status: 409 }),
+      json({ error: 'no active desktop session in the guest' }, { status: 409 }),
+      json(guest),
+    ];
+    const { rec, c } = await get(() => answers.shift()!);
+    await expect(c.waitForDesktop({ timeoutMs: 60_000, pollMs: 1 })).resolves.toBe(c);
+    expect(rec.calls.filter((call) => call.path.endsWith('/exec'))).toHaveLength(4);
+  });
+
+  it('names the desktop session when it times out', async () => {
+    const { c } = await get(() =>
+      json({ error: 'no active desktop session in the guest' }, { status: 409 }),
+    );
+    const error = await c.waitForDesktop({ timeoutMs: 50, pollMs: 1 }).catch((e) => e);
+    expect(error).toBeInstanceOf(TimeoutError);
+    expect(error.message).toBe(
+      "launch-42's desktop session was not active within 50ms (it may still be logging in, or " +
+        'nobody is logged in)',
+    );
+  });
+
+  it('refuses nonsense numbers before asking anything', async () => {
+    const { rec, c } = await get(() => json(guest));
+    await expect(c.waitForDesktop({ pollMs: 0 })).rejects.toBeInstanceOf(ValidationError);
+    expect(rec.calls.filter((call) => call.method === 'POST')).toHaveLength(0);
+  });
+});

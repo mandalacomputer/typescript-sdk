@@ -278,12 +278,13 @@ async function exerciseEverything(client: Client): Promise<void> {
   const scratch = await client.computers.ephemeral({ template: 'base' });
   await scratch[Symbol.asyncDispose]();
   await c.refresh();
-  // The five readiness waits, which poll routes the calls around them already
-  // reach: `GET computers/:id` for all but the guest, and a
-  // `POST computers/:id/exec` probe for the guest.
+  // The readiness waits, which poll routes the calls around them already
+  // reach: `GET computers/:id` for all but the guest and the desktop, and a
+  // `POST computers/:id/exec` probe for those two.
   await c.waitUntilBuilt();
   await c.waitUntilRunning();
   await c.waitForGuest();
+  await c.waitForDesktop();
   await c.waitForSecrets();
   await c.waitForBrowserProxy();
   await c.waitForEgressProxy();

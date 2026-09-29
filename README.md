@@ -114,8 +114,9 @@ try {
 ```
 
 `launch()` creates once, waits for the disk, starts the computer if needed, and
-returns when its guest agent answers. Guest readiness does not guarantee that
-the visible desktop has finished logging in. It accepts every `create()` option;
+returns when its guest agent answers and, on Linux, when its desktop session
+exists (`waitForDesktop()`), so a first `exec(..., { desktop: true })` is not
+refused as having no desktop session. It accepts every `create()` option;
 `start: false` is sent unchanged to create, then launch starts the computer after
 its disk is ready. An already admitted start is waited on, and a failed start is
 reported without being retried in that call (a launch resent under the same key
@@ -129,7 +130,7 @@ until then every connection the computer opens is closed.
 
 Pass `{ timeoutMs: 600_000, signal }` as the second argument for a larger build or
 cancellation. The default readiness budget is 180,000 milliseconds, beginning
-after create returns. Disk, running, guest, secrets and proxy waits share the remaining budget,
+after create returns. Disk, running, guest, secrets, proxy and desktop waits share the remaining budget,
 including elapsed start work. Create and start retain their usual transport
 deadlines, so this is not a total wall-clock limit on launch. `pollMs` defaults
 to 3,000 for all stages.
