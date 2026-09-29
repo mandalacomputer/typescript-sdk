@@ -87,6 +87,14 @@ This is the summary you read to decide whether to upgrade.
   oversized upload. The platform's own 404 and 413 on these routes carry no
   prefix and keep their classes. `agentStream()` still yields the failure as
   an `error` event.
+- **`isTransient()` answers false for a 429 the model API answered an agent
+  run with after the run had already taken steps** (`agent()` and
+  `agentOnce()`). The wait is the model provider's, but the steps are on the
+  desktop, and sending the same prompt again repeats them; read the error's
+  `body` before running again. Steps count as taken when the error body lists
+  them, or, on `agent()`, when the stream delivered a `step` event before the
+  failure. The same relayed 429 before any step, and the platform's own 429 on
+  the agent routes, are still transient.
 - **A 429 the model API answered on `agentOnce()` has `limit`, `remaining`
   and `resetSeconds` undefined**, as one reported mid-stream on `agent()`
   already did. They came from the platform's `RateLimit-*` headers, the

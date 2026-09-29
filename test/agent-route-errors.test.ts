@@ -200,3 +200,76 @@ describe('the same statuses reported mid-stream on agent()', () => {
     expect((err as APIError).status).toBe(504);
   });
 });
+
+describe('a relayed model 429 after the run took steps is not transient (OPL-5446)', () => {
+  const STEP = { n: 1, tool: 'computer', detail: 'clicked Settings' };
+  const RELAYED = 'model API: 429 rate_limit_error';
+
+  /** An agent() stream that delivers these frames, in order. */
+  const agentFramesError = async (frames: Array<[string, unknown]>) => {
+    const body = frames.map(([ev, data]) => `event: ${ev}\ndata: ${JSON.stringify(data)}\n\n`);
+    const c = client((call) =>
+      call.path.endsWith('/agent')
+        ? new Response(body.join(''), { headers: { 'content-type': 'text/event-stream' } })
+        : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    return computer.agent({ prompt: 'go', modelKey: 'sk' }).catch((e: unknown) => e);
+  };
+
+  it('agentOnce(): the body lists steps already taken', async () => {
+    const body = { error: RELAYED, usage: RUN.usage, steps_taken: [STEP] };
+    const err = await agentOnceError(() => refusal(429, body, BUDGET));
+    expect(err).toBeInstanceOf(RateLimitError);
+    expect(isTransient(err)).toBe(false);
+  });
+
+  it.each([
+    ['an empty list', { error: RELAYED, ...RUN }],
+    ['no steps field', { error: RELAYED }],
+    ['a count, not a list', { error: RELAYED, steps: 0 }],
+  ])('agentOnce(): stays transient before any step (%s)', async (_, body) => {
+    const err = await agentOnceError(() => refusal(429, body, BUDGET));
+    expect(err).toBeInstanceOf(RateLimitError);
+    expect(isTransient(err)).toBe(true);
+  });
+
+  it.each([
+    ['bare', { error: 'rate limited' }],
+    ['with steps', { error: 'rate limited', steps_taken: [STEP] }],
+  ])('agentOnce(): the platform own unprefixed 429 is unchanged (%s)', async (_, body) => {
+    const err = await agentOnceError(() => refusal(429, body, BUDGET));
+    expect(err).toBeInstanceOf(RateLimitError);
+    expect(isTransient(err)).toBe(true);
+  });
+
+  it('agent(): the failure frame lists steps already taken', async () => {
+    const err = await agentFramesError([['error', { error: RELAYED, status: 429, steps: [STEP] }]]);
+    expect(err).toBeInstanceOf(RateLimitError);
+    expect(isTransient(err)).toBe(false);
+  });
+
+  it('agent(): the stream delivered a step before the failure', async () => {
+    const err = await agentFramesError([
+      ['step', STEP],
+      ['error', { error: RELAYED, status: 429 }],
+    ]);
+    expect(err).toBeInstanceOf(RateLimitError);
+    expect(isTransient(err)).toBe(false);
+  });
+
+  it('agent(): stays transient before any step', async () => {
+    const err = await agentFramesError([['error', { error: RELAYED, status: 429 }]]);
+    expect(err).toBeInstanceOf(RateLimitError);
+    expect(isTransient(err)).toBe(true);
+  });
+
+  it('agent(): the platform own unprefixed 429 after a step is unchanged', async () => {
+    const err = await agentFramesError([
+      ['step', STEP],
+      ['error', { error: 'slow down', status: 429 }],
+    ]);
+    expect(err).toBeInstanceOf(RateLimitError);
+    expect(isTransient(err)).toBe(true);
+  });
+});

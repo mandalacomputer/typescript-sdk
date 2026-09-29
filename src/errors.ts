@@ -424,6 +424,30 @@ function relayedFromModel(err: APIError): boolean {
 }
 
 /**
+ * Whether a failed run's body lists steps it had already completed: a stream's
+ * error frame calls them `steps`, a non-streaming refusal `steps_taken`, and
+ * only a non-empty list counts — a count under `steps` is not a record of
+ * actions. Identical to `_reports_steps` in mandala-computer-python.
+ */
+function reportsSteps(body: unknown): boolean {
+  const record = errorRecord(body);
+  return ['steps', 'steps_taken'].some((name) => {
+    const value = record?.[name];
+    return Array.isArray(value) && value.length > 0;
+  });
+}
+
+/**
+ * The relayed model 429s {@link agentRouteError} rebuilt after the run had
+ * already taken steps on the desktop. {@link isTransient} reads it and answers
+ * false: sending the prompt again would repeat those steps. A mark rather than
+ * a second copy of the rule, so the route that knows the run and the predicate
+ * that answers for it cannot come to disagree; the counterpart of
+ * `_after_agent_steps` in mandala-computer-python (OPL-5446).
+ */
+const afterAgentSteps = new WeakSet<APIError>();
+
+/**
  * The class an agent route's status deserves, where it is not the table's.
  * The same mapping as `_agent_route_error` in mandala-computer-python.
  *
@@ -439,7 +463,12 @@ function relayedFromModel(err: APIError): boolean {
  *   `RateLimit-*` headers and describe the caller's Mandala budget, which is
  *   not what refused the call. `retryAfterMs` is kept: the platform forwards
  *   the model API's own wait, when it named one, as `Retry-After`. The
- *   platform's own 429 keeps its budget fields.
+ *   platform's own 429 keeps its budget fields. When the run had already taken
+ *   steps — listed in the body, or `stepsSeen` step events the stream delivered
+ *   before the failure — the rebuilt error is also marked so that
+ *   {@link isTransient} answers false for it: the steps are on the desktop and
+ *   sending the same prompt again would repeat them. Before any step it stays
+ *   transient. This is the one place the mark is set (OPL-5446).
  * - A 504 {@link GatewayTimeoutError} whose JSON body carries `steps_taken` or
  *   `usage` becomes a plain {@link APIError}. That is the platform relaying the
  *   model API's `timeout_error` on a failed `agentOnce()` run, not a hop that
@@ -452,7 +481,7 @@ function relayedFromModel(err: APIError): boolean {
  * body (and so its `reason`, `code` and `operationId`), `retryAfterMs`,
  * `requestId`, `allow`, `wwwAuthenticate`, `method` and `idempotencyKey`.
  */
-export function agentRouteError(err: APIError): APIError {
+export function agentRouteError(err: APIError, stepsSeen = 0): APIError {
   if (err instanceof ModelProviderError) return err;
   const metadata: ErrorMetadata = {
     requestId: err.requestId,
@@ -475,6 +504,7 @@ export function agentRouteError(err: APIError): APIError {
     // No `rateLimit` in the metadata, so limit, remaining and resetSeconds are
     // left undefined.
     rebuilt = new RateLimitError(err.message, err.status, err.body, err.retryAfterMs, metadata);
+    if (stepsSeen > 0 || reportsSteps(err.body)) afterAgentSteps.add(rebuilt);
   } else if (
     err.status === 504 &&
     err instanceof GatewayTimeoutError &&
@@ -752,7 +782,9 @@ export class RangeNotSatisfiableError extends APIError {
  * the model provider's rate limit, relayed, and all three are `undefined`: the
  * headers describe the caller's Mandala budget, which did not refuse it.
  * `retryAfterMs` is the model API's own wait, forwarded, when it named one.
- * The platform's own 429 on those routes keeps all three.
+ * The platform's own 429 on those routes keeps all three. Such a relayed 429
+ * after the run had already taken steps is not {@link isTransient}: waiting is
+ * the remedy for the limit, but sending the same prompt again repeats the steps.
  */
 export class RateLimitError extends APIError {
   override name = 'RateLimitError';
@@ -1332,8 +1364,11 @@ function withoutRefusalReason(body: unknown): unknown {
  * and a 504 with the run's `usage` or steps a plain {@link APIError} rather than
  * a {@link GatewayTimeoutError}. So is a 404, 413 or 429 whose `error` starts
  * `model API: `: the 404 and 413 are {@link ModelProviderError}s (not
- * transient), and the 429 a {@link RateLimitError} with no budget fields (still
- * transient, as every 429 is).
+ * transient), and the 429 a {@link RateLimitError} with no budget fields. That
+ * 429 is transient only while the run has taken no step: once it has, the steps
+ * are on the desktop and replaying the prompt would repeat them, so this answers
+ * false (OPL-5446). Read the error's body before running again. The platform's
+ * own unprefixed 429 there is unchanged.
  * A 403 there without `reason: "revoked"` may likewise be the model key's own
  * `permission_error`. A 403 that arrives as the run's `error` event — a
  * refusal after the run started — reaches `agent()`'s thrown error without
@@ -1394,6 +1429,9 @@ export function isTransient(err: unknown): boolean {
   // also carries the per-request timeout, which used to be a plain
   // ConnectionError and so used to be told it was safe to replay a create.
   if (err instanceof ConnectionInterruptedError) return false;
+  // A relayed model 429 on an agent run that had already acted: the wait is the
+  // model provider's, but replaying the prompt repeats the steps it took.
+  if (err instanceof APIError && afterAgentSteps.has(err)) return false;
   // The platform's own word, ahead of the types below, because it is the more
   // specific answer and it is the one that tells the 409 that never clears from
   // the two that do (platform OPL-3898). Only an APIError carries a
