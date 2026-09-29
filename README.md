@@ -117,8 +117,10 @@ try {
 returns when its guest agent answers. Guest readiness does not guarantee that
 the visible desktop has finished logging in. It accepts every `create()` option;
 `start: false` is sent unchanged to create, then launch starts the computer after
-its disk is ready. An already admitted start is waited on, and failed starts are
-reported without retrying them. With `secrets` bound, it also waits until they
+its disk is ready. An already admitted start is waited on, and a failed start is
+reported without being retried in that call (a launch resent under the same key
+reads the computer afresh and may start it again; see [Operations](#operations)).
+With `secrets` bound, it also waits until they
 have reached the desktop, so the first command on the returned computer sees
 them; a delivery that failed throws, naming why. With a browser proxy it waits
 until the browsers have it (`waitForBrowserProxy()`), and with an egress proxy

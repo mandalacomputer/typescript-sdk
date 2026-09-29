@@ -328,7 +328,9 @@ export class Computers {
    *
    * Accepts every {@link create} argument unchanged. `start: false` defers the
    * start until the disk is built; launch still starts it before returning.
-   * An admitted start is waited on, and a failed start is never retried.
+   * An admitted start is waited on, and a failed start is not retried within
+   * one call; a launch resent under its key reads the computer afresh and
+   * starts it again.
    *
    * `timeoutMs` defaults to 180,000 and is one readiness budget beginning after
    * create returns. Disk, running, guest, secrets, browser proxy and egress
