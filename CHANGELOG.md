@@ -54,7 +54,14 @@ This is the summary you read to decide whether to upgrade.
   `isTransient` still answers `false`. The docs no longer say a plan
   downgrade stops a run: the mid-run recheck covers the credential, the role
   and the account's standing (401/403 with `reason: "revoked"`), and a 402,
-  504 or 529 on these routes is the model API's status.
+  504 or 529 on these routes is the model API's status. It is also raised
+  for a 404 or 413 the model API answered; see Fixed.
+- **A model API 504 on `agentOnce()` is a plain `APIError`, not a
+  `GatewayTimeoutError`.** The platform relays the model's `timeout_error`
+  with the run's `usage` and `steps_taken` in the body, so the connection was
+  not cut; `agent()` already reported the same 504 this way. A body-less 504,
+  one whose body carries neither field, and a 524 are still
+  `GatewayTimeoutError`.
 - **`computer.open()` picks the browser from what the image has installed**
   (`firefox-esr`, then `firefox`, then `chromium`) and **throws a
   `MandalaError` when the launch exits non-zero**, as it does on an image
@@ -72,6 +79,20 @@ This is the summary you read to decide whether to upgrade.
 
 ### Fixed
 
+- **A 404 or 413 the model API answered on `agent()` or `agentOnce()` is a
+  `ModelProviderError`**, not a `NotFoundError` or `TooLargeError`. The
+  platform relays the model API's own failures with the message prefixed
+  `model API: `; a 404 there is usually a model name the provider does not
+  know, and a 413 a request it found too large, not a missing computer or an
+  oversized upload. The platform's own 404 and 413 on these routes carry no
+  prefix and keep their classes. `agentStream()` still yields the failure as
+  an `error` event.
+- **A 429 the model API answered on `agentOnce()` has `limit`, `remaining`
+  and `resetSeconds` undefined**, as one reported mid-stream on `agent()`
+  already did. They came from the platform's `RateLimit-*` headers, the
+  caller's Mandala budget, which did not refuse the call. `retryAfterMs`
+  stays: it is the model API's own wait, forwarded. The platform's own 429 on
+  the agent routes keeps all three.
 - **`mandala secrets set` takes a path-shaped name whose last piece an
   acronym closes or splits again**, such as `myapp/DATABASE/RedisURL`, and
   likewise `MongoURI`, `NeonDBURL`, `ZoomJWT`, `SSHKeyEd25519`, `Ed25519Key`

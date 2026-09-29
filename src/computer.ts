@@ -19,7 +19,8 @@ import {
   verifyArtifact,
 } from './artifacts.js';
 import {
-  // `isTransient`, `ModelProviderError` and `PlanLimitError` are TYPE-ONLY,
+  // `GatewayTimeoutError`, `isTransient`, `ModelProviderError`,
+  // `PlanLimitError` and `RateLimitError` are TYPE-ONLY,
   // and kept rather than dropped: every reference to them in this file is a
   // `{@link}` in a doc comment, so as values they are dead, and
   // `verbatimModuleSyntax` would emit a runtime import for bindings nothing
@@ -28,19 +29,21 @@ import {
   // agent loop tests an error against it. The inline modifier rather than a
   // second import statement, matching the `./agent.js` line above.
   APIError,
+  agentRouteError,
   ComputerNotRunningError,
   ConflictError,
   ConnectionError,
   CreateOnlyConflictError,
   errorForEventStatus,
   FileExistsError,
+  type GatewayTimeoutError,
   type isTransient,
   MandalaError,
   type ModelProviderError,
-  modelProviderRefusal,
   NotFoundError,
   type PlanLimitError,
   RangeNotSatisfiableError,
+  type RateLimitError,
   TimeoutError,
   TooLargeError,
   ValidationError,
@@ -5364,8 +5367,17 @@ export class Computer {
    * **A 402, 504 OR 529 HERE IS THE MODEL API'S STATUS**, for the account behind
    * `modelKey` (billing, timeout, overloaded), relayed — never a Mandala plan
    * limit. A 402 is raised as {@link ModelProviderError}, not
-   * {@link PlanLimitError}; a 403 without `reason: "revoked"` may likewise be
-   * the model key's own `permission_error`.
+   * {@link PlanLimitError}, and a 504 as a plain {@link APIError}, not
+   * {@link GatewayTimeoutError}; a 403 without `reason: "revoked"` may likewise
+   * be the model key's own `permission_error`. So may a 404, 413 or 429 whose
+   * `error` starts `model API: `, the prefix the platform puts on what it
+   * relays: a 404 or 413 the model API answered is raised as
+   * {@link ModelProviderError} (usually a model name the provider does not know,
+   * or a request it found too large), not {@link NotFoundError} or
+   * {@link TooLargeError}, and a 429 it answered as a {@link RateLimitError}
+   * whose `limit`, `remaining` and `resetSeconds` are `undefined`, because the
+   * Mandala budget did not refuse it. The platform's own 404, 413 and 429 carry
+   * no prefix and keep their classes.
    *
    * **A 403 THAT ARRIVES AS THE RUN'S `error` EVENT LOSES ITS `reason` HERE.**
    * For a refusal after the run started, this method withholds `reason` from
@@ -5409,11 +5421,10 @@ export class Computer {
         const message = `the agent run failed: ${ev.error}`;
         // A 402 on this route is the model API's billing refusal for the
         // caller's model key, never the plan: nothing inside a run answers 402
-        // on the platform's behalf.
+        // on the platform's behalf. A relayed 404/413/429 is the model
+        // provider's too; see agentRouteError.
         throw ev.status
-          ? modelProviderRefusal(
-              errorForEventStatus(ev.status, message, ev.raw, { method: 'POST' }),
-            )
+          ? agentRouteError(errorForEventStatus(ev.status, message, ev.raw, { method: 'POST' }))
           : new MandalaError(message);
       }
     }
@@ -5452,7 +5463,8 @@ export class Computer {
    * or 403 and `reason: "revoked"` in its `raw`. A `status` of 402, 504 or 529
    * is the model API's own (billing, timeout, overloaded) for the account behind
    * `modelKey`, relayed — never a Mandala plan limit — and a 403 without
-   * `reason: "revoked"` may be the model key's `permission_error`. Its `usage`
+   * `reason: "revoked"` may be the model key's `permission_error`, as may a 404,
+   * 413 or 429 whose `error` starts `model API: `. Its `usage`
    * and `steps` say what had already been spent and done, which is the
    * difference between a run that did nothing and one that did four things and
    * was then refused. Do not retry any of those unchanged.
@@ -5524,8 +5536,18 @@ export class Computer {
    * when it was sent means the run was stopped between two of its steps, with
    * the steps before it billed and done. A 402 is the model API's billing
    * refusal for the account behind `modelKey`, raised as
-   * {@link ModelProviderError} rather than {@link PlanLimitError}; a 504 or 529
-   * the platform answered with a body is likewise the model API's.
+   * {@link ModelProviderError} rather than {@link PlanLimitError}; a 404 or 413
+   * whose `error` starts `model API: ` (the prefix the platform puts on what it
+   * relays) is the model API's too, and raised as {@link ModelProviderError}
+   * rather than {@link NotFoundError} or {@link TooLargeError}. A 429 with that
+   * prefix is a {@link RateLimitError} whose `limit`, `remaining` and
+   * `resetSeconds` are `undefined`, since the Mandala budget did not refuse it;
+   * its `retryAfterMs` is the model API's own wait, forwarded. The platform's
+   * own 404, 413 and 429 carry no prefix and keep their classes and fields. A
+   * 504 whose body carries the run's `usage` or `steps_taken` is the model API's
+   * `timeout_error`, raised as a plain {@link APIError} (as {@link agent} raises
+   * the same 504), not {@link GatewayTimeoutError}; a body-less 504 or 524 stays
+   * {@link GatewayTimeoutError}. A 529 is likewise the model API's.
    * {@link APIError.body} carries what the platform reported about the steps.
    * Do not retry any of those unchanged.
    */
@@ -5550,8 +5572,10 @@ export class Computer {
       })
       .catch((err: unknown) => {
         // The HTTP form of agent()'s mapping: this route's 402 is the model
-        // API's billing refusal for the caller's key, not a plan limit.
-        throw err instanceof APIError ? modelProviderRefusal(err) : err;
+        // API's billing refusal for the caller's key, not a plan limit; a
+        // relayed 404/413/429 is the model provider's, and a 504 with the run's
+        // usage or steps is the platform answering, not an edge cut.
+        throw err instanceof APIError ? agentRouteError(err) : err;
       });
     if (!P.isRecord(data) || data.stop == null) {
       throw new MandalaError(
