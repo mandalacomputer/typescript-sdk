@@ -533,7 +533,12 @@ function findBlock(text: string, label: string, from = 0): [number, number] | un
  * end of the line.
  */
 function hostLineArgs(line: string): string[] | undefined {
-  const text = line.replace(/[ \t\r\n\f]+$/, '');
+  // Walked back by hand: a `[ \t...]+$` regex retries every start in a long
+  // run of spaces that ends before a non-space, which is quadratic. Not
+  // trimEnd, which would also drop a no-break space.
+  let end = line.length;
+  while (end > 0 && ' \t\r\n\f'.includes(line[end - 1]!)) end--;
+  const text = line.slice(0, end);
   const keyword = /^[ \t]*host(?:[ \t]*=[ \t]*|[ \t]+|$)/i.exec(text);
   if (!keyword) return undefined;
   const rest = text.slice(keyword[0].length);

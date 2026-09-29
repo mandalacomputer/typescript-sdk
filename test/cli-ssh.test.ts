@@ -561,6 +561,14 @@ Host ${host}
     expect(writtenHosts(`${block}\n`)).toEqual([{ id: 'vm-7', hosts }]);
   });
 
+  it('reads a Host line with a long run of spaces before an alias in linear time', () => {
+    const line = `Host a${' '.repeat(100_000)}b${' \t'.repeat(50_000)}`;
+    const block = computerBlock('dev', 'vm-7').replace('Host dev', line);
+    const started = performance.now();
+    expect(writtenHosts(`${block}\n`)).toEqual([{ id: 'vm-7', hosts: ['a', 'b'] }]);
+    expect(performance.now() - started).toBeLessThan(1000);
+  });
+
   it('reads the aliases of every Host line in a block', () => {
     const block = computerBlock('dev', 'vm-7').replace('Host dev', 'Host dev\nHost other box');
     expect(writtenHosts(block)).toEqual([{ id: 'vm-7', hosts: ['dev', 'other', 'box'] }]);
