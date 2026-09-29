@@ -1660,6 +1660,42 @@ describe('ssh-config over a config holding a duplicate block', () => {
       `# before\n\n${newGw}\n\n${newVm1}\n# middle\n\n${vm2}\n\n${vm2Copy}\n# after\n`,
     );
   });
+
+  // OpenSSH ends a stanza at the next Host or Match line, not at a comment, so
+  // a directive after a copy's end marker belongs to the copy's last Host.
+  const copyFollowedBy = (tail: string) => {
+    const snippet = (host: string) => configSnippet(host, 'vm-1', gateway({}), KH, host);
+    return (
+      `${mergeConfig('Host work\n  User me\n', snippet('dev'))}\n` +
+      `Host *\n  ServerAliveInterval 30\n\n${snippet('stale')}${tail}`
+    );
+  };
+
+  it('keeps a copy whose stanza goes on past its end marker, with what follows it', () => {
+    const snippet = configSnippet('dev', 'vm-1', gateway({}), KH, 'dev');
+    const [, staleVm1] = blocksOf(configSnippet('stale', 'vm-1', gateway({}), KH, 'stale'));
+    const text = copyFollowedBy('ForwardAgent yes\n');
+    const merged = mergeConfig(text, snippet);
+    expect(merged).toBe(
+      `${mergeConfig('Host work\n  User me\n', snippet)}\n` +
+        `Host *\n  ServerAliveInterval 30\n\n${staleVm1}\nForwardAgent yes\n`,
+    );
+    expect(merged).not.toMatch(/ServerAliveInterval 30\n+ForwardAgent/);
+    expect(mergeConfig(merged, snippet)).toBe(merged);
+  });
+
+  it.each([
+    ['nothing', ''],
+    ['blank and comment lines', '\n  \t\n# a note\n   # another\n'],
+    ['blank lines and then a Host line', '\n# mine\nHost other\n  ForwardAgent yes\n'],
+    ['a Match line', 'Match host other\n  ForwardAgent yes\n'],
+  ])('still removes a copy followed by %s', (_, tail) => {
+    const snippet = configSnippet('dev', 'vm-1', gateway({}), KH, 'dev');
+    expect(mergeConfig(copyFollowedBy(tail), snippet)).toBe(
+      `${mergeConfig('Host work\n  User me\n', snippet)}\n` +
+        `Host *\n  ServerAliveInterval 30\n${tail}`,
+    );
+  });
 });
 
 describe('ssh-config over a config that is not UTF-8', () => {

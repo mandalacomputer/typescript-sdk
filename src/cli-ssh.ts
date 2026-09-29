@@ -661,7 +661,31 @@ export function writtenHosts(text: string): { id: string; hosts: string[] }[] {
 }
 
 /**
- * `text` without any block for `label` that starts at `from` or later. Each
+ * Whether the lines of `text` after the one `at` ends (an end marker's), up to
+ * the next `Host` or `Match` line or the end, are all blank or comments: that
+ * the stanza the marker closes ends there too. OpenSSH does not end a stanza
+ * at a comment, so an unmarked directive after the marker still belongs to the
+ * block's last `Host`.
+ */
+function stanzaEndsAt(text: string, at: number): boolean {
+  let from = at;
+  while (from < text.length) {
+    // `at` is the end marker's end: the line break there ends its line.
+    const start = text[from] === '\n' ? from + 1 : from;
+    const stop = text.indexOf('\n', start);
+    const line = text.slice(start, stop < 0 ? text.length : stop);
+    if (hostLineArgs(line) !== undefined || /^[ \t]*match(?:[ \t=]|$)/i.test(line)) return true;
+    if (!/^[ \t]*(?:#|[ \t\r\f]*$)/.test(line)) return false;
+    if (stop < 0) break;
+    from = stop;
+  }
+  return true;
+}
+
+/**
+ * `text` without any block for `label` that starts at `from` or later, save
+ * one whose last stanza goes on past its end marker (see
+ * {@link stanzaEndsAt}), which is left where it stands. Each removed block
  * goes with its end marker's line break and, when a blank line comes before
  * it, that blank line: the shape an append left.
  */
@@ -670,6 +694,10 @@ function withoutLaterCopies(text: string, label: string, from: number): string {
   let at = from;
   for (let found = findBlock(out, label, at); found; found = findBlock(out, label, at)) {
     let [start, end] = found;
+    if (!stanzaEndsAt(out, end)) {
+      at = end;
+      continue;
+    }
     if (out[end] === '\n') end += 1;
     if (start >= 2 && out[start - 1] === '\n' && out[start - 2] === '\n') start -= 1;
     out = out.slice(0, start) + out.slice(end);
@@ -685,7 +713,10 @@ function withoutLaterCopies(text: string, label: string, from: number): string {
  * is replaced where it stands, so writing twice changes nothing. A later copy
  * of a block `snippet` carries (one an earlier version appended to a CRLF
  * config, which it did not read as holding the first) is removed, with the
- * blank line before it; another label's copies are left as they are.
+ * blank line before it, unless an unmarked directive follows it before the
+ * next `Host` or `Match` line: removing that copy would move the directive
+ * under another stanza, so it is left as it is. Another label's copies are
+ * left as they are.
  */
 export function mergeConfig(current: string, snippet: string): string {
   let text = current;

@@ -91,7 +91,10 @@ This is the summary you read to decide whether to upgrade.
   a `~/.ssh/config` saved with CRLF line endings. That copy kept its old
   `Host` alias routing, and the next run said "already up to date". Run
   `mandala ssh-config <computer> --write` once for each computer you wrote
-  that way (or delete the later `# >>> mandala … >>>` block by hand).
+  that way (or delete the later `# >>> mandala … >>>` block by hand). A copy
+  followed by a line of your own before the next `Host` or `Match` line is
+  left in place, since that line belongs to the copy's `Host` and removing
+  the copy would apply it to other hosts.
 - **`mandala ssh-config --write` no longer replaces a byte that is not valid
   UTF-8 anywhere in `~/.ssh/config` with U+FFFD.** It refuses with
   `invalid_arguments`, naming the file, and leaves it byte for byte as it
