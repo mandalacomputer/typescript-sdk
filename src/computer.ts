@@ -5376,8 +5376,10 @@ export class Computer {
    * or a request it found too large), not {@link NotFoundError} or
    * {@link TooLargeError}, and a 429 it answered as a {@link RateLimitError}
    * whose `limit`, `remaining` and `resetSeconds` are `undefined`, because the
-   * Mandala budget did not refuse it. The platform's own 404, 413 and 429 carry
-   * no prefix and keep their classes.
+   * Mandala budget did not refuse it. Once the run has taken a step,
+   * {@link isTransient} answers false for that 429: running the prompt again
+   * would repeat the steps already on the desktop. The platform's own 404, 413
+   * and 429 carry no prefix and keep their classes.
    *
    * **A 403 THAT ARRIVES AS THE RUN'S `error` EVENT LOSES ITS `reason` HERE.**
    * For a refusal after the run started, this method withholds `reason` from
@@ -5400,7 +5402,11 @@ export class Computer {
     // later: it would name ITSELF, and this is the method the caller called.
     // agentOnce below does the same thing for the same reason.
     requireModelKey(args.modelKey, 'agent()');
+    // Steps the stream delivered before any failure: evidence the run acted,
+    // even when the failure frame itself lists none (see agentRouteError).
+    let steps = 0;
     for await (const ev of this.agentStream(args)) {
+      if (ev.type === 'step') steps += 1;
       if (ev.type === 'done') {
         // A done event is terminal even if a proxy or server leaves the SSE
         // response open for heartbeats. Returning also cancels the reader in
@@ -5424,7 +5430,10 @@ export class Computer {
         // on the platform's behalf. A relayed 404/413/429 is the model
         // provider's too; see agentRouteError.
         throw ev.status
-          ? agentRouteError(errorForEventStatus(ev.status, message, ev.raw, { method: 'POST' }))
+          ? agentRouteError(
+              errorForEventStatus(ev.status, message, ev.raw, { method: 'POST' }),
+              steps,
+            )
           : new MandalaError(message);
       }
     }
@@ -5542,7 +5551,9 @@ export class Computer {
    * rather than {@link NotFoundError} or {@link TooLargeError}. A 429 with that
    * prefix is a {@link RateLimitError} whose `limit`, `remaining` and
    * `resetSeconds` are `undefined`, since the Mandala budget did not refuse it;
-   * its `retryAfterMs` is the model API's own wait, forwarded. The platform's
+   * its `retryAfterMs` is the model API's own wait, forwarded, and when its body
+   * lists steps already taken {@link isTransient} answers false for it, since
+   * running the prompt again would repeat them. The platform's
    * own 404, 413 and 429 carry no prefix and keep their classes and fields. A
    * 504 whose body carries the run's `usage` or `steps_taken` is the model API's
    * `timeout_error`, raised as a plain {@link APIError} (as {@link agent} raises
