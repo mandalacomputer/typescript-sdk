@@ -75,9 +75,13 @@ export class MandalaError extends Error {
    * the outcome is unknown.
    *
    * An error from `computers.launch()` thrown AFTER launch's create returned —
-   * one whose message starts `launch of <id> failed:` — is the exception: this
-   * is the key of launch's CREATE, which succeeded, even when the stage that
-   * failed was the start launch made afterwards. It is for resending
+   * one whose message starts `launch of <id> failed:` — that carries this key
+   * (a dropped connection, a `5xx` or an unsettled `409`) is the exception:
+   * this is the key of launch's CREATE, which succeeded, even when the stage
+   * that failed was the start launch made afterwards. Such an error without
+   * one (a start refused with a `4xx`, or a wait that timed out) still means
+   * the computer exists: use it, or resend with the key you passed yourself,
+   * never with the absent key, which would make a second. It is for resending
    * `launch()`, which replays the create (the same computer) and runs the rest
    * again, not for finding the failed stage: `operations.list({
    * idempotencyKey })` with it finds the create's operation, which says
@@ -1232,12 +1236,13 @@ function withoutRefusalReason(body: unknown): unknown {
  * account behind `X-Model-Key` (billing, timeout, overloaded), relayed — not a
  * Mandala plan limit, which is why a 402 there is a {@link ModelProviderError}.
  * A 403 there without `reason: "revoked"` may likewise be the model key's own
- * `permission_error`. `agent()` cannot show you that word: it withholds
- * `reason` from the error it throws (see {@link withoutRefusalReason}), so
- * every 403 it raises reads as one without it. To tell a revocation from the
- * model key's `permission_error`, use `agentStream()` and read the `error`
- * event's `raw.reason`, or `agentOnce()`, whose HTTP error keeps
- * {@link APIError.reason}.
+ * `permission_error`. A 403 that arrives as the run's `error` event — a
+ * refusal after the run started — reaches `agent()`'s thrown error without
+ * that word (see {@link withoutRefusalReason}); `agentStream()`'s `error` event
+ * keeps it as `raw.reason`. A 403 answered before the stream opens is the HTTP
+ * response itself and keeps {@link APIError.reason} on both `agent()` and
+ * `agentStream()` (which throws it rather than yielding an `error` event), as
+ * `agentOnce()`'s HTTP error always does.
  *
  * None of these is transient, and this function says so. That is not a
  * change — it never called them transient — but the reason is now a real one

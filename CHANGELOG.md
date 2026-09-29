@@ -22,12 +22,16 @@ This is the summary you read to decide whether to upgrade.
 - **`idempotencyKey` on `launch()`** (sent on its create only), on both
   `ephemeral()` forms and on `rename()`. `ephemeral()` always sent a key but
   never took yours, although this changelog said it did. An error `launch()`
-  throws after its create returned (`launch of <id> failed: ...`) carries the
-  create's key as `err.idempotencyKey`, even when its own start failed, so
-  resending `launch()` with it replays the same computer rather than creating
-  a second. That key finds the create's operation, not the failed stage's; an
-  `err.operationId` the error names is the failed stage's own, read with
-  `operations.get()`. An error from the create itself follows the ordinary
+  throws after its create returned (`launch of <id> failed: ...`) that carries
+  an `err.idempotencyKey` (a dropped connection, a 5xx or an unsettled 409)
+  carries the create's key, even when its own start failed, so resending
+  `launch()` with it replays the same computer rather than creating a second.
+  One without a key (a start refused with a 4xx such as 402 or 409, or a wait
+  that timed out) means the computer `<id>` exists: use it (`computers.get(id)`)
+  or resend `launch()` with the key you passed yourself, never with the absent
+  `err.idempotencyKey`. That key finds the create's operation, not the failed
+  stage's; an `err.operationId` the error names is the failed stage's own, read
+  with `operations.get()`. An error from the create itself follows the ordinary
   idempotency rules.
 - **`RateLimitError` carries `limit`, `remaining` and `resetSeconds`** from the
   refusal's `RateLimit-*` headers. New export: `RateLimitInfo`.

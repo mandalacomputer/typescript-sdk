@@ -1547,11 +1547,14 @@ came. Your Mandala plan is not the cause, so `agent()` and `agentOnce()` raise a
 402 as `ModelProviderError` rather than `PlanLimitError`. A 403 without
 `reason: "revoked"` may likewise be the model key's own `permission_error`.
 
-`agent()` cannot tell those two 403s apart for you: it withholds `reason` from
-the error it throws (see below), so `err.reason` and `err.body.reason` are
-`undefined` on every 403 it raises, a revocation included. To tell a revocation
-from the model key's `permission_error`, use `agentStream()` and read the `error`
-event's `raw.reason`, or `agentOnce()`, whose HTTP error keeps `err.reason`.
+A 403 can come two ways, and they read differently. One that arrives as the
+run's `error` event — a refusal after the run started — reaches `agent()`'s
+thrown error without `reason`: it withholds that word (see below), so
+`err.reason` and `err.body.reason` are `undefined` there, a revocation included,
+and only `agentStream()`'s `error` event keeps it, as `raw.reason`. One answered
+before the stream opens is the HTTP response itself: it keeps `err.reason` on
+both `agent()` and `agentStream()`, and `agentStream()` throws it rather than
+yielding an `error` event. `agentOnce()`'s HTTP error always keeps `err.reason`.
 
 The refusal reports what was already spent and already done, and this SDK hands
 that over rather than flattening it into a sentence:
@@ -2103,12 +2106,17 @@ call ends, its own answer. Whichever it was, sending the same call again under
 the same key is safe after any `5xx`. Keys last 24 hours, and a key sent with a
 different request is refused with a `422`.
 
-An error `launch()` throws after its create returned — one whose message starts
-`launch of <id> failed:` — is the exception to all of that. Its
-`err.idempotencyKey` is the key of launch's create, which succeeded, even when
-the stage that failed was the start launch made afterwards. It is for resending
+An error `launch()` throws after its create returned (its message starts
+`launch of <id> failed:`) that carries an `err.idempotencyKey` — a dropped
+connection, a `5xx` or an unsettled `409` — is the exception to all of that.
+That key is the key of launch's create, which succeeded, even when the stage
+that failed was the start launch made afterwards. It is for resending
 `launch()`: the create is replayed (the same computer, never a second) and the
-rest runs again. It does not find the failed stage —
+rest runs again. One without a key — a start refused with a `4xx` such as `402`
+or `409`, or a wait that timed out — still means the computer `<id>` exists: use
+it (`client.computers.get(id)`), or resend `launch()` with the key you passed
+yourself, never with the absent `err.idempotencyKey`, which would make a second
+computer. It does not find the failed stage —
 `client.operations.list({ idempotencyKey })` with it finds the create's
 operation, which says nothing about the start. When the error names an
 `operationId`, that is the failed stage's own operation: read it with

@@ -421,6 +421,30 @@ describe('the key an error from launch() carries', () => {
     expect((err as MandalaError).idempotencyKey).not.toBe(startKey);
   });
 
+  // A start refused with a 4xx settles nothing about the create's key, so the
+  // error carries none: the docs send the caller to the computer it names, or
+  // to the key they passed themselves, never to an absent err.idempotencyKey.
+  it.each([
+    [402, { error: 'plan RAM full' }],
+    [409, { error: 'already starting' }],
+  ] as const)(
+    'is absent when the start is refused %s, and the prefix stays',
+    async (status, body) => {
+      const { client: c } = client((call) =>
+        call.method === 'POST' && call.path === '/computers/vm-1/start'
+          ? json(body, { status })
+          : respond(call),
+      );
+      const err = await c.computers
+        .launch({ template: 'base', start: false }, { timeoutMs: 60_000, pollMs: 10 })
+        .catch((e) => e);
+      expect(err).toBeInstanceOf(APIError);
+      expect((err as APIError).status).toBe(status);
+      expect((err as Error).message).toMatch(/^launch of vm-1 failed: /);
+      expect((err as MandalaError).idempotencyKey).toBeUndefined();
+    },
+  );
+
   // The create itself failing is NOT the exception the docs carve out: the
   // error is the create's own, with no `launch of` prefix, and its key and
   // operation id both belong to that create, under the ordinary rules.
@@ -450,8 +474,10 @@ describe('the key an error from launch() carries', () => {
 
 describe('the reason word on an agent route’s 403', () => {
   // The docs tell a caller who must tell a revocation from the model key's own
-  // permission_error which surface keeps the word: agent() withholds it,
-  // agentStream()'s raw and agentOnce()'s HTTP error keep it.
+  // permission_error which surface keeps the word: agent() withholds it from a
+  // refusal that arrives as the run's error event, agentStream()'s raw and
+  // agentOnce()'s HTTP error keep it, and a 403 answered before the stream
+  // opens keeps it on agent() and agentStream() alike.
   const FRAME = { error: 'credential revoked', status: 403, reason: 'revoked' };
 
   it('is withheld from the error agent() throws', async () => {
@@ -475,6 +501,27 @@ describe('the reason word on an agent route’s 403', () => {
       if (ev.type === 'error') raw = ev.raw;
     }
     expect(raw?.reason).toBe('revoked');
+  });
+
+  it('is kept on agent() and agentStream() when the 403 comes before the stream', async () => {
+    const { client: c } = client((call) =>
+      call.path.endsWith('/agent')
+        ? json({ error: 'credential revoked', reason: 'revoked' }, { status: 403 })
+        : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    const err = await computer.agent({ prompt: 'go', modelKey: 'sk' }).catch((e) => e);
+    expect((err as APIError).status).toBe(403);
+    expect((err as APIError).reason).toBe('revoked');
+    const events: unknown[] = [];
+    const streamErr = await (async () => {
+      for await (const ev of computer.agentStream({ prompt: 'go', modelKey: 'sk' })) {
+        events.push(ev);
+      }
+    })().catch((e) => e);
+    expect(events).toEqual([]);
+    expect((streamErr as APIError).status).toBe(403);
+    expect((streamErr as APIError).reason).toBe('revoked');
   });
 
   it('is kept on the error agentOnce() throws', async () => {
