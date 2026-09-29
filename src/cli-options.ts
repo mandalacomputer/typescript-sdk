@@ -189,7 +189,12 @@ export const COMMANDS: readonly Command[] = [
     'computers start',
     'Start or resume a computer',
     ['computer'],
-    [bool('resume-only', 'Require an existing suspended state')],
+    [
+      bool(
+        'resume-only',
+        'Resume only if a saved session exists; on a stopped computer with none it succeeds without booting (check status)',
+      ),
+    ],
   ),
   command('computers stop', 'Stop a computer', ['computer'], [bool('force', 'Force power off')]),
   command('computers suspend', 'Suspend a computer', ['computer']),
@@ -199,7 +204,10 @@ export const COMMANDS: readonly Command[] = [
     'Delete a computer',
     ['computer'],
     [
-      bool('delete-snapshots', 'Also delete snapshots; requires --expect'),
+      bool(
+        'delete-snapshots',
+        'Also delete snapshots; requires --expect. Exits 1 when the purge did not complete (ok: false)',
+      ),
       flag('expect', 'Snapshot holdings fingerprint'),
     ],
   ),
@@ -301,6 +309,7 @@ export const COMMANDS: readonly Command[] = [
       ...waits,
     ],
   ),
+  command('sizes list', 'List the named sizes computers create --size accepts'),
   command('templates list', 'List templates with completeness status'),
   command('templates get', 'Read a published template', ['namespace', 'name'], [version]),
   command('templates validate', 'Validate a template document from a file or - for stdin', [

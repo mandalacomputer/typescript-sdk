@@ -17,6 +17,7 @@ import {
   ConnectionInterruptedError,
   errorForStatus,
   MandalaError,
+  type RateLimitInfo,
   ValidationError,
 } from './errors.js';
 import { isIdempotencyKey, isRecord } from './paths.js';
@@ -30,10 +31,14 @@ export const DEFAULT_BASE_URL = 'https://app.mandala.computer/api/v1';
  * The platform records a call that carries one BEFORE carrying it out, and for
  * 24 hours answers the same key with the same request from that record instead
  * of doing the call again: `409` with `code: "idempotency_in_progress"` while
- * it runs, the original answer once it has finished. A call it answered with a
- * `5xx` is different: the key is marked lost, and every resend answers `409`
- * with `code: "idempotency_outcome_unknown"`; read the computer or its
- * operation instead. A different request under the same key is a `422`.
+ * it runs, the original answer once it has finished (without the desktop
+ * credentials it carried). A `5xx` that names an `operation_id` is an unknown
+ * outcome: the key is spent, and for 24 hours every resend answers `409` with
+ * `code: "idempotency_outcome_unknown"`; read the computer or its operation
+ * instead. A `5xx` that names none may have been refused before dispatch,
+ * which releases the key, and a resend is carried out — so resending the same
+ * call under the same key is safe after any `5xx`. Keys are kept per
+ * credential scope. A different request under the same key is a `422`.
  */
 export const IDEMPOTENCY_KEY_HEADER = 'Idempotency-Key';
 
@@ -66,9 +71,11 @@ const KEY_UNSETTLED: ReadonlySet<unknown> = new Set([
  * unknown — a request that may have been received, a `5xx`, or the platform
  * saying the keyed call is still running or was never heard to end. After a
  * dropped connection or `idempotency_in_progress` the caller can send the same
- * call again with it and not do it twice; after a `5xx` or
- * `idempotency_outcome_unknown` a resend only answers
- * `idempotency_outcome_unknown`, and the key finds the operation to read.
+ * call again with it and not do it twice. After a `5xx` that names an
+ * `operation_id`, or `idempotency_outcome_unknown`, a resend only answers
+ * `idempotency_outcome_unknown`, and the key finds the operation to read; after
+ * a `5xx` that names none the key may have been released, and a resend is then
+ * carried out. A resend under the key is safe after any `5xx`.
  */
 function withIdempotencyKey(error: unknown, opts: RequestOptions): unknown {
   const key = opts.headers?.[IDEMPOTENCY_KEY_HEADER];
@@ -346,6 +353,12 @@ export type Bytes = {
    * not report — a `/proc` entry — which cannot be windowed at all.
    */
   acceptRanges?: string;
+  /**
+   * `X-GC-Frame`, lowercased, when the response carried one. `suspended` on a
+   * screenshot is the saved frame of a suspended computer rather than a live
+   * capture.
+   */
+  frame?: string;
 };
 
 /**
@@ -512,6 +525,26 @@ export function unsatisfiedTotal(header: string | null): number | undefined {
   if (!m) return undefined;
   const total = Number(m[1]);
   return Number.isSafeInteger(total) ? total : undefined;
+}
+
+/** One `RateLimit-*` header, as a non-negative integer, or `undefined`. */
+const rateHeader = (header: string | null): number | undefined => {
+  const value = header?.trim();
+  if (!value || !/^\d+$/.test(value)) return undefined;
+  const n = Number(value);
+  return Number.isSafeInteger(n) ? n : undefined;
+};
+
+/** The `RateLimit-*` headers a response carried, or `undefined` for none. */
+export function rateLimitInfo(headers: Headers): RateLimitInfo | undefined {
+  const info: RateLimitInfo = {};
+  const limit = rateHeader(headers.get('ratelimit-limit'));
+  const remaining = rateHeader(headers.get('ratelimit-remaining'));
+  const resetSeconds = rateHeader(headers.get('ratelimit-reset'));
+  if (limit !== undefined) info.limit = limit;
+  if (remaining !== undefined) info.remaining = remaining;
+  if (resetSeconds !== undefined) info.resetSeconds = resetSeconds;
+  return Object.keys(info).length ? info : undefined;
 }
 
 /** A Retry-After header, in milliseconds from now. */
@@ -1020,6 +1053,7 @@ export class Transport {
       allow: resp.headers.get('allow') ?? undefined,
       wwwAuthenticate: resp.headers.get('www-authenticate') ?? undefined,
       retryAfterMs: retryAfterMs(resp.headers.get('retry-after')),
+      rateLimit: rateLimitInfo(resp.headers),
       // Only ever set on a 416, which is the one status that answers with a
       // Content-Range naming the file rather than a window of it.
       rangeTotal: unsatisfiedTotal(resp.headers.get('content-range')),
@@ -1260,6 +1294,7 @@ export class Transport {
         status: sent.resp.status,
         contentRange: parseContentRange(sent.resp.headers.get('content-range')),
         acceptRanges: acceptRanges?.trim().toLowerCase() || undefined,
+        frame: sent.resp.headers.get('x-gc-frame')?.trim().toLowerCase() || undefined,
       };
     });
   }

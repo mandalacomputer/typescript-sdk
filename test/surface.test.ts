@@ -321,6 +321,7 @@ async function exerciseEverything(client: Client): Promise<void> {
     format: 'jpeg',
     quality: 60,
   });
+  await c.screenshotWithInfo();
   await c.windows();
   await c.windows({ includeAll: true });
   await c.windowAction('0x1', 'focus');

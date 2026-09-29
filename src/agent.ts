@@ -70,6 +70,15 @@ export type AgentResult = {
   /** The model's closing text — its answer, or why it could not get there. */
   text: string;
   usage: AgentUsage;
+  /**
+   * Every step the run took, as the platform reported them.
+   *
+   * Carried only by `agentOnce()`'s non-streaming answer (`steps_taken`), and
+   * absent when that answer had none. The streaming `done` frame does not carry
+   * it: `agent()` and `agentStream()` callers see each step as its own
+   * `step` event instead.
+   */
+  stepsTaken?: AgentStep[];
   raw: Record<string, unknown>;
 };
 
@@ -86,9 +95,9 @@ export type AgentEvent =
        * What the run had already spent on your key when it stopped.
        *
        * A run can be refused part-way through — the credential can be revoked,
-       * the member demoted, the account suspended or the plan downgraded between
-       * two of its steps — and the steps already taken are real, billed, and
-       * still on the desktop. Zeros here mean the platform sent no accounting,
+       * the member demoted or the account suspended between two of its steps, or
+       * the model API can refuse the key — and the steps already taken are real,
+       * billed, and still on the desktop. Zeros here mean the platform sent no accounting,
        * not that nothing was spent.
        */
       usage: AgentUsage;
@@ -187,7 +196,7 @@ export function toAgentResult(d: unknown): AgentResult {
   // the docs tell callers to make instead of comparing this string themselves.
   // Anything unreadable is the same "nobody said" as an absent one.
   const stop = typeof r.stop === 'string' ? r.stop : 'unknown';
-  return {
+  const result: AgentResult = {
     steps: num(r.steps),
     stop,
     finished: stop === 'end_turn',
@@ -195,6 +204,13 @@ export function toAgentResult(d: unknown): AgentResult {
     usage: toAgentUsage(r.usage),
     raw: { ...r },
   };
+  // Present only when the answer carried a list: the non-streaming form sends
+  // it and the streaming `done` frame does not, so absent is "not sent", never
+  // "no steps".
+  if (Array.isArray(r.steps_taken)) {
+    result.stepsTaken = r.steps_taken.map((s, i) => toAgentStep(s, i + 1));
+  }
+  return result;
 }
 
 /**

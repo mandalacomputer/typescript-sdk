@@ -9,6 +9,52 @@ This is the summary you read to decide whether to upgrade.
 
 ## [Unreleased]
 
+### Added
+
+- **`computer.screenshotWithInfo()`** returns `{ bytes, contentType,
+  suspended }`; `suspended` is true for a suspended computer's saved frame
+  (`X-GC-Frame: suspended`) rather than a live capture. `mandala computers
+  screenshot` notes a saved frame on stderr and adds `"suspended": true` to
+  its result. New export: `ScreenshotInfo`.
+- **`mandala sizes list`** prints the named sizes `computers create --size`
+  takes: `id`, `label`, `template`, `cpu`, `ram_mb`, `disk_gb`, `allowed` and
+  `cheapest_plan`.
+- **`idempotencyKey` on `launch()`** (sent on its create only), on both
+  `ephemeral()` forms and on `rename()`. `ephemeral()` always sent a key but
+  never took yours, although this changelog said it did.
+- **`RateLimitError` carries `limit`, `remaining` and `resetSeconds`** from the
+  refusal's `RateLimit-*` headers. New export: `RateLimitInfo`.
+- **`AgentResult.stepsTaken`**: every step of an `agentOnce()` run, from the
+  non-streaming answer's `steps_taken`. The streaming `done` frame does not
+  carry it.
+- **`computer.halfRemoved`**, true for a computer whose deletion stopped
+  part-way (`status: "half-removed"`).
+
+### Changed
+
+- **A 402 from `agent()` or `agentOnce()` is a `ModelProviderError`, not a
+  `PlanLimitError`.** Nothing inside an agent run answers 402 on the
+  platform's behalf; it is the model API's billing refusal for the account
+  behind `X-Model-Key`, relayed. `ModelProviderError` extends `APIError`, and
+  `isTransient` still answers `false`. The docs no longer say a plan
+  downgrade stops a run: the mid-run recheck covers the credential, the role
+  and the account's standing (401/403 with `reason: "revoked"`), and a 402,
+  504 or 529 on these routes is the model API's status.
+- **`computer.open()` picks the browser from what the image has installed**
+  (`firefox-esr`, then `firefox`, then `chromium`) and **throws a
+  `MandalaError` when the launch exits non-zero**, as it does on an image
+  with none of the three. It named `firefox` alone, which the Omarchy image
+  does not have, and the detached launch exited 0 there having opened
+  nothing (OPL-3705).
+- **A `ConflictError` from `templates.publish()` is permanent to
+  `isTransient`**: it carries `reason: "exists"` where the platform sent no
+  reason. None of those conflicts (a different document under the ref, a
+  retired ref, either template ceiling) clears by sending it again.
+- **`mandala computers delete` reports a purge that did not complete.** It
+  reads the detailed result and prints `ok`, `computer_deleted`,
+  `snapshots_deleted`, `purge` and `error`; `ok: false` (copies still queued,
+  or refused) exits 1 instead of printing `deleted: true` and exiting 0.
+
 ### Fixed
 
 - **`mandala secrets set` takes a path-shaped name whose last piece an
@@ -120,6 +166,33 @@ This is the summary you read to decide whether to upgrade.
   `conflict` error says that `--write` moves both. A block with more than the
   one alias the CLI writes, or whose id another block uses as a `Host`, is
   refused as before.
+- **Every wait fails at once on a half-removed computer** — `waitUntilRunning`,
+  `waitForGuest`, `waitUntilBuilt`, the secrets and proxy waits, and
+  `launch()` — saying its files were partly removed, it cannot be started,
+  and `delete()` clears it. They polled it to a `TimeoutError`.
+- **`setSchedule()` no longer refreshes the handle** to read the current
+  window, which dropped a create's `startError` that the waits fail fast on.
+  `setSchedule()` and `clearSchedule()` now update `snapshotSchedule`, which
+  went stale after either.
+- **Idempotency after a `5xx`**, in the docs: one that names an
+  `operation_id` spends the key (resends answer `idempotency_outcome_unknown`
+  for 24 hours); one that names none may have been refused before dispatch,
+  which releases the key. Resending under the same key is safe after any
+  `5xx`. Keys are kept per credential scope, so
+  `operations.list({ idempotencyKey })` finds only operations reserved by a
+  credential of the same scope. A replayed answer carries no `vnc`;
+  `refresh()` fetches it.
+- **Docs**: `agentOnce()` cannot outlive about 120 seconds on the hosted API
+  (a body-less `524`, the run stopped, its usage and steps lost); the
+  snapshot admission `503` and what to check before retrying; build secrets
+  (`spec.secrets`), the `system/...` rule for `spec.from`, and that
+  `spec.env` alone makes a document a build; `idleSuspendMin`'s `0`, its
+  per-plan cap and its 10080 ceiling; `--resume-only`'s help now says a
+  stopped computer with no saved session succeeds without booting;
+  `PlanLimitError` no longer lists the rate budget (that is a `429`); and
+  smaller corrections to the webhook retry count, a Connected app key's
+  name, API key name rules, where a `capturing` snapshot lists, and which
+  execs see bound secrets.
 
 ## [0.7.0] — 2026-09-27
 

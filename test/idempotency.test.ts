@@ -15,7 +15,16 @@ import {
   isTransient,
   ValidationError,
 } from '../src/index.js';
-import { anyRoute, BASE, type Call, json, OPERATION, type Responder, recorder } from './harness.js';
+import {
+  anyRoute,
+  BASE,
+  type Call,
+  COMPUTER,
+  json,
+  OPERATION,
+  type Responder,
+  recorder,
+} from './harness.js';
 
 function sdk(respond: Responder = anyRoute, timeoutMs?: number) {
   const rec = recorder(respond);
@@ -37,6 +46,8 @@ const LIFECYCLE: [string, (client: Client, vm: Computer, key?: string) => Promis
   ['restart', (_c, vm, k) => vm.restart({ idempotencyKey: k })],
   ['clone', (_c, vm, k) => vm.clone('copy', { idempotencyKey: k })],
   ['update', (_c, vm, k) => vm.update({ ramMb: 4096 }, { idempotencyKey: k })],
+  ['rename', (_c, vm, k) => vm.rename('renamed', { idempotencyKey: k })],
+  ['ephemeral', (c, _vm, k) => c.computers.ephemeral({ template: 'base' }, { idempotencyKey: k })],
   ['relocate', (_c, vm, k) => vm.relocate({ ramMb: 32768 }, { idempotencyKey: k })],
   ['delete', (_c, vm, k) => vm.delete({ idempotencyKey: k })],
   ['snapshots.restore', (c, _vm, k) => c.snapshots.restore('snap-1', { idempotencyKey: k })],
@@ -64,6 +75,33 @@ describe('a lifecycle call', () => {
     await run(client, vm, 'order-4711:create');
     const sent = rec.calls.filter((c) => c.method !== 'GET');
     expect(sent.map(keyOf)).toEqual(['order-4711:create']);
+  });
+
+  it('launch sends a caller’s key on its create only', async () => {
+    // A launch resent after its answer was lost must not create a second
+    // computer; the start it makes afterwards is a different call.
+    const { rec, client } = sdk((call) =>
+      call.method === 'POST' && call.path === '/computers'
+        ? json({ ...COMPUTER, status: 'stopped', running_ram_mb: 0 })
+        : anyRoute(call),
+    );
+    await client.computers.launch({ template: 'base' }, { idempotencyKey: 'order-4711:launch' });
+    const posts = rec.calls.filter((c) => c.method === 'POST');
+    expect(posts[0]!.path).toBe('/computers');
+    expect(keyOf(posts[0]!)).toBe('order-4711:launch');
+    const start = posts.find((c) => c.path === '/computers/vm-1/start');
+    expect(start).toBeDefined();
+    expect(keyOf(start!)).toMatch(KEY_SYNTAX);
+    expect(keyOf(start!)).not.toBe('order-4711:launch');
+  });
+
+  it('ephemeral with a callback sends a caller’s key on its create', async () => {
+    const { rec, client } = sdk();
+    await client.computers.ephemeral({ template: 'base' }, async () => undefined, {
+      idempotencyKey: 'order-4711:scratch',
+    });
+    const create = rec.calls.find((c) => c.method === 'POST' && c.path === '/computers');
+    expect(keyOf(create!)).toBe('order-4711:scratch');
   });
 
   it('sends a different key on each call', async () => {

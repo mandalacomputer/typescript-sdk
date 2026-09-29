@@ -42,6 +42,7 @@ const expectedCommands = [
   'computers screenshot',
   'computers exec',
   'computers wait',
+  'sizes list',
   'templates list',
   'templates get',
   'templates validate',

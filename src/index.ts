@@ -115,7 +115,7 @@ export {
   SCREEN_HEIGHT,
   SCREEN_WIDTH,
 } from './computer.js';
-export type { ErrorMetadata } from './errors.js';
+export type { ErrorMetadata, RateLimitInfo } from './errors.js';
 export {
   APIError,
   AuthenticationError,
@@ -129,6 +129,7 @@ export {
   isTransient,
   MandalaError,
   MethodNotAllowedError,
+  ModelProviderError,
   MoveRequiredError,
   NotFoundError,
   OperationFailedError,
@@ -212,6 +213,7 @@ export type {
   RetiredTemplates,
   Role,
   Schedule,
+  ScreenshotInfo,
   Secret,
   SecretBinding,
   SecretBindings,
