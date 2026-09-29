@@ -86,6 +86,16 @@ This is the summary you read to decide whether to upgrade.
   replacing it. `--write` now replaces its block in place and writes the file
   back with LF line endings, as `mandala-py ssh-config` already does; a file
   it has nothing to change in is left as it is.
+- **`mandala ssh-config --write` removes a second copy of the computer's
+  block or the gateway's block**, which versions before this one appended to
+  a `~/.ssh/config` saved with CRLF line endings. That copy kept its old
+  `Host` alias routing, and the next run said "already up to date". Run
+  `mandala ssh-config <computer> --write` once for each computer you wrote
+  that way (or delete the later `# >>> mandala … >>>` block by hand).
+- **`mandala ssh-config --write` no longer replaces a byte that is not valid
+  UTF-8 anywhere in `~/.ssh/config` with U+FFFD.** It refuses with
+  `invalid_arguments`, naming the file, and leaves it byte for byte as it
+  was, as `mandala-py ssh-config` already does.
 - **`mandala ssh-config` counts every alias of a hand-edited block's `Host`
   lines**, read the way OpenSSH reads them: `Host dev # mine`, `Host other
   dev`, `  host=dev`, `Host "dev"`, `Host 'dev'` and a second `Host` line all
