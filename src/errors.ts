@@ -368,18 +368,28 @@ export class PlanLimitError extends APIError {
 }
 
 /**
- * 402 from the agent loop — the MODEL PROVIDER refused billing on the account
- * behind your `X-Model-Key`, not a Mandala plan limit.
+ * A failure on the agent routes that the MODEL PROVIDER answered, not Mandala:
+ * a 402, and a 404 or 413 the model API answered.
  *
- * `agent()` and `agentOnce()` raise this where any other route would raise
- * {@link PlanLimitError}. Nothing inside an agent run can answer 402 on the
- * platform's own behalf: its mid-run rechecks cover the credential, the role
- * and the account's standing and answer 401 or 403 with `reason: "revoked"`.
- * A 402 there is the model API's own status (its `billing_error`), relayed for
- * the key you passed, so the fix is on that account and not on your plan.
+ * `agent()` and `agentOnce()` raise this for a 402 where any other route would
+ * raise {@link PlanLimitError}. Nothing inside an agent run can answer 402 on
+ * the platform's own behalf: its mid-run rechecks cover the credential, the
+ * role and the account's standing and answer 401 or 403 with
+ * `reason: "revoked"`. A 402 there is the model API's own status (its
+ * `billing_error`), relayed for the key you passed, so the fix is on that
+ * account and not on your plan.
  *
- * Not transient: {@link isTransient} answers false, as it does for every 402.
- * {@link APIError.body} carries what the run had already spent and done.
+ * They also raise it for a 404 or 413 the model API answered, where the status
+ * table would give {@link NotFoundError} (no such computer) or
+ * {@link TooLargeError}. The platform prefixes everything it relays from the
+ * model API with `model API: `; a 404 there is usually a model name the
+ * provider does not know, and a 413 a request it found too large. The
+ * platform's own 404 and 413 on these routes carry no prefix and keep their
+ * classes.
+ *
+ * Not transient: {@link isTransient} answers false, as it does for every 402,
+ * 404 and 413. {@link APIError.body} carries what the run had already spent
+ * and done.
  */
 export class ModelProviderError extends APIError {
   override name = 'ModelProviderError';
@@ -391,23 +401,92 @@ export const MODEL_BILLING_MESSAGE =
   '(not a Mandala plan limit)';
 
 /**
- * The error an agent route's 402 becomes: a {@link ModelProviderError}, never a
- * {@link PlanLimitError}. Every other error is returned unchanged.
+ * The prefix the platform puts on a failure it relays from the model API on the
+ * agent routes. Its own refusals there (no such computer, not running, already
+ * driven, revoked, a request body too large, its own rate limit) carry none, so
+ * this is what tells a status the model API answered from the same status
+ * answered by the platform. Identical to `_MODEL_API_PREFIX` in
+ * mandala-computer-python.
  */
-export function modelProviderRefusal(err: APIError): APIError {
-  if (err.status !== 402 || err instanceof ModelProviderError) return err;
-  return new ModelProviderError(
-    `${MODEL_BILLING_MESSAGE}: ${err.message}`,
-    err.status,
-    err.body,
-    err.retryAfterMs,
-    {
-      requestId: err.requestId,
-      allow: err.allow,
-      wwwAuthenticate: err.wwwAuthenticate,
-      method: err.method,
-    },
-  );
+const MODEL_API_PREFIX = 'model API: ';
+
+/**
+ * Whether an agent route's failure is the model API's own, relayed.
+ *
+ * Read off the body: a non-streaming answer's JSON body, or the `error` frame a
+ * stream reported, which `agent()` hands over as the body. Either way it is the
+ * platform's `error` text, and the platform prefixes only what the model API
+ * said.
+ */
+function relayedFromModel(err: APIError): boolean {
+  const message = errorRecord(err.body)?.error;
+  return typeof message === 'string' && message.startsWith(MODEL_API_PREFIX);
+}
+
+/**
+ * The class an agent route's status deserves, where it is not the table's.
+ * The same mapping as `_agent_route_error` in mandala-computer-python.
+ *
+ * - A 402 becomes a {@link ModelProviderError}, never a
+ *   {@link PlanLimitError}: it is the model API's `billing_error` for the
+ *   account behind `X-Model-Key`.
+ * - A 404 or 413 the model API answered (see {@link relayedFromModel}) becomes
+ *   a {@link ModelProviderError} rather than a {@link NotFoundError} or
+ *   {@link TooLargeError}. An unprefixed one is the platform's own and is
+ *   returned unchanged.
+ * - A 429 the model API answered stays a {@link RateLimitError}, but without
+ *   `limit`, `remaining` and `resetSeconds`: those come from the platform's
+ *   `RateLimit-*` headers and describe the caller's Mandala budget, which is
+ *   not what refused the call. `retryAfterMs` is kept: the platform forwards
+ *   the model API's own wait, when it named one, as `Retry-After`. The
+ *   platform's own 429 keeps its budget fields.
+ * - A 504 {@link GatewayTimeoutError} whose JSON body carries `steps_taken` or
+ *   `usage` becomes a plain {@link APIError}. That is the platform relaying the
+ *   model API's `timeout_error` on a failed `agentOnce()` run, not a hop that
+ *   stopped waiting — the class {@link errorForEventStatus} already gives the
+ *   same 504 reported mid-stream. A body-less 504 (or one without either
+ *   field), and a 524, stay {@link GatewayTimeoutError}: that is an edge cut,
+ *   and the run went with the connection.
+ *
+ * Every other error is returned unchanged. A rebuilt one keeps the original's
+ * body (and so its `reason`, `code` and `operationId`), `retryAfterMs`,
+ * `requestId`, `allow`, `wwwAuthenticate`, `method` and `idempotencyKey`.
+ */
+export function agentRouteError(err: APIError): APIError {
+  if (err instanceof ModelProviderError) return err;
+  const metadata: ErrorMetadata = {
+    requestId: err.requestId,
+    allow: err.allow,
+    wwwAuthenticate: err.wwwAuthenticate,
+    method: err.method,
+  };
+  let rebuilt: APIError;
+  if (err.status === 402) {
+    rebuilt = new ModelProviderError(
+      `${MODEL_BILLING_MESSAGE}: ${err.message}`,
+      err.status,
+      err.body,
+      err.retryAfterMs,
+      metadata,
+    );
+  } else if ((err.status === 404 || err.status === 413) && relayedFromModel(err)) {
+    rebuilt = new ModelProviderError(err.message, err.status, err.body, err.retryAfterMs, metadata);
+  } else if (err.status === 429 && relayedFromModel(err)) {
+    // No `rateLimit` in the metadata, so limit, remaining and resetSeconds are
+    // left undefined.
+    rebuilt = new RateLimitError(err.message, err.status, err.body, err.retryAfterMs, metadata);
+  } else if (
+    err.status === 504 &&
+    err instanceof GatewayTimeoutError &&
+    errorRecord(err.body) !== undefined &&
+    ('steps_taken' in (err.body as object) || 'usage' in (err.body as object))
+  ) {
+    rebuilt = new APIError(err.message, err.status, err.body, err.retryAfterMs, metadata);
+  } else {
+    return err;
+  }
+  rebuilt.idempotencyKey = err.idempotencyKey;
+  return rebuilt;
 }
 
 /** 403 — authenticated, but the key's role on the account is too low. */
@@ -668,6 +747,12 @@ export class RangeNotSatisfiableError extends APIError {
  * headers — see {@link RateLimitInfo}. The platform sends them on successful
  * metered responses too; this SDK does not surface those, and a caller who
  * wants them reads them in a `fetch` passed to the client (see the README).
+ *
+ * On `agent()` and `agentOnce()`, a 429 whose `error` starts `model API: ` is
+ * the model provider's rate limit, relayed, and all three are `undefined`: the
+ * headers describe the caller's Mandala budget, which did not refuse it.
+ * `retryAfterMs` is the model API's own wait, forwarded, when it named one.
+ * The platform's own 429 on those routes keeps all three.
  */
 export class RateLimitError extends APIError {
   override name = 'RateLimitError';
@@ -732,6 +817,13 @@ export class UnavailableError extends APIError {
  * The abandoned command keeps running, which is why the next call on the same
  * computer often raises {@link ConflictError} — the guest agent is still busy
  * with it. That is this failure continuing, not a second one.
+ *
+ * Not raised for the 504 `agentOnce()` gets when the model API timed out: the
+ * platform relays that with the run's `usage` and `steps_taken` in the body,
+ * so it answered and nothing was cut, and it is a plain {@link APIError}, as
+ * the same 504 reported mid-stream on `agent()` is. A body-less 504 or a 524
+ * on `agentOnce()` is still this: the edge cut the request, and the run went
+ * with the connection.
  */
 export class GatewayTimeoutError extends APIError {
   override name = 'GatewayTimeoutError';
@@ -1236,7 +1328,12 @@ function withoutRefusalReason(body: unknown): unknown {
  *
  * On the agent routes a 402, 504 or 529 is the MODEL API's status for the
  * account behind `X-Model-Key` (billing, timeout, overloaded), relayed — not a
- * Mandala plan limit, which is why a 402 there is a {@link ModelProviderError}.
+ * Mandala plan limit, which is why a 402 there is a {@link ModelProviderError},
+ * and a 504 with the run's `usage` or steps a plain {@link APIError} rather than
+ * a {@link GatewayTimeoutError}. So is a 404, 413 or 429 whose `error` starts
+ * `model API: `: the 404 and 413 are {@link ModelProviderError}s (not
+ * transient), and the 429 a {@link RateLimitError} with no budget fields (still
+ * transient, as every 429 is).
  * A 403 there without `reason: "revoked"` may likewise be the model key's own
  * `permission_error`. A 403 that arrives as the run's `error` event — a
  * refusal after the run started — reaches `agent()`'s thrown error without
