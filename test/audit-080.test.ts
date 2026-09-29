@@ -420,4 +420,72 @@ describe('the key an error from launch() carries', () => {
     expect((err as MandalaError).idempotencyKey).toBe(launchKey);
     expect((err as MandalaError).idempotencyKey).not.toBe(startKey);
   });
+
+  // The create itself failing is NOT the exception the docs carve out: the
+  // error is the create's own, with no `launch of` prefix, and its key and
+  // operation id both belong to that create, under the ordinary rules.
+  it('is the create’s own error, key and operation id when the create fails', async () => {
+    const { rec, client: c } = client((call) =>
+      call.method === 'POST' && call.path === '/computers'
+        ? json(
+            { error: 'The create was not heard to end.', operation_id: 'op-create' },
+            { status: 500 },
+          )
+        : respond(call),
+    );
+    const err = await c.computers
+      .launch({ template: 'base' }, { timeoutMs: 60_000, pollMs: 10, idempotencyKey: 'lk-2' })
+      .catch((e) => e);
+    expect(err).toBeInstanceOf(APIError);
+    expect((err as APIError).status).toBe(500);
+    expect((err as Error).message).not.toMatch(/^launch of /);
+    expect((err as APIError).operationId).toBe('op-create');
+    const creates = rec.calls.filter((x) => x.method === 'POST' && x.path === '/computers');
+    expect(creates.map((x) => x.headers[IDEMPOTENCY_KEY_HEADER])).toContain('lk-2');
+    expect((err as MandalaError).idempotencyKey).toBe('lk-2');
+    // Nothing ran after it.
+    expect(rec.calls.some((x) => x.path.startsWith('/computers/vm-1'))).toBe(false);
+  });
+});
+
+describe('the reason word on an agent route’s 403', () => {
+  // The docs tell a caller who must tell a revocation from the model key's own
+  // permission_error which surface keeps the word: agent() withholds it,
+  // agentStream()'s raw and agentOnce()'s HTTP error keep it.
+  const FRAME = { error: 'credential revoked', status: 403, reason: 'revoked' };
+
+  it('is withheld from the error agent() throws', async () => {
+    const { client: c } = client((call) =>
+      call.path.endsWith('/agent') ? errorStream(FRAME) : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    const err = await computer.agent({ prompt: 'go', modelKey: 'sk' }).catch((e) => e);
+    expect((err as APIError).status).toBe(403);
+    expect((err as APIError).reason).toBeUndefined();
+    expect(((err as APIError).body as Record<string, unknown>).reason).toBeUndefined();
+  });
+
+  it('is on agentStream()’s error event raw', async () => {
+    const { client: c } = client((call) =>
+      call.path.endsWith('/agent') ? errorStream(FRAME) : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    let raw: Record<string, unknown> | undefined;
+    for await (const ev of computer.agentStream({ prompt: 'go', modelKey: 'sk' })) {
+      if (ev.type === 'error') raw = ev.raw;
+    }
+    expect(raw?.reason).toBe('revoked');
+  });
+
+  it('is kept on the error agentOnce() throws', async () => {
+    const { client: c } = client((call) =>
+      call.path.endsWith('/agent')
+        ? json({ error: 'credential revoked', reason: 'revoked' }, { status: 403 })
+        : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    const err = await computer.agentOnce({ prompt: 'go', modelKey: 'sk' }).catch((e) => e);
+    expect((err as APIError).status).toBe(403);
+    expect((err as APIError).reason).toBe('revoked');
+  });
 });

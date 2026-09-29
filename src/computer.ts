@@ -5367,6 +5367,15 @@ export class Computer {
    * {@link PlanLimitError}; a 403 without `reason: "revoked"` may likewise be
    * the model key's own `permission_error`.
    *
+   * **THIS METHOD CANNOT TELL THOSE TWO 403s APART FOR YOU.** It withholds
+   * `reason` from the error it throws (a word meaning "send it again" is not
+   * true of a run that has already acted), so `err.reason` and
+   * `err.body.reason` are `undefined` on every 403 `agent()` raises, a
+   * revocation included. A caller who needs to tell a revocation from the model
+   * key's `permission_error` should use {@link agentStream} and read the
+   * `error` event's `raw.reason`, or {@link agentOnce}, whose HTTP error keeps
+   * `err.reason`.
+   *
    * None of these is a transport failure and none is worth retrying unchanged;
    * {@link APIError.body} carries the `usage` and the completed steps the
    * refusal reported, so read those before deciding what to do next.

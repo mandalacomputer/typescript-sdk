@@ -22,11 +22,13 @@ This is the summary you read to decide whether to upgrade.
 - **`idempotencyKey` on `launch()`** (sent on its create only), on both
   `ephemeral()` forms and on `rename()`. `ephemeral()` always sent a key but
   never took yours, although this changelog said it did. An error `launch()`
-  throws carries the create's key as `err.idempotencyKey`, even when its own
-  start failed, so resending `launch()` with it replays the same computer
-  rather than creating a second. That key finds the create's operation, not
-  the failed stage's; an `err.operationId` the error names is the failed
-  stage's own, read with `operations.get()`.
+  throws after its create returned (`launch of <id> failed: ...`) carries the
+  create's key as `err.idempotencyKey`, even when its own start failed, so
+  resending `launch()` with it replays the same computer rather than creating
+  a second. That key finds the create's operation, not the failed stage's; an
+  `err.operationId` the error names is the failed stage's own, read with
+  `operations.get()`. An error from the create itself follows the ordinary
+  idempotency rules.
 - **`RateLimitError` carries `limit`, `remaining` and `resetSeconds`** from the
   refusal's `RateLimit-*` headers. New export: `RateLimitInfo`.
 - **`AgentResult.stepsTaken`**: every step of an `agentOnce()` run, from the
@@ -182,8 +184,10 @@ This is the summary you read to decide whether to upgrade.
 - **Idempotency after a `5xx`**, in the docs: one that names an
   `operation_id` spends the key (resends answer `idempotency_outcome_unknown`
   for 24 hours); one that names none may have been refused before dispatch,
-  which releases the key. Resending under the same key is safe after any
-  `5xx`. Keys are kept per credential scope, so
+  which releases the key; one made in front of the platform (an edge `524`)
+  can arrive while the first call still runs, and a resend then answers
+  `idempotency_in_progress`, then that call's own answer. Resending under the
+  same key is safe after any `5xx`. Keys are kept per credential scope, so
   `operations.list({ idempotencyKey })` finds only operations reserved by a
   credential of the same scope. A replayed answer carries no `vnc`;
   `refresh()` fetches it.

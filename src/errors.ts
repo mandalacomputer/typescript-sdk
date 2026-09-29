@@ -64,18 +64,30 @@ export class MandalaError extends Error {
    * with `operations.get(err.operationId)` or
    * `operations.list({ idempotencyKey })`. A `5xx` that names none may have
    * been refused before it was sent anywhere, which releases the key, and a
-   * resend is then carried out. Sending the same call again under the same key
-   * is safe after ANY `5xx`: it is carried out if the key was released and
-   * answered `idempotency_outcome_unknown` if not.
+   * resend is then carried out. A `5xx` made in front of the platform (such as
+   * a `524` from the edge) names none either, and can arrive while the first
+   * call is still running: a resend then answers `409
+   * idempotency_in_progress`, and once that call ends, gets its own answer.
+   * Sending the same call again under the same key is safe after ANY `5xx`:
+   * it is carried out if the key was released, answered
+   * `idempotency_in_progress` or the first call's answer if that call is still
+   * running or has since ended, and answered `idempotency_outcome_unknown` if
+   * the outcome is unknown.
    *
-   * An error from `computers.launch()` is the exception: this is the key of
-   * launch's CREATE, which succeeded, even when the stage that failed was the
-   * start launch made afterwards. It is for resending `launch()`, which
-   * replays the create (the same computer) and runs the rest again, not for
-   * finding the failed stage: `operations.list({ idempotencyKey })` with it
-   * finds the create's operation, which says nothing about how the start
-   * ended. When the error names an `operationId`, that is the failed stage's
-   * own operation, so read it with `operations.get(err.operationId)`.
+   * An error from `computers.launch()` thrown AFTER launch's create returned —
+   * one whose message starts `launch of <id> failed:` — is the exception: this
+   * is the key of launch's CREATE, which succeeded, even when the stage that
+   * failed was the start launch made afterwards. It is for resending
+   * `launch()`, which replays the create (the same computer) and runs the rest
+   * again, not for finding the failed stage: `operations.list({
+   * idempotencyKey })` with it finds the create's operation, which says
+   * nothing about how the start ended. When such an error names an
+   * `operationId`, that is the failed stage's own operation, so read it with
+   * `operations.get(err.operationId)`. An error from launch's create itself
+   * (no `launch of` prefix) follows the ordinary rules above: after a dropped
+   * connection a resend replays, and after a `5xx` naming an `operation_id` the
+   * key is spent, so read `operations.list({ idempotencyKey })` or
+   * `operations.get(err.operationId)`.
    */
   idempotencyKey?: string;
 }
@@ -1220,7 +1232,12 @@ function withoutRefusalReason(body: unknown): unknown {
  * account behind `X-Model-Key` (billing, timeout, overloaded), relayed — not a
  * Mandala plan limit, which is why a 402 there is a {@link ModelProviderError}.
  * A 403 there without `reason: "revoked"` may likewise be the model key's own
- * `permission_error`.
+ * `permission_error`. `agent()` cannot show you that word: it withholds
+ * `reason` from the error it throws (see {@link withoutRefusalReason}), so
+ * every 403 it raises reads as one without it. To tell a revocation from the
+ * model key's `permission_error`, use `agentStream()` and read the `error`
+ * event's `raw.reason`, or `agentOnce()`, whose HTTP error keeps
+ * {@link APIError.reason}.
  *
  * None of these is transient, and this function says so. That is not a
  * change — it never called them transient — but the reason is now a real one

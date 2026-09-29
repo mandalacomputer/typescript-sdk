@@ -2228,18 +2228,6 @@ export function toDeleteResult(d: unknown): DeleteResult {
 }
 
 /**
- * The outcome of a shell command run inside the guest.
- *
- * {@link stdout} and {@link stderr} are BYTES, and the text is beside them in
- * {@link stdoutText} and {@link stderrText}. The platform sends both streams
- * base64-encoded (OPL-4403) precisely because a JSON string could not carry
- * them: a JSON string is UTF-8 by definition, so every byte that was not valid
- * UTF-8 became `U+FFFD` on the way out, and a command that printed a tarball, a
- * PNG, or a latin-1 build log came back altered with a 200 and no flag saying
- * so. Decoding that back into a string here would move the same defect to this
- * SDK's own boundary, so what this hands back is what the command wrote.
- */
-/**
  * A screenshot with what the response said about it, from
  * `Computer.screenshotWithInfo()`.
  */
@@ -2256,6 +2244,18 @@ export type ScreenshotInfo = {
   suspended: boolean;
 };
 
+/**
+ * The outcome of a shell command run inside the guest.
+ *
+ * {@link stdout} and {@link stderr} are BYTES, and the text is beside them in
+ * {@link stdoutText} and {@link stderrText}. The platform sends both streams
+ * base64-encoded (OPL-4403) precisely because a JSON string could not carry
+ * them: a JSON string is UTF-8 by definition, so every byte that was not valid
+ * UTF-8 became `U+FFFD` on the way out, and a command that printed a tarball, a
+ * PNG, or a latin-1 build log came back altered with a 200 and no flag saying
+ * so. Decoding that back into a string here would move the same defect to this
+ * SDK's own boundary, so what this hands back is what the command wrote.
+ */
 export type ExecResult = {
   /** Confirmed optional retained synchronous output; absent on older servers or unconfirmed capture. */
   resultId?: string;

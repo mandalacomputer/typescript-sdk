@@ -36,8 +36,11 @@ export const DEFAULT_BASE_URL = 'https://app.mandala.computer/api/v1';
  * outcome: the key is spent, and for 24 hours every resend answers `409` with
  * `code: "idempotency_outcome_unknown"`; read the computer or its operation
  * instead. A `5xx` that names none may have been refused before dispatch,
- * which releases the key, and a resend is carried out — so resending the same
- * call under the same key is safe after any `5xx`. Keys are kept per
+ * which releases the key, and a resend is carried out. One made in front of
+ * the platform (such as a `524` from the edge) can arrive while the first call
+ * is still running: a resend then answers `409` with `code:
+ * "idempotency_in_progress"`, and that call's own answer once it has ended.
+ * Resending the same call under the same key is safe after any `5xx`. Keys are kept per
  * credential scope. A different request under the same key is a `422`.
  */
 export const IDEMPOTENCY_KEY_HEADER = 'Idempotency-Key';
@@ -75,7 +78,10 @@ const KEY_UNSETTLED: ReadonlySet<unknown> = new Set([
  * `operation_id`, or `idempotency_outcome_unknown`, a resend only answers
  * `idempotency_outcome_unknown`, and the key finds the operation to read; after
  * a `5xx` that names none the key may have been released, and a resend is then
- * carried out. A resend under the key is safe after any `5xx`.
+ * carried out — or, for one made in front of the platform (such as an edge
+ * `524`) while the first call still runs, answered `idempotency_in_progress`
+ * and then that call's own answer. A resend under the key is safe after any
+ * `5xx`.
  */
 function withIdempotencyKey(error: unknown, opts: RequestOptions): unknown {
   const key = opts.headers?.[IDEMPOTENCY_KEY_HEADER];

@@ -144,8 +144,11 @@ export type CallOptions = { signal?: AbortSignal };
  * computer, or the operation with `operations.get(err.operationId)` or
  * `operations.list({ idempotencyKey })`. A `5xx` that names none may have been
  * refused before it was sent anywhere, which releases the key, and a resend is
- * carried out. Resending the same call under the same key is safe after ANY
- * `5xx`. Keys are kept per credential scope.
+ * carried out. One made in front of the platform (such as a `524` from the
+ * edge) can arrive while the first call is still running: a resend then
+ * answers `ConflictError` with `code: "idempotency_in_progress"`, and that
+ * call's own answer once it has ended. Resending the same call under the same
+ * key is safe after ANY `5xx`. Keys are kept per credential scope.
  *
  * An error whose outcome is unknown carries the key it was sent with as
  * `idempotencyKey`. 1 to 255 characters, each printable ASCII other than a
@@ -319,17 +322,22 @@ export class Computers {
    *
    * `idempotencyKey` is sent on the create only, so a launch resent under the
    * same key after its answer was lost does not create a second computer; the
-   * start launch may make afterwards gets a key of its own. An error launch
-   * throws that carries an `idempotencyKey` carries the CREATE's key — the one
-   * given, or the one made when none was — even when the stage that failed was
-   * that later start, so passing it back to launch replays the create (the
-   * same computer) and runs the rest again. The start's own key is never
-   * handed out as a launch key: sent on a create, it would make a second
-   * computer. The create succeeded, so `operations.list({ idempotencyKey })`
-   * with that key finds the create's operation, not the failed stage's; when
-   * the error names an `operationId`, that one is the failed stage's own, and
-   * `operations.get(err.operationId)` reads how it ended. See
-   * {@link IdempotencyOptions}.
+   * start launch may make afterwards gets a key of its own. An error from the
+   * create itself is the create's error, and follows the ordinary rules of
+   * {@link IdempotencyOptions}: after a dropped connection a resend replays,
+   * and after a `5xx` naming an `operation_id` the key is spent, so read
+   * `operations.list({ idempotencyKey })` or `operations.get(err.operationId)`.
+   *
+   * An error thrown AFTER the create returned — its message starts `launch of
+   * <id> failed:` — that carries an `idempotencyKey` carries the CREATE's key
+   * (the one given, or the one made when none was) even when the stage that
+   * failed was that later start, so passing it back to launch replays the
+   * create (the same computer) and runs the rest again. The start's own key is
+   * never handed out as a launch key: sent on a create, it would make a second
+   * computer. That create succeeded, so `operations.list({ idempotencyKey })`
+   * with the key finds the create's operation, not the failed stage's; when
+   * such an error names an `operationId`, that one is the failed stage's own,
+   * and `operations.get(err.operationId)` reads how it ended.
    *
    * A computer with secrets bound is also waited on until they have reached
    * its desktop ({@link Computer.waitForSecrets}), so a command run on the
