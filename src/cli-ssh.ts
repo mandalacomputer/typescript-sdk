@@ -871,6 +871,9 @@ function otherWrittenBlocks(file: string, computerId: string): { id: string; hos
   return writtenHosts(text ?? '').filter((b) => b.id !== computerId);
 }
 
+/** An id OpenSSH reads as one host, and one that cannot start an option. */
+const SSH_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
 /** `mandala ssh-config <computer> [--write]`. */
 export async function sshConfigCommand(
   computer: Computer,
@@ -881,6 +884,15 @@ export async function sshConfigCommand(
   rt: SshRuntime,
   write: boolean,
 ): Promise<number> {
+  // The id goes into the config text as the marker, HostName, HostKeyAlias
+  // and, on every fallback, the Host, so one that is not a plain host word
+  // (a line break could start a ProxyCommand) is refused before anything is
+  // read, printed or written. mandala-py's `_ssh_id` rule.
+  if (!SSH_ID.test(computer.id))
+    throw new CliError(
+      'invalid_response',
+      `the platform returned a computer id SSH cannot use: ${computer.id}`,
+    );
   const home = rt.home();
   const gw = gateway(io.env, home);
   let host = hostAlias(computer.name, computer.id);

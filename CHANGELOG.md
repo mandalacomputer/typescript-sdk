@@ -72,6 +72,13 @@ This is the summary you read to decide whether to upgrade.
   nothing, since a second block under the id would never be reached and
   `ssh <id>` would go to the other computer. Remove that block, then run
   again.
+- **`mandala ssh-config` refuses a computer id that is not a plain host
+  word** (letters, digits, `.`, `_` and `-`, not starting with `-`), with an
+  `invalid_response` error, in every mode and before it reads, prints or
+  writes anything. The id goes into the snippet as `HostName`,
+  `HostKeyAlias` and sometimes `Host`, so an id with a line break from the
+  API could have added a directive such as `ProxyCommand` to
+  `~/.ssh/config`. This is the check `mandala-py ssh-config` already makes.
 
 ## [0.7.0] — 2026-09-27
 

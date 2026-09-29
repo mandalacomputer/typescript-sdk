@@ -1346,6 +1346,56 @@ describe('ssh-config under a name a block in ~/.ssh/config already uses', () => 
   });
 });
 
+describe('ssh-config for a computer id SSH cannot use', () => {
+  // The id is written into the config text as the marker, HostName,
+  // HostKeyAlias and, on a fallback, the Host, so an API that answers one
+  // holding a line break could add a directive such as ProxyCommand to a
+  // snippet the user pastes into ~/.ssh/config.
+  it.each([
+    ['a line break', 'vm-9\n  ProxyCommand touch /tmp/pwned\nHost x'],
+    ['a leading dash', '-oProxyCommand=touch'],
+    ['a space', 'vm 9'],
+  ])('refuses an id with %s in every mode', async (_, id) => {
+    const respond: Responder = (call) =>
+      call.path === '/computers' ? json([{ ...COMPUTER, id }]) : anyRoute(call);
+    const home = await tempDir();
+    fs.mkdirSync(join(home, '.ssh'));
+    const file = join(home, '.ssh', 'config');
+    fs.writeFileSync(file, 'Host work\n  User me\n');
+    const before = fs.readFileSync(file, 'utf8');
+    for (const mode of [[], ['--write'], ['--json'], ['--write', '--json']]) {
+      const r = await cli(['ssh-config', 'demo', ...mode], { home, respond });
+      expect(r.code).toBe(1);
+      if (mode.includes('--json')) {
+        const parsed = JSON.parse(r.out || r.err);
+        expect(parsed.data).toBeUndefined();
+        expect(parsed.error).toMatchObject({
+          code: 'invalid_response',
+          message: `the platform returned a computer id SSH cannot use: ${id}`,
+        });
+        expect(r.out + r.err).not.toContain('HostName');
+      } else {
+        expect(r.out).toBe('');
+        expect(r.err).toMatch(/^mandala: the platform returned a computer id SSH cannot use: /);
+        expect(r.err).not.toContain('\n  ProxyCommand');
+      }
+      expect(fs.readFileSync(file, 'utf8')).toBe(before);
+      expect(fs.existsSync(knownHostsPath(home))).toBe(false);
+      expect(writes(r)).toEqual([]);
+    }
+  });
+
+  it('takes an id with dots, dashes and underscores', async () => {
+    const id = 'Vm_1.a-b';
+    const r = await cli(['ssh-config', 'demo', '--json'], {
+      respond: (call) =>
+        call.path === '/computers' ? json([{ ...COMPUTER, id }]) : anyRoute(call),
+    });
+    expect(r.code).toBe(0);
+    expect(JSON.parse(r.out).data.computer).toBe(id);
+  });
+});
+
 describe('ssh-config without a complete listing', () => {
   it.each([
     ['the listing failed', () => json({ error: 'boom' }, { status: 400 })],
