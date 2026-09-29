@@ -1598,6 +1598,351 @@ describe('ssh-config over a config with CRLF line endings', () => {
   });
 });
 
+describe('ssh-config over a config holding a duplicate block', () => {
+  const named = (name: string) => (call: Call) =>
+    call.path === '/computers' ? json([{ ...COMPUTER, name }]) : anyRoute(call);
+  const WORK = 'Host work\n  User me\n';
+  /** The gateway block and the computer block of a snippet, markers included. */
+  const blocksOf = (snippet: string) => {
+    const gap = snippet.indexOf('\n\n');
+    return [snippet.slice(0, gap), snippet.slice(gap + 2, -1)] as const;
+  };
+  // Before CRLF line endings were read as `\n`, --write found no block in a
+  // CRLF config and appended an LF copy of both after the originals.
+  const homeWithCopy = async (first: string) => {
+    const home = await tempDir();
+    fs.mkdirSync(join(home, '.ssh'));
+    const file = join(home, '.ssh', 'config');
+    const kh = knownHostsPath(home);
+    const original = mergeConfig(
+      WORK,
+      configSnippet(first, 'vm-1', gateway({}), kh, first),
+    ).replace(/\n/g, '\r\n');
+    const [gw, vm1] = blocksOf(configSnippet('stale', 'vm-1', gateway({}), kh, 'stale'));
+    fs.writeFileSync(file, `${original}\n${gw}\n\n${vm1}\n`);
+    return { home, file, kh };
+  };
+
+  it.each([
+    ['an old Host', 'old'],
+    ['the current Host', 'dev'],
+  ])('removes the later copy when the first has %s', async (_, first) => {
+    const { home, file, kh } = await homeWithCopy(first);
+    const before = fs.readFileSync(file, 'utf8').replace(/\r\n/g, '\n');
+    expect(writtenHosts(before).map((b) => b.id)).toEqual(['vm-1', 'vm-1']);
+    const r = await cli(['ssh-config', 'vm-1', '--write'], { home, respond: named('dev') });
+    expect(r.code).toBe(0);
+    expect(r.out).toBe(`wrote Host dev in ${file}\nconnect with: ssh dev\n`);
+    const after = fs.readFileSync(file, 'utf8');
+    expect(after.match(/# >>> mandala computer vm-1 >>>/g)).toHaveLength(1);
+    expect(after.match(/# >>> mandala gateway >>>/g)).toHaveLength(1);
+    expect(after).not.toContain('stale');
+    expect(after).not.toContain('\r');
+    expect(writtenHosts(after)).toEqual([{ id: 'vm-1', hosts: ['dev'] }]);
+    expect(after).toBe(mergeConfig(WORK, configSnippet('dev', 'vm-1', gateway({}), kh, 'dev')));
+    const again = await cli(['ssh-config', 'vm-1', '--write'], { home, respond: named('dev') });
+    expect(again.code).toBe(0);
+    expect(again.out).toBe(`already up to date: Host dev in ${file}\nconnect with: ssh dev\n`);
+    expect(fs.readFileSync(file, 'utf8')).toBe(after);
+  });
+
+  it("removes only the snippet's own copies, keeping every other line where it stands", () => {
+    const snippet = (host: string, id: string) => configSnippet(host, id, gateway({}), KH, host);
+    const [gw, vm1] = blocksOf(snippet('old', 'vm-1'));
+    const [gwCopy, vm1Copy] = blocksOf(snippet('stale', 'vm-1'));
+    const [, vm2] = blocksOf(snippet('a', 'vm-2'));
+    const [, vm2Copy] = blocksOf(snippet('b', 'vm-2'));
+    const text =
+      `# before\n\n${gw}\n\n${vm1}\n# middle\n\n${gwCopy}\n\n${vm1Copy}\n\n` +
+      `${vm2}\n\n${vm2Copy}\n# after\n`;
+    const [newGw, newVm1] = blocksOf(snippet('dev', 'vm-1'));
+    expect(mergeConfig(text, snippet('dev', 'vm-1'))).toBe(
+      `# before\n\n${newGw}\n\n${newVm1}\n# middle\n\n${vm2}\n\n${vm2Copy}\n# after\n`,
+    );
+  });
+
+  // OpenSSH ends a stanza at the next Host or Match line, not at a comment, so
+  // a directive after a copy's end marker belongs to the copy's last Host.
+  const copyFollowedBy = (tail: string) => {
+    const snippet = (host: string) => configSnippet(host, 'vm-1', gateway({}), KH, host);
+    return (
+      `${mergeConfig('Host work\n  User me\n', snippet('dev'))}\n` +
+      `Host *\n  ServerAliveInterval 30\n\n${snippet('stale')}${tail}`
+    );
+  };
+
+  it('keeps a copy whose stanza goes on past its end marker, with what follows it', () => {
+    const snippet = configSnippet('dev', 'vm-1', gateway({}), KH, 'dev');
+    const [, staleVm1] = blocksOf(configSnippet('stale', 'vm-1', gateway({}), KH, 'stale'));
+    const text = copyFollowedBy('ForwardAgent yes\n');
+    const merged = mergeConfig(text, snippet);
+    expect(merged).toBe(
+      `${mergeConfig('Host work\n  User me\n', snippet)}\n` +
+        `Host *\n  ServerAliveInterval 30\n\n${staleVm1}\nForwardAgent yes\n`,
+    );
+    expect(merged).not.toMatch(/ServerAliveInterval 30\n+ForwardAgent/);
+    expect(mergeConfig(merged, snippet)).toBe(merged);
+  });
+
+  it.each([
+    ['nothing', ''],
+    ['blank and comment lines', '\n  \t\n# a note\n   # another\n'],
+    ['blank lines and then a Host line', '\n# mine\nHost other\n  ForwardAgent yes\n'],
+    ['a Match line', 'Match host other\n  ForwardAgent yes\n'],
+  ])('still removes a copy followed by %s', (_, tail) => {
+    const snippet = configSnippet('dev', 'vm-1', gateway({}), KH, 'dev');
+    expect(mergeConfig(copyFollowedBy(tail), snippet)).toBe(
+      `${mergeConfig('Host work\n  User me\n', snippet)}\n` +
+        `Host *\n  ServerAliveInterval 30\n${tail}`,
+    );
+  });
+
+  // A begin marker whose end marker is gone runs on to a later copy's end
+  // marker, which OpenSSH does not care about but writtenHosts reads as the
+  // orphan's own: removing that copy would hide the orphan's aliases from the
+  // name-clash checks. The removal stops at the orphan.
+  it('keeps a copy that lost its end marker, and everything after it', () => {
+    const snippet = (host: string, id: string) => configSnippet(host, id, gateway({}), KH, host);
+    const [gw, vm1] = blocksOf(snippet('old', 'vm-1'));
+    const [, brokenFull] = blocksOf(snippet('broken', 'vm-1'));
+    const broken = brokenFull.slice(0, brokenFull.lastIndexOf('\n'));
+    expect(broken).not.toContain('<<<');
+    const [, vm2] = blocksOf(snippet('a', 'vm-2'));
+    const [, later] = blocksOf(snippet('later', 'vm-1'));
+    const tail = `${broken}\n\n${vm2}\n\nHost mine\n  User x\n\n${later}\n`;
+    const text = `${WORK}\n${gw}\n\n${vm1}\n\n${tail}`;
+    const [newGw, newVm1] = blocksOf(snippet('dev', 'vm-1'));
+    const merged = mergeConfig(text, snippet('dev', 'vm-1'));
+    expect(merged).toBe(`${WORK}\n${newGw}\n\n${newVm1}\n\n${tail}`);
+    expect(mergeConfig(merged, snippet('dev', 'vm-1'))).toBe(merged);
+  });
+
+  it('removes a whole copy before a copy that lost its end marker', () => {
+    const snippet = (host: string) => configSnippet(host, 'vm-1', gateway({}), KH, host);
+    const [gw, vm1] = blocksOf(snippet('old'));
+    const [, stale] = blocksOf(snippet('stale'));
+    const [, brokenFull] = blocksOf(snippet('broken'));
+    const broken = brokenFull.slice(0, brokenFull.lastIndexOf('\n'));
+    const [, later] = blocksOf(snippet('later'));
+    const tail = `${broken}\n\n${later}\n`;
+    const text = `${WORK}\n${gw}\n\n${vm1}\n\n${stale}\n\n${tail}`;
+    const [newGw, newVm1] = blocksOf(snippet('dev'));
+    expect(mergeConfig(text, snippet('dev'))).toBe(`${WORK}\n${newGw}\n\n${newVm1}\n\n${tail}`);
+  });
+
+  it('keeps a hand-written stanza after a stray gateway begin marker', () => {
+    const snippet = (host: string) => configSnippet(host, 'vm-1', gateway({}), KH, host);
+    const prod = 'Host prod\n  ProxyJump bastion\n  StrictHostKeyChecking yes\n';
+    const stray = `\n# >>> mandala gateway >>>\n# half\n\n${prod}`;
+    const [staleGw] = blocksOf(snippet('stale'));
+    const text = `${mergeConfig(WORK, snippet('old'))}${stray}\n${snippet('stale')}`;
+    const merged = mergeConfig(text, snippet('dev'));
+    // The stray marker borrows the stale gateway copy's end marker, so that
+    // copy stays; the stale computer copy after it goes.
+    expect(merged).toBe(`${mergeConfig(WORK, snippet('dev'))}${stray}\n${staleGw}\n`);
+    expect(merged).not.toContain('stale');
+    expect(mergeConfig(merged, snippet('dev'))).toBe(merged);
+  });
+
+  // The regression round 2 of this change made: the orphan below borrows the
+  // stale copy's end marker, and removing that copy dropped `dev` from
+  // writtenHosts while OpenSSH still routed `ssh dev` to vm-1.
+  describe('with a copy that lost its end marker before a whole copy', () => {
+    const as = (id: string, name: string) => (call: Call) => {
+      const c = { ...COMPUTER, id, name };
+      if (call.path === '/computers') return json([c]);
+      if (call.path === `/computers/${id}`) return json(c);
+      return anyRoute(call);
+    };
+    const orphanHome = async () => {
+      const home = await tempDir();
+      fs.mkdirSync(join(home, '.ssh'));
+      const file = join(home, '.ssh', 'config');
+      const kh = knownHostsPath(home);
+      const snippet = (host: string) => configSnippet(host, 'vm-1', gateway({}), kh, host);
+      const [, devFull] = blocksOf(snippet('dev'));
+      const orphan = devFull.slice(0, devFull.lastIndexOf('\n'));
+      const [, stale] = blocksOf(snippet('stale'));
+      fs.writeFileSync(file, `${mergeConfig(WORK, snippet('a'))}\n${orphan}\n\n${stale}\n`);
+      return { home, file, snippet };
+    };
+
+    it("keeps the orphan's aliases in writtenHosts", async () => {
+      const { file, snippet } = await orphanHome();
+      const before = fs.readFileSync(file, 'utf8');
+      const hosts = [
+        { id: 'vm-1', hosts: ['a'] },
+        { id: 'vm-1', hosts: ['dev', 'stale'] },
+        { id: 'vm-1', hosts: ['stale'] },
+      ];
+      expect(writtenHosts(before)).toEqual(hosts);
+      const merged = mergeConfig(before, snippet('a'));
+      expect(merged).toBe(before);
+      expect(writtenHosts(merged)).toEqual(hosts);
+    });
+
+    it("does not give the orphan's alias to another computer", async () => {
+      const { home, file } = await orphanHome();
+      const before = fs.readFileSync(file, 'utf8');
+      const first = await cli(['ssh-config', 'vm-1', '--write'], {
+        home,
+        respond: as('vm-1', 'a'),
+      });
+      expect(first.code).toBe(0);
+      expect(first.out).toBe(`already up to date: Host a in ${file}\nconnect with: ssh a\n`);
+      expect(fs.readFileSync(file, 'utf8')).toBe(before);
+      const second = await cli(['ssh-config', 'vm-2', '--write'], {
+        home,
+        respond: as('vm-2', 'dev'),
+      });
+      expect(second.code).toBe(0);
+      expect(second.err).toBe(
+        'mandala: a block in ~/.ssh/config already uses the name dev for another computer; using Host vm-2 instead\n',
+      );
+      expect(second.out).toBe(`wrote Host vm-2 in ${file}\nconnect with: ssh vm-2\n`);
+      const after = writtenHosts(fs.readFileSync(file, 'utf8'));
+      expect(after.filter((b) => b.hosts.includes('dev')).map((b) => b.id)).toEqual(['vm-1']);
+      expect(after.at(-1)).toEqual({ id: 'vm-2', hosts: ['vm-2'] });
+    });
+  });
+});
+
+describe('ssh-config over a config that is not UTF-8', () => {
+  const named = (name: string) => (call: Call) =>
+    call.path === '/computers' ? json([{ ...COMPUTER, name }]) : anyRoute(call);
+  /** `# café` in Latin-1: 0xE9 is not valid UTF-8 on its own. */
+  const LATIN1 = Buffer.concat([Buffer.from('# caf'), Buffer.from([0xe9]), Buffer.from('\n')]);
+  const homeWith = async (rest: string) => {
+    const home = await tempDir();
+    fs.mkdirSync(join(home, '.ssh'));
+    const file = join(home, '.ssh', 'config');
+    const bytes = Buffer.concat([LATIN1, Buffer.from(rest)]);
+    fs.writeFileSync(file, bytes);
+    return { home, file, bytes };
+  };
+
+  it.each([
+    ['no block', () => 'Host work\n  User me\n'],
+    [
+      'a block under another Host',
+      () => mergeConfig('', configSnippet('old', 'vm-1', gateway({}), KH, 'old')),
+    ],
+  ])('refuses --write and leaves the file byte for byte, over %s', async (_, rest) => {
+    const { home, file, bytes } = await homeWith(rest());
+    const refusal = `${file} holds a byte that is not valid UTF-8; fix that byte, then run again`;
+    const r = await cli(['ssh-config', 'vm-1', '--write'], { home, respond: named('dev') });
+    expect(r.code).toBe(1);
+    expect(r.out).toBe('');
+    expect(r.err).toBe(`mandala: ${refusal}\n`);
+    const asJson = await cli(['ssh-config', 'vm-1', '--write', '--json'], {
+      home,
+      respond: named('dev'),
+    });
+    expect(asJson.code).toBe(1);
+    expect(JSON.parse(asJson.out || asJson.err).error).toMatchObject({
+      code: 'invalid_arguments',
+      message: refusal,
+    });
+    expect(fs.readFileSync(file).equals(bytes)).toBe(true);
+    // A refused --write has no other effect either.
+    expect(fs.existsSync(knownHostsPath(home))).toBe(false);
+    const printed = await cli(['ssh-config', 'vm-1'], { home, respond: named('dev') });
+    expect(printed.code).toBe(0);
+    expect(printed.out).toBe(
+      configSnippet('dev', 'vm-1', gateway({}), knownHostsPath(home), 'dev'),
+    );
+    expect(fs.readFileSync(file).equals(bytes)).toBe(true);
+  });
+
+  it('writeConfig refuses it with invalid_arguments, even when nothing would change', async () => {
+    const snippet = configSnippet('dev', 'vm-1', gateway({}), KH, 'dev');
+    for (const rest of ['Host work\n', snippet]) {
+      const { file, bytes } = await homeWith(rest);
+      let thrown: unknown;
+      try {
+        writeConfig(file, snippet);
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown).toBeInstanceOf(CliError);
+      expect((thrown as CliError).code).toBe('invalid_arguments');
+      expect(fs.readFileSync(file).equals(bytes)).toBe(true);
+    }
+  });
+
+  it("still sees another computer's block under the name", async () => {
+    const { home, file, bytes } = await homeWith(
+      mergeConfig('', configSnippet('dev', 'vm-other', gateway({}), KH, 'dev')),
+    );
+    const r = await cli(['ssh-config', 'vm-1'], { home, respond: named('dev') });
+    expect(r.code).toBe(0);
+    expect(r.err).toBe(
+      'mandala: a block in ~/.ssh/config already uses the name dev for another computer; using Host vm-1 instead\n',
+    );
+    expect(r.out).toContain('\nHost vm-1\n');
+    expect(fs.readFileSync(file).equals(bytes)).toBe(true);
+  });
+
+  it("refuses the move for two computers named after each other's ids", async () => {
+    const as = (id: string, name: string) => (call: Call) => {
+      const c = { ...COMPUTER, id, name };
+      if (call.path === '/computers') return json([c]);
+      if (call.path === `/computers/${id}`) return json(c);
+      return anyRoute(call);
+    };
+    const home = await tempDir();
+    fs.mkdirSync(join(home, '.ssh'));
+    const file = join(home, '.ssh', 'config');
+    fs.writeFileSync(file, 'Host work\n  User me\n');
+    const first = await cli(['ssh-config', 'vm-1', '--write'], {
+      home,
+      respond: as('vm-1', 'vm-other'),
+    });
+    expect(first.code).toBe(0);
+    const bytes = Buffer.concat([LATIN1, fs.readFileSync(file)]);
+    fs.writeFileSync(file, bytes);
+    const refusal =
+      'a block in ~/.ssh/config for computer vm-1 already uses Host vm-other, and ~/.ssh/config holds a byte that is not valid UTF-8; fix that byte, then run again';
+    for (const mode of [[], ['--write']]) {
+      const r = await cli(['ssh-config', 'vm-other', ...mode], {
+        home,
+        respond: as('vm-other', 'vm-1'),
+      });
+      expect(r.code).toBe(1);
+      expect(r.out).toBe('');
+      expect(r.err).toBe(`mandala: ${refusal}\n`);
+    }
+    const asJson = await cli(['ssh-config', 'vm-other', '--write', '--json'], {
+      home,
+      respond: as('vm-other', 'vm-1'),
+    });
+    expect(asJson.code).toBe(1);
+    expect(JSON.parse(asJson.out || asJson.err).error).toMatchObject({
+      code: 'conflict',
+      message: refusal,
+    });
+    expect(fs.readFileSync(file).equals(bytes)).toBe(true);
+  });
+
+  it('keeps a byte order mark on --write', async () => {
+    const home = await tempDir();
+    fs.mkdirSync(join(home, '.ssh'));
+    const file = join(home, '.ssh', 'config');
+    const bom = Buffer.from([0xef, 0xbb, 0xbf]);
+    fs.writeFileSync(file, Buffer.concat([bom, Buffer.from('Host work\n  User me\n')]));
+    const r = await cli(['ssh-config', 'vm-1', '--write'], { home, respond: named('dev') });
+    expect(r.code).toBe(0);
+    const after = fs.readFileSync(file);
+    expect(after.subarray(0, 3).equals(bom)).toBe(true);
+    expect(after.subarray(3).toString('utf8')).toBe(
+      mergeConfig(
+        'Host work\n  User me\n',
+        configSnippet('dev', 'vm-1', gateway({}), knownHostsPath(home), 'dev'),
+      ),
+    );
+  });
+});
+
 describe('ssh-config against a hand-edited block', () => {
   const named = (name: string) => (call: Call) =>
     call.path === '/computers' ? json([{ ...COMPUTER, name }]) : anyRoute(call);

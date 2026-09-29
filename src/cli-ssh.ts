@@ -226,13 +226,57 @@ export function pinnedKnownHosts(current: string, gw: Gateway): string {
 }
 
 /**
- * The ssh config at `file`, its line endings made `\n`, or `undefined` when
- * there is none. A file saved with CRLF (or lone CR) line endings holds its
- * marker lines just the same, so `\r\n` and `\r` are read as `\n`:
- * otherwise no written block would be found in it, and `--write` would add a
- * second one beside each.
+ * `bytes` decoded as UTF-8, or `undefined` when one is not valid UTF-8. A
+ * leading byte order mark is kept, so a file written back still has it.
  */
-const readConfig = (file: string): string | undefined => readIfThere(file)?.replace(/\r\n?/g, '\n');
+function strictUtf8(bytes: Buffer): string | undefined {
+  try {
+    return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The ssh config `bytes` as text, its line endings made `\n`, and whether a
+ * byte in them is not valid UTF-8 (read as U+FFFD). A file saved with CRLF
+ * (or lone CR) line endings holds its marker lines just the same, so `\r\n`
+ * and `\r` are read as `\n`: otherwise no written block would be found in
+ * it, and `--write` would add a second one beside each.
+ */
+function configText(bytes: Buffer): { text: string; undecodable: boolean } {
+  const strict = strictUtf8(bytes);
+  return {
+    text: (strict ?? bytes.toString('utf8')).replace(/\r\n?/g, '\n'),
+    undecodable: strict === undefined,
+  };
+}
+
+/** The refusal for an ssh config at `file` that `--write` cannot rewrite intact. */
+const notUtf8 = (file: string): CliError =>
+  new CliError(
+    'invalid_arguments',
+    `${file} holds a byte that is not valid UTF-8; fix that byte, then run again`,
+  );
+
+/**
+ * The ssh config at `file` as `configText` reads it, or `undefined` when
+ * there is none. A byte that is not valid UTF-8 is refused with
+ * `invalid_arguments`: read as U+FFFD, writing the text back would put that
+ * in its place.
+ */
+function readConfig(file: string): string | undefined {
+  let bytes: Buffer;
+  try {
+    bytes = fs.readFileSync(file);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    throw error;
+  }
+  const { text, undecodable } = configText(bytes);
+  if (undecodable) throw notUtf8(file);
+  return text;
+}
 
 /**
  * Make `file` pin the gateway, keeping every computer key already in it.
@@ -617,10 +661,73 @@ export function writtenHosts(text: string): { id: string; hosts: string[] }[] {
 }
 
 /**
+ * Whether the lines of `text` after the one `at` ends (an end marker's), up to
+ * the next `Host` or `Match` line or the end, are all blank or comments: that
+ * the stanza the marker closes ends there too. OpenSSH does not end a stanza
+ * at a comment, so an unmarked directive after the marker still belongs to the
+ * block's last `Host`.
+ */
+function stanzaEndsAt(text: string, at: number): boolean {
+  let from = at;
+  while (from < text.length) {
+    // `at` is the end marker's end: the line break there ends its line.
+    const start = text[from] === '\n' ? from + 1 : from;
+    const stop = text.indexOf('\n', start);
+    const line = text.slice(start, stop < 0 ? text.length : stop);
+    if (hostLineArgs(line) !== undefined || /^[ \t]*match(?:[ \t=]|$)/i.test(line)) return true;
+    if (!/^[ \t]*(?:#|[ \t\r\f]*$)/.test(line)) return false;
+    if (stop < 0) break;
+    from = stop;
+  }
+  return true;
+}
+
+/**
+ * `text` without any block for `label` that starts at `from` or later, save
+ * one whose last stanza goes on past its end marker (see
+ * {@link stanzaEndsAt}), which is left where it stands. A begin marker for
+ * `label` with no end marker of its own stops the removal there: it and every
+ * copy after it are left as they are. Each removed block goes with its end
+ * marker's line break and, when a blank line comes before it, that blank
+ * line: the shape an append left.
+ */
+function withoutLaterCopies(text: string, label: string, from: number): string {
+  let out = text;
+  let at = from;
+  for (let found = findBlock(out, label, at); found; found = findBlock(out, label, at)) {
+    let [start, end] = found;
+    // A begin marker whose end marker was lost runs on to a later copy's end
+    // marker, over whatever stands between, so another block begins inside
+    // the span. Stop there: removing the later copy would take the end marker
+    // the orphan borrows, and with it the orphan's aliases from writtenBlocks
+    // (so from the name-clash checks) while OpenSSH still reads its stanza.
+    if (out.slice(start, end).includes('\n# >>> mandala ')) break;
+    if (!stanzaEndsAt(out, end)) {
+      at = end;
+      continue;
+    }
+    if (out[end] === '\n') end += 1;
+    if (start >= 2 && out[start - 1] === '\n' && out[start - 2] === '\n') start -= 1;
+    out = out.slice(0, start) + out.slice(end);
+    at = start;
+  }
+  return out;
+}
+
+/**
  * `current` with each marked block of `snippet` replaced, or appended.
  *
  * Everything outside the markers is kept byte for byte. A block already there
- * is replaced where it stands, so writing twice changes nothing.
+ * is replaced where it stands, so writing twice changes nothing. A later copy
+ * of a block `snippet` carries (one an earlier version appended to a CRLF
+ * config, which it did not read as holding the first) is removed, with the
+ * blank line before it, unless an unmarked directive follows it before the
+ * next `Host` or `Match` line: removing that copy would move the directive
+ * under another stanza, so it is left as it is. A later begin marker with no
+ * end marker of its own is left as it is, with every copy after it: it reads
+ * the next copy's end marker as its own, so removing that copy would hide the
+ * aliases under it from {@link writtenHosts}. Another label's copies are left
+ * as they are.
  */
 export function mergeConfig(current: string, snippet: string): string {
   let text = current;
@@ -630,6 +737,7 @@ export function mergeConfig(current: string, snippet: string): string {
     const block = snippet.slice(own[0], own[1]);
     const found = findBlock(text, label);
     if (found) {
+      text = withoutLaterCopies(text, label, found[1]);
       text = text.slice(0, found[0]) + block + text.slice(found[1]);
       continue;
     }
@@ -644,12 +752,14 @@ export function mergeConfig(current: string, snippet: string): string {
  * Merge `snippet` into the ssh config at `file`. Whether it changed.
  *
  * A missing file is created 0600 (and its directory 0700); an existing one
- * keeps its mode.
+ * keeps its mode. One holding a byte that is not valid UTF-8 is refused with
+ * `invalid_arguments` and not changed.
  */
 export function writeConfig(file: string, snippet: string): boolean {
   // Read with its line endings made `\n`, so a CRLF file's blocks are found
   // and replaced; a changed file is written back with `\n` endings, and an
-  // unchanged one is left as it is.
+  // unchanged one is left as it is. A file holding a byte that is not valid
+  // UTF-8 is refused, changed or not, and left as it is.
   const current = readConfig(file);
   const mode = current === undefined ? undefined : fs.statSync(file).mode & 0o7777;
   const merged = mergeConfig(current ?? '', snippet);
@@ -950,19 +1060,22 @@ export async function sshAccessCommand(
  * The blocks in the ssh config at `file` written for computers other than
  * `computerId`, as `writtenBlocks` reads them, and the text they stand in
  * (its line endings made `\n`). A file that is missing or cannot be read
- * holds none.
+ * holds none. A byte that is not valid UTF-8 is read as U+FFFD, so the
+ * blocks are still seen, and `undecodable` says so: that text must never be
+ * written back.
  */
 function otherWrittenBlocks(
   file: string,
   computerId: string,
-): { text: string; blocks: WrittenBlock[] } {
-  let text: string | undefined;
+): { text: string; blocks: WrittenBlock[]; undecodable: boolean } {
+  let bytes: Buffer;
   try {
-    text = readConfig(file) ?? '';
+    bytes = fs.readFileSync(file);
   } catch {
-    return { text: '', blocks: [] };
+    return { text: '', blocks: [], undecodable: false };
   }
-  return { text, blocks: writtenBlocks(text).filter((b) => b.id !== computerId) };
+  const { text, undecodable } = configText(bytes);
+  return { text, blocks: writtenBlocks(text).filter((b) => b.id !== computerId), undecodable };
 }
 
 /** Whether `block` has `host` among its `Host` aliases, compared without regard to case. */
@@ -1016,7 +1129,7 @@ export async function sshConfigCommand(
   // `ssh <name>` whenever it came first. This computer's own block is the one
   // --write replaces, so it never counts.
   const file = path.join(home, '.ssh', 'config');
-  const { text: config, blocks: others } = otherWrittenBlocks(file, computer.id);
+  const { text: config, blocks: others, undecodable } = otherWrittenBlocks(file, computer.id);
   const folded = computer.name.toLowerCase();
   let reason: string | undefined;
   if (host !== computer.id) {
@@ -1062,6 +1175,13 @@ export async function sshConfigCommand(
       holder.hostLines[0]!.length === 1 &&
       SSH_ID.test(holder.id) &&
       !others.some((b) => b !== holder && (b.id === holder.id || usesHost(b, holder.id)));
+    // The move rewrites the file, which a byte that is not valid UTF-8 rules
+    // out (see readConfig), so say why before pointing at --write.
+    if (mutual && undecodable)
+      throw new CliError(
+        'conflict',
+        `a block in ~/.ssh/config for computer ${holder.id} already uses Host ${host}, and ~/.ssh/config holds a byte that is not valid UTF-8; fix that byte, then run again`,
+      );
     if (!mutual)
       throw new CliError(
         'conflict',
@@ -1075,6 +1195,9 @@ export async function sshConfigCommand(
     moved = holder;
   }
   if (reason) output.diagnostic(`mandala: ${reason}; using Host ${computer.id} instead`);
+  // writeConfig would refuse the file too; refusing here also leaves the
+  // known_hosts file untouched.
+  if (write && undecodable) throw notUtf8(file);
   const knownHosts = knownHostsPath(home);
   ensureKnownHosts(gw, knownHosts);
   const snippet = configSnippet(computer.name, computer.id, gw, knownHosts, host);
