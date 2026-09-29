@@ -1308,6 +1308,7 @@ describe('ssh-config under a name a block in ~/.ssh/config already uses', () => 
       expect(writtenHosts(fs.readFileSync(file, 'utf8'))).toEqual([
         { id: 'vm-other', host: expect.stringMatching(/^vm-1$/i) },
       ]);
+      expect(fs.existsSync(knownHostsPath(home))).toBe(false);
     };
 
     it.each(['vm-1', 'VM-1'])(
@@ -1331,6 +1332,10 @@ describe('ssh-config under a name a block in ~/.ssh/config already uses', () => 
             { ...COMPUTER, name: 'dev' },
             { ...COMPUTER, id: 'vm-2', name: 'dev' },
           ]),
+      ],
+      [
+        'ssh would read the name as another destination',
+        () => json([{ ...COMPUTER, name: 'github.com' }]),
       ],
     ])('refuses when the id is the Host because %s', async (_, listing) => {
       const { home, file } = await homeWith('vm-1');
