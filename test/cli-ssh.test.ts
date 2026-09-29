@@ -17,7 +17,6 @@ import {
   gateway,
   hostAlias,
   identityOptions,
-  isInetAtonAddress,
   keyPath,
   knownHostsPath,
   mergeConfig,
@@ -25,10 +24,12 @@ import {
   pinnedKnownHosts,
   proxyCommand,
   readPublicKey,
+  readsAsIPv4,
   type SshRuntime,
   shellWord,
   sshArgv,
   writeConfig,
+  writtenHosts,
 } from '../src/cli-ssh.js';
 import { Client, ConflictError, ValidationError } from '../src/index.js';
 import {
@@ -428,6 +429,10 @@ Host ${host}
     expect(hostAlias('dev.box_1', 'vm-2')).toBe('dev.box_1');
   });
 
+  // Every form some resolver reads, macOS's looser ones included: it takes
+  // `08.0.0.1` as 8.0.0.1, `192.168.1.09` as an address and `0x.1` as
+  // 0.0.0.1, where inet_aton refuses all three. No range check: a part too
+  // big for its bytes still reads as an address to be safe.
   it.each([
     ['10.0.0.5', true],
     ['10.5', true],
@@ -438,28 +443,80 @@ Host ${host}
     ['167772165', true],
     ['1.16777215', true],
     ['1.2.65535', true],
-    ['1.16777216', false],
-    ['1.2.65536', false],
-    ['1.2.3.256', false],
-    ['256.1', false],
-    ['08.0.0.1', false],
-    ['0x', false],
-    ['0x.0.0.1', false],
+    ['08.0.0.1', true],
+    ['192.168.1.09', true],
+    ['0x.1', true],
+    ['0X.1', true],
+    ['0x.0.0.1', true],
+    ['0x', true],
+    ['1.2.3.256', true],
+    ['256.1', true],
+    ['1.16777216', true],
     ['1..2', false],
     ['1.2.3.', false],
     ['1.2.3.4.5', false],
     ['', false],
-  ])('reads %s as an IPv4 address the way inet_aton does: %s', (text, want) => {
-    expect(isInetAtonAddress(text)).toBe(want);
+    ['ubuntu-24.04', false],
+    ['a.1', false],
+    ['0x1g.1', false],
+  ])('reads %s as an IPv4 address: %s', (text, want) => {
+    expect(readsAsIPv4(text)).toBe(want);
   });
 
   it('refuses a name ssh would read as another destination, and only such a name', () => {
-    const taken = ['github.com', 'GitHub.COM', 'github.com.', 'foo.xn--p1ai', '10.5', '0x1f'];
+    const taken = [
+      'github.com',
+      'GitHub.COM',
+      'github.com.',
+      'foo.xn--p1ai',
+      '10.5',
+      '0x1f',
+      '08.0.0.1',
+      '192.168.1.09',
+      '0x.1',
+      '0X.1',
+    ];
     for (const name of taken) expect(namesAnotherDestination(name, []), name).toBe(true);
     for (const name of ['demo', 'ubuntu-24.04', 'py3.12', 'web-1', '1.2.3.4.5', 'x.y2'])
       expect(namesAnotherDestination(name, []), name).toBe(false);
     expect(namesAnotherDestination('VM-2', [{ id: 'vm-2' }])).toBe(true);
     expect(namesAnotherDestination('vm-3', [{ id: 'vm-2' }])).toBe(false);
+  });
+
+  it('lists the computer blocks written in a config, and only those', () => {
+    const text = [
+      'Host work',
+      '  User me',
+      '# >>> mandala computer vm-9 >>>',
+      'Host outside-the-markers-before',
+      '',
+      GATEWAY_BLOCK,
+      '',
+      computerBlock('dev', 'vm-7'),
+      '',
+      computerBlock('vm-8', 'vm-8'),
+      '# >>> mandala computer vm-6 >>>',
+      'Host never-closed',
+      '# <<< mandala computer vm-5 <<<',
+      'Host after',
+      '',
+    ].join('\n');
+    expect(writtenHosts(text)).toEqual([
+      { id: 'vm-7', host: 'dev' },
+      { id: 'vm-8', host: 'vm-8' },
+    ]);
+    expect(writtenHosts(mergeConfig('', snippet))).toEqual([{ id: 'vm-1', host: 'demo' }]);
+    expect(writtenHosts('')).toEqual([]);
+    // A marker must stand on its own line, as mergeConfig reads it.
+    expect(writtenHosts(` ${computerBlock('dev', 'vm-7')}\n`)).toEqual([]);
+    expect(writtenHosts(computerBlock('dev', 'vm-7').replace('Host dev\n', ''))).toEqual([
+      { id: 'vm-7', host: '' },
+    ]);
+    // A begin marker that does not end its line opens no block, so the block
+    // after it is listed once.
+    expect(
+      writtenHosts(`# >>> mandala computer vm-7 >>>\r\n${computerBlock('dev', 'vm-7')}\n`),
+    ).toEqual([{ id: 'vm-7', host: 'dev' }]);
   });
 
   it('merges: appends once, replaces in place, keeps everything else byte for byte', () => {
@@ -1070,6 +1127,9 @@ describe('ssh-config under a name ssh would read as another destination', () => 
     '0x0A.0.0.5',
     '167772165',
     '0x0A000005',
+    '08.0.0.1',
+    '192.168.1.09',
+    '0x.1',
     'localhost',
     'LOCALHOST',
     'mandala-gateway',
@@ -1149,6 +1209,81 @@ describe('ssh-config under a name ssh would read as another destination', () => 
     expect(r.err).toBe(
       'mandala: another computer is also named github.com; using Host vm-1 instead\n',
     );
+  });
+});
+
+describe('ssh-config under a name a block in ~/.ssh/config already uses', () => {
+  const named = (name: string) => (call: Call) =>
+    call.path === '/computers' ? json([{ ...COMPUTER, name }]) : anyRoute(call);
+  /** A home whose ssh config holds a block for vm-other, a computer the listing lacks. */
+  const homeWith = async (host: string, id = 'vm-other') => {
+    const home = await tempDir();
+    fs.mkdirSync(join(home, '.ssh'));
+    const file = join(home, '.ssh', 'config');
+    const kh = knownHostsPath(home);
+    fs.writeFileSync(
+      file,
+      mergeConfig('Host work\n  User me\n', configSnippet(host, id, gateway({}), kh, host)),
+    );
+    return { home, file };
+  };
+
+  it.each([
+    ['dev', 'dev'],
+    ['DEV', 'dev'],
+    ['dev', 'Dev'],
+    ['vm-other', 'dev'],
+    ['VM-Other', 'dev'],
+  ])('writes %s under the computer id when another block uses Host %s', async (name, written) => {
+    const { home, file } = await homeWith(written);
+    const before = fs.readFileSync(file, 'utf8');
+    const note = `mandala: a block in ~/.ssh/config already uses the name ${name} for another computer; using Host vm-1 instead\n`;
+    const printed = await cli(['ssh-config', 'vm-1'], { home, respond: named(name) });
+    expect(printed.code).toBe(0);
+    expect(printed.err).toBe(note);
+    expect(printed.out).toContain('# >>> mandala computer vm-1 >>>\nHost vm-1\n  HostName vm-1\n');
+    expect(fs.readFileSync(file, 'utf8')).toBe(before);
+    const asJson = await cli(['ssh-config', 'vm-1', '--json'], { home, respond: named(name) });
+    expect(asJson.err).toBe(note);
+    const data = JSON.parse(asJson.out).data;
+    expect(data.host).toBe('vm-1');
+    expect(data.config).toContain('\nHost vm-1\n');
+    const wrote = await cli(['ssh-config', 'vm-1', '--write'], { home, respond: named(name) });
+    expect(wrote.err).toBe(note);
+    expect(wrote.out).toBe(`wrote Host vm-1 in ${file}\nconnect with: ssh vm-1\n`);
+    expect(writtenHosts(fs.readFileSync(file, 'utf8'))).toEqual([
+      { id: 'vm-other', host: written },
+      { id: 'vm-1', host: 'vm-1' },
+    ]);
+  });
+
+  it("keeps the name when the block under it is the computer's own", async () => {
+    const { home, file } = await homeWith('dev', 'vm-1');
+    const before = fs.readFileSync(file, 'utf8');
+    const r = await cli(['ssh-config', 'vm-1', '--write'], { home, respond: named('dev') });
+    expect(r.code).toBe(0);
+    expect(r.err).toBe('');
+    expect(r.out).toBe(`already up to date: Host dev in ${file}\nconnect with: ssh dev\n`);
+    expect(fs.readFileSync(file, 'utf8')).toBe(before);
+  });
+
+  it('keeps the name when no block uses it, or there is no config to read', async () => {
+    const { home } = await homeWith('other');
+    const r = await cli(['ssh-config', 'vm-1', '--json'], { home, respond: named('dev') });
+    expect(r.err).toBe('');
+    expect(JSON.parse(r.out).data.host).toBe('dev');
+    const bare = await cli(['ssh-config', 'vm-1', '--json'], { respond: named('dev') });
+    expect(bare.err).toBe('');
+    expect(JSON.parse(bare.out).data.host).toBe('dev');
+    const unreadable = await tempDir();
+    fs.mkdirSync(join(unreadable, '.ssh', 'config'), { recursive: true });
+    const r2 = await cli(['ssh-config', 'vm-1', '--json'], {
+      home: unreadable,
+      respond: named('dev'),
+    });
+    expect(r2.code).toBe(0);
+    expect(r2.err).toBe('');
+    expect(JSON.parse(r2.out).data.host).toBe('dev');
   });
 });
 
