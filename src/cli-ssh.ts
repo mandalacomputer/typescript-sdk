@@ -408,25 +408,19 @@ export const hostAlias = (name: string, computerId: string): string =>
   name && /^[A-Za-z0-9._-]+$/.test(name) && !name.startsWith('-') ? name : computerId;
 
 /**
- * Whether the resolver reads `text` as an IPv4 address, in any form
- * `inet_aton` takes: one to four dot-separated parts, each decimal, `0x` hex
- * or leading-`0` octal, the last filling the bytes the others leave, so `10.5`
- * is 10.0.0.5 and `167772165` is too. Pure: no DNS.
+ * Whether some resolver may read `text` as an IPv4 address: one to four
+ * dot-separated parts, each digits or `0x` and hex digits. That takes in
+ * every form `inet_aton` reads (decimal, `0x` hex, leading-`0` octal, the
+ * last part filling the bytes the others leave, so `10.5` is 10.0.0.5 and
+ * `167772165` is too) and the looser ones macOS reads as well: `08.0.0.1` is
+ * 8.0.0.1 there, `192.168.1.09` an address and `0x.1` 0.0.0.1. No range
+ * check either: refusing a name no resolver would take costs only the name,
+ * missing one some resolver takes lets a block capture that address. Pure:
+ * no DNS.
  */
-export function isInetAtonAddress(text: string): boolean {
+export function readsAsIPv4(text: string): boolean {
   const parts = text.split('.');
-  if (parts.length > 4) return false;
-  const values: number[] = [];
-  for (const part of parts) {
-    const lower = part.toLowerCase();
-    if (/^0x[0-9a-f]+$/.test(lower)) values.push(Number.parseInt(lower.slice(2), 16));
-    else if (/^0[0-7]*$/.test(lower)) values.push(Number.parseInt(lower, 8));
-    else if (/^[1-9][0-9]*$/.test(lower)) values.push(Number(lower));
-    else return false;
-  }
-  const last = values.length - 1;
-  const tail = values[last] ?? Number.NaN;
-  return values.slice(0, last).every((v) => v <= 255) && tail < 256 ** (4 - last);
+  return parts.length <= 4 && parts.every((part) => /^(?:0x[0-9a-f]*|[0-9]+)$/i.test(part));
 }
 
 /**
@@ -434,13 +428,13 @@ export function isInetAtonAddress(text: string): boolean {
  *
  * OpenSSH matches `Host` patterns without regard to case, so these are
  * compared lowercased: the gateway's own alias, `localhost`, a bare number
- * (`ssh 167772165` is 10.0.0.5), any IPv4 address in the forms the resolver
- * reads, a dotted name shaped like a hostname (its last label empty, as in
- * `github.com.`, all letters like a top-level domain, or an `xn--` one), and
- * any listed computer's id, which is that computer's Host when its own name
- * cannot be one. A dotted name whose last label has a digit, such as
- * `ubuntu-24.04`, names no other place: no top-level domain has one. This is
- * mandala-py's rule (OPL-5392).
+ * (`ssh 167772165` is 10.0.0.5), any IPv4 address in the forms a resolver
+ * reads (`readsAsIPv4`), a dotted name shaped like a hostname (its last label
+ * empty, as in `github.com.`, all letters like a top-level domain, or an
+ * `xn--` one), and any listed computer's id, which is that computer's Host
+ * when its own name cannot be one. A dotted name whose last label has a
+ * digit, such as `ubuntu-24.04`, names no other place: no top-level domain
+ * has one. This is mandala-py's rule (OPL-5392).
  */
 export function namesAnotherDestination(
   name: string,
@@ -450,7 +444,7 @@ export function namesAnotherDestination(
   if (folded === GATEWAY_ALIAS || folded === 'localhost') return true;
   if (/^(?:[0-9]+|0x[0-9a-f]*)$/.test(folded)) return true;
   if (folded.includes('.')) {
-    if (isInetAtonAddress(folded)) return true;
+    if (readsAsIPv4(folded)) return true;
     const last = folded.slice(folded.lastIndexOf('.') + 1);
     if (!last || /^[a-z]+$/.test(last) || last.startsWith('xn--')) return true;
   }
@@ -494,11 +488,11 @@ export function configSnippet(
   return `${gatewayBlock}\n\n${computerBlock}\n`;
 }
 
-/** The first marked block for `label` in `text`, as [start, end). */
-function findBlock(text: string, label: string): [number, number] | undefined {
+/** The first marked block for `label` in `text` from `from` on, as [start, end). */
+function findBlock(text: string, label: string, from = 0): [number, number] | undefined {
   const begin = markerBegin(label);
   const end = markerEnd(label);
-  let at = 0;
+  let at = from;
   while (true) {
     const start = text.indexOf(begin, at);
     if (start < 0) return undefined;
@@ -514,6 +508,25 @@ function findBlock(text: string, label: string): [number, number] | undefined {
       from = after;
     }
   }
+}
+
+/**
+ * The computer blocks written in the ssh config `text`: for each
+ * `mandala computer <id>` block whose markers `mergeConfig` would find, its
+ * id and the value of its first `Host` line (`''` when it has none). Only the
+ * marked blocks are read; the gateway's block, one with no end marker and
+ * anything outside the markers are left out.
+ */
+export function writtenHosts(text: string): { id: string; host: string }[] {
+  const written: { id: string; host: string }[] = [];
+  for (const begin of text.matchAll(/^# >>> mandala computer (.+?) >>>$/gm)) {
+    const id = begin[1]!;
+    const found = findBlock(text, `computer ${id}`, begin.index);
+    if (!found || found[0] !== begin.index) continue;
+    const host = /^Host (.+)$/m.exec(text.slice(found[0], found[1]))?.[1]?.trim() ?? '';
+    written.push({ id, host });
+  }
+  return written;
 }
 
 /**
@@ -843,6 +856,24 @@ export async function sshAccessCommand(
   return 0;
 }
 
+/**
+ * The blocks in the ssh config at `file` written for computers other than
+ * `computerId`, as `writtenHosts` reads them. A file that is missing or
+ * cannot be read holds none.
+ */
+function otherWrittenBlocks(file: string, computerId: string): { id: string; host: string }[] {
+  let text: string | undefined;
+  try {
+    text = readIfThere(file);
+  } catch {
+    return [];
+  }
+  return writtenHosts(text ?? '').filter((b) => b.id !== computerId);
+}
+
+/** An id OpenSSH reads as one host, and one that cannot start an option. */
+const SSH_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
 /** `mandala ssh-config <computer> [--write]`. */
 export async function sshConfigCommand(
   computer: Computer,
@@ -853,6 +884,15 @@ export async function sshConfigCommand(
   rt: SshRuntime,
   write: boolean,
 ): Promise<number> {
+  // The id goes into the config text as the marker, HostName, HostKeyAlias
+  // and, on every fallback, the Host, so one that is not a plain host word
+  // (a line break could start a ProxyCommand) is refused before anything is
+  // read, printed or written. mandala-py's `_ssh_id` rule.
+  if (!SSH_ID.test(computer.id))
+    throw new CliError(
+      'invalid_response',
+      `the platform returned a computer id SSH cannot use: ${computer.id}`,
+    );
   const home = rt.home();
   const gw = gateway(io.env, home);
   let host = hostAlias(computer.name, computer.id);
@@ -863,24 +903,42 @@ export async function sshConfigCommand(
   // block under it would take over every connection the user makes there, so
   // a computer named github.com would send their pushes to it (OPL-5392,
   // mandala-py's rule).
+  // The listing holds only this key's account, so the blocks already in
+  // ~/.ssh/config count too: one written for another computer, from another
+  // account say, under this name (or with it as its id) would get
+  // `ssh <name>` whenever it came first. This computer's own block is the one
+  // --write replaces, so it never counts.
+  const file = path.join(home, '.ssh', 'config');
+  const others = otherWrittenBlocks(file, computer.id);
+  const folded = computer.name.toLowerCase();
+  let reason: string | undefined;
   if (host !== computer.id) {
-    const reason =
+    reason =
       !listing || listing.incomplete !== null
         ? "could not check other computers' names"
         : listing.items.some((c) => c.name === computer.name && c.id !== computer.id)
           ? `another computer is also named ${computer.name}`
           : namesAnotherDestination(computer.name, listing.items)
             ? `the name ${computer.name} cannot be a Host, since ssh would also use it for another destination`
-            : undefined;
-    if (reason) {
-      host = computer.id;
-      output.diagnostic(`mandala: ${reason}; using Host ${computer.id} instead`);
-    }
+            : others.some((b) => b.host.toLowerCase() === folded || b.id.toLowerCase() === folded)
+              ? `a block in ~/.ssh/config already uses the name ${computer.name} for another computer`
+              : undefined;
+    if (reason) host = computer.id;
   }
+  // The id is the last Host there is. When another computer's block already
+  // has it as its Host (one named after this computer's id, say), a second
+  // block under it would never be reached: `ssh <id>` would go to that other
+  // computer. Refused, whatever put the id here, before anything is written.
+  const holder = others.find((b) => b.host.toLowerCase() === host.toLowerCase());
+  if (holder)
+    throw new CliError(
+      'conflict',
+      `a block in ~/.ssh/config for computer ${holder.id} already uses Host ${host}; remove that block, then run again`,
+    );
+  if (reason) output.diagnostic(`mandala: ${reason}; using Host ${computer.id} instead`);
   const knownHosts = knownHostsPath(home);
   ensureKnownHosts(gw, knownHosts);
   const snippet = configSnippet(computer.name, computer.id, gw, knownHosts, host);
-  const file = path.join(home, '.ssh', 'config');
   const changed = write ? writeConfig(file, snippet) : null;
   if (output.json)
     return output.result({
