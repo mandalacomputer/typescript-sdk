@@ -79,6 +79,32 @@ This is the summary you read to decide whether to upgrade.
   `HostKeyAlias` and sometimes `Host`, so an id with a line break from the
   API could have added a directive such as `ProxyCommand` to
   `~/.ssh/config`. This is the check `mandala-py ssh-config` already makes.
+- **`mandala ssh-config` reads a `~/.ssh/config` saved with CRLF line
+  endings.** It found none of the blocks it had written in such a file, so a
+  name or id another computer's block already used went unnoticed, and
+  `--write` added a second block beside the one already there instead of
+  replacing it. `--write` now replaces its block in place and writes the file
+  back with LF line endings, as `mandala-py ssh-config` already does; a file
+  it has nothing to change in is left as it is.
+- **`mandala ssh-config` counts every alias of a hand-edited block's `Host`
+  lines**, read the way OpenSSH reads them: `Host dev # mine`, `Host other
+  dev`, `  host=dev`, `Host "dev"`, `Host 'dev'` and a second `Host` line all
+  put `dev` in that block. Only spaces and tabs separate aliases, as for ssh:
+  a no-break space does not, so the `#` after one starts no comment. Only the
+  whole first `Host` line counted before, so a name such a block used could
+  still be written under, and `ssh <name>` went to whichever block came
+  first. Negated patterns (`!dev`) do not count, and a wildcard pattern is
+  compared as written, not expanded.
+- **`mandala ssh-config` no longer refuses forever when two computers are
+  named after each other's ids** (say `vm-1` named `vm-other` and `vm-other`
+  named `vm-1`, in two accounts). The one written second fell back to its id,
+  which the first one's block held, and removing that block only moved the
+  refusal to the other computer. `--write` now puts both under their ids in
+  one write: it changes only the other block's `Host` line, to its id, and a
+  note on stderr says so. Without `--write` it still refuses, and the
+  `conflict` error says that `--write` moves both. A block with more than the
+  one alias the CLI writes, or whose id another block uses as a `Host`, is
+  refused as before.
 
 ## [0.7.0] — 2026-09-27
 

@@ -502,21 +502,76 @@ Host ${host}
       '',
     ].join('\n');
     expect(writtenHosts(text)).toEqual([
-      { id: 'vm-7', host: 'dev' },
-      { id: 'vm-8', host: 'vm-8' },
+      { id: 'vm-7', hosts: ['dev'] },
+      { id: 'vm-8', hosts: ['vm-8'] },
     ]);
-    expect(writtenHosts(mergeConfig('', snippet))).toEqual([{ id: 'vm-1', host: 'demo' }]);
+    expect(writtenHosts(mergeConfig('', snippet))).toEqual([{ id: 'vm-1', hosts: ['demo'] }]);
     expect(writtenHosts('')).toEqual([]);
     // A marker must stand on its own line, as mergeConfig reads it.
     expect(writtenHosts(` ${computerBlock('dev', 'vm-7')}\n`)).toEqual([]);
     expect(writtenHosts(computerBlock('dev', 'vm-7').replace('Host dev\n', ''))).toEqual([
-      { id: 'vm-7', host: '' },
+      { id: 'vm-7', hosts: [] },
     ]);
     // A begin marker that does not end its line opens no block, so the block
     // after it is listed once.
     expect(
       writtenHosts(`# >>> mandala computer vm-7 >>>\r\n${computerBlock('dev', 'vm-7')}\n`),
-    ).toEqual([{ id: 'vm-7', host: 'dev' }]);
+    ).toEqual([{ id: 'vm-7', hosts: ['dev'] }]);
+  });
+
+  it.each([
+    ['Host a b', ['a', 'b']],
+    ['Host vm-1 # note', ['vm-1']],
+    ['Host vm-1 #note b', ['vm-1']],
+    ['Host a#b', ['a#b']],
+    ['  host  x', ['x']],
+    ['\tHOST\tx', ['x']],
+    ['Host=x', ['x']],
+    ['Host = x y', ['x', 'y']],
+    ['Host "x y" z', ['x y', 'z']],
+    ['Host "#x"', ['#x']],
+    ['Host a !b', ['a']],
+    ['Host "!b" c', ['c']],
+    ['Host vm-*', ['vm-*']],
+    ['Host', []],
+    ['Host # only a comment', []],
+    ['Hostname x', []],
+    ['Match host x', []],
+    ['# Host x', []],
+    // OpenSSH splits on space and tab only, so a no-break space is part of an
+    // argument and the `#` after it starts no comment.
+    ['Host other\u00a0# vm-9', ['other\u00a0#', 'vm-9']],
+    ['Host x\u00a0', ['x\u00a0']],
+    ['Host\u00a0x', []],
+    ['Host\fx', []],
+    ['Host x\f', ['x']],
+    // Single quotes quote too, a quote ends only at its own character, and a
+    // backslash escapes a quote, a backslash or (outside quotes) a space.
+    ["Host 'x y' z", ['x y', 'z']],
+    ["Host 'dev'", ['dev']],
+    [`Host 'a"b' "c'd"`, ['a"b', "c'd"]],
+    ['Host de\\"v', ['de"v']],
+    ["Host a\\'b a\\\\b", ["a'b", 'a\\b']],
+    ['Host a\\ b', ['a b']],
+    ['Host "a\\ b"', ['a\\ b']],
+    ['Host a\\x', ['a\\x']],
+    ["Host '#x' y", ['#x', 'y']],
+  ])('reads every alias of a hand-edited Host line: %j', (line, hosts) => {
+    const block = computerBlock('dev', 'vm-7').replace('Host dev', line);
+    expect(writtenHosts(`${block}\n`)).toEqual([{ id: 'vm-7', hosts }]);
+  });
+
+  it('reads a Host line with a long run of spaces before an alias in linear time', () => {
+    const line = `Host a${' '.repeat(100_000)}b${' \t'.repeat(50_000)}`;
+    const block = computerBlock('dev', 'vm-7').replace('Host dev', line);
+    const started = performance.now();
+    expect(writtenHosts(`${block}\n`)).toEqual([{ id: 'vm-7', hosts: ['a', 'b'] }]);
+    expect(performance.now() - started).toBeLessThan(1000);
+  });
+
+  it('reads the aliases of every Host line in a block', () => {
+    const block = computerBlock('dev', 'vm-7').replace('Host dev', 'Host dev\nHost other box');
+    expect(writtenHosts(block)).toEqual([{ id: 'vm-7', hosts: ['dev', 'other', 'box'] }]);
   });
 
   it('merges: appends once, replaces in place, keeps everything else byte for byte', () => {
@@ -1252,8 +1307,8 @@ describe('ssh-config under a name a block in ~/.ssh/config already uses', () => 
     expect(wrote.err).toBe(note);
     expect(wrote.out).toBe(`wrote Host vm-1 in ${file}\nconnect with: ssh vm-1\n`);
     expect(writtenHosts(fs.readFileSync(file, 'utf8'))).toEqual([
-      { id: 'vm-other', host: written },
-      { id: 'vm-1', host: 'vm-1' },
+      { id: 'vm-other', hosts: [written] },
+      { id: 'vm-1', hosts: ['vm-1'] },
     ]);
   });
 
@@ -1290,7 +1345,12 @@ describe('ssh-config under a name a block in ~/.ssh/config already uses', () => 
     const refusal =
       'a block in ~/.ssh/config for computer vm-other already uses Host vm-1; remove that block, then run again';
     /** Every mode refuses: nothing printed, nothing written, the file as it was. */
-    const refusesEveryMode = async (home: string, file: string, respond: Responder) => {
+    const refusesEveryMode = async (
+      home: string,
+      file: string,
+      respond: Responder,
+      hosts: unknown[] = [expect.stringMatching(/^vm-1$/i)],
+    ) => {
       const before = fs.readFileSync(file, 'utf8');
       for (const mode of [[], ['--write']]) {
         const r = await cli(['ssh-config', 'vm-1', ...mode], { home, respond });
@@ -1305,22 +1365,65 @@ describe('ssh-config under a name a block in ~/.ssh/config already uses', () => 
       expect(parsed.data).toBeUndefined();
       expect(parsed.error).toMatchObject({ code: 'conflict', message: refusal });
       expect(fs.readFileSync(file, 'utf8')).toBe(before);
-      expect(writtenHosts(fs.readFileSync(file, 'utf8'))).toEqual([
-        { id: 'vm-other', host: expect.stringMatching(/^vm-1$/i) },
-      ]);
+      expect(writtenHosts(fs.readFileSync(file, 'utf8'))).toEqual([{ id: 'vm-other', hosts }]);
       expect(fs.existsSync(knownHostsPath(home))).toBe(false);
     };
 
-    it.each(['vm-1', 'VM-1'])(
-      'refuses when the name falls back to the id a block uses as Host %s',
-      async (written) => {
-        // vm-other, from another account, is named vm-1; this computer, vm-1,
-        // is named vm-other. The name clashes with that block's id, and the id
-        // with its Host.
-        const { home, file } = await homeWith(written);
-        await refusesEveryMode(home, file, named('vm-other'));
-      },
-    );
+    // The shape where the two computers are named after each other's ids
+    // (vm-other is named vm-1, this computer vm-1 is named vm-other) is
+    // refused only while its block holds more than the one alias the CLI
+    // writes, or its id is another block's Host too: --write moves it to its
+    // id otherwise (see the describe below).
+    it.each([
+      ['a second alias', 'vm-1 spare', ['vm-1', 'spare']],
+      ['a second Host line', 'vm-1\nHost spare', ['vm-1', 'spare']],
+      ['a comment and a second alias', 'VM-1 spare # mine', ['VM-1', 'spare']],
+    ])('refuses when the block named after this id has %s', async (_, written, hosts) => {
+      const { home, file } = await homeWith(written);
+      await refusesEveryMode(home, file, named('vm-other'), hosts);
+    });
+
+    it('refuses when the block named after this id has its own id taken as a Host', async () => {
+      const { home, file } = await homeWith('vm-1');
+      fs.appendFileSync(
+        file,
+        `\n${configSnippet('vm-other', 'vm-3', gateway({}), knownHostsPath(home), 'x vm-other')}`,
+      );
+      const before = fs.readFileSync(file, 'utf8');
+      for (const mode of [[], ['--write'], ['--json'], ['--write', '--json']]) {
+        const r = await cli(['ssh-config', 'vm-1', ...mode], { home, respond: named('vm-other') });
+        expect(r.code).toBe(1);
+        expect(r.out + r.err).toContain(refusal);
+        expect(fs.readFileSync(file, 'utf8')).toBe(before);
+      }
+    });
+
+    it('refuses when the block named after this id has an id that cannot be a Host', async () => {
+      // A hand-edited marker: the id the block would move to is two words.
+      const { home, file } = await homeWith('vm-1', 'vm other');
+      const before = fs.readFileSync(file, 'utf8');
+      const r = await cli(['ssh-config', 'vm-1', '--write'], { home, respond: named('vm other') });
+      expect(r.code).toBe(1);
+      expect(r.err).toBe(
+        'mandala: a block in ~/.ssh/config for computer vm other already uses Host vm-1; remove that block, then run again\n',
+      );
+      expect(fs.readFileSync(file, 'utf8')).toBe(before);
+    });
+
+    it('refuses when two blocks hold the id', async () => {
+      const { home, file } = await homeWith('vm-1');
+      fs.appendFileSync(
+        file,
+        `\n${configSnippet('x', 'vm-3', gateway({}), knownHostsPath(home), 'vm-1')}`,
+      );
+      const before = fs.readFileSync(file, 'utf8');
+      for (const mode of [['--write'], ['--write', '--json']]) {
+        const r = await cli(['ssh-config', 'vm-1', ...mode], { home, respond: named('vm-other') });
+        expect(r.code).toBe(1);
+        expect(r.out + r.err).toContain(refusal);
+        expect(fs.readFileSync(file, 'utf8')).toBe(before);
+      }
+    });
 
     it.each([
       ['the listing is partial', () => json([COMPUTER], { headers: { 'X-GC-Incomplete': '1' } })],
@@ -1343,6 +1446,216 @@ describe('ssh-config under a name a block in ~/.ssh/config already uses', () => 
         call.path === '/computers' ? listing() : anyRoute(call),
       );
     });
+  });
+});
+
+describe("ssh-config for two computers named after each other's ids", () => {
+  // vm-1 is named vm-other and vm-other is named vm-1, in two accounts, so
+  // neither listing shows the other. Whichever is written second falls back
+  // to its id, which the first block holds; ids for both is the one state
+  // in which neither refuses (OPL-5421).
+  const as = (id: string, name: string) => (call: Call) => {
+    const c = { ...COMPUTER, id, name };
+    if (call.path === '/computers') return json([c]);
+    if (call.path === `/computers/${id}`) return json(c);
+    return anyRoute(call);
+  };
+  const A = { id: 'vm-1', respond: as('vm-1', 'vm-other') };
+  const B = { id: 'vm-other', respond: as('vm-other', 'vm-1') };
+  const run = (who: typeof A, home: string, ...mode: string[]) =>
+    cli(['ssh-config', who.id, ...mode], { home, respond: who.respond });
+  const blockOf = (text: string, id: string) =>
+    text.slice(
+      text.indexOf(`# >>> mandala computer ${id} >>>`),
+      text.indexOf(`# <<< mandala computer ${id} <<<`),
+    );
+
+  it.each([
+    ['vm-1 first', A, B],
+    ['vm-other first', B, A],
+  ])('moves both to their ids on --write, %s', async (_, first, second) => {
+    const home = await tempDir();
+    fs.mkdirSync(join(home, '.ssh'));
+    const file = join(home, '.ssh', 'config');
+    fs.writeFileSync(file, 'Host work\n  User me\n');
+    const firstRun = await run(first, home, '--write');
+    expect(firstRun.code).toBe(0);
+    // The first is written under its name, which is the second's id.
+    expect(writtenHosts(fs.readFileSync(file, 'utf8'))).toEqual([
+      { id: first.id, hosts: [second.id] },
+    ]);
+    const before = fs.readFileSync(file, 'utf8');
+    const refusal = `a block in ~/.ssh/config for computer ${first.id} already uses Host ${second.id}, and the two computers are named after each other's ids; run this command with --write to move both to their ids (Host ${first.id} and Host ${second.id})`;
+    const printed = await run(second, home);
+    expect(printed.code).toBe(1);
+    expect(printed.out).toBe('');
+    expect(printed.err).toBe(`mandala: ${refusal}\n`);
+    const asJson = await run(second, home, '--json');
+    expect(asJson.code).toBe(1);
+    const parsed = JSON.parse(asJson.out || asJson.err);
+    expect(parsed.data).toBeUndefined();
+    expect(parsed.error).toMatchObject({ code: 'conflict', message: refusal });
+    expect(fs.readFileSync(file, 'utf8')).toBe(before);
+
+    const wrote = await run(second, home, '--write', '--json');
+    expect(wrote.code).toBe(0);
+    expect(wrote.err).toBe(
+      `mandala: a block in ~/.ssh/config already uses the name ${first.id} for another computer; using Host ${second.id} instead\n` +
+        `mandala: computer ${first.id} is named after this computer's id; moved its block to Host ${first.id} as well\n`,
+    );
+    const data = JSON.parse(wrote.out).data;
+    expect(data).toMatchObject({ host: second.id, changed: true, path: file });
+    // The printed config is this computer's alone.
+    expect(data.config).not.toContain(`mandala computer ${first.id}`);
+    const after = fs.readFileSync(file, 'utf8');
+    expect(writtenHosts(after)).toEqual([
+      { id: first.id, hosts: [first.id] },
+      { id: second.id, hosts: [second.id] },
+    ]);
+    // Only the moved block's Host line changed, where it stands.
+    expect(blockOf(after, first.id)).toBe(
+      blockOf(before, first.id).replace(`\nHost ${second.id}\n`, `\nHost ${first.id}\n`),
+    );
+    expect(after.startsWith(before.slice(0, before.indexOf('# >>> mandala computer')))).toBe(true);
+    expect(after.match(/# >>> mandala computer/g)).toHaveLength(2);
+
+    // Neither refuses from here on, in either order, in any mode.
+    for (const who of [second, first, second]) {
+      const again = await run(who, home, '--write');
+      expect(again.code).toBe(0);
+      expect(again.out).toBe(
+        `already up to date: Host ${who.id} in ${file}\nconnect with: ssh ${who.id}\n`,
+      );
+      expect((await run(who, home)).code).toBe(0);
+      expect((await run(who, home, '--json')).code).toBe(0);
+    }
+    expect(fs.readFileSync(file, 'utf8')).toBe(after);
+  });
+});
+
+describe('ssh-config over a config with CRLF line endings', () => {
+  const named = (name: string) => (call: Call) =>
+    call.path === '/computers' ? json([{ ...COMPUTER, name }]) : anyRoute(call);
+  const crlfHome = async (host: string, id: string) => {
+    const home = await tempDir();
+    fs.mkdirSync(join(home, '.ssh'));
+    const file = join(home, '.ssh', 'config');
+    const text = mergeConfig(
+      'Host work\n  User me\n',
+      configSnippet(host, id, gateway({}), knownHostsPath(home), host),
+    );
+    fs.writeFileSync(file, text.replace(/\n/g, '\r\n'));
+    return { home, file };
+  };
+
+  it("falls back to the id when another computer's block uses the name", async () => {
+    const { home, file } = await crlfHome('dev', 'vm-other');
+    const before = fs.readFileSync(file, 'utf8');
+    const r = await cli(['ssh-config', 'vm-1', '--json'], { home, respond: named('dev') });
+    expect(r.code).toBe(0);
+    expect(r.err).toBe(
+      'mandala: a block in ~/.ssh/config already uses the name dev for another computer; using Host vm-1 instead\n',
+    );
+    expect(JSON.parse(r.out).data.host).toBe('vm-1');
+    expect(fs.readFileSync(file, 'utf8')).toBe(before);
+  });
+
+  it("refuses when another computer's block holds the id", async () => {
+    const { home, file } = await crlfHome('vm-1', 'vm-other');
+    const before = fs.readFileSync(file, 'utf8');
+    for (const mode of [[], ['--write'], ['--json']]) {
+      const r = await cli(['ssh-config', 'vm-1', ...mode], { home, respond: named('my box') });
+      expect(r.code).toBe(1);
+      expect(r.out + r.err).toContain(
+        'a block in ~/.ssh/config for computer vm-other already uses Host vm-1; remove that block, then run again',
+      );
+      expect(fs.readFileSync(file, 'utf8')).toBe(before);
+    }
+  });
+
+  it('replaces its own block in place on --write, and writes LF line endings', async () => {
+    const { home, file } = await crlfHome('old', 'vm-1');
+    const unchanged = await crlfHome('dev', 'vm-1');
+    const same = await cli(['ssh-config', 'vm-1', '--write'], {
+      home: unchanged.home,
+      respond: named('dev'),
+    });
+    expect(same.code).toBe(0);
+    expect(same.out).toBe(
+      `already up to date: Host dev in ${unchanged.file}\nconnect with: ssh dev\n`,
+    );
+    // An unchanged file is not rewritten, so it keeps its CRLF endings.
+    expect(fs.readFileSync(unchanged.file, 'utf8')).toContain('\r\nHost dev\r\n');
+    const r = await cli(['ssh-config', 'vm-1', '--write'], { home, respond: named('dev') });
+    expect(r.code).toBe(0);
+    expect(r.out).toBe(`wrote Host dev in ${file}\nconnect with: ssh dev\n`);
+    const after = fs.readFileSync(file, 'utf8');
+    expect(after).not.toContain('\r');
+    expect(after.match(/# >>> mandala computer vm-1 >>>/g)).toHaveLength(1);
+    expect(after.match(/# >>> mandala gateway >>>/g)).toHaveLength(1);
+    expect(after.startsWith('Host work\n  User me\n')).toBe(true);
+    expect(writtenHosts(after)).toEqual([{ id: 'vm-1', hosts: ['dev'] }]);
+  });
+});
+
+describe('ssh-config against a hand-edited block', () => {
+  const named = (name: string) => (call: Call) =>
+    call.path === '/computers' ? json([{ ...COMPUTER, name }]) : anyRoute(call);
+  const homeWith = async (hostLine: string) => {
+    const home = await tempDir();
+    fs.mkdirSync(join(home, '.ssh'));
+    const file = join(home, '.ssh', 'config');
+    const text = mergeConfig(
+      '',
+      configSnippet('x', 'vm-other', gateway({}), knownHostsPath(home), 'x'),
+    ).replace('\nHost x\n', `\n${hostLine}\n`);
+    fs.writeFileSync(file, text);
+    return { home, file };
+  };
+
+  it.each([
+    'Host dev # mine',
+    'Host other dev',
+    '  host=DEV',
+    'Host "dev"',
+    'Host x\nHost dev',
+    "Host 'dev'",
+    'Host other\u00a0# dev',
+  ])('falls back to the id when %j names dev', async (line) => {
+    const { home } = await homeWith(line);
+    const r = await cli(['ssh-config', 'vm-1', '--json'], { home, respond: named('dev') });
+    expect(r.code).toBe(0);
+    expect(r.err).toBe(
+      'mandala: a block in ~/.ssh/config already uses the name dev for another computer; using Host vm-1 instead\n',
+    );
+    expect(JSON.parse(r.out).data.host).toBe('vm-1');
+  });
+
+  it.each([
+    'Host vm-1 extra',
+    'Host extra VM-1 # mine',
+    'Host=vm-1',
+    // ssh reads `other<NBSP>#` and `vm-1`: a no-break space splits nothing.
+    'Host other\u00a0# vm-1',
+    "Host 'vm-1'",
+  ])('refuses when %j holds the id', async (line) => {
+    const { home, file } = await homeWith(line);
+    const before = fs.readFileSync(file, 'utf8');
+    for (const mode of [[], ['--write'], ['--json']]) {
+      const r = await cli(['ssh-config', 'vm-1', ...mode], { home, respond: named('my box') });
+      expect(r.code).toBe(1);
+      expect(r.out + r.err).toContain(
+        'a block in ~/.ssh/config for computer vm-other already uses Host vm-1; remove that block, then run again',
+      );
+      expect(fs.readFileSync(file, 'utf8')).toBe(before);
+    }
+  });
+
+  it('does not count a negated pattern, and keeps the name', async () => {
+    const { home } = await homeWith('Host x !dev');
+    const r = await cli(['ssh-config', 'vm-1', '--json'], { home, respond: named('dev') });
+    expect(r.err).toBe('');
+    expect(JSON.parse(r.out).data.host).toBe('dev');
   });
 });
 

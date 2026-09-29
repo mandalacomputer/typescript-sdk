@@ -226,6 +226,15 @@ export function pinnedKnownHosts(current: string, gw: Gateway): string {
 }
 
 /**
+ * The ssh config at `file`, its line endings made `\n`, or `undefined` when
+ * there is none. A file saved with CRLF (or lone CR) line endings holds its
+ * marker lines just the same, so `\r\n` and `\r` are read as `\n`:
+ * otherwise no written block would be found in it, and `--write` would add a
+ * second one beside each.
+ */
+const readConfig = (file: string): string | undefined => readIfThere(file)?.replace(/\r\n?/g, '\n');
+
+/**
  * Make `file` pin the gateway, keeping every computer key already in it.
  *
  * Any other line for the pinned host names is dropped, so a changed pin
@@ -511,22 +520,100 @@ function findBlock(text: string, label: string, from = 0): [number, number] | un
 }
 
 /**
- * The computer blocks written in the ssh config `text`: for each
- * `mandala computer <id>` block whose markers `mergeConfig` would find, its
- * id and the value of its first `Host` line (`''` when it has none). Only the
- * marked blocks are read; the gateway's block, one with no end marker and
- * anything outside the markers are left out.
+ * The arguments of `line` when it is a `Host` line, read as OpenSSH reads a
+ * config line (`readconf` and `argv_split`): trailing space, tab and form
+ * feed dropped; leading space or tab allowed; the keyword in any case and then
+ * space or tab and/or one `=`. The arguments are split on space and tab only,
+ * so a no-break space is part of an argument. `'` and `"` both quote, a quote
+ * ending only at the same character. A backslash before `'`, `"` or `\` (or,
+ * outside quotes, a space) stands for that character; before any other it is
+ * kept. An unquoted argument starting with `#` ends the line as a comment.
+ * `undefined` for any other line (a `Match` line included). Negated patterns
+ * (`!x`) are kept here. A quote left open, which ssh refuses, is read to the
+ * end of the line.
  */
-export function writtenHosts(text: string): { id: string; host: string }[] {
-  const written: { id: string; host: string }[] = [];
+function hostLineArgs(line: string): string[] | undefined {
+  // Walked back by hand: a `[ \t...]+$` regex retries every start in a long
+  // run of spaces that ends before a non-space, which is quadratic. Not
+  // trimEnd, which would also drop a no-break space.
+  let end = line.length;
+  while (end > 0 && ' \t\r\n\f'.includes(line[end - 1]!)) end--;
+  const text = line.slice(0, end);
+  const keyword = /^[ \t]*host(?:[ \t]*=[ \t]*|[ \t]+|$)/i.exec(text);
+  if (!keyword) return undefined;
+  const rest = text.slice(keyword[0].length);
+  const args: string[] = [];
+  let i = 0;
+  while (i < rest.length) {
+    if (rest[i] === ' ' || rest[i] === '\t') {
+      i++;
+      continue;
+    }
+    if (rest[i] === '#') break;
+    let arg = '';
+    let quote = '';
+    for (; i < rest.length; i++) {
+      const c = rest[i]!;
+      if (c === '\\') {
+        const next = rest[i + 1];
+        if (next === "'" || next === '"' || next === '\\' || (!quote && next === ' ')) {
+          arg += next;
+          i++;
+        } else {
+          arg += c;
+        }
+      } else if (!quote && (c === ' ' || c === '\t')) break;
+      else if (!quote && (c === '"' || c === "'")) quote = c;
+      else if (quote && c === quote) quote = '';
+      else arg += c;
+    }
+    args.push(arg);
+  }
+  return args;
+}
+
+/** One marked computer block of an ssh config, as {@link writtenBlocks} reads it. */
+interface WrittenBlock {
+  id: string;
+  /** Every alias of every `Host` line in the block, negated patterns left out. */
+  hosts: string[];
+  /** The arguments of each `Host` line in the block, one list per line. */
+  hostLines: string[][];
+  /** Where the block stands in the text it was read from, as [start, end). */
+  at: [number, number];
+}
+
+/** The marked computer blocks in `text`, as {@link writtenHosts} describes. */
+function writtenBlocks(text: string): WrittenBlock[] {
+  const written: WrittenBlock[] = [];
   for (const begin of text.matchAll(/^# >>> mandala computer (.+?) >>>$/gm)) {
     const id = begin[1]!;
     const found = findBlock(text, `computer ${id}`, begin.index);
     if (!found || found[0] !== begin.index) continue;
-    const host = /^Host (.+)$/m.exec(text.slice(found[0], found[1]))?.[1]?.trim() ?? '';
-    written.push({ id, host });
+    const hostLines = text
+      .slice(found[0], found[1])
+      .split('\n')
+      .map(hostLineArgs)
+      .filter((args) => args !== undefined);
+    const hosts = hostLines.flat().filter((arg) => arg && !arg.startsWith('!'));
+    written.push({ id, hosts, hostLines, at: found });
   }
   return written;
+}
+
+/**
+ * The computer blocks written in the ssh config `text`: for each
+ * `mandala computer <id>` block whose markers `mergeConfig` would find, its
+ * id and every alias of every `Host` line inside it, as OpenSSH reads the
+ * line (see `hostLineArgs`): a hand-edited `Host dev # mine`, `Host a b`,
+ * `  host=x` or `Host "x"` counts. Negated patterns (`!x`) name no host and
+ * are left out; wildcard patterns are kept as written, not expanded. A block
+ * with no `Host` line has no hosts. Only the marked blocks are read; the
+ * gateway's block, one with no end marker and anything outside the markers
+ * are left out.
+ */
+export function writtenHosts(text: string): { id: string; hosts: string[] }[] {
+  return writtenBlocks(text).map(({ id, hosts }) => ({ id, hosts }));
 }
 
 /**
@@ -560,7 +647,10 @@ export function mergeConfig(current: string, snippet: string): string {
  * keeps its mode.
  */
 export function writeConfig(file: string, snippet: string): boolean {
-  const current = readIfThere(file);
+  // Read with its line endings made `\n`, so a CRLF file's blocks are found
+  // and replaced; a changed file is written back with `\n` endings, and an
+  // unchanged one is left as it is.
+  const current = readConfig(file);
   const mode = current === undefined ? undefined : fs.statSync(file).mode & 0o7777;
   const merged = mergeConfig(current ?? '', snippet);
   if (current !== undefined && merged === current) return false;
@@ -858,17 +948,34 @@ export async function sshAccessCommand(
 
 /**
  * The blocks in the ssh config at `file` written for computers other than
- * `computerId`, as `writtenHosts` reads them. A file that is missing or
- * cannot be read holds none.
+ * `computerId`, as `writtenBlocks` reads them, and the text they stand in
+ * (its line endings made `\n`). A file that is missing or cannot be read
+ * holds none.
  */
-function otherWrittenBlocks(file: string, computerId: string): { id: string; host: string }[] {
+function otherWrittenBlocks(
+  file: string,
+  computerId: string,
+): { text: string; blocks: WrittenBlock[] } {
   let text: string | undefined;
   try {
-    text = readIfThere(file);
+    text = readConfig(file) ?? '';
   } catch {
-    return [];
+    return { text: '', blocks: [] };
   }
-  return writtenHosts(text ?? '').filter((b) => b.id !== computerId);
+  return { text, blocks: writtenBlocks(text).filter((b) => b.id !== computerId) };
+}
+
+/** Whether `block` has `host` among its `Host` aliases, compared without regard to case. */
+const usesHost = (block: WrittenBlock, host: string): boolean =>
+  block.hosts.some((h) => h.toLowerCase() === host.toLowerCase());
+
+/** `block`, read from `text`, with its one `Host` line made `Host <its id>`. */
+function underItsId(text: string, block: WrittenBlock): string {
+  return text
+    .slice(block.at[0], block.at[1])
+    .split('\n')
+    .map((line) => (hostLineArgs(line) === undefined ? line : `Host ${block.id}`))
+    .join('\n');
 }
 
 /** An id OpenSSH reads as one host, and one that cannot start an option. */
@@ -909,7 +1016,7 @@ export async function sshConfigCommand(
   // `ssh <name>` whenever it came first. This computer's own block is the one
   // --write replaces, so it never counts.
   const file = path.join(home, '.ssh', 'config');
-  const others = otherWrittenBlocks(file, computer.id);
+  const { text: config, blocks: others } = otherWrittenBlocks(file, computer.id);
   const folded = computer.name.toLowerCase();
   let reason: string | undefined;
   if (host !== computer.id) {
@@ -920,26 +1027,67 @@ export async function sshConfigCommand(
           ? `another computer is also named ${computer.name}`
           : namesAnotherDestination(computer.name, listing.items)
             ? `the name ${computer.name} cannot be a Host, since ssh would also use it for another destination`
-            : others.some((b) => b.host.toLowerCase() === folded || b.id.toLowerCase() === folded)
+            : others.some((b) => b.id.toLowerCase() === folded || usesHost(b, folded))
               ? `a block in ~/.ssh/config already uses the name ${computer.name} for another computer`
               : undefined;
     if (reason) host = computer.id;
   }
   // The id is the last Host there is. When another computer's block already
-  // has it as its Host (one named after this computer's id, say), a second
-  // block under it would never be reached: `ssh <id>` would go to that other
-  // computer. Refused, whatever put the id here, before anything is written.
-  const holder = others.find((b) => b.host.toLowerCase() === host.toLowerCase());
-  if (holder)
-    throw new CliError(
-      'conflict',
-      `a block in ~/.ssh/config for computer ${holder.id} already uses Host ${host}; remove that block, then run again`,
-    );
+  // has it among its Host aliases (one named after this computer's id, say),
+  // a second block under it would never be reached: `ssh <id>` would go to
+  // that other computer. Refused, whatever put the id here, before anything
+  // is written. Aliases are compared as written: a wildcard pattern such as
+  // `vm-*` is not expanded.
+  const holders = others.filter((b) => usesHost(b, host));
+  let moved: WrittenBlock | undefined;
+  if (holders.length) {
+    const holder = holders[0]!;
+    // One shape has a way out: the two computers are named after each
+    // other's ids (they are in different accounts, so neither listing shows
+    // the other). The holder is under this computer's id, which is its name,
+    // and this computer's name is the holder's id. Whichever block is written
+    // second falls back to its id, which the first holds, so removing a block
+    // and running again only swaps which one refuses. The one state where
+    // neither refuses is both under their ids, so --write moves the holder's
+    // block there too: only its single Host line, which must be the one
+    // alias the CLI writes, and only when no other block holds the holder's
+    // id and that id can be a Host. Print and --json write nothing, so they
+    // refuse and say how to get there.
+    const mutual =
+      holders.length === 1 &&
+      host === computer.id &&
+      folded === holder.id.toLowerCase() &&
+      holder.id.toLowerCase() !== computer.id.toLowerCase() &&
+      holder.hostLines.length === 1 &&
+      holder.hostLines[0]!.length === 1 &&
+      SSH_ID.test(holder.id) &&
+      !others.some((b) => b !== holder && (b.id === holder.id || usesHost(b, holder.id)));
+    if (!mutual)
+      throw new CliError(
+        'conflict',
+        `a block in ~/.ssh/config for computer ${holder.id} already uses Host ${host}; remove that block, then run again`,
+      );
+    if (!write)
+      throw new CliError(
+        'conflict',
+        `a block in ~/.ssh/config for computer ${holder.id} already uses Host ${host}, and the two computers are named after each other's ids; run this command with --write to move both to their ids (Host ${holder.id} and Host ${computer.id})`,
+      );
+    moved = holder;
+  }
   if (reason) output.diagnostic(`mandala: ${reason}; using Host ${computer.id} instead`);
   const knownHosts = knownHostsPath(home);
   ensureKnownHosts(gw, knownHosts);
   const snippet = configSnippet(computer.name, computer.id, gw, knownHosts, host);
-  const changed = write ? writeConfig(file, snippet) : null;
+  // The moved block rides along with this computer's, so the one merge
+  // replaces both where they stand; the printed and --json config stay this
+  // computer's own.
+  const changed = write
+    ? writeConfig(file, moved ? `${snippet}${underItsId(config, moved)}\n` : snippet)
+    : null;
+  if (moved)
+    output.diagnostic(
+      `mandala: computer ${moved.id} is named after this computer's id; moved its block to Host ${moved.id} as well`,
+    );
   if (output.json)
     return output.result({
       computer: computer.id,
