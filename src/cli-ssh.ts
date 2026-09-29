@@ -521,32 +521,49 @@ function findBlock(text: string, label: string, from = 0): [number, number] | un
 
 /**
  * The arguments of `line` when it is a `Host` line, read as OpenSSH reads a
- * config line: leading whitespace allowed, the keyword in any case and then
- * whitespace and/or one `=`, the arguments split on whitespace, a
- * `"double quoted"` one unquoted, and an unquoted one starting with `#`
- * ending the line as a comment. `undefined` for any other line (a `Match`
- * line included). Negated patterns (`!x`) are kept here.
+ * config line (`readconf` and `argv_split`): trailing space, tab and form
+ * feed dropped; leading space or tab allowed; the keyword in any case and then
+ * space or tab and/or one `=`. The arguments are split on space and tab only,
+ * so a no-break space is part of an argument. `'` and `"` both quote, a quote
+ * ending only at the same character. A backslash before `'`, `"` or `\` (or,
+ * outside quotes, a space) stands for that character; before any other it is
+ * kept. An unquoted argument starting with `#` ends the line as a comment.
+ * `undefined` for any other line (a `Match` line included). Negated patterns
+ * (`!x`) are kept here. A quote left open, which ssh refuses, is read to the
+ * end of the line.
  */
 function hostLineArgs(line: string): string[] | undefined {
-  const keyword = /^\s*host(?:\s*=\s*|\s+|$)/i.exec(line);
+  const text = line.replace(/[ \t\r\n\f]+$/, '');
+  const keyword = /^[ \t]*host(?:[ \t]*=[ \t]*|[ \t]+|$)/i.exec(text);
   if (!keyword) return undefined;
+  const rest = text.slice(keyword[0].length);
   const args: string[] = [];
-  let arg = '';
-  let started = false;
-  let quoted = false;
-  for (const c of line.slice(keyword[0].length)) {
-    if (!quoted && /\s/.test(c)) {
-      if (started) args.push(arg);
-      arg = '';
-      started = false;
+  let i = 0;
+  while (i < rest.length) {
+    if (rest[i] === ' ' || rest[i] === '\t') {
+      i++;
       continue;
     }
-    if (!quoted && !started && c === '#') return args;
-    started = true;
-    if (c === '"') quoted = !quoted;
-    else arg += c;
+    if (rest[i] === '#') break;
+    let arg = '';
+    let quote = '';
+    for (; i < rest.length; i++) {
+      const c = rest[i]!;
+      if (c === '\\') {
+        const next = rest[i + 1];
+        if (next === "'" || next === '"' || next === '\\' || (!quote && next === ' ')) {
+          arg += next;
+          i++;
+        } else {
+          arg += c;
+        }
+      } else if (!quote && (c === ' ' || c === '\t')) break;
+      else if (!quote && (c === '"' || c === "'")) quote = c;
+      else if (quote && c === quote) quote = '';
+      else arg += c;
+    }
+    args.push(arg);
   }
-  if (started) args.push(arg);
   return args;
 }
 

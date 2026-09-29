@@ -538,7 +538,25 @@ Host ${host}
     ['Hostname x', []],
     ['Match host x', []],
     ['# Host x', []],
-  ])('reads every alias of a hand-edited Host line: %s', (line, hosts) => {
+    // OpenSSH splits on space and tab only, so a no-break space is part of an
+    // argument and the `#` after it starts no comment.
+    ['Host other\u00a0# vm-9', ['other\u00a0#', 'vm-9']],
+    ['Host x\u00a0', ['x\u00a0']],
+    ['Host\u00a0x', []],
+    ['Host\fx', []],
+    ['Host x\f', ['x']],
+    // Single quotes quote too, a quote ends only at its own character, and a
+    // backslash escapes a quote, a backslash or (outside quotes) a space.
+    ["Host 'x y' z", ['x y', 'z']],
+    ["Host 'dev'", ['dev']],
+    [`Host 'a"b' "c'd"`, ['a"b', "c'd"]],
+    ['Host de\\"v', ['de"v']],
+    ["Host a\\'b a\\\\b", ["a'b", 'a\\b']],
+    ['Host a\\ b', ['a b']],
+    ['Host "a\\ b"', ['a\\ b']],
+    ['Host a\\x', ['a\\x']],
+    ["Host '#x' y", ['#x', 'y']],
+  ])('reads every alias of a hand-edited Host line: %j', (line, hosts) => {
     const block = computerBlock('dev', 'vm-7').replace('Host dev', line);
     expect(writtenHosts(`${block}\n`)).toEqual([{ id: 'vm-7', hosts }]);
   });
@@ -1587,34 +1605,43 @@ describe('ssh-config against a hand-edited block', () => {
     return { home, file };
   };
 
-  it.each(['Host dev # mine', 'Host other dev', '  host=DEV', 'Host "dev"', 'Host x\nHost dev'])(
-    'falls back to the id when %j names dev',
-    async (line) => {
-      const { home } = await homeWith(line);
-      const r = await cli(['ssh-config', 'vm-1', '--json'], { home, respond: named('dev') });
-      expect(r.code).toBe(0);
-      expect(r.err).toBe(
-        'mandala: a block in ~/.ssh/config already uses the name dev for another computer; using Host vm-1 instead\n',
-      );
-      expect(JSON.parse(r.out).data.host).toBe('vm-1');
-    },
-  );
+  it.each([
+    'Host dev # mine',
+    'Host other dev',
+    '  host=DEV',
+    'Host "dev"',
+    'Host x\nHost dev',
+    "Host 'dev'",
+    'Host other\u00a0# dev',
+  ])('falls back to the id when %j names dev', async (line) => {
+    const { home } = await homeWith(line);
+    const r = await cli(['ssh-config', 'vm-1', '--json'], { home, respond: named('dev') });
+    expect(r.code).toBe(0);
+    expect(r.err).toBe(
+      'mandala: a block in ~/.ssh/config already uses the name dev for another computer; using Host vm-1 instead\n',
+    );
+    expect(JSON.parse(r.out).data.host).toBe('vm-1');
+  });
 
-  it.each(['Host vm-1 extra', 'Host extra VM-1 # mine', 'Host=vm-1'])(
-    'refuses when %j holds the id',
-    async (line) => {
-      const { home, file } = await homeWith(line);
-      const before = fs.readFileSync(file, 'utf8');
-      for (const mode of [[], ['--write'], ['--json']]) {
-        const r = await cli(['ssh-config', 'vm-1', ...mode], { home, respond: named('my box') });
-        expect(r.code).toBe(1);
-        expect(r.out + r.err).toContain(
-          'a block in ~/.ssh/config for computer vm-other already uses Host vm-1; remove that block, then run again',
-        );
-        expect(fs.readFileSync(file, 'utf8')).toBe(before);
-      }
-    },
-  );
+  it.each([
+    'Host vm-1 extra',
+    'Host extra VM-1 # mine',
+    'Host=vm-1',
+    // ssh reads `other<NBSP>#` and `vm-1`: a no-break space splits nothing.
+    'Host other\u00a0# vm-1',
+    "Host 'vm-1'",
+  ])('refuses when %j holds the id', async (line) => {
+    const { home, file } = await homeWith(line);
+    const before = fs.readFileSync(file, 'utf8');
+    for (const mode of [[], ['--write'], ['--json']]) {
+      const r = await cli(['ssh-config', 'vm-1', ...mode], { home, respond: named('my box') });
+      expect(r.code).toBe(1);
+      expect(r.out + r.err).toContain(
+        'a block in ~/.ssh/config for computer vm-other already uses Host vm-1; remove that block, then run again',
+      );
+      expect(fs.readFileSync(file, 'utf8')).toBe(before);
+    }
+  });
 
   it('does not count a negated pattern, and keeps the name', async () => {
     const { home } = await homeWith('Host x !dev');

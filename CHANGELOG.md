@@ -88,11 +88,13 @@ This is the summary you read to decide whether to upgrade.
   it has nothing to change in is left as it is.
 - **`mandala ssh-config` counts every alias of a hand-edited block's `Host`
   lines**, read the way OpenSSH reads them: `Host dev # mine`, `Host other
-  dev`, `  host=dev`, `Host "dev"` and a second `Host` line all put `dev` in
-  that block. Only the whole first `Host` line counted before, so a name such
-  a block used could still be written under, and `ssh <name>` went to
-  whichever block came first. Negated patterns (`!dev`) do not count, and a
-  wildcard pattern is compared as written, not expanded.
+  dev`, `  host=dev`, `Host "dev"`, `Host 'dev'` and a second `Host` line all
+  put `dev` in that block. Only spaces and tabs separate aliases, as for ssh:
+  a no-break space does not, so the `#` after one starts no comment. Only the
+  whole first `Host` line counted before, so a name such a block used could
+  still be written under, and `ssh <name>` went to whichever block came
+  first. Negated patterns (`!dev`) do not count, and a wildcard pattern is
+  compared as written, not expanded.
 - **`mandala ssh-config` no longer refuses forever when two computers are
   named after each other's ids** (say `vm-1` named `vm-other` and `vm-other`
   named `vm-1`, in two accounts). The one written second fell back to its id,
