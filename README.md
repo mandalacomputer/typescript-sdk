@@ -3101,11 +3101,20 @@ that does not exist.
 ### Account quota and historical usage
 
 ```sh
+mandala billing                 # plan, this period's totals, the computers that ran longest
+mandala billing --json          # { account, usage }: the two reads below, whole
 mandala account
 mandala account --json
 mandala usage
 mandala usage --from 2026-08-01T00:00:00Z --to 2026-09-01T00:00:00Z --json
 ```
+
+`billing` is one screen over the two reads below, with no API of its own: the
+plan and its limits from `account`, then the current billing period from
+`usage` — its totals, how far it is settled, the same completeness caveats, and
+the five computers with the most run hours (or a note when the breakdown is
+withheld for the credential). With `--json`, `data` is `{ "account": ...,
+"usage": ... }`, each exactly what `account --json` and `usage --json` print.
 
 `account` reads instantaneous account-wide quota through `client.account.read()`.
 It takes no arguments or account/computer selectors. The report includes the
@@ -3182,6 +3191,9 @@ mandala computers wait workbench --until egress-proxy
 mandala computers egress-proxy clear workbench
 mandala computers stop build-box && mandala computers resize build-box --cpu 4 --ram-mb 8192
 mandala computers view build-box
+mandala computers secrets get workbench
+mandala computers stop workbench && mandala computers secrets set workbench --secret OPENAI --as OPENAI_API_KEY --secret-file GH_TOKEN --path gh
+mandala computers secrets set workbench --clear
 ```
 
 Create starts the computer by default; `--no-start` leaves it stopped. It returns
@@ -3222,6 +3234,22 @@ An id the default scope does not list, such as one of a workspace's secrets, is
 sent as it is and needs its `--as` or `--path`. A name that matches nothing
 fails before anything is created. The secrets reach the desktop a few seconds
 after the computer runs: `computers wait --until secrets` waits for them.
+
+`computers secrets get COMPUTER` prints what a computer is bound to: each
+secret's id and revision and the variable or file it is bound as, and the
+list's `version` — never a value, which a binding does not hold.
+`computers secrets set COMPUTER` REPLACES that whole list with the bindings
+given, spelled and checked exactly as `computers create` takes them above
+(`--secret`, `--as`, `--secret-file`, `--path`, `--no-value-check`), and prints
+the new list with every typed name as `[REDACTED]`; `--clear` removes every
+binding. The platform refuses a running computer's first binding (stop it
+first), and any change while a delivery or another operation holds the
+computer; its refusal is printed as it came. New values reach the desktop at
+the next start or restart.
+
+`computers view` needs no VNC password: the desktop on that page is behind your
+dashboard sign-in. There is deliberately no command that prints a desktop
+password — the API does not return one.
 
 `SECRET=VAR` and `SECRET=FILE` still work but are deprecated, and print a
 one-line warning on stderr that never repeats what follows the `=`. The part
@@ -3545,6 +3573,29 @@ paged: a larger directory prints part of itself and says so on stderr (with
 `--json`, `truncated: true`), so list a narrower path.
 
 All of them take a computer's name or its id and use the shared credential/profile selection.
+
+`artifacts` keeps one guest file as an immutable artifact, retained after the
+file changes or the computer is stopped, and fetches it later:
+
+```sh
+mandala artifacts export my-computer /home/user/report.pdf      # prints its artifact_id
+mandala artifacts export my-computer /tmp/big.bin --max-bytes 67108864
+mandala artifacts get my-computer art_0123456789abcdef0123456789abcdef
+mandala artifacts download my-computer art_0123456789abcdef0123456789abcdef -o report.pdf
+mandala artifacts rm my-computer art_0123456789abcdef0123456789abcdef --yes
+```
+
+`export` needs the computer running. The platform keeps only bytes that match
+a size and SHA-256 named in advance, so the CLI first reads both on the
+computer with one `exec` (`wc -c` and `sha256sum`), and a file that changes
+before the capture is refused rather than kept part-way; give `--size` and
+`--sha256` yourself to skip that read. The read is Linux-only: on a Windows (or
+any other) computer `export` refuses unless `--size` and `--sha256` are given. It refuses a file over
+8 MiB unless `--max-bytes` (at most 64 MiB) allows it, and `--retention-seconds`
+sets how long it is kept (a day unless set, a week at most). `download` saves the bytes only once they match the
+artifact's SHA-256, to `-o FILE` or `./ARTIFACT_ID.bin`. `rm` needs `--yes`: a
+deleted artifact cannot be read again. There is no listing — the platform keeps
+none — so keep the `artifact_id` `export` prints.
 
 ### SSH access
 

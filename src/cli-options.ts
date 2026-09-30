@@ -61,6 +61,34 @@ const computers = flag('computer', 'Computer ID filter; repeat for several', {
   conflicts: ['all-computers'],
 });
 const secretScope = flag('workspace', 'Workspace ID (default: the account-wide secrets)');
+/**
+ * The binding flags `computers create` and `computers secrets set` share: one
+ * syntax, one validation (cli-secrets.ts bindingSpecs) for both.
+ */
+const bindingFlags = [
+  flag(
+    'secret',
+    'Bind a stored secret, by name or id, as an environment variable named by --as (default: its name); repeat for several. SECRET=VAR is deprecated',
+    { repeatable: true },
+  ),
+  flag('as', 'The variable the --secret right before it is bound as', {
+    repeatable: true,
+    follows: 'secret',
+  }),
+  flag(
+    'secret-file',
+    'Bind a stored secret as a file in /run/mandala-secrets/user/files named by --path (default: its name); repeat for several. SECRET=FILE is deprecated',
+    { repeatable: true },
+  ),
+  flag('path', 'The file the --secret-file right before it is bound as', {
+    repeatable: true,
+    follows: 'secret-file',
+  }),
+  bool(
+    'no-value-check',
+    "Send each --as, --path and deprecated =VAR or =FILE as typed, even one that looks like a secret's value rather than a name. The check is best-effort: it can miss a URL-safe base64 or short key",
+  ),
+];
 const command = (
   path: string,
   description: string,
@@ -108,6 +136,10 @@ export const COMMANDS: readonly Command[] = [
     ],
   ),
   command(
+    'billing',
+    'Show the plan and the current billing period on one screen: usage totals and the computers that ran longest',
+  ),
+  command(
     'computers list',
     'List computers with completeness status',
     [],
@@ -134,28 +166,7 @@ export const COMMANDS: readonly Command[] = [
       num('disk-gb', 'Disk in GiB'),
       flag('resolution', 'WIDTHxHEIGHT or WIDTHxHEIGHTxDEPTH'),
       bool('no-start', 'Create without starting'),
-      flag(
-        'secret',
-        'Bind a stored secret, by name or id, as an environment variable named by --as (default: its name); repeat for several. SECRET=VAR is deprecated',
-        { repeatable: true },
-      ),
-      flag('as', 'The variable the --secret right before it is bound as', {
-        repeatable: true,
-        follows: 'secret',
-      }),
-      flag(
-        'secret-file',
-        'Bind a stored secret as a file in /run/mandala-secrets/user/files named by --path (default: its name); repeat for several. SECRET=FILE is deprecated',
-        { repeatable: true },
-      ),
-      flag('path', 'The file the --secret-file right before it is bound as', {
-        repeatable: true,
-        follows: 'secret-file',
-      }),
-      bool(
-        'no-value-check',
-        "Send each --as, --path and deprecated =VAR or =FILE as typed, even one that looks like a secret's value rather than a name. The check is best-effort: it can miss a URL-safe base64 or short key",
-      ),
+      ...bindingFlags,
       flag(
         'browser-proxy',
         "Send the computer's browsers through this proxy URL, e.g. http://proxy.example.com:3128",
@@ -260,8 +271,22 @@ export const COMMANDS: readonly Command[] = [
     ['computer'],
   ),
   command(
+    'computers secrets get',
+    'Show the secrets a computer is bound to: secret ids, revisions and the variable or file each is bound as (never values)',
+    ['computer'],
+  ),
+  command(
+    'computers secrets set',
+    "Replace the secrets a computer is bound to with those given (the whole list); binding a computer's first secret needs it stopped",
+    ['computer'],
+    [
+      ...bindingFlags,
+      bool('clear', 'Remove every binding', { conflicts: ['secret', 'secret-file'] }),
+    ],
+  ),
+  command(
     'computers view',
-    "Open the computer's dashboard page in a browser, and print its URL",
+    "Open the computer's dashboard page in a browser, and print its URL; the desktop there needs no VNC password, as your dashboard sign-in is the credential",
     ['computer'],
     [bool('no-open', 'Print the URL without opening a browser')],
   ),
@@ -518,6 +543,36 @@ export const COMMANDS: readonly Command[] = [
     'files download',
     'Copy one guest file to a local path (default: the current directory)',
     ['computer', 'path', 'dest?'],
+  ),
+  command('artifacts get', "Read one artifact's metadata: size, SHA-256, creation and expiry", [
+    'computer',
+    'artifact',
+  ]),
+  command(
+    'artifacts export',
+    'Keep one guest file as an immutable artifact; the computer must be running. Its size and SHA-256 are read on the computer first unless --size and --sha256 give them',
+    ['computer', 'path'],
+    [
+      num('size', 'The file size in bytes, with --sha256; skips reading it on the computer'),
+      flag('sha256', "The file's SHA-256 in lowercase hex, with --size"),
+      num('max-bytes', 'Largest file to accept, up to 67108864 (default 8388608)'),
+      num(
+        'retention-seconds',
+        'How long the artifact is kept, up to 604800 (default 86400, a day)',
+      ),
+    ],
+  ),
+  command(
+    'artifacts download',
+    "Save an artifact's bytes, verified against its SHA-256, to a local file",
+    ['computer', 'artifact'],
+    [flag('output', 'Destination file (default: ./ARTIFACT_ID.bin)', { alias: 'o' })],
+  ),
+  command(
+    'artifacts rm',
+    'Delete an artifact; it cannot be read or downloaded again',
+    ['computer', 'artifact'],
+    [bool('yes', 'Confirm the deletion (required)')],
   ),
   command(
     'agent run',

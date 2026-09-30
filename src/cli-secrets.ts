@@ -1,5 +1,6 @@
 /**
- * `mandala secrets list | set | rm` — the account's secret store (OPL-4984).
+ * `mandala secrets list | set | rm` — the account's secret store (OPL-4984) —
+ * and `mandala computers secrets get | set`, what one computer is bound to.
  *
  * A value goes IN and never comes back out: the platform answers names, ids and
  * revisions only, so nothing here ever prints one. `set` reads it from stdin or
@@ -10,8 +11,9 @@
 import { CliError } from './cli-options.js';
 import { type Output, terminalSafe } from './cli-output.js';
 import { type CliIO, readSecretValue } from './cli-runtime.js';
+import type { Computer } from './computer.js';
 import { ConflictError } from './errors.js';
-import type { Client, Secret } from './index.js';
+import type { Client, Secret, SecretBindings } from './index.js';
 import * as P from './paths.js';
 
 /** How many times `set` and `rm` re-read a secret whose revision moved under them. */
@@ -596,8 +598,9 @@ export function equalsDeprecation(specs: readonly BindingSpec[]): string | undef
 }
 
 /**
- * The bindings a create sends, each secret found by name or id in the default
- * scope — the account-wide one, or the workspace an API key is confined to.
+ * The bindings a create (or `computers secrets set`) sends, each secret found
+ * by name or id in the default scope — the account-wide one, or the workspace
+ * an API key is confined to.
  *
  * An id that listing does not hold is sent as it is, for a secret in a scope
  * the listing did not cover; the platform refuses one it cannot bind, and the
@@ -612,13 +615,15 @@ export async function secretBindings(
   client: Client,
   specs: readonly BindingSpec[],
   signal: AbortSignal,
+  /** What a refusal says was left undone: a create's computer, or a rebinding. */
+  unchanged = 'nothing was created',
 ): Promise<P.SecretBindingArgs[]> {
   if (!specs.length) return [];
   const list = await client.secrets.list({ signal });
   if (!list.delivery)
     throw new CliError(
       'unsupported',
-      'Delivery is off on this platform: secrets can be stored but not bound; nothing was created',
+      `Delivery is off on this platform: secrets can be stored but not bound; ${unchanged}`,
     );
   const seen = new Map<string, string>();
   const once = (slot: string, label: string, what: string) => {
@@ -626,18 +631,18 @@ export async function secretBindings(
     if (first !== undefined)
       throw new CliError(
         'invalid_arguments',
-        `${label} binds ${what} ${first} already binds; nothing was created`,
+        `${label} binds ${what} ${first} already binds; ${unchanged}`,
       );
     seen.set(slot, label);
   };
   return specs.map(({ flag, key, target, label: position }) => {
-    const found = byNameOrId(list.secrets, key, 'nothing was created', position);
+    const found = byNameOrId(list.secrets, key, unchanged, position);
     // Named by position alone: a key that matched no stored secret and is not
     // shaped like an id may be the value typed where the name was meant.
     if (!found && !SECRET_ID.test(key))
       throw new CliError(
         'not_found',
-        `${position}: no secret by that name or id in this scope; nothing was created`,
+        `${position}: no secret by that name or id in this scope; ${unchanged}`,
       );
     // Resolved to a stored secret's name or id, or shaped like an id: a name
     // the user needs to see. Still quoted only when it does not look like a
@@ -874,4 +879,51 @@ export async function secretsRemove(
     `${terminalSafe(safe ? `deleted ${gone.id}  ${gone.name}` : `deleted ${gone.id}`)}\n`,
   );
   return 0;
+}
+
+/**
+ * `mandala computers secrets get COMPUTER`: the computer's bindings as the
+ * platform answers them — secret ids, revisions, and the variable or file each
+ * is bound as, with the list's `version`. A binding holds no value, so none can
+ * be printed.
+ */
+export async function computerSecretsGet(
+  computer: Computer,
+  output: Output,
+  signal: AbortSignal,
+): Promise<number> {
+  return output.result((await computer.secrets({ signal })).raw);
+}
+
+/**
+ * `mandala computers secrets set COMPUTER (--secret ... | --secret-file ... | --clear)`:
+ * replace the computer's whole binding list with `specs`, or with none for
+ * `--clear`.
+ *
+ * `specs` are what {@link bindingSpecs} already checked, the very checks
+ * `computers create --secret` runs, and each secret is found by name or id as
+ * a create finds it ({@link secretBindings}). No `version` is sent: the list
+ * given is the whole of what the computer is to hold, so there is nothing read
+ * earlier for a concurrent change to have made stale. The platform refuses a
+ * computer's FIRST binding while it runs, and a change while a delivery or
+ * another operation holds it; its refusal is passed through as it came, less
+ * every typed variable or file ({@link scrubTypedTargets}), as is the answer
+ * ({@link withoutTypedTargets}).
+ */
+export async function computerSecretsSet(
+  client: Client,
+  computer: Computer,
+  specs: readonly BindingSpec[],
+  output: Output,
+  signal: AbortSignal,
+): Promise<number> {
+  const unchanged = 'no binding was changed';
+  const bindings = await secretBindings(client, specs, signal, unchanged);
+  let answer: SecretBindings;
+  try {
+    answer = await computer.setSecrets(bindings, { signal });
+  } catch (error) {
+    throw scrubTypedTargets(error, specs);
+  }
+  return output.result(withoutTypedTargets(answer.raw, specs));
 }

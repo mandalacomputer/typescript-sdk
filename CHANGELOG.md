@@ -29,6 +29,23 @@ This is the summary you read to decide whether to upgrade.
 
 ### Added
 
+- **`mandala billing`**: the plan and the current billing period on one
+  screen — totals, how far it is settled, and the five computers with the most
+  run hours — from the `account` and `usage` reads; `--json` returns both
+  objects as `{ account, usage }`.
+- **`mandala computers secrets get` and `set`**: read or replace the secrets an
+  existing computer is bound to. `set` takes the same `--secret`/`--as`,
+  `--secret-file`/`--path` and `--no-value-check` as `computers create`, with the
+  same value check and redaction, and `--clear` removes every binding. The
+  platform's refusal to bind a running computer's first secrets is printed as
+  it came.
+- **`mandala artifacts export`, `get`, `download` and `rm`**: keep a guest file
+  as an immutable artifact (its size and SHA-256 read on the computer first,
+  unless `--size` and `--sha256` give them), read its metadata, save its
+  verified bytes, and delete it with `--yes`. The automatic read is Linux-only:
+  a Windows computer, or one whose os is not given, needs `--size` and
+  `--sha256`, and no command is run on it.
+- `mandala computers view`'s help says the desktop there needs no VNC password.
 - **Workspace create, rename and delete**: `client.workspaces.create({ name })`,
   `rename(id, name)` and `delete(id)`, and `mandala workspaces create`,
   `rename` and `rm --yes` (by name or id). They need an owner's account-wide

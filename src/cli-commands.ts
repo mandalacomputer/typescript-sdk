@@ -1,5 +1,11 @@
 import { writeFile } from 'node:fs/promises';
 import process from 'node:process';
+import {
+  ARTIFACT_DEFAULT_BYTES,
+  ARTIFACT_MAX_BYTES,
+  type Artifact,
+  artifactBody,
+} from './artifacts.js';
 import { completion } from './cli-completion.js';
 import {
   apiKeysCreate,
@@ -15,6 +21,8 @@ import { errorInfo, Output, redact, snakeKeys, terminalSafe } from './cli-output
 import { type CliIO, documentInput, openBrowser, readInput } from './cli-runtime.js';
 import {
   bindingSpecs,
+  computerSecretsGet,
+  computerSecretsSet,
   equalsDeprecation,
   scrubTypedTargets,
   secretBindings,
@@ -485,6 +493,93 @@ function checkUsageWindow(from?: string, to?: string): void {
   // Default bounds, retention and future-end clamping depend on the API's clock and billing period.
 }
 
+/** How many computers `billing` lists by name; the rest are counted. */
+const BILLING_TOP = 5;
+
+/**
+ * `billing` for a person, one line each, raw, as {@link usageLines}: the plan
+ * from the account read, then the current billing period's totals and the
+ * computers that ran longest in it. The caller redacts and escapes each line.
+ */
+function billingLines(q: AccountQuota, u: UsageReport): string[] {
+  const top = [...u.usage.computers].sort((a, b) => b.runHours - a.runHours);
+  const shown = top.slice(0, BILLING_TOP);
+  return [
+    `Plan: ${q.plan.label} (${q.plan.id})`,
+    `Plan limits: ${q.limits.maxComputers} computers; ${q.limits.vcpuPool} vCPU; ${q.limits.ramPoolMb} MiB RAM; ${q.limits.diskPoolGb} GiB disk`,
+    `Billing period: ${u.period.start} to ${u.period.end} (${u.period.source})`,
+    `Measured so far: ${u.from} to ${u.to}`,
+    `Settled for billing through: ${u.reportedThrough ?? 'none of this period'}`,
+    ...(u.degraded
+      ? ['Incomplete: some usage could not be read; totals may be too small. Retry later.']
+      : []),
+    ...(u.unmetered
+      ? ['Incomplete: some usage was not metered; retrying alone will not recover it.']
+      : []),
+    `Run hours: ${u.usage.runHours}; vCPU-hours: ${u.usage.vcpuHours}; RAM GB-hours: ${u.usage.ramGbHours}`,
+    `Disk GB-months: ${u.usage.diskGbMonths}; snapshot GB-months: ${u.usage.snapshotGbMonths}`,
+    ...(!u.breakdown
+      ? ['Top computers: withheld for this credential; the totals above still apply']
+      : !top.length
+        ? ['Top computers: none ran this period']
+        : [
+            'Top computers by run hours:',
+            ...shown.map(
+              (c) =>
+                `  ${c.name || c.id} (${c.id})${c.gone ? ' [deleted]' : ''}: ${c.runHours} run hours; ${c.vcpuHours} vCPU-hours`,
+            ),
+            ...(top.length > shown.length
+              ? [`  and ${top.length - shown.length} more; mandala usage lists every one`]
+              : []),
+          ]),
+    'Quota and headroom in full: mandala account',
+  ];
+}
+
+/** An artifact id operand, checked before any request. */
+function artifactId(value: string): string {
+  if (!P.isArtifactId(value))
+    throw new CliError(
+      'invalid_arguments',
+      '<artifact> must be an artifact id: art_ followed by 32 lowercase hex characters',
+    );
+  return value;
+}
+
+/** An artifact as the CLI prints it: the SDK's fields in the API's snake_case. */
+const artifactData = (a: Artifact) => snakeKeys(a) as Record<string, unknown>;
+
+/** A POSIX shell word that is exactly `text`. */
+const shellWord = (text: string) => `'${text.replace(/'/g, `'\\''`)}'`;
+
+/**
+ * What `artifacts export` nominates when no `--size` and `--sha256` are given:
+ * the guest file's size and SHA-256, read on the computer by one `exec`. The
+ * platform publishes only bytes that match both, so a file that changes
+ * between this read and the capture is refused (409), never kept half-way.
+ */
+async function guestFileDigest(
+  c: Computer,
+  path: string,
+  signal: AbortSignal,
+): Promise<{ size: number; sha256: string }> {
+  const f = shellWord(path);
+  const result = await c.exec(
+    `[ -f ${f} ] || { echo 'not a regular file' >&2; exit 2; }; wc -c < ${f} && sha256sum < ${f}`,
+    { timeoutS: 60, signal },
+  );
+  const read = /^\s*(\d+)\s*\n([0-9a-f]{64})\s+-\s*$/.exec(result.stdoutText);
+  if (result.exitCode !== 0 || result.timedOut || !read) {
+    const why = result.stderrText.trim().split('\n')[0];
+    throw new CliError(
+      'artifact_unavailable',
+      `could not read the size and SHA-256 of ${terminalSafe(path)} on ${c.id}${why ? `: ${terminalSafe(why)}` : ''}; ` +
+        'give them with --size and --sha256 to publish without this read',
+    );
+  }
+  return { size: Number(read[1]), sha256: read[2]! };
+}
+
 /**
  * `--region X,Y,WIDTH,HEIGHT`, the wire's own spelling, read into the object
  * the SDK takes. Only the count and the digits are checked here; the values
@@ -722,6 +817,36 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
         `deleting workspace ${target} revokes every API key confined to it; its computers are kept. Pass --yes to delete it`,
       );
     if (path === 'files list') P.directoryQuery(args[1]!);
+    if (path === 'computers secrets set' && !b('clear') && !bindings.length)
+      throw new CliError(
+        'invalid_arguments',
+        'say what the computer is to be bound to: --secret or --secret-file, or --clear to remove every binding',
+      );
+    if (['artifacts get', 'artifacts download', 'artifacts rm'].includes(path))
+      artifactId(args[1]!);
+    // Deleted for good, so not on a bare command: refused before any request,
+    // as workspaces rm is.
+    if (path === 'artifacts rm' && !b('yes'))
+      throw new CliError(
+        'confirmation_required',
+        `deleting artifact ${args[1]} cannot be undone; it is never readable again. Pass --yes to delete it`,
+      );
+    const nominated = { size: n('size'), sha256: s('sha256') };
+    const keep = { maxBytes: n('max-bytes'), retentionSeconds: n('retention-seconds') };
+    if (path === 'artifacts export') {
+      if ((nominated.size === undefined) !== (nominated.sha256 === undefined))
+        throw new CliError(
+          'invalid_arguments',
+          '--size and --sha256 go together; give both, or neither to read them on the computer',
+        );
+      // The path, the caps and any nomination, checked as the SDK will check
+      // them, before anything is read on the computer.
+      artifactBody(args[1]!, {
+        expectedSize: nominated.size ?? 0,
+        expectedSha256: nominated.sha256 ?? '0'.repeat(64),
+        ...keep,
+      });
+    }
     const deletion = { deleteSnapshots: b('delete-snapshots'), expect: s('expect'), signal };
     if (path === 'computers delete') {
       P.deleteQuery(deletion);
@@ -907,6 +1032,26 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
         );
         return 0;
       }
+      case 'billing': {
+        const [quota, report] = await Promise.all([
+          client.account.read(call),
+          client.usage.read(call),
+        ]);
+        checkUsageReport(report.raw);
+        const { raw: _quotaRaw, ...account } = quota;
+        const { raw: _usageRaw, ...usage } = report;
+        if (json)
+          return output.result({
+            account: snakeKeys(account),
+            usage: snakeKeys({ ...usage, reportedThrough: report.reportedThrough ?? null }),
+          });
+        io.stdout.write(
+          `${billingLines(quota, report)
+            .map((line) => terminalSafe(redact(line, io.env, io.secrets) as string))
+            .join('\n')}\n`,
+        );
+        return 0;
+      }
       case 'computers list': {
         const listing = await client.computers.listWithStatus({
           allowPartial: b('allow-partial'),
@@ -993,6 +1138,10 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
       case 'computers browser-proxy clear':
       case 'computers egress-proxy clear':
         return output.result(computerData(await (await computer()).update(proxy!, call)));
+      case 'computers secrets get':
+        return await computerSecretsGet(await computer(), output, signal);
+      case 'computers secrets set':
+        return await computerSecretsSet(client, await computer(), bindings, output, signal);
       case 'computers view': {
         const c = await computer();
         const url = dashboardUrl(client.baseUrl, c.id);
@@ -1270,6 +1419,63 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
           );
         return 0;
       }
+      case 'artifacts get':
+        return output.result(artifactData(await (await computer()).artifact(args[1]!, call)));
+      case 'artifacts export': {
+        const c = await computer();
+        let expected = nominated as { size: number; sha256: string };
+        if (nominated.size === undefined) {
+          // Read on the computer, which must be running for the capture anyway;
+          // a stopped or suspended one is not woken by this read.
+          if (c.status !== 'running')
+            throw new CliError(
+              'not_running',
+              `${c.id} is ${terminalSafe(c.status)}; an artifact is captured from a running computer, so start it first`,
+            );
+          // The read is a POSIX shell command (bash, wc, sha256sum) with the
+          // path quoted for that shell. On any other guest, Windows' cmd.exe
+          // above all, the quoting means nothing and a path holding `&`, `|`
+          // or `>` would run extra commands, so only a Linux computer is read;
+          // an empty or unknown os is refused too.
+          if (c.os !== 'linux')
+            throw new CliError(
+              'unsupported',
+              `the size and SHA-256 can only be read on a Linux computer, and ${c.id} runs ${terminalSafe(c.os || 'an unknown os')}; ` +
+                'give them with --size and --sha256 to publish without this read',
+            );
+          expected = await guestFileDigest(c, args[1]!, signal);
+          const cap = keep.maxBytes ?? ARTIFACT_DEFAULT_BYTES;
+          if (expected.size > cap)
+            throw new CliError(
+              'invalid_arguments',
+              `${terminalSafe(args[1]!)} is ${expected.size} bytes, over the ${cap}-byte limit; ` +
+                `raise it with --max-bytes (at most ${ARTIFACT_MAX_BYTES})`,
+            );
+        }
+        return output.result(
+          artifactData(
+            await c.publishArtifact(args[1]!, {
+              expectedSize: expected.size,
+              expectedSha256: expected.sha256,
+              ...keep,
+              signal,
+            }),
+          ),
+        );
+      }
+      case 'artifacts download': {
+        const c = await computer();
+        // Up to the largest artifact there is: the cap is the SDK's guard for a
+        // program holding the bytes, and this command's whole job is to save them.
+        const data = await c.downloadArtifact(args[1]!, { maxBytes: ARTIFACT_MAX_BYTES, signal });
+        const dest = s('output') ?? `${args[1]}.bin`;
+        // Written only once every byte has matched the SHA-256.
+        await writeFile(dest, data, { signal });
+        return output.result({ artifact_id: args[1], path: dest, bytes: data.length });
+      }
+      case 'artifacts rm':
+        await (await computer()).deleteArtifact(args[1]!, call);
+        return output.result({ artifact_id: args[1], deleted: true });
       case 'ssh':
         return await sshSetup(client, io, output, ssh, target, s('key'), signal);
       case 'ssh-key list':
