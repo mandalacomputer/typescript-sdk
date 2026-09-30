@@ -112,6 +112,19 @@ const INCOMPLETE_HEADER = 'X-GC-Incomplete';
 const MAX_SSE_EVENT_CHARS = 1 << 20;
 
 /**
+ * Longest an event stream may send nothing at all, keepalives included.
+ *
+ * The platform writes a `: keepalive` comment every 10 seconds so a quiet run
+ * still ticks, and six missed heartbeats is a connection that is gone rather
+ * than one that is busy. Without a bound, a connection dropped without a FIN (a
+ * NAT rebind, a load balancer reaping an idle socket, a laptop suspended
+ * mid-run) left the caller waiting for ever. The same figure as the Python
+ * client's `STREAM_IDLE_TIMEOUT`. It is idle time, not a deadline: it restarts
+ * on every chunk, and it does not run while the caller is handling an event.
+ */
+const SSE_IDLE_MS = 60_000;
+
+/**
  * Most of a failure's body worth holding, in bytes.
  *
  * Every other body here is bounded by what the platform will send — a file
@@ -665,6 +678,16 @@ export class Transport {
       void new URL(this.baseUrl);
     } catch {
       throw new ValidationError(`baseUrl must be an absolute URL (got ${JSON.stringify(baseUrl)})`);
+    }
+    // Every request is `${baseUrl}/${path}`, so a query or a fragment on the
+    // base would swallow the path: `https://h/api/v1?t=x` asked for
+    // `?t=x/computers`. Refused rather than rearranged, as a saved profile's
+    // base URL already is.
+    if (/[?#]/.test(baseUrl)) {
+      throw new ValidationError(
+        `baseUrl must not carry a query or a fragment (got ${JSON.stringify(baseUrl)}); ` +
+          'pass the API root alone, such as https://app.mandala.computer/api/v1',
+      );
     }
     this.#headers = { Authorization: `Bearer ${key}`, Accept: 'application/json' };
     // Checked here for the reason #deadlineMs checks minTimeoutMs below — one
@@ -1314,7 +1337,9 @@ export class Transport {
    *
    * The per-request deadline is deliberately not applied — a stream is meant to
    * stay open, and a 60-second deadline would cut every run short at the same
-   * place. A caller's own `signal` is the only thing that stops one early.
+   * place. What bounds it instead is silence: a stream that sends nothing, not
+   * even a keepalive, for {@link SSE_IDLE_MS} fails with a
+   * {@link ConnectionInterruptedError}. A caller's own `signal` stops one early.
    */
   async *sse(method: string, path: string, opts: RequestOptions = {}): AsyncGenerator<SSEEvent> {
     let exposed = false;
@@ -1335,11 +1360,44 @@ export class Transport {
   }
 
   async *#sseAttempt(method: string, path: string, opts: RequestOptions): AsyncGenerator<SSEEvent> {
-    const sent = await this.#fetchRaw(method, path, {
-      ...opts,
-      headers: { ...opts.headers, Accept: 'text/event-stream' },
-      noTimeout: true,
-    });
+    // The idle bound (SSE_IDLE_MS). Armed only while this waits on the network,
+    // for the answer's headers, for the body of an answer that is not an event
+    // stream, and then for each chunk, and always disarmed when that wait ends,
+    // however it ends, so no timer outlives the stream.
+    const idle = new AbortController();
+    const signal = opts.signal ? AbortSignal.any([opts.signal, idle.signal]) : idle.signal;
+    const watched = async <T>(step: () => Promise<T>): Promise<T> => {
+      const timer = setTimeout(
+        () => idle.abort(new DOMException(`no data for ${SSE_IDLE_MS}ms`, 'TimeoutError')),
+        SSE_IDLE_MS,
+      );
+      try {
+        return await step();
+      } catch (cause) {
+        // The caller's own cancellation is theirs, whatever else fired.
+        if (opts.signal?.aborted || !idle.signal.aborted) throw cause;
+        throw new ConnectionInterruptedError(
+          `${method} ${path}: the event stream sent nothing, not even a keepalive, for ` +
+            `${SSE_IDLE_MS / 1000}s, so the connection is treated as lost. It may have been ` +
+            'received, so treat anything it would have changed as unknown rather than undone.',
+          { cause },
+        );
+      } finally {
+        clearTimeout(timer);
+      }
+    };
+    const sent = await watched(() =>
+      this.#fetchRaw(
+        method,
+        path,
+        {
+          ...opts,
+          headers: { ...opts.headers, Accept: 'text/event-stream' },
+          noTimeout: true,
+        },
+        { timeoutMs: 0, signal },
+      ),
+    );
     const { resp } = sent;
     if (!resp.body) throw new MandalaError(`${method} ${path} answered with no body`);
     // The captive-portal case #decode names, on the one route that had no such
@@ -1349,7 +1407,13 @@ export class Transport {
     // it.
     const contentType = resp.headers.get('content-type') ?? '';
     if (!contentType.toLowerCase().includes('text/event-stream')) {
-      const text = await textUpTo(resp, MAX_ERROR_BODY_BYTES, opts.signal).catch(() => '');
+      // Read under the idle bound and the composed signal: a proxy page that
+      // sends a first chunk and then stalls without a close would otherwise
+      // hold this read, and the caller, for ever. A body that goes silent is
+      // quoted as empty; the wrong content type is still the news.
+      const text = await watched(() => textUpTo(resp, MAX_ERROR_BODY_BYTES, signal)).catch(
+        () => '',
+      );
       // Cancellation wins even when the diagnostic read completed in the same
       // turn. An unreadable body still falls back to the content-type message.
       opts.signal?.throwIfAborted();
@@ -1373,12 +1437,8 @@ export class Transport {
     try {
       for (;;) {
         opts.signal?.throwIfAborted();
-        const { done, value } = await this.#readBody(
-          () => reader.read(),
-          method,
-          path,
-          sent,
-          opts.signal,
+        const { done, value } = await watched(() =>
+          this.#readBody(() => reader.read(), method, path, sent, opts.signal),
         );
         // A read may already have settled when the caller cancels. Check its
         // result before decoding it, including an EOF that would emit a tail.

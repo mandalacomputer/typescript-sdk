@@ -2861,36 +2861,65 @@ describe('paging a file bigger than one request', () => {
     expect(rangesOf(rec)).toHaveLength(2);
   });
 
-  it.each([
-    ['shrinks', 600],
-    ['grows', 1300],
-  ])('rejects a source that %s between pages', async (_change, changedTotal) => {
+  it('follows a source that grows between pages to its new end', async () => {
+    // Parity with the Python client (OPL-5520): appended bytes leave the ones
+    // already read where they were, so the new total is the new end bound.
+    const grown = filled(1300);
     let page = 0;
     const { rec, computer } = await computerOn((call) => {
       if (!call.path.endsWith('/files')) return anyRoute(call);
-      const offset = page === 0 ? 0 : 300;
-      const total = page++ === 0 ? 1000 : changedTotal;
-      return new Response(filled(300), {
+      const size = page++ === 0 ? 1000 : 1300;
+      const from = Number(/^bytes=(\d+)-/.exec(call.headers.Range ?? '')?.[1] ?? 0);
+      const to = Math.min(from + 300, size) - 1;
+      return new Response(grown.slice(from, to + 1), {
         status: 206,
         headers: {
           'content-type': 'application/octet-stream',
           'accept-ranges': 'bytes',
-          'content-range': `bytes ${offset}-${offset + 299}/${total}`,
+          'content-range': `bytes ${from}-${to}/${size}`,
         },
       });
     });
-    const chunks: FileChunk[] = [];
-
-    await expect(
-      (async () => {
-        for await (const chunk of computer.readFileChunks('/tmp/changing.bin')) {
-          chunks.push(chunk);
-        }
-      })(),
-    ).rejects.toThrow(new RegExp(`changed from 1000 to ${changedTotal}`));
-    expect(chunks).toHaveLength(1);
-    expect(rangesOf(rec)).toEqual(['bytes=0-', 'bytes=300-']);
+    expect(await rebuilt(computer.readFileChunks('/tmp/growing.log'))).toEqual(grown);
+    expect(rangesOf(rec)).toEqual([
+      'bytes=0-',
+      'bytes=300-',
+      'bytes=600-',
+      'bytes=900-',
+      'bytes=1200-',
+    ]);
   });
+
+  it.each([['shrinks', 600]])(
+    'rejects a source that %s between pages',
+    async (_change, changedTotal) => {
+      let page = 0;
+      const { rec, computer } = await computerOn((call) => {
+        if (!call.path.endsWith('/files')) return anyRoute(call);
+        const offset = page === 0 ? 0 : 300;
+        const total = page++ === 0 ? 1000 : changedTotal;
+        return new Response(filled(300), {
+          status: 206,
+          headers: {
+            'content-type': 'application/octet-stream',
+            'accept-ranges': 'bytes',
+            'content-range': `bytes ${offset}-${offset + 299}/${total}`,
+          },
+        });
+      });
+      const chunks: FileChunk[] = [];
+
+      await expect(
+        (async () => {
+          for await (const chunk of computer.readFileChunks('/tmp/changing.bin')) {
+            chunks.push(chunk);
+          }
+        })(),
+      ).rejects.toThrow(new RegExp(`was 1000 bytes and is ${changedTotal} part-way`));
+      expect(chunks).toHaveLength(1);
+      expect(rangesOf(rec)).toEqual(['bytes=0-', 'bytes=300-']);
+    },
+  );
 
   it('holds no more than chunkBytes at a time when asked to', async () => {
     const { rec, computer } = await computerOn(guestFile(filled(1000)));
@@ -3145,7 +3174,7 @@ describe('paging a file bigger than one request', () => {
     const shrank = await computerOn(wholeFileOf(500));
     await expect(
       rebuilt(shrank.computer.readFileChunks('/tmp/big.bin', { offset: -5000 })),
-    ).rejects.toThrow(/total for \/tmp\/big\.bin changed from 1000 to 500/);
+    ).rejects.toThrow(/\/tmp\/big\.bin was 1000 bytes and is 500 part-way/);
   });
 
   it('refuses a window wider than the one it asked for', async () => {
@@ -4895,5 +4924,42 @@ describe('cloning a memory snapshot', () => {
     ).client.snapshots.clone('snap-1');
     expect(odd.memoryDropped).toBe(false);
     expect(odd.memoryDroppedReason).toBeUndefined();
+  });
+});
+
+describe('the deadline a type() is sent with', () => {
+  it.each([
+    ['plain ASCII', 'hello, world', 60_000],
+    ['text with an accent', 'café', 110_000],
+    ['an emoji', 'ok 👍', 110_000],
+  ])('%s gets %s ms', async (_label, text, expected) => {
+    const { client: c } = client(anyRoute);
+    const computer = await c.computers.get('vm-1');
+    const timer = vi.spyOn(AbortSignal, 'timeout');
+    try {
+      await computer.type(text);
+      // The input request is the last one this test made; its deadline is the
+      // last timeout the transport asked for.
+      expect(timer.mock.calls.at(-1)?.[0]).toBe(expected);
+    } finally {
+      timer.mockRestore();
+    }
+  });
+});
+
+describe('a scroll amount checked before it is sent', () => {
+  it.each([0, 2.5, 51])('refuses %s without a request', async (amount) => {
+    const { client: c, rec } = client(anyRoute);
+    const computer = await c.computers.get('vm-1');
+    const before = rec.calls.length;
+    await expect(computer.scroll(10, 10, { amount })).rejects.toThrow(/1 to 50/);
+    expect(rec.calls).toHaveLength(before);
+  });
+
+  it('sends 50', async () => {
+    const { client: c, rec } = client(anyRoute);
+    const computer = await c.computers.get('vm-1');
+    await computer.scroll(10, 10, { amount: 50 });
+    expect(rec.last().body).toMatchObject({ action: 'scroll', amount: 50 });
   });
 });

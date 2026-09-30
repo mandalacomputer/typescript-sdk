@@ -744,6 +744,7 @@ export const SECRET_BINDINGS_MAX = 32;
 export const SECRET_FILES_MAX = 8;
 export const SECRET_ENV = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
 export const SECRET_FILE = /^[a-z][a-z0-9_-]{0,47}$/;
+const SECRET_BINDING_KEYS = ['secretId', 'env', 'file', 'revisionId'];
 
 /**
  * A binding list as the wire takes it, checked for what the platform would
@@ -762,6 +763,17 @@ export function secretBindingsBody(list: SecretBindingArgs[], what = 'secrets'):
   const out = list.map((b, i) => {
     if (!b || typeof b !== 'object' || Array.isArray(b)) {
       throw new ValidationError(`${what}[${i}] must be an object`);
+    }
+    // A key this builder does not send was dropped in silence, so a
+    // `revision_id` spelled the wire's way pinned nothing and the binding
+    // recorded the latest revision instead. Refused, as the other clients do.
+    for (const key of Object.keys(b)) {
+      if (!SECRET_BINDING_KEYS.includes(key)) {
+        throw new ValidationError(
+          `${what}[${i}] has an unknown key ${JSON.stringify(key)}; a binding takes ` +
+            `${SECRET_BINDING_KEYS.join(', ')}`,
+        );
+      }
     }
     const id = requireString(b.secretId, `${what}[${i}].secretId`);
     if (!id.trim() || id !== id.trim()) {
@@ -1879,6 +1891,9 @@ export function buttonBody(action: string, x?: number, y?: number): Json {
 export const SCROLL_DIRECTIONS = ['up', 'down', 'left', 'right'] as const;
 export type ScrollDirection = (typeof SCROLL_DIRECTIONS)[number];
 
+/** The most notches one `scroll` may carry. */
+export const SCROLL_MAX_AMOUNT = 50;
+
 /**
  * A wheel scroll, optionally at a point and optionally with keys held.
  *
@@ -1905,11 +1920,17 @@ export function scrollBody(args: {
     "they are already an option here — scroll(x, y, { modifiers: ['shift'], signal })",
   );
   wholePoint(args.x, args.y);
-  const body: Json = {
-    action: 'scroll',
-    scroll_direction: args.direction,
-    amount: finite(args.amount, 'amount'),
-  };
+  // A whole number of notches, 1 to 50. The platform reads 0 as "left out" and
+  // scrolls its default of 3 instead, and more than 50 is a 400; a fraction is
+  // not a notch count at all. Refused here rather than sent to mean something
+  // else.
+  const amount = finite(args.amount, 'amount');
+  if (!Number.isInteger(amount) || amount < 1 || amount > SCROLL_MAX_AMOUNT) {
+    throw new ValidationError(
+      `amount must be a whole number of notches from 1 to ${SCROLL_MAX_AMOUNT} (got ${amount})`,
+    );
+  }
+  const body: Json = { action: 'scroll', scroll_direction: args.direction, amount };
   if (args.x !== undefined && args.y !== undefined) body.coordinate = [args.x, args.y];
   if (args.modifiers?.length) body.text = args.modifiers.join(MODIFIER_JOIN);
   return body;

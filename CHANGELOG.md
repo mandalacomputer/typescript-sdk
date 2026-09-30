@@ -29,6 +29,13 @@ This is the summary you read to decide whether to upgrade.
   that no longer exists. The README says the same.
 - `mandala --help` lists `operations wait` beside `operations list` and
   `operations get`.
+- **`isTransient` calls a 409 with `reason` `name_taken` or `stale_revision`
+  final**: the secret store's words for a name another secret already has and
+  for a revision that is no longer the current one. Neither clears by waiting.
+  A platform that does not send them yet is unaffected.
+- `readTextFile` is documented as decoding strictly: bytes that are not valid
+  UTF-8 throw a `MandalaError`, and `readFile` gives the raw bytes. The Python
+  SDK replaces invalid bytes instead. No behaviour change.
 
 ### Added
 
@@ -91,6 +98,35 @@ This is the summary you read to decide whether to upgrade.
   guest is polled through, not taken as a session. It returns at once for a Windows guest or a
   computer whose `os` is not reported. An absent `computer.desktop` is an X11
   desktop and is waited on.
+- **`computer.snapshotHoldings()`**, the same call as `holdings()` under the
+  name the Python SDK and the MCP server use.
+
+### Fixed
+
+- **A `noWake` file transfer to a computer that is not running** is a
+  `ComputerNotRunningError` when the platform says `unavailable`, as well as
+  when it says nothing, with `reason` kept. It was a plain `ConflictError`.
+  This covers create-only uploads too.
+- **`type()` of text that is not all ASCII** is sent with a deadline of at
+  least 110 seconds instead of the client's 60-second default, which cut off
+  a long Unicode type the platform was still allowed to finish.
+- **An event stream (`agentStream`, `builds.events`) that sends nothing for
+  60 seconds**, not even the platform's 10-second keepalive, fails with a
+  `ConnectionInterruptedError`. A connection dropped without a close used to
+  leave the caller waiting for ever. An answer that is not an event stream at
+  all, such as a proxy's HTML page, is bounded the same way while its body is
+  read for the error, which then names the content type it got.
+- **`readFileChunks` follows a file that grows** while it is read, to its new
+  end. Only a file that gets shorter is refused.
+- **A base URL with a query or a fragment is refused** when the client is
+  made. `https://host/api/v1?t=x` used to send every request to
+  `…?t=x/<path>`.
+- **`scroll()` refuses an `amount` that is not a whole number from 1 to 50**
+  before sending. `0` became the platform's default of 3, and a fraction went
+  on the wire.
+- **A secret binding with a key other than `secretId`, `env`, `file` and
+  `revisionId` is refused.** A `revision_id` spelled the wire's way was dropped,
+  so the binding recorded the latest revision instead of the one named.
 
 ## [0.8.0] — 2026-09-29
 

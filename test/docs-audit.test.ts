@@ -278,13 +278,33 @@ describe('noWake transfers', () => {
     expect(plain).not.toBeInstanceOf(ComputerNotRunningError);
   });
 
-  it('keeps the platform’s word when it sends one', async () => {
+  it('reads unavailable as not running too, keeping the word', async () => {
+    // Parity with the Python and MCP clients (OPL-5520): the platform's word
+    // for a noWake transfer to a computer that is not running is `unavailable`.
     const { client: c } = client(refused({ error: 'not running', reason: 'unavailable' }));
+    const vm = await c.computers.get('vm-1');
+    for (const call of [
+      vm.readFile('/tmp/a', { noWake: true }),
+      vm.writeFile('/tmp/a', 'x', { noWake: true }),
+      vm.writeFile('/tmp/a', 'x', { noWake: true, overwrite: false }),
+    ]) {
+      const err = await call.catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(ComputerNotRunningError);
+      expect(err).not.toBeInstanceOf(CreateOnlyConflictError);
+      expect((err as APIError).reason).toBe('unavailable');
+      expect(isTransient(err)).toBe(false);
+    }
+    // Without noWake the same body is the ordinary conflict it always was.
+    const plain = await vm.readFile('/tmp/a').catch((e: unknown) => e);
+    expect(plain).not.toBeInstanceOf(ComputerNotRunningError);
+  });
+
+  it('keeps the platform’s classification for any other word', async () => {
+    const { client: c } = client(refused({ error: 'busy', reason: 'contention' }));
     const vm = await c.computers.get('vm-1');
     const err = await vm.readFile('/tmp/a', { noWake: true }).catch((e: unknown) => e);
     expect(err).not.toBeInstanceOf(ComputerNotRunningError);
-    expect((err as APIError).reason).toBe('unavailable');
-    expect(isTransient(err)).toBe(false);
+    expect((err as APIError).reason).toBe('contention');
     // A create-only upload with both options keeps its own, more careful class.
     const { client: c2 } = client(refused({ error: 'taken', reason: 'exists' }));
     const vm2 = await c2.computers.get('vm-1');

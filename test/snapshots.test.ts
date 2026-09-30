@@ -822,3 +822,22 @@ describe('the deletion wait’s own numbers', () => {
     expect(rec.calls.length).toBe(before);
   });
 });
+
+describe('snapshotHoldings', () => {
+  it('is holdings() under the other clients’ name: the same route and answer', async () => {
+    const held = { count: 2, size_bytes: 10, fingerprint: 'fp' };
+    const { rec, client: c } = client((call) =>
+      call.path === '/computers/vm-1/snapshots' && call.method === 'GET'
+        ? json(held)
+        : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    const viaAlias = await computer.snapshotHoldings();
+    const aliasCall = rec.last();
+    const direct = await computer.holdings();
+    expect([aliasCall.method, aliasCall.path]).toEqual(['GET', '/computers/vm-1/snapshots']);
+    expect([rec.last().method, rec.last().path]).toEqual([aliasCall.method, aliasCall.path]);
+    expect(viaAlias).toEqual(direct);
+    expect(viaAlias).toMatchObject({ count: 2, sizeBytes: 10, fingerprint: 'fp' });
+  });
+});
