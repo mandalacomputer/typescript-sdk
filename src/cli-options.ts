@@ -92,6 +92,18 @@ const bindingFlags = [
     "Send each --as, --path and deprecated =VAR or =FILE as typed, even one that looks like a secret's value rather than a name. The check is best-effort: it can miss a URL-safe base64 or short key",
   ),
 ];
+/**
+ * The `Idempotency-Key` a lifecycle command sends, instead of one the SDK
+ * makes up: every command whose call is keyed takes it, so a failed one's
+ * error can be answered by sending the same command again with the key it
+ * names (cli-output.ts). `operations list` has its own `--idempotency-key`,
+ * a filter.
+ */
+export const IDEMPOTENCY_KEY_FLAG = flag(
+  'idempotency-key',
+  'Send this Idempotency-Key (1-255 printable ASCII, no space) instead of a new one; resending a command under the key an error named does not carry it out twice',
+);
+const keyed = [IDEMPOTENCY_KEY_FLAG];
 const command = (
   path: string,
   description: string,
@@ -196,6 +208,7 @@ export const COMMANDS: readonly Command[] = [
         'egress-proxy-credentials',
         'The id of a secret holding user:password for the egress proxy (with --egress-proxy); not bound to the computer',
       ),
+      ...keyed,
     ],
   ),
   command('computers get', 'Get a computer by name or ID', ['computer']),
@@ -208,11 +221,17 @@ export const COMMANDS: readonly Command[] = [
         'resume-only',
         'Resume only if a saved session exists; on a stopped computer with none it succeeds without booting (check status)',
       ),
+      ...keyed,
     ],
   ),
-  command('computers stop', 'Stop a computer', ['computer'], [bool('force', 'Force power off')]),
-  command('computers suspend', 'Suspend a computer', ['computer']),
-  command('computers restart', 'Restart a computer', ['computer']),
+  command(
+    'computers stop',
+    'Stop a computer',
+    ['computer'],
+    [bool('force', 'Force power off'), ...keyed],
+  ),
+  command('computers suspend', 'Suspend a computer', ['computer'], keyed),
+  command('computers restart', 'Restart a computer', ['computer'], keyed),
   command(
     'computers delete',
     'Delete a computer',
@@ -223,18 +242,50 @@ export const COMMANDS: readonly Command[] = [
         'Also delete snapshots; requires --expect. Exits 1 when the purge did not complete (ok: false)',
       ),
       flag('expect', 'Snapshot holdings fingerprint'),
+      ...keyed,
     ],
   ),
-  command('computers clone', 'Clone a computer', ['computer'], [name]),
-  command('computers rename', 'Give a computer a new name; nothing else changes', [
-    'computer',
-    'name',
-  ]),
+  command('computers clone', 'Clone a computer', ['computer'], [name, ...keyed]),
+  command(
+    'computers rename',
+    'Give a computer a new name; nothing else changes',
+    ['computer', 'name'],
+    keyed,
+  ),
   command(
     'computers resize',
-    'Change vCPU, RAM or disk; the computer must be stopped, and disks grow only',
+    'Change vCPU, RAM or disk; the computer must be stopped, and disks grow only. A size its host cannot run is refused with move_required: see computers move',
     ['computer'],
-    [num('cpu', 'vCPU count'), num('ram-mb', 'RAM in MiB'), num('disk-gb', 'Disk in GiB')],
+    [
+      num('cpu', 'vCPU count'),
+      num('ram-mb', 'RAM in MiB'),
+      num('disk-gb', 'Disk in GiB'),
+      ...keyed,
+    ],
+  ),
+  command(
+    'computers move',
+    'Move a stopped computer to another host in its region that can run a size its own host cannot (after resize answered move_required), resizing it there; one move runs per account at a time',
+    ['computer'],
+    [
+      num('ram-mb', 'RAM in MiB: the size that did not fit, more than the computer has now', {
+        required: true,
+      }),
+      num('cpu', 'vCPU count to apply with the move (default: unchanged)'),
+      num('disk-gb', 'Disk in GiB to apply with the move; disks grow only (default: unchanged)'),
+      bool(
+        'wait',
+        'Wait for the move to finish and exit 0 only when it is done; moved, failed and lost exit 1',
+      ),
+      ...waits,
+      ...keyed,
+    ],
+  ),
+  command(
+    'computers idle-suspend',
+    "Set how many idle minutes before the host suspends a computer: a number up to 10080, off (never; capped by plan), or default (the host's own window)",
+    ['computer', 'minutes'],
+    keyed,
   ),
   command(
     'computers browser-proxy set',
@@ -249,12 +300,14 @@ export const COMMANDS: readonly Command[] = [
         'The id of a secret holding user:password for the proxy, bound to the computer as a file',
       ),
       bool('no-credentials', "Remove the proxy's credentials rather than keep them"),
+      ...keyed,
     ],
   ),
   command(
     'computers browser-proxy clear',
     "Remove a computer's browser proxy; its browsers go out directly",
     ['computer'],
+    keyed,
   ),
   command(
     'computers egress-proxy set',
@@ -266,12 +319,14 @@ export const COMMANDS: readonly Command[] = [
         "The id of a secret holding user:password for the proxy; the computer's host signs in with it",
       ),
       bool('no-credentials', "Remove the proxy's credentials rather than keep them"),
+      ...keyed,
     ],
   ),
   command(
     'computers egress-proxy clear',
     "Remove a computer's egress proxy; its traffic goes out directly",
     ['computer'],
+    keyed,
   ),
   command(
     'computers secrets get',
@@ -285,6 +340,11 @@ export const COMMANDS: readonly Command[] = [
     [
       ...bindingFlags,
       bool('clear', 'Remove every binding', { conflicts: ['secret', 'secret-file'] }),
+      bool(
+        'keep-revision',
+        'Keep the revision the computer holds now for each secret it is already bound to, rather than record the latest; a secret new to it gets the latest',
+        { conflicts: ['clear'] },
+      ),
     ],
   ),
   command(
@@ -322,7 +382,22 @@ export const COMMANDS: readonly Command[] = [
       flag('cwd', 'Working directory'),
       flag('env', 'NAME=VALUE; repeat for several', { repeatable: true }),
       bool('desktop', 'Run on the desktop'),
+      bool(
+        'retain-output',
+        'Keep the output on the platform as a retained result, named by result_id (foreground only)',
+        { conflicts: ['background'] },
+      ),
     ],
+  ),
+  command(
+    'computers exec-poll',
+    'Read what a background command has printed since the last read, and whether it has finished; exits 0 while it runs, then with its exit status',
+    ['computer', 'pid'],
+  ),
+  command(
+    'computers exec-kill',
+    'Kill a background command and everything it started, printing what it wrote that was not read yet',
+    ['computer', 'pid'],
   ),
   command(
     'computers wait',
@@ -331,8 +406,18 @@ export const COMMANDS: readonly Command[] = [
     [
       flag(
         'until',
-        'Readiness condition (default running; secrets: bound secrets delivered; browser-proxy: browsers have the proxy; egress-proxy: the host holds the egress proxy credentials)',
-        { choices: ['built', 'running', 'guest', 'secrets', 'browser-proxy', 'egress-proxy'] },
+        'Readiness condition (default running; guest: the guest agent answers; desktop: the desktop session is logged in and takes commands, which comes after guest; secrets: bound secrets delivered; browser-proxy: browsers have the proxy; egress-proxy: the host holds the egress proxy credentials)',
+        {
+          choices: [
+            'built',
+            'running',
+            'guest',
+            'desktop',
+            'secrets',
+            'browser-proxy',
+            'egress-proxy',
+          ],
+        },
       ),
       ...waits,
     ],
@@ -381,7 +466,7 @@ export const COMMANDS: readonly Command[] = [
     ['computer'],
     [name, bool('memory', 'Include memory'), noWait, ...waits],
   ),
-  command('snapshots restore', 'Restore a snapshot', ['snapshot']),
+  command('snapshots restore', 'Restore a snapshot', ['snapshot'], keyed),
   command(
     'snapshots clone',
     'Clone a snapshot into a computer',
@@ -396,6 +481,7 @@ export const COMMANDS: readonly Command[] = [
         'Resume a memory snapshot of a computer that held secrets; the copy holds the same credentials',
         { conflicts: ['disk-only'] },
       ),
+      ...keyed,
     ],
   ),
   command('snapshots delete', 'Delete a snapshot', ['snapshot'], [noWait, ...waits]),
@@ -464,6 +550,12 @@ export const COMMANDS: readonly Command[] = [
       ),
     ],
   ),
+  command(
+    'secrets get',
+    "Read one secret's metadata by name or id: id, name, workspace, revision and dates (never its value)",
+    ['name'],
+    [secretScope],
+  ),
   command('secrets rm', 'Delete a secret by name or id', ['name'], [secretScope]),
   command(
     'api-keys list',
@@ -508,6 +600,12 @@ export const COMMANDS: readonly Command[] = [
     ['id'],
     waits,
   ),
+  command(
+    'moves list',
+    "List moves still running and those finished in the last day: each one's computer, state and target size",
+    [],
+    [flag('computer', 'Only this computer, by name or ID')],
+  ),
   command('workspaces list', "List the account's workspaces, oldest first"),
   command('workspaces get', 'Read one workspace, by name or ID', ['workspace']),
   command(
@@ -550,12 +648,16 @@ export const COMMANDS: readonly Command[] = [
     'files upload',
     'Copy one local file to an absolute guest path; a path ending in / keeps the file name',
     ['computer', 'file', 'path'],
-    [bool('no-overwrite', 'Create the guest file, refusing if something is there')],
+    [
+      bool('no-overwrite', 'Create the guest file, refusing if something is there'),
+      bool('no-wake', 'Fail with not_running rather than resume a suspended computer for the copy'),
+    ],
   ),
   command(
     'files download',
     'Copy one guest file to a local path (default: the current directory)',
     ['computer', 'path', 'dest?'],
+    [bool('no-wake', 'Fail with not_running rather than resume a suspended computer for the copy')],
   ),
   command('artifacts get', "Read one artifact's metadata: size, SHA-256, creation and expiry", [
     'computer',
@@ -895,6 +997,17 @@ export function parseArgs(argv: string[]): Parsed {
       const [spelling, ...tail] = arg.split('=');
       const flags = [...GLOBAL_FLAGS, ...(parsed.command?.flags ?? [])];
       const spec = flags.find((f) => spelling === `--${f.name}` || spelling === `-${f.alias}`);
+      // Said plainly, as the one option a person may reasonably expect on
+      // every command: only a command whose call is keyed takes it.
+      if (!spec && parsed.command && spelling === `--${IDEMPOTENCY_KEY_FLAG.name}`)
+        throw usageError(
+          parsed.command,
+          `mandala ${parsed.path} sends no Idempotency-Key, so it takes no --idempotency-key; the commands that do: ${COMMANDS.filter(
+            (c) => c.flags.includes(IDEMPOTENCY_KEY_FLAG),
+          )
+            .map((c) => c.path)
+            .join(', ')}`,
+        );
       if (!spec)
         throw usageError(
           parsed.command,

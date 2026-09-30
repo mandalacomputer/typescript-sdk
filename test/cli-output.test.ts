@@ -162,7 +162,8 @@ describe('versioned output contract', () => {
     const t = writer(false);
     t.output.error(dropped);
     expect(t.read().stderr).toContain(
-      '(find its operation with: mandala operations list --idempotency-key k-2)',
+      '(find its operation with: mandala operations list --idempotency-key k-2; or send the same ' +
+        'command again with --idempotency-key k-2, which the platform does not carry out twice)',
     );
     // Nothing to add when none is present.
     const plain = errorInfo(new ConflictError('busy', 409, { error: 'busy' }));

@@ -3109,6 +3109,21 @@ answer was lost ended, when present: `idempotency_key`, `operation_id` and
 `request_id` in the `--json` error object, and a second `mandala:` line on
 stderr naming them and the command to run next.
 
+Every command whose call is keyed takes `--idempotency-key KEY` (1 to 255
+printable ASCII characters, no space) and sends it instead of a key of its own:
+`computers create`, `start`, `stop`, `suspend`, `restart`, `clone`, `delete`,
+`rename`, `resize`, `move`, `idle-suspend`, `browser-proxy set` and `clear`,
+`egress-proxy set` and `clear`, and `snapshots restore` and `clone`. So a
+command whose answer was lost, and whose error named a key, can be sent again
+with that key: the platform does not carry one key out twice. What a resend
+answers depends on how the first call ended; the SDK's [Operations](#operations)
+says which answer means what. Any other command refuses the flag, naming those
+that take it; `operations list --idempotency-key` stays a filter.
+
+```sh
+mandala computers start workbench --idempotency-key start-workbench-1
+```
+
 ### Workspaces
 
 ```sh
@@ -3245,6 +3260,11 @@ mandala computers screenshot workbench -o corner.jpg --fresh --region 0,0,640,40
 mandala computers exec workbench -c 'uname -a' --timeout 60
 printf 'pwd\nls -la\n' | mandala computers exec workbench
 mandala computers exec workbench -c 'make build' --cwd /home/user/project --background --json
+mandala computers exec-poll workbench 4242                  # new output; exits 0 while it runs
+mandala computers exec-kill workbench 4242
+mandala computers exec workbench -c 'make test' --retain-output
+mandala computers wait workbench --until desktop
+mandala computers idle-suspend workbench 120                 # or off, or default
 mandala computers rename workbench build-box
 mandala computers create --name via-proxy --browser-proxy http://proxy.example.com:3128 --browser-proxy-bypass '<local>,*.internal'
 mandala computers create --name direct --template acme/web --no-browser-proxy  # decline a template's default proxy
@@ -3256,16 +3276,21 @@ mandala computers egress-proxy set workbench socks5://proxy.example.com:1080 --n
 mandala computers wait workbench --until egress-proxy
 mandala computers egress-proxy clear workbench
 mandala computers stop build-box && mandala computers resize build-box --cpu 4 --ram-mb 8192
+mandala computers move build-box --ram-mb 65536 --wait      # after resize answered move_required
+mandala moves list --computer build-box
 mandala computers view build-box
 mandala computers secrets get workbench
 mandala computers stop workbench && mandala computers secrets set workbench --secret OPENAI --as OPENAI_API_KEY --secret-file GH_TOKEN --path gh
+mandala computers secrets set workbench --secret OPENAI --as OPENAI_API_KEY --keep-revision
 mandala computers secrets set workbench --clear
 ```
 
 Create starts the computer by default; `--no-start` leaves it stopped. It returns
 after provisioning responds. Use `computers wait` for readiness: `built` waits
 for the disk copy, `running` waits for the VM, `guest` waits for the guest
-agent, `secrets` waits until a computer's bound secrets have reached its
+agent, `desktop` waits until the desktop session is logged in and takes
+commands (a few seconds after `guest`: an `exec --desktop` sent in between is
+refused; at once for a computer with no Linux desktop to wait on), `secrets` waits until a computer's bound secrets have reached its
 desktop (at once for one with none bound), `browser-proxy` waits until its
 browsers have its proxy (at once for one with none), and `egress-proxy` waits
 until its host holds the egress proxy's credentials (at once for one with none).
@@ -3308,7 +3333,11 @@ list's `version` — never a value, which a binding does not hold.
 given, spelled and checked exactly as `computers create` takes them above
 (`--secret`, `--as`, `--secret-file`, `--path`, `--no-value-check`), and prints
 the new list with every typed name as `[REDACTED]`; `--clear` removes every
-binding. The platform refuses a running computer's first binding (stop it
+binding. A binding records each secret's latest revision; `--keep-revision`
+instead keeps the revision the computer holds now for every secret it is
+already bound to (a secret new to it still gets the latest). It reads the
+bindings first and sends the list's `version` with the change, so a change
+made in between is refused rather than overwritten. The platform refuses a running computer's first binding (stop it
 first), and any change while a delivery or another operation holds the
 computer; its refusal is printed as it came. New values reach the desktop at
 the next start or restart.
@@ -3369,8 +3398,24 @@ provide UTF-8 decoding. Foreground results also include `exit_code`, `timed_out`
 when the remote command exits zero; success does not mean all output was captured.
 Background exec returns a handle including `pid`, `running`, output, and available
 execution metadata. Starting it successfully does not mean the command has
-finished. Use the SDK's [background execution methods](#long-running-commands)
-to poll or stop it.
+finished. `computers exec-poll COMPUTER PID` prints what it has written since the
+last read (stdout and stderr to the local streams, or base64 and decoded text
+under `--json`, with `running` and `exit_code`) and a line on stderr saying
+whether it is still running. The output is a cursor, not a buffer: each poll
+hands over only what is new, and while the platform says more is waiting the
+command reads on, up to 16 reads, before it says to poll again. If one of those
+later reads fails, what was already read is still printed (or kept in the
+`--json` result, with `more: true` and the failure as `drain_error`) and the
+command exits 1 (130 when cancelled): run `exec-poll` again for the rest.
+`exec-poll` exits 0 while the command runs, and once it has finished exits with its status
+as foreground exec does (0 through 255, or 1 when it is unknown), so a script
+polls until `--json`'s `running` is false.
+`computers exec-kill COMPUTER PID` kills it and everything it started, prints
+what it wrote that was not read yet, and exits 0.
+
+`--retain-output` (foreground only) asks the platform to keep the command's
+output as a retained result; its id is `result_id` in the `--json` result, and a
+line on stderr names it otherwise.
 
 Screenshot always writes the image bytes to the required `-o`/`--output` file.
 Its JSON result reports `{ "path": "screen.png", "bytes": 12345 }`; it never
@@ -3384,7 +3429,26 @@ pixels, `--scale` shrinks by a factor (not with `--width`), `--format` picks
 `computers rename COMPUTER NAME` changes only the label. `computers resize`
 takes any of `--cpu`, `--ram-mb` and `--disk-gb`, and needs the computer
 stopped; disks grow only. A size its host cannot run fails with the error code
-`move_required`; the SDK's `computer.relocate()` is the move it offers.
+`move_required`; when another host in the region can run it, a second line on
+stderr gives the `computers move` command that goes there.
+
+`computers move COMPUTER --ram-mb N [--cpu N] [--disk-gb N]` is that move: it
+copies the stopped computer to another host in its region and applies the new
+size there. `--ram-mb` is required, as the size that did not fit; the others
+are left alone unless given. It prints the move as it was accepted (`state`,
+`live`, the target `cpu`, `ram_mb` and `disk_gb`, `started_at`); `--wait` waits
+for it to finish (`--timeout-ms`, default 15 minutes, and `--poll-ms`) and
+exits 0 only when its `state` is `done`. The other three ends exit 1 with a note:
+`moved` (it is on the new host at its OLD size; resize it again there),
+`failed` (nothing changed) and `lost` (read the computer). One move runs per
+account at a time. `moves list` prints the moves still running and those
+finished in the last day, one row per computer; `--computer` keeps one
+computer's, by name or id.
+
+`computers idle-suspend COMPUTER MINUTES` sets how long a computer may sit idle
+before its host suspends it: a number of minutes up to 10080 (a week), `off`
+never to suspend it (how many computers may be pinned that way depends on the
+plan), or `default` to follow the host's own window again.
 `computers view` opens the computer's page in the dashboard, beside the API
 the CLI talks to, and prints its URL; `--no-open` only prints it. The page uses
 your browser's own dashboard sign-in, so the URL carries no credential.
@@ -3420,6 +3484,7 @@ mandala snapshots schedule set workbench --hour 4 --minute 30 --tz UTC
 mandala webhooks create https://hooks.example.com/mandala --event computer.ready --json
 mandala webhooks deliveries whk-example --json
 mandala secrets list --workspace ws-example
+mandala secrets get OPENAI_API_KEY                   # metadata only, never the value
 printf %s "$OPENAI_API_KEY" | mandala secrets set OPENAI_API_KEY
 mandala secrets rm OPENAI_API_KEY
 ```
@@ -3460,8 +3525,10 @@ at a terminal, from a prompt with echo off — **never from the command line**,
 where it would sit in shell history and process listings. It creates the secret,
 or replaces the one of that name (ASCII case ignored, as the platform ignores
 it) against the revision it read, re-reading a few times if another writer moved
-it first. `secrets rm` takes a name or an id. `secrets list` prints names, ids
-and revisions; no command prints a value. All three take `--workspace`.
+it first. `secrets get` and `secrets rm` take a name or an id. `secrets list`
+prints names, ids and revisions, and `secrets get` one secret's id, name,
+workspace, revision and dates; no command prints a value. All four take
+`--workspace`.
 
 ### Agent runs and cancellation
 
@@ -3633,7 +3700,8 @@ mandala files download my-computer /var/log/app.log ./logs/
 ```
 
 `files upload` and `files download` behave exactly as `scp`'s two directions
-and report the same result. `files list` names each entry's type and a regular
+and report the same result. By default a copy resumes a suspended computer;
+`--no-wake` makes either one fail with the error code `not_running` instead. `files list` names each entry's type and a regular
 file's size; the computer must be running. The listing is bounded rather than
 paged: a larger directory prints part of itself and says so on stderr (with
 `--json`, `truncated: true`), so list a narrower path.

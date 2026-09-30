@@ -871,12 +871,15 @@ export async function download(
   remotePath: string,
   local: string,
   signal?: AbortSignal,
+  /** `noWake`: refuse rather than resume a suspended computer (`files download --no-wake`). */
+  opts: { noWake?: boolean } = {},
 ): Promise<number> {
   let out: Awaited<ReturnType<typeof open>> | undefined;
   let written = 0;
   try {
     for await (const chunk of computer.readFileChunks(remotePath, {
       timeoutMs: SCP_TRANSFER_TIMEOUT_MS,
+      ...(opts.noWake ? { noWake: true } : {}),
       signal,
     })) {
       // Do not truncate an existing destination until the remote read has
@@ -923,7 +926,14 @@ const cmdScp: LegacyCommands['scp'] = async (srcArg, dstArg, io, signal, opts = 
  * One guest file to a local path — `scp <computer>:<path> <local>` and
  * `files download`. A local directory takes the guest file's own name, like scp.
  */
-const copyOut: LegacyCommands['download'] = async (target, guestPath, dest, io, signal) => {
+const copyOut: LegacyCommands['download'] = async (
+  target,
+  guestPath,
+  dest,
+  io,
+  signal,
+  opts = {},
+) => {
   const computer = await resolveComputer(io.createClient(), target, signal);
   let local = dest;
   const info = await stat(local).catch(() => undefined);
@@ -932,7 +942,7 @@ const copyOut: LegacyCommands['download'] = async (target, guestPath, dest, io, 
     if (!name) die(`say which file: ${target}:${guestPath}`);
     local = join(local, name);
   }
-  const size = await download(computer, guestPath, local, signal);
+  const size = await download(computer, guestPath, local, signal, opts);
   return { source: `${target}:${guestPath}`, destination: local, bytes: size, confirmed: true };
 };
 
@@ -981,6 +991,8 @@ const copyIn: LegacyCommands['upload'] = async (
         contentLength: info.size,
         // Only when asked: absent is the replace every platform version does.
         ...(overwrite ? {} : { overwrite: false }),
+        // Only when asked: absent resumes a suspended computer for the copy.
+        ...(opts.noWake ? { noWake: true } : {}),
         signal,
       });
     } catch (error) {

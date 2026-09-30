@@ -26,6 +26,7 @@ import {
   equalsDeprecation,
   scrubTypedTargets,
   secretBindings,
+  secretsGet,
   secretsList,
   secretsRemove,
   secretsSet,
@@ -58,13 +59,15 @@ import {
   saveWorkspaceDefault,
   workspaceDefault,
 } from './defaults.js';
-import { MandalaError, NotFoundError, ValidationError } from './errors.js';
+import { MandalaError, MoveRequiredError, NotFoundError, ValidationError } from './errors.js';
 import {
   type AccountQuota,
+  type BackgroundExec,
   type BuildProgress,
   type Client,
   type GuestDirectory,
   type Listing,
+  type Move,
   type UsageReport,
   VERSION,
   type Workspace,
@@ -97,7 +100,7 @@ export type LegacyCommands = {
     guestPath: string,
     io: CliIO,
     signal: AbortSignal,
-    opts?: { overwrite?: boolean },
+    opts?: { overwrite?: boolean; noWake?: boolean },
   ) => Promise<CopyResult>;
   /** One guest file to a local path: scp's download half, with the computer named apart. */
   download: (
@@ -106,6 +109,7 @@ export type LegacyCommands = {
     local: string,
     io: CliIO,
     signal: AbortSignal,
+    opts?: { noWake?: boolean },
   ) => Promise<CopyResult>;
 };
 
@@ -172,6 +176,8 @@ async function operationsComputer(
   target: string,
   output: Output,
   signal: AbortSignal,
+  /** What is listed, for the note: `operations`, or `moves`. */
+  listed = 'operations',
 ): Promise<string> {
   try {
     return (await resolveComputer(client, target, signal)).id;
@@ -179,11 +185,59 @@ async function operationsComputer(
     signal.throwIfAborted();
     if (!(error instanceof NotFoundError)) throw error;
     output.diagnostic(
-      `mandala: no computer is named ${target} or has that id now; listing the operations recorded under the id ${target}`,
+      `mandala: no computer is named ${target} or has that id now; listing the ${listed} recorded under the id ${target}`,
     );
     return target;
   }
 }
+
+/**
+ * `computers exec-poll` and `exec-kill`'s pid operand: a positive whole
+ * number, checked before any request.
+ */
+function pidOperand(value: string): number {
+  if (!/^[1-9][0-9]{0,9}$/.test(value) || !Number.isSafeInteger(Number(value)))
+    throw new CliError(
+      'invalid_arguments',
+      '<pid> must be the positive whole number computers exec --background printed',
+    );
+  return Number(value);
+}
+
+/**
+ * `computers idle-suspend`'s minutes operand: a whole number of minutes, `off`
+ * (0, never suspend) or `default` (null, the host's own window).
+ */
+function idleMinutes(value: string): number | null {
+  if (value === 'off') return 0;
+  if (value === 'default') return null;
+  if (!/^[0-9]{1,6}$/.test(value))
+    throw new CliError(
+      'invalid_arguments',
+      '<minutes> must be a whole number of minutes (at most 10080), off, or default',
+    );
+  return Number(value);
+}
+
+/** How many polls `computers exec-poll` reads back to back while more output waits. */
+const EXEC_POLL_DRAIN = 16;
+
+/**
+ * The process exit status for a background command's state, as `computers
+ * exec` maps a foreground one: 0 while it runs, its exit code once it has one
+ * in 0-255, and 1 for one the platform could not say or that is out of range.
+ */
+function backgroundExitStatus(state: BackgroundExec): number {
+  if (state.running) return 0;
+  const code = state.exitCode;
+  return code !== undefined && Number.isInteger(code) && code >= 0 && code <= 255 ? code : 1;
+}
+
+/** A move as the CLI prints it: the SDK's fields in the API's snake_case, without `raw`. */
+const moveData = (move: Move) => {
+  const { raw: _raw, ...fields } = move;
+  return snakeKeys(fields) as Record<string, unknown>;
+};
 
 /** A workspace id: `wsp-` and twelve lowercase hex characters. */
 const WORKSPACE_ID = /^wsp-[0-9a-f]{12}$/;
@@ -816,6 +870,8 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
   let parsed: Parsed | undefined;
   const controller = new AbortController();
   let watching = false;
+  // A line said after the error, for a refusal the CLI has a next step for.
+  let moveHint: string | undefined;
   const cancel = () => controller.abort(new DOMException('Cancelled', 'AbortError'));
   const signal = controller.signal;
   try {
@@ -937,6 +993,16 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
     if (wait.timeoutMs !== undefined || wait.pollMs !== undefined)
       checkWait(wait.timeoutMs ?? 60_000, wait.pollMs ?? 1_000);
     const call = { signal };
+    // The key a keyed command sends instead of a new one, checked as the SDK
+    // checks it and before any name is resolved. `operations list` has a flag
+    // of the same name that is a filter, read below.
+    const key = path === 'operations list' ? undefined : s('idempotency-key');
+    if (key !== undefined && !P.isIdempotencyKey(key))
+      throw new CliError(
+        'invalid_arguments',
+        '--idempotency-key must be 1 to 255 characters, each printable ASCII other than a space',
+      );
+    const keyed = key === undefined ? call : { ...call, idempotencyKey: key };
     const usageWindow = { from: s('from'), to: s('to'), signal };
     const operationPage = {
       computerId: s('computer'),
@@ -1040,6 +1106,19 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
       P.updateBody(resize);
     }
     if (path === 'computers rename') P.updateBody({ name: args[1]! });
+    const idle =
+      path === 'computers idle-suspend' ? { idleSuspendMin: idleMinutes(args[1]!) } : undefined;
+    if (idle) P.updateBody(idle);
+    const relocation = { ramMb: n('ram-mb')!, cpu: n('cpu'), diskGb: n('disk-gb') };
+    if (path === 'computers move') {
+      P.moveBody(relocation);
+      if (!b('wait') && (wait.timeoutMs !== undefined || wait.pollMs !== undefined))
+        throw new CliError('invalid_arguments', '--timeout-ms and --poll-ms go with --wait');
+    }
+    const pid =
+      path === 'computers exec-poll' || path === 'computers exec-kill'
+        ? pidOperand(args[1]!)
+        : undefined;
     if (path === 'workspaces create') P.workspaceNameBody(target);
     if (path === 'workspaces rename') P.workspaceNameBody(args[1]!);
     // A delete revokes every key confined to the workspace, whoever holds them,
@@ -1160,12 +1239,15 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
     if (path === 'webhooks update') P.webhookUpdateBody(hook);
     if (path === 'scp' || path === 'files upload' || path === 'files download') {
       const overwrite = { overwrite: !b('no-overwrite') };
+      // Only when asked: absent is the default, which resumes a suspended
+      // computer for the copy.
+      const wake = b('no-wake') ? { noWake: true } : {};
       const result =
         path === 'scp'
           ? await legacy.scp(target, args[1]!, io, signal, overwrite)
           : path === 'files upload'
-            ? await legacy.upload(target, args[1]!, args[2]!, io, signal, overwrite)
-            : await legacy.download(target, args[1]!, args[2] ?? '.', io, signal);
+            ? await legacy.upload(target, args[1]!, args[2]!, io, signal, { ...overwrite, ...wake })
+            : await legacy.download(target, args[1]!, args[2] ?? '.', io, signal, wake);
       if (json) return output.result(result);
       output.diagnostic(
         `${result.source} -> ${result.destination} (${result.accounting ?? `${result.bytes} bytes`})`,
@@ -1226,6 +1308,18 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
       }
       case 'operations get':
         return output.result(raw(await client.operations.get(target, call)));
+      case 'moves list': {
+        // The platform lists the account's moves, one row per computer at
+        // most; the filter is applied here, to the id a name resolves to.
+        const only =
+          s('computer') === undefined
+            ? undefined
+            : await operationsComputer(client, s('computer')!, output, signal, 'moves');
+        const moves = await client.moves.list(call);
+        return output.result({
+          moves: moves.filter((m) => only === undefined || m.computerId === only).map(moveData),
+        });
+      }
       case 'workspaces list':
         return output.result((await client.workspaces.list(call)).map(raw));
       case 'workspaces get':
@@ -1319,7 +1413,7 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
         try {
           created = await client.computers.create(
             secrets.length ? { ...create, secrets } : create,
-            call,
+            keyed,
           );
         } catch (error) {
           throw scrubTypedTargets(error, bindings);
@@ -1330,22 +1424,51 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
         return output.result(computerData(await (await computer()).refresh(call)));
       case 'computers start':
         return output.result(
-          computerData(await (await computer()).start({ resumeOnly: b('resume-only'), signal })),
+          computerData(await (await computer()).start({ resumeOnly: b('resume-only'), ...keyed })),
         );
       case 'computers stop':
         return output.result(
-          computerData(await (await computer()).stop({ force: b('force'), signal })),
+          computerData(await (await computer()).stop({ force: b('force'), ...keyed })),
         );
       case 'computers suspend':
-        return output.result(computerData(await (await computer()).suspend(call)));
+        return output.result(computerData(await (await computer()).suspend(keyed)));
       case 'computers restart':
-        return output.result(computerData(await (await computer()).restart(call)));
+        return output.result(computerData(await (await computer()).restart(keyed)));
       case 'computers clone':
-        return output.result(computerData(await (await computer()).clone(s('name'), call)));
+        return output.result(computerData(await (await computer()).clone(s('name'), keyed)));
       case 'computers rename':
-        return output.result(computerData(await (await computer()).rename(args[1]!, call)));
-      case 'computers resize':
-        return output.result(computerData(await (await computer()).update(resize, call)));
+        return output.result(computerData(await (await computer()).rename(args[1]!, keyed)));
+      case 'computers resize': {
+        const c = await computer();
+        try {
+          return output.result(computerData(await c.update(resize, keyed)));
+        } catch (error) {
+          // The platform's refusal names the API route; this names the command.
+          if (error instanceof MoveRequiredError && error.movePossible && !json)
+            moveHint = `mandala: another host in this region can run that size: stop the computer and move it there with: mandala computers move ${c.id}${resize.ramMb === undefined ? ' --ram-mb MiB' : ` --ram-mb ${resize.ramMb}`}${resize.cpu === undefined ? '' : ` --cpu ${resize.cpu}`}${resize.diskGb === undefined ? '' : ` --disk-gb ${resize.diskGb}`} --wait`;
+          throw error;
+        }
+      }
+      case 'computers move': {
+        const c = await computer();
+        const accepted = await c.relocate(relocation, keyed);
+        if (!b('wait')) return output.result(moveData(accepted));
+        const outcome = await c.waitForMove(accepted, wait);
+        // The three ways a move ends other than `done` are three situations,
+        // and none of them is the size that was asked for (see Move.state).
+        if (outcome.state !== 'done' && !json)
+          output.diagnostic(
+            outcome.state === 'moved'
+              ? `mandala: ${c.id} moved to another host at its OLD size; the resize did not apply there: run computers resize again`
+              : outcome.state === 'failed'
+                ? `mandala: the move of ${c.id} failed; the computer is where it was, untouched${outcome.detail ? `: ${outcome.detail}` : ''}`
+                : `mandala: the move of ${c.id} ended ${outcome.state}; read the computer to see where it is${outcome.detail ? `: ${outcome.detail}` : ''}`,
+            { keepNewlines: false },
+          );
+        return output.result(moveData(outcome), outcome.state === 'done' ? 0 : 1);
+      }
+      case 'computers idle-suspend':
+        return output.result(computerData(await (await computer()).update(idle!, keyed)));
       case 'computers browser-proxy set': {
         const c = await computer();
         let change = proxy!;
@@ -1364,7 +1487,7 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
             change = { browserProxy: { ...change.browserProxy!, credentialsSecretId: kept } };
           }
         }
-        return output.result(computerData(await c.update(change, call)));
+        return output.result(computerData(await c.update(change, keyed)));
       }
       case 'computers egress-proxy set': {
         const c = await computer();
@@ -1383,15 +1506,17 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
             change = { egressProxy: { ...change.egressProxy!, credentialsSecretId: kept } };
           }
         }
-        return output.result(computerData(await c.update(change, call)));
+        return output.result(computerData(await c.update(change, keyed)));
       }
       case 'computers browser-proxy clear':
       case 'computers egress-proxy clear':
-        return output.result(computerData(await (await computer()).update(proxy!, call)));
+        return output.result(computerData(await (await computer()).update(proxy!, keyed)));
       case 'computers secrets get':
         return await computerSecretsGet(await computer(), output, signal);
       case 'computers secrets set':
-        return await computerSecretsSet(client, await computer(), bindings, output, signal);
+        return await computerSecretsSet(client, await computer(), bindings, output, signal, {
+          keepRevision: b('keep-revision') === true,
+        });
       case 'computers view': {
         const c = await computer();
         const url = dashboardUrl(client.baseUrl, c.id);
@@ -1414,7 +1539,7 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
         // Detailed, so a purge the platform answered 202 with `ok: false` —
         // copies still queued, or refused — is reported as not done rather
         // than as `deleted: true` and exit 0.
-        const result = await c.delete({ ...deletion, detailed: true });
+        const result = await c.delete({ ...deletion, ...keyed, detailed: true });
         if (!result.ok && !json)
           output.diagnostic(
             `mandala: the delete of ${c.id} did not complete${result.error ? `: ${result.error}` : ''}`,
@@ -1462,7 +1587,11 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
         };
         const result = b('background')
           ? await c.execBackground(commandText!, opts)
-          : await c.exec(commandText!, { ...opts, timeoutS: n('timeout') });
+          : await c.exec(commandText!, {
+              ...opts,
+              timeoutS: n('timeout'),
+              ...(b('retain-output') ? { retainOutput: true } : {}),
+            });
         const code =
           'timedOut' in result && result.timedOut
             ? 124
@@ -1491,6 +1620,100 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
         if ('timedOut' in result && result.timedOut)
           output.diagnostic('mandala: command timed out');
         if (result.exitCode === -1) output.diagnostic('mandala: remote exit status is unknown');
+        if ('resultId' in result && result.resultId !== undefined)
+          output.diagnostic(`mandala: the output is retained as result ${result.resultId}`);
+        return code;
+      }
+      case 'computers exec-poll':
+      case 'computers exec-kill': {
+        const c = await computer();
+        const kill = path === 'computers exec-kill';
+        // A poll is a cursor: each one hands over only what is new, and `more`
+        // says another is waiting, so the output is read until it is not (to a
+        // bound, past which a note says to poll again). A kill answers once,
+        // with whatever had not been read.
+        //
+        // The platform does not hand a chunk over twice, so once one read has
+        // answered, nothing it gave may be lost to a later read's failure: a
+        // person's output is written as each chunk arrives, and a later read
+        // that fails ends the drain with what was read and a note to poll again
+        // (exit 1, or 130 when cancelled), rather than an error that drops it.
+        // Only the first read's failure is thrown, since nothing was consumed.
+        let state = kill ? await c.execKill(pid!, call) : await c.execPoll(pid!, call);
+        const stdout = [state.stdout];
+        const stderr = [state.stderr];
+        const emit = (chunk: BackgroundExec) => {
+          if (json) return;
+          io.stdout.write(chunk.stdout);
+          io.stderr.write(chunk.stderr);
+        };
+        emit(state);
+        let drainError: unknown;
+        for (let reads = 1; !kill && state.more && reads < EXEC_POLL_DRAIN; reads++) {
+          try {
+            state = await c.execPoll(pid!, call);
+          } catch (error) {
+            drainError = error;
+            break;
+          }
+          stdout.push(state.stdout);
+          stderr.push(state.stderr);
+          emit(state);
+        }
+        const drained = drainError === undefined;
+        const out = Buffer.concat(stdout);
+        const err = Buffer.concat(stderr);
+        // A kill that worked is the command's success; the status the killed
+        // process ended with is in the output.
+        const code = !drained
+          ? controller.signal.aborted
+            ? 130
+            : 1
+          : kill
+            ? 0
+            : backgroundExitStatus(state);
+        const more = !drained || state.more;
+        const {
+          stdout: _out,
+          stderr: _err,
+          stdoutText: _outText,
+          stderrText: _errText,
+          raw: _raw,
+          ...fields
+        } = state;
+        if (json)
+          return output.result(
+            snakeKeys({
+              ...fields,
+              more,
+              stdoutBase64: out.toString('base64'),
+              stderrBase64: err.toString('base64'),
+              stdoutText: new TextDecoder().decode(out),
+              stderrText: new TextDecoder().decode(err),
+              // The output above was read and is not given out again; the read
+              // after it failed, so the rest waits for another exec-poll.
+              ...(drained ? {} : { drainError: errorInfo(drainError) }),
+            }),
+            code,
+          );
+        if (state.outTruncated || state.errTruncated)
+          output.diagnostic('mandala: command output is incomplete (truncated)');
+        if (!drained)
+          output.diagnostic(
+            `mandala: a later read failed (${errorInfo(drainError).message}); the output above was read and is not given out again; run computers exec-poll again for the rest`,
+            { keepNewlines: false },
+          );
+        else if (more)
+          output.diagnostic(`mandala: more output is waiting; run computers exec-poll again`);
+        output.diagnostic(
+          kill
+            ? `mandala: pid ${state.pid} was killed${state.exitCode === undefined ? '' : `; it ended with status ${state.exitCode}`}`
+            : state.running
+              ? `mandala: pid ${state.pid} is still running; poll again for more`
+              : state.exitCode === undefined || state.exitCode < 0
+                ? `mandala: pid ${state.pid} has finished${state.killed ? ', killed' : ''}; its exit status is unknown`
+                : `mandala: pid ${state.pid} has finished${state.killed ? ', killed' : ''}, with status ${state.exitCode}`,
+        );
         return code;
       }
       case 'computers wait': {
@@ -1500,13 +1723,15 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
             ? await c.waitUntilBuilt(wait)
             : s('until') === 'guest'
               ? await c.waitForGuest(wait)
-              : s('until') === 'secrets'
-                ? await c.waitForSecrets(wait)
-                : s('until') === 'browser-proxy'
-                  ? await c.waitForBrowserProxy(wait)
-                  : s('until') === 'egress-proxy'
-                    ? await c.waitForEgressProxy(wait)
-                    : await c.waitUntilRunning(wait);
+              : s('until') === 'desktop'
+                ? await c.waitForDesktop(wait)
+                : s('until') === 'secrets'
+                  ? await c.waitForSecrets(wait)
+                  : s('until') === 'browser-proxy'
+                    ? await c.waitForBrowserProxy(wait)
+                    : s('until') === 'egress-proxy'
+                      ? await c.waitForEgressProxy(wait)
+                      : await c.waitUntilRunning(wait);
         return output.result(computerData(result));
       }
       case 'sizes list': {
@@ -1585,7 +1810,7 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
         return output.result(raw(await (await computer()).snapshot(capture)));
       case 'snapshots restore': {
         // The ack names the operation to read for how the restore ended.
-        const ack = await client.snapshots.restore(target, call);
+        const ack = await client.snapshots.restore(target, keyed);
         return output.result({
           id: target,
           restored: true,
@@ -1598,7 +1823,7 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
         return output.result(
           computerData(
             await client.snapshots.clone(target, s('name'), {
-              ...call,
+              ...keyed,
               ...(b('disk-only') ? { memory: false } : {}),
               ...(b('inherit-secrets') ? { inheritSecrets: true } : {}),
             }),
@@ -1648,6 +1873,8 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
         return await secretsSet(client, io, output, target, scopeFlag(), signal, {
           valueCheck: !b('no-value-check'),
         });
+      case 'secrets get':
+        return await secretsGet(client, io, output, target, scopeFlag(false), signal);
       case 'secrets rm':
         return await secretsRemove(client, io, output, target, scopeFlag(), signal);
       case 'files list': {
@@ -1785,7 +2012,9 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
     )
       throw error;
     const exitCode = error instanceof CliError && error.exitCode !== undefined ? error.exitCode : 1;
-    return output.error(error, exitCode, watching);
+    const code = output.error(error, exitCode, watching);
+    if (moveHint) output.diagnostic(moveHint, { keepNewlines: false });
+    return code;
   } finally {
     process.off('SIGINT', cancel);
     process.off('SIGTERM', cancel);

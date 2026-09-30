@@ -5,7 +5,7 @@ import os, { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { main } from '../src/cli.js';
 import { dashboardUrl, type LegacyCommands, runCli } from '../src/cli-commands.js';
 import { type Flag, GLOBAL_FLAGS, parseArgs } from '../src/cli-options.js';
@@ -23,9 +23,12 @@ import {
   EXEC_OK,
   guestFile,
   json,
+  MOVE_DONE,
+  MOVE_STARTED,
   type Responder,
   recorder,
   SECRET,
+  SECRET_BINDINGS,
   SECRET_LIST,
   SNAPSHOT,
   SSH_ACCESS,
@@ -2743,7 +2746,7 @@ describe('one JSON casing and one error vocabulary (OPL-5048)', () => {
       expect(verb.code).toBe(1);
       if (word === secret) expect(verb.out + verb.err).not.toContain(word);
       expect(verb.frames[0].error.message).toBe(
-        'unknown command under secrets; choose one of: list, set, rm (the word typed is not ' +
+        'unknown command under secrets; choose one of: list, set, get, rm (the word typed is not ' +
           'repeated here, as under secrets it may be a secret value)',
       );
     }
@@ -4532,5 +4535,572 @@ describe('text output escapes control and bidi characters', () => {
     const exact = await harness(respond).run(['computers', 'get', COMPUTER.id]);
     expect(exact.out).toContain(named.name);
     expect(exact.frames[0].data.name).toBe(named.name);
+  });
+});
+
+describe('background exec follow-up: exec-poll and exec-kill (OPL-5524)', () => {
+  const b64 = (text: string) => Buffer.from(text).toString('base64');
+  const handle = (fields: Record<string, unknown>) => ({
+    pid: 42,
+    running: false,
+    stdout_b64: '',
+    stderr_b64: '',
+    ...fields,
+  });
+
+  it('polls the pid, prints what is new, and exits with the finished status', async () => {
+    const h = harness((call) =>
+      /\/exec\/42$/.test(call.path)
+        ? json(handle({ exit_code: 3, stdout_b64: b64('out\n'), stderr_b64: b64('err\n') }))
+        : anyRoute(call),
+    );
+    const result = await h.run(['computers', 'exec-poll', COMPUTER.name, '42']);
+    expect(h.rec.routes()).toEqual([
+      ['GET', 'computers'],
+      ['GET', `computers/${COMPUTER.name}`],
+      ['GET', `computers/${COMPUTER.id}/exec/42`],
+    ]);
+    expect(result.code).toBe(3);
+    expect(result.frames[0]).toMatchObject({
+      command: 'computers exec-poll',
+      ok: false,
+      exit_code: 3,
+      data: {
+        pid: 42,
+        running: false,
+        exit_code: 3,
+        stdout_base64: b64('out\n'),
+        stderr_base64: b64('err\n'),
+        stdout_text: 'out\n',
+        stderr_text: 'err\n',
+      },
+    });
+    expect(result.frames[0].data).not.toHaveProperty('raw');
+  });
+
+  it('exits 0 while the command runs, and says so for a person', async () => {
+    const h = harness((call) =>
+      /\/exec\/42$/.test(call.path)
+        ? json(handle({ running: true, stdout_b64: b64('so far\n') }))
+        : anyRoute(call),
+    );
+    const result = await h.run(['computers', 'exec-poll', COMPUTER.id, '42'], false);
+    expect(result.code).toBe(0);
+    expect(result.out).toBe('so far\n');
+    expect(result.err).toContain('pid 42 is still running');
+  });
+
+  it.each([
+    [{ exit_code: -1 }, 1, 'exit status is unknown'],
+    [{ exit_code: 0 }, 0, 'has finished, with status 0'],
+  ])('maps a finished poll %j to exit %i', async (fields, code, note) => {
+    const h = harness((call) =>
+      /\/exec\/42$/.test(call.path) ? json(handle(fields)) : anyRoute(call),
+    );
+    const result = await h.run(['computers', 'exec-poll', COMPUTER.id, '42'], false);
+    expect(result.code).toBe(code);
+    expect(result.err).toContain(note);
+  });
+
+  it('reads on while more output waits, and joins it', async () => {
+    let polls = 0;
+    const h = harness((call) => {
+      if (!/\/exec\/42$/.test(call.path)) return anyRoute(call);
+      polls++;
+      return json(
+        polls === 1
+          ? handle({ running: false, exit_code: 0, more: true, stdout_b64: b64('one ') })
+          : handle({ running: false, exit_code: 0, stdout_b64: b64('two') }),
+      );
+    });
+    const result = await h.run(['computers', 'exec-poll', COMPUTER.id, '42']);
+    expect(polls).toBe(2);
+    expect(result.frames[0].data).toMatchObject({ stdout_text: 'one two', more: false });
+  });
+
+  // The poll is a consuming cursor: a chunk one read handed over is not given
+  // out again, so a later read's failure must not drop it.
+  const failsSecondPoll =
+    (second: () => Response | Promise<Response>): Responder =>
+    (call) => {
+      if (!/\/exec\/42$/.test(call.path)) return anyRoute(call);
+      pollCalls++;
+      return pollCalls === 1
+        ? json(
+            handle({
+              running: true,
+              more: true,
+              stdout_b64: b64('CONSUMED'),
+              stderr_b64: b64('E1'),
+            }),
+          )
+        : second();
+    };
+  let pollCalls = 0;
+  beforeEach(() => {
+    pollCalls = 0;
+  });
+
+  it('prints what was read when a later poll in the drain fails, and exits 1', async () => {
+    const h = harness(failsSecondPoll(() => json({ error: 'bad poll' }, { status: 400 })));
+    const result = await h.run(['computers', 'exec-poll', COMPUTER.id, '42'], false);
+    expect(pollCalls).toBe(2);
+    expect(result.code).toBe(1);
+    expect(result.out).toBe('CONSUMED');
+    expect(result.err).toContain('E1');
+    expect(result.err).toContain('a later read failed');
+    expect(result.err).toContain('run computers exec-poll again');
+  });
+
+  it('keeps what was read in the JSON frame when a later poll fails, with more and drain_error', async () => {
+    const h = harness(failsSecondPoll(() => json({ error: 'bad poll' }, { status: 400 })));
+    const result = await h.run(['computers', 'exec-poll', COMPUTER.id, '42']);
+    expect(pollCalls).toBe(2);
+    expect(result.code).toBe(1);
+    expect(result.frames[0]).toMatchObject({
+      command: 'computers exec-poll',
+      ok: false,
+      exit_code: 1,
+      data: {
+        pid: 42,
+        running: true,
+        more: true,
+        stdout_text: 'CONSUMED',
+        stderr_text: 'E1',
+        stdout_base64: b64('CONSUMED'),
+        drain_error: { status: 400 },
+      },
+    });
+  });
+
+  it('keeps what was read when the drain is cancelled after the first read, and exits 130', async () => {
+    const h = harness(
+      failsSecondPoll(() => {
+        process.emit('SIGINT');
+        throw new DOMException('The operation was aborted.', 'AbortError');
+      }),
+    );
+    const result = await h.run(['computers', 'exec-poll', COMPUTER.id, '42']);
+    expect(pollCalls).toBe(2);
+    expect(result.code).toBe(130);
+    expect(result.frames[0]).toMatchObject({
+      ok: false,
+      exit_code: 130,
+      data: { more: true, stdout_text: 'CONSUMED', drain_error: { code: 'cancelled' } },
+    });
+  });
+
+  it('still fails with the error when the first poll fails, since nothing was read', async () => {
+    const h = harness((call) =>
+      /\/exec\/42$/.test(call.path) ? json({ error: 'bad poll' }, { status: 400 }) : anyRoute(call),
+    );
+    const result = await h.run(['computers', 'exec-poll', COMPUTER.id, '42']);
+    expect(result.code).toBe(1);
+    expect(result.frames[0]).toMatchObject({ ok: false, error: { status: 400 } });
+    expect(result.frames[0]).not.toHaveProperty('data');
+  });
+
+  it('kills the pid with DELETE and exits 0', async () => {
+    const h = harness((call) =>
+      /\/exec\/42$/.test(call.path)
+        ? json(handle({ killed: true, exit_code: -1, stdout_b64: b64('last words') }))
+        : anyRoute(call),
+    );
+    const result = await h.run(['computers', 'exec-kill', COMPUTER.id, '42'], false);
+    expect(h.rec.last()).toMatchObject({
+      method: 'DELETE',
+      path: `/computers/${COMPUTER.id}/exec/42`,
+    });
+    expect(result.code).toBe(0);
+    expect(result.out).toBe('last words');
+    expect(result.err).toContain('pid 42 was killed');
+  });
+
+  it.each(['0', '-3', 'abc', '4.2'])('refuses pid %s before any request', async (pid) => {
+    const h = harness();
+    const result = await h.run(['computers', 'exec-poll', COMPUTER.id, '--', pid], false);
+    expect(result.code).toBe(1);
+    expect(result.err).toContain('<pid> must be the positive whole number');
+    expect(h.rec.calls).toEqual([]);
+  });
+});
+
+describe('computers move and moves list (OPL-5524)', () => {
+  it('moves by id with the sizing flags and prints the move', async () => {
+    const h = harness();
+    const result = await h.run([
+      'computers',
+      'move',
+      COMPUTER.name,
+      '--ram-mb',
+      '26000',
+      '--cpu',
+      '2',
+      '--idempotency-key',
+      'move-1',
+    ]);
+    expect(h.rec.last()).toMatchObject({
+      method: 'POST',
+      path: `/computers/${COMPUTER.id}/move`,
+      body: { ram_mb: 26000, cpu: 2 },
+    });
+    expect(h.rec.last().headers['Idempotency-Key']).toBe('move-1');
+    expect(result.code).toBe(0);
+    expect(result.frames[0].data).toEqual({
+      computer_id: 'vm-1',
+      state: 'moving',
+      detail: '',
+      live: true,
+      cpu: 2,
+      ram_mb: 26000,
+      started_at: MOVE_STARTED.started_at,
+    });
+  });
+
+  it('waits for the move with --wait and exits 0 when it is done', async () => {
+    const h = harness();
+    const result = await h.run(['computers', 'move', COMPUTER.id, '--ram-mb', '26000', '--wait']);
+    expect(h.rec.routes().slice(-2)).toEqual([
+      ['POST', `computers/${COMPUTER.id}/move`],
+      ['GET', 'moves'],
+    ]);
+    expect(result.code).toBe(0);
+    expect(result.frames[0].data).toMatchObject({ state: 'done', live: false });
+  });
+
+  it.each([
+    ['moved', 'OLD size'],
+    ['failed', 'untouched'],
+  ])('exits 1 and says why when a waited move ends %s', async (state, note) => {
+    const h = harness((call) =>
+      call.path === '/moves' ? json({ moves: [{ ...MOVE_DONE, state }] }) : anyRoute(call),
+    );
+    const result = await h.run(
+      ['computers', 'move', COMPUTER.id, '--ram-mb', '26000', '--wait'],
+      false,
+    );
+    expect(result.code).toBe(1);
+    expect(result.out).toContain(`"state": "${state}"`);
+    expect(result.err).toContain(note);
+  });
+
+  it('needs --ram-mb, and --timeout-ms only with --wait, before any request', async () => {
+    const h = harness();
+    const bare = await h.run(['computers', 'move', COMPUTER.id, '--cpu', '4']);
+    expect(bare.code).toBe(1);
+    expect(bare.frames[0].error.message).toContain('requires --ram-mb');
+    const h2 = harness();
+    const early = await h2.run([
+      'computers',
+      'move',
+      COMPUTER.id,
+      '--ram-mb',
+      '26000',
+      '--timeout-ms',
+      '5000',
+    ]);
+    expect(early.frames[0].error.message).toContain('go with --wait');
+    expect([...h.rec.calls, ...h2.rec.calls]).toEqual([]);
+  });
+
+  it('names the move command when a resize is refused for a move', async () => {
+    const h = harness((call) =>
+      call.method === 'PATCH'
+        ? json(
+            {
+              error: 'this host cannot run 32768 MiB; POST /computers/vm-1/move to move it',
+              move: { required: true, possible: true },
+            },
+            { status: 409 },
+          )
+        : anyRoute(call),
+    );
+    const human = await h.run(
+      ['computers', 'resize', COMPUTER.name, '--ram-mb', '32768', '--cpu', '4'],
+      false,
+    );
+    expect(human.code).toBe(1);
+    expect(human.err).toContain(
+      `mandala computers move ${COMPUTER.id} --ram-mb 32768 --cpu 4 --wait`,
+    );
+    const h2 = harness((call) =>
+      call.method === 'PATCH'
+        ? json({ error: 'no', move: { required: true, possible: false } }, { status: 409 })
+        : anyRoute(call),
+    );
+    const nowhere = await h2.run(['computers', 'resize', COMPUTER.id, '--ram-mb', '32768'], false);
+    expect(nowhere.err).not.toContain('computers move');
+  });
+
+  it("lists the account's moves, or one computer's by name", async () => {
+    const other = { ...MOVE_DONE, computer_id: 'vm-2' };
+    const h = harness((call) =>
+      call.path === '/moves' ? json({ moves: [MOVE_DONE, other] }) : anyRoute(call),
+    );
+    const all = await h.run(['moves', 'list']);
+    expect(all.frames[0].data.moves.map((m: { computer_id: string }) => m.computer_id)).toEqual([
+      'vm-1',
+      'vm-2',
+    ]);
+    const h2 = harness((call) =>
+      call.path === '/moves' ? json({ moves: [MOVE_DONE, other] }) : anyRoute(call),
+    );
+    const one = await h2.run(['moves', 'list', '--computer', COMPUTER.name]);
+    expect(h2.rec.routes().at(-1)).toEqual(['GET', 'moves']);
+    expect(one.frames[0].data).toEqual({
+      moves: [
+        {
+          computer_id: 'vm-1',
+          state: 'done',
+          detail: '',
+          live: false,
+          cpu: 2,
+          ram_mb: 26000,
+          started_at: MOVE_DONE.started_at,
+          finished_at: MOVE_DONE.finished_at,
+        },
+      ],
+    });
+  });
+});
+
+describe('computers idle-suspend (OPL-5524)', () => {
+  it.each([
+    ['30', 30],
+    ['off', 0],
+    ['default', null],
+  ])('sends %s as idle_suspend_min %j', async (typed, sent) => {
+    const h = harness();
+    const result = await h.run(['computers', 'idle-suspend', COMPUTER.name, typed]);
+    expect(result.code).toBe(0);
+    expect(h.rec.last()).toMatchObject({ method: 'PATCH', path: `/computers/${COMPUTER.id}` });
+    expect(h.rec.last().body).toEqual({ idle_suspend_min: sent });
+    expect(result.frames[0].data.id).toBe(COMPUTER.id);
+  });
+
+  it.each(['soon', '-5', '1.5'])('refuses %s before any request', async (typed) => {
+    const h = harness();
+    const result = await h.run(['computers', 'idle-suspend', COMPUTER.id, '--', typed], false);
+    expect(result.code).toBe(1);
+    expect(result.err).toContain('<minutes> must be a whole number of minutes');
+    expect(h.rec.calls).toEqual([]);
+  });
+});
+
+describe('secrets get (OPL-5524)', () => {
+  it('finds a secret by name and reads its metadata by id', async () => {
+    const h = harness();
+    const result = await h.run(['secrets', 'get', 'openai_api_key']);
+    expect(h.rec.routes()).toEqual([
+      ['GET', 'secrets'],
+      ['GET', `secrets/${SECRET.id}`],
+    ]);
+    expect(result.code).toBe(0);
+    expect(result.frames[0].data).toEqual(SECRET);
+  });
+
+  it('reads an id as typed, in the workspace given', async () => {
+    const other = 'csec-00000000000000aa';
+    const h = harness();
+    await h.run(['secrets', 'get', other, '--workspace', 'wsp-0123456789ab']);
+    expect(h.rec.last()).toMatchObject({
+      path: `/secrets/${other}`,
+      query: { workspace_id: 'wsp-0123456789ab' },
+    });
+  });
+
+  it('prints one line for a person, with no value', async () => {
+    const h = harness();
+    const result = await h.run(['secrets', 'get', SECRET.id], false);
+    expect(result.out).toBe(
+      `${SECRET.id}  ${SECRET.name}  ${SECRET.revision_id}  account-wide  created ${SECRET.created_at}  updated ${SECRET.updated_at}  never delivered\n`,
+    );
+  });
+
+  it('refuses a name the scope does not hold without reading any id', async () => {
+    const h = harness();
+    const result = await h.run(['secrets', 'get', 'NOPE']);
+    expect(result.code).toBe(1);
+    expect(result.frames[0].error).toMatchObject({ code: 'not_found' });
+    expect(h.rec.routes()).toEqual([['GET', 'secrets']]);
+  });
+});
+
+describe('--idempotency-key on keyed commands (OPL-5524)', () => {
+  const deleted: Responder = (call) =>
+    call.method === 'DELETE' ? json({ ok: true, snapshots_deleted: 0 }) : anyRoute(call);
+  it.each([
+    [['computers', 'create', '--size', 'small'], 'POST', 'computers'],
+    [['computers', 'start', COMPUTER.id], 'POST', `computers/${COMPUTER.id}/start`],
+    [['computers', 'stop', COMPUTER.id], 'POST', `computers/${COMPUTER.id}/stop`],
+    [['computers', 'suspend', COMPUTER.id], 'POST', `computers/${COMPUTER.id}/suspend`],
+    [['computers', 'restart', COMPUTER.id], 'POST', `computers/${COMPUTER.id}/restart`],
+    [['computers', 'clone', COMPUTER.id], 'POST', `computers/${COMPUTER.id}/clone`],
+    [['computers', 'delete', COMPUTER.id], 'DELETE', `computers/${COMPUTER.id}`, deleted],
+    [['computers', 'resize', COMPUTER.id, '--cpu', '4'], 'PATCH', `computers/${COMPUTER.id}`],
+    [['computers', 'rename', COMPUTER.id, 'next'], 'PATCH', `computers/${COMPUTER.id}`],
+    [['computers', 'idle-suspend', COMPUTER.id, '30'], 'PATCH', `computers/${COMPUTER.id}`],
+    [['snapshots', 'restore', SNAPSHOT.id], 'POST', `snapshots/${SNAPSHOT.id}/restore`],
+    [['snapshots', 'clone', SNAPSHOT.id], 'POST', `snapshots/${SNAPSHOT.id}/clone`],
+  ] as [string[], string, string, Responder?][])(
+    '%j sends the key it is given',
+    async (args, method, route, respond) => {
+      const h = harness(respond);
+      const result = await h.run([...args, '--idempotency-key', 'retry-7']);
+      expect(result.code).toBe(0);
+      const sent = h.rec.calls.find(
+        (c) => c.method === method && c.path === `/${route}` && c.headers['Idempotency-Key'],
+      );
+      expect(sent?.headers['Idempotency-Key']).toBe('retry-7');
+    },
+  );
+
+  it('refuses a key the platform would, before any request', async () => {
+    const h = harness();
+    const result = await h.run(['computers', 'start', COMPUTER.id, '--idempotency-key', 'a b']);
+    expect(result.code).toBe(1);
+    expect(result.frames[0].error).toMatchObject({
+      code: 'invalid_arguments',
+      message: expect.stringContaining('printable ASCII other than a space'),
+    });
+    expect(h.rec.calls).toEqual([]);
+  });
+
+  it('refuses it on a command that sends no key, naming the ones that do', async () => {
+    const h = harness();
+    const result = await h.run(['computers', 'get', COMPUTER.id, '--idempotency-key', 'k']);
+    expect(result.code).toBe(1);
+    expect(result.frames[0].error.message).toContain(
+      'mandala computers get sends no Idempotency-Key',
+    );
+    expect(result.frames[0].error.message).toContain('computers start');
+    expect(h.rec.calls).toEqual([]);
+  });
+
+  it('keeps operations list --idempotency-key a filter', async () => {
+    const h = harness();
+    await h.run(['operations', 'list', '--idempotency-key', 'k-9']);
+    expect(h.rec.last().query).toMatchObject({ idempotency_key: 'k-9' });
+    expect(h.rec.last().headers['Idempotency-Key']).toBeUndefined();
+  });
+
+  it('tells a person to resend a lost keyed call under its key', async () => {
+    const h = harness((call) =>
+      call.method === 'POST' && call.path.endsWith('/start')
+        ? json({ error: 'upstream failed' }, { status: 502 })
+        : anyRoute(call),
+    );
+    const result = await h.run(
+      ['computers', 'start', COMPUTER.id, '--idempotency-key', 'retry-8'],
+      false,
+    );
+    expect(result.code).toBe(1);
+    expect(result.err).toContain(
+      'send the same command again with --idempotency-key retry-8, which the platform does not carry out twice',
+    );
+  });
+});
+
+describe('exec --retain-output, files --no-wake, secrets --keep-revision, wait --until desktop (OPL-5524)', () => {
+  it('asks for retained output and names the result', async () => {
+    const id = `res_${'a'.repeat(32)}`;
+    const h = harness((call) =>
+      call.path.endsWith('/exec')
+        ? json({ ...EXEC_OK, out_truncated: false, err_truncated: false, result_id: id })
+        : anyRoute(call),
+    );
+    const result = await h.run(
+      ['computers', 'exec', COMPUTER.id, '-c', 'make', '--retain-output'],
+      false,
+    );
+    expect(h.rec.last().body).toEqual({ command: 'make', timeout_s: 30, retain_output: true });
+    expect(result.code).toBe(0);
+    expect(result.err).toContain(`output is retained as result ${id}`);
+  });
+
+  it('refuses --retain-output with --background', async () => {
+    const h = harness();
+    const result = await h.run([
+      'computers',
+      'exec',
+      COMPUTER.id,
+      '-c',
+      'make',
+      '--background',
+      '--retain-output',
+    ]);
+    expect(result.code).toBe(1);
+    expect(result.frames[0].error.message).toMatch(/conflicts with/);
+    expect(h.rec.calls).toEqual([]);
+  });
+
+  it('sends no_wake on files upload and download with --no-wake', async () => {
+    const path = join(await tempDir(), 'upload.bin');
+    await writeFile(path, Uint8Array.from([1]));
+    const up = harness((call) =>
+      call.path === '/computers' ? json([COMPUTER]) : json({ bytes: 1 }),
+    );
+    await up.run(['files', 'upload', '--no-wake', COMPUTER.id, path, '/tmp/x.bin']);
+    expect(up.rec.last().query).toEqual({ path: '/tmp/x.bin', no_wake: '1' });
+    const dir = await tempDir();
+    const down = harness(guestFile(Uint8Array.from([5])));
+    await down.run(['files', 'download', '--no-wake', COMPUTER.id, '/tmp/in.bin', dir]);
+    const reads = down.rec.calls.filter((c) => c.path.endsWith('/files'));
+    expect(reads.length).toBeGreaterThan(0);
+    for (const read of reads) expect(read.query).toMatchObject({ no_wake: '1' });
+    const plain = harness(guestFile(Uint8Array.from([5])));
+    await plain.run(['files', 'download', COMPUTER.id, '/tmp/in.bin', dir]);
+    for (const read of plain.rec.calls.filter((c) => c.path.endsWith('/files')))
+      expect(read.query).not.toHaveProperty('no_wake');
+  });
+
+  it('keeps the revisions a computer holds with --keep-revision, and sends the version read', async () => {
+    const held = SECRET_BINDINGS.secrets[0]!;
+    const h = harness();
+    const result = await h.run([
+      'computers',
+      'secrets',
+      'set',
+      COMPUTER.id,
+      '--secret',
+      SECRET.name,
+      '--as',
+      'API_TOKEN',
+      '--keep-revision',
+    ]);
+    expect(result.code).toBe(0);
+    expect(h.rec.routes().slice(-2)).toEqual([
+      ['GET', `computers/${COMPUTER.id}/secrets`],
+      ['PUT', `computers/${COMPUTER.id}/secrets`],
+    ]);
+    expect(h.rec.last().body).toEqual({
+      secrets: [{ secret_id: SECRET.id, env: 'API_TOKEN', revision_id: held.revision_id }],
+      version: SECRET_BINDINGS.version,
+    });
+    const plain = harness();
+    await plain.run([
+      'computers',
+      'secrets',
+      'set',
+      COMPUTER.id,
+      '--secret',
+      SECRET.name,
+      '--as',
+      'API_TOKEN',
+    ]);
+    expect(plain.rec.last().body).toEqual({
+      secrets: [{ secret_id: SECRET.id, env: 'API_TOKEN' }],
+    });
+  });
+
+  it('waits for the desktop session with --until desktop', async () => {
+    const h = harness();
+    const result = await h.run(['computers', 'wait', COMPUTER.id, '--until', 'desktop']);
+    expect(result.code).toBe(0);
+    expect(h.rec.last()).toMatchObject({
+      method: 'POST',
+      path: `/computers/${COMPUTER.id}/exec`,
+      body: { command: 'true', session: 'desktop' },
+    });
   });
 });

@@ -35,6 +35,8 @@ const expectedCommands = [
   'computers clone',
   'computers rename',
   'computers resize',
+  'computers move',
+  'computers idle-suspend',
   'computers browser-proxy set',
   'computers browser-proxy clear',
   'computers egress-proxy set',
@@ -44,6 +46,8 @@ const expectedCommands = [
   'computers view',
   'computers screenshot',
   'computers exec',
+  'computers exec-poll',
+  'computers exec-kill',
   'computers wait',
   'sizes list',
   'templates list',
@@ -77,6 +81,7 @@ const expectedCommands = [
   'webhooks deliveries',
   'secrets list',
   'secrets set',
+  'secrets get',
   'secrets rm',
   'api-keys list',
   'api-keys create',
@@ -84,6 +89,7 @@ const expectedCommands = [
   'operations list',
   'operations get',
   'operations wait',
+  'moves list',
   'workspaces list',
   'workspaces get',
   'workspaces members',
@@ -175,7 +181,8 @@ describe('one command inventory', () => {
     const at = (path: string) => lines.indexOf(path);
     expect(at('operations get')).toBeGreaterThan(-1);
     expect(at('operations wait')).toBe(at('operations get') + 1);
-    expect(at('workspaces list')).toBe(at('operations wait') + 1);
+    expect(at('moves list')).toBe(at('operations wait') + 1);
+    expect(at('workspaces list')).toBe(at('moves list') + 1);
   });
 
   it('contains the entire supported tree with no deferred endpoints', () => {
@@ -357,6 +364,42 @@ describe('offline discovery', () => {
     );
   });
 
+  it('completes the verbs and flags OPL-5524 added, in bash and zsh', () => {
+    const probe = (words: string, at: number) =>
+      `COMP_WORDS=(${words}); COMP_CWORD=${at}; _mandala_complete; printf '%s\\n' "\${COMPREPLY[@]}"`;
+    const script = [
+      completion('bash'),
+      probe('mandala computers exec-', 2),
+      probe('mandala mov', 1),
+      probe('mandala computers mo', 2),
+      probe('mandala computers idle', 2),
+      probe('mandala secrets g', 2),
+      probe('mandala computers start demo --idem', 4),
+      probe('mandala computers wait demo --until de', 5),
+      probe('mandala files download demo /a --no-w', 5),
+      probe('mandala computers exec demo --ret', 4),
+      probe('mandala computers secrets set demo --keep', 5),
+    ].join('\n');
+    expect(execFileSync('/bin/bash', ['-c', script], { encoding: 'utf8' })).toBe(
+      [
+        'exec-poll',
+        'exec-kill',
+        'moves',
+        'move',
+        'idle-suspend',
+        'get',
+        '--idempotency-key',
+        'desktop',
+        '--no-wake',
+        '--retain-output',
+        '--keep-revision',
+        '',
+      ].join('\n'),
+    );
+    for (const words of ["'computers move'", "'moves list'", "'secrets get'"])
+      expect(completion('zsh')).toContain(`${words})`);
+  });
+
   const fishAvailable = spawnSync('fish', ['--version'], { encoding: 'utf8' }).status === 0;
   // Fish may be absent locally. CI installs it and must execute every probe.
   it.skipIf(!fishAvailable && !process.env.CI).each([
@@ -372,6 +415,10 @@ describe('offline discovery', () => {
     ['mandala usa', 'usage'],
     ['mandala usage --fr', '--from'],
     ['mandala --json usage --to', '--to'],
+    ['mandala computers exec-p', 'exec-poll'],
+    ['mandala moves l', 'list'],
+    ['mandala computers move demo --ra', '--ram-mb'],
+    ['mandala computers wait demo --until de', 'desktop'],
   ])('fish completes %s from the actual command context', async (line, expected) => {
     expect(fishAvailable, 'CI requires fish for shell completion probes').toBe(true);
     const directory = await mkdtemp(join(tmpdir(), 'mandala-fish-'));

@@ -286,7 +286,9 @@ export class Output {
             (info.operation_id !== undefined
               ? ` (read it with: mandala operations get ${info.operation_id})`
               : info.idempotency_key !== undefined
-                ? ` (find its operation with: mandala operations list --idempotency-key ${info.idempotency_key})`
+                ? // Every command that sends a key takes --idempotency-key, so
+                  // the one that failed can be sent again under it.
+                  ` (find its operation with: mandala operations list --idempotency-key ${info.idempotency_key}; or send the same command again with --idempotency-key ${info.idempotency_key}, which the platform does not carry out twice)`
                 : ''),
           { keepNewlines: false },
         );
