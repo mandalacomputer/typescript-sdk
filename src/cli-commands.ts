@@ -163,7 +163,7 @@ async function operationsComputer(
 }
 
 /**
- * `workspaces get` and `workspaces members`: a workspace by name or id, as a
+ * `workspaces get`, `members`, `rename` and `rm`: a workspace by name or id, as a
  * computer argument is. The listing is the whole of what this key can reach,
  * so it decides: an id in it is taken as it is (an id wins over a name), a name
  * that fits exactly one workspace becomes that workspace's id, and a name that
@@ -700,6 +700,16 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
       P.updateBody(resize);
     }
     if (path === 'computers rename') P.updateBody({ name: args[1]! });
+    if (path === 'workspaces create') P.workspaceNameBody(target);
+    if (path === 'workspaces rename') P.workspaceNameBody(args[1]!);
+    // A delete revokes every key confined to the workspace, whoever holds them,
+    // so it is not done on a bare command: refused before any request, as a
+    // usage mistake is, and the message says what --yes agrees to.
+    if (path === 'workspaces rm' && !b('yes'))
+      throw new CliError(
+        'confirmation_required',
+        `deleting workspace ${target} revokes every API key confined to it; its computers are kept. Pass --yes to delete it`,
+      );
     if (path === 'files list') P.directoryQuery(args[1]!);
     const deletion = { deleteSnapshots: b('delete-snapshots'), expect: s('expect'), signal };
     if (path === 'computers delete') {
@@ -841,6 +851,23 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
           (
             await readWorkspace(client, target, signal, (id) => client.workspaces.members(id, call))
           ).map(raw),
+        );
+      case 'workspaces create':
+        return output.result(raw(await client.workspaces.create({ name: target }, call)));
+      case 'workspaces rename':
+        return output.result(
+          raw(
+            await readWorkspace(client, target, signal, (id) =>
+              client.workspaces.rename(id, args[1]!, call),
+            ),
+          ),
+        );
+      case 'workspaces rm':
+        // The answer carries `revoked_keys`: how many keys stopped working.
+        return output.result(
+          raw(
+            await readWorkspace(client, target, signal, (id) => client.workspaces.delete(id, call)),
+          ),
         );
       case 'operations wait':
         return output.result(raw(await client.operations.wait(target, wait)));

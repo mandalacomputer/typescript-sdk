@@ -241,6 +241,7 @@ export type {
   Whoami,
   WindowResult,
   Workspace,
+  WorkspaceDeleted,
   WorkspaceMember,
 } from './models.js';
 export type {

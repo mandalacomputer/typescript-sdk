@@ -99,8 +99,8 @@ export const API_KEYS = 'api-keys';
  */
 export const OPERATIONS = 'operations';
 /**
- * The account's workspaces (platform OPL-5057), read only: they are created,
- * renamed and deleted in the dashboard.
+ * The account's workspaces (platform OPL-5057), and their create, rename and
+ * delete (platform OPL-5473), which need an owner's account-wide key.
  */
 export const WORKSPACES = 'workspaces';
 
@@ -2888,6 +2888,20 @@ export function apiKeyCreateBody(args: ApiKeyCreateArgs = {}): Json {
   }
   if (args.name !== undefined) requireString(args.name, 'name');
   return omitUndefined({ name: args.name, workspace_id: workspaceId });
+}
+
+// --- workspaces -------------------------------------------------------------
+
+/**
+ * The body for `POST workspaces` and `PATCH workspaces/:id`: `{ name }` and
+ * nothing else. The platform trims the name and judges it (1 to 40 characters,
+ * no control characters, unique within the account); a name that is empty
+ * once trimmed is refused here, before a request is spent on a certain `400`.
+ */
+export function workspaceNameBody(name: unknown): Json {
+  const n = requireString(name, 'name');
+  if (!n.trim()) throw new ValidationError('name must not be empty');
+  return { name: n };
 }
 
 // --- operations -------------------------------------------------------------

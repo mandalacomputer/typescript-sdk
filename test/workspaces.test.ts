@@ -1,6 +1,6 @@
 /**
  * `client.workspaces` (platform OPL-5057): the account's workspaces and the
- * people who reach one, read only.
+ * people who reach one, and their create, rename and delete (OPL-5473).
  */
 
 import { describe, expect, it } from 'vitest';
@@ -18,6 +18,7 @@ import {
   type Responder,
   recorder,
   WORKSPACE,
+  WORKSPACE_DELETED,
   WORKSPACE_MEMBER,
 } from './harness.js';
 
@@ -88,6 +89,78 @@ describe('client.workspaces', () => {
     );
     await expect(scoped.client.workspaces.members(WORKSPACE.id)).rejects.toBeInstanceOf(
       PermissionDeniedError,
+    );
+  });
+
+  it('creates, renames and deletes, sending { name } and nothing else', async () => {
+    const { rec, client } = sdk();
+    const made = await client.workspaces.create({ name: 'customer-acme' });
+    expect(made).toEqual({
+      id: WORKSPACE.id,
+      name: WORKSPACE.name,
+      createdAt: WORKSPACE.created_at,
+      raw: WORKSPACE,
+    });
+    const renamed = await client.workspaces.rename(WORKSPACE.id, 'customer-acme-prod');
+    expect(renamed.id).toBe(WORKSPACE.id);
+    const gone = await client.workspaces.delete(WORKSPACE.id);
+    expect(gone).toEqual({ revokedKeys: 2, raw: WORKSPACE_DELETED });
+    expect(rec.routes()).toEqual([
+      ['POST', 'workspaces'],
+      ['PATCH', `workspaces/${WORKSPACE.id}`],
+      ['DELETE', `workspaces/${WORKSPACE.id}`],
+    ]);
+    expect(rec.calls.map((c) => c.body)).toEqual([
+      { name: 'customer-acme' },
+      { name: 'customer-acme-prod' },
+      undefined,
+    ]);
+  });
+
+  it('refuses a missing or empty name, and an empty id, before any request', async () => {
+    const { rec, client } = sdk();
+    await expect(client.workspaces.create({ name: '' })).rejects.toBeInstanceOf(ValidationError);
+    await expect(client.workspaces.create({ name: '   ' })).rejects.toBeInstanceOf(ValidationError);
+    await expect(
+      client.workspaces.create({} as unknown as { name: string }),
+    ).rejects.toBeInstanceOf(ValidationError);
+    await expect(
+      client.workspaces.create(undefined as unknown as { name: string }),
+    ).rejects.toBeInstanceOf(ValidationError);
+    await expect(
+      client.workspaces.rename(WORKSPACE.id, 7 as unknown as string),
+    ).rejects.toBeInstanceOf(ValidationError);
+    await expect(client.workspaces.rename('', 'x')).rejects.toBeInstanceOf(ValidationError);
+    await expect(client.workspaces.delete('')).rejects.toBeInstanceOf(ValidationError);
+    expect(rec.calls).toHaveLength(0);
+  });
+
+  it('refuses a delete answer that does not say how many keys it revoked', async () => {
+    for (const answer of [{ ok: true }, { ok: true, revoked_keys: -1 }, { revoked_keys: 0 }, {}]) {
+      const { client } = sdk(() => json(answer));
+      await expect(client.workspaces.delete(WORKSPACE.id)).rejects.toBeInstanceOf(MandalaError);
+    }
+  });
+
+  it('maps a scoped key or a non-owner to PermissionDeniedError and a foreign id to NotFoundError', async () => {
+    const denied = sdk(() =>
+      json(
+        {
+          error:
+            'Workspaces cannot be created, renamed or deleted with a workspace-scoped API key.',
+        },
+        { status: 403 },
+      ),
+    );
+    await expect(denied.client.workspaces.create({ name: 'x' })).rejects.toBeInstanceOf(
+      PermissionDeniedError,
+    );
+    await expect(denied.client.workspaces.delete(WORKSPACE.id)).rejects.toBeInstanceOf(
+      PermissionDeniedError,
+    );
+    const hidden = sdk(() => json({ error: 'workspace not found' }, { status: 404 }));
+    await expect(hidden.client.workspaces.rename('wsp-ffffffffffff', 'x')).rejects.toBeInstanceOf(
+      NotFoundError,
     );
   });
 });

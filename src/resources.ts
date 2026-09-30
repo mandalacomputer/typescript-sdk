@@ -38,6 +38,7 @@ import type {
   WebhookDelivery,
   Whoami,
   Workspace,
+  WorkspaceDeleted,
   WorkspaceMember,
 } from './models.js';
 import {
@@ -72,6 +73,7 @@ import {
   toWebhookDelivery,
   toWhoami,
   toWorkspace,
+  toWorkspaceDeleted,
   toWorkspaceMember,
   unmatchableRows,
 } from './models.js';
@@ -2440,9 +2442,14 @@ export class ApiKeys {
 }
 
 /**
- * The account's workspaces, read only (platform OPL-5057): they are created,
- * renamed and deleted in the dashboard. A workspace partitions the account's
- * computers; a key confined to one reaches that workspace's computers only.
+ * The account's workspaces (platform OPL-5057). A workspace partitions the
+ * account's computers; a key confined to one reaches that workspace's
+ * computers only.
+ *
+ * {@link Workspaces.create}, {@link Workspaces.rename} and
+ * {@link Workspaces.delete} (platform OPL-5473) need an owner's ACCOUNT-WIDE
+ * key: any key confined to a workspace is refused them with a
+ * {@link PermissionDeniedError}, and so is a member or viewer.
  */
 export class Workspaces {
   #t: Transport;
@@ -2489,6 +2496,58 @@ export class Workspaces {
       signal: opts.signal,
     });
     return data.map((row, i) => toWorkspaceMember(row, `workspace member ${i}`));
+  }
+
+  /**
+   * Make a workspace. The platform trims the name, which must be 1 to 40
+   * characters and one the account does not already use; an account holds at
+   * most 500. Each of those is an {@link APIError} with status 400.
+   *
+   * ```ts
+   * const ws = await client.workspaces.create({ name: 'customer-acme' });
+   * ```
+   *
+   * Not retried: a create whose answer was lost may have happened, so list
+   * before sending it again.
+   */
+  async create(args: { name: string }, opts: CallOptions = {}): Promise<Workspace> {
+    if (!P.isRecord(args)) {
+      throw new ValidationError(`options must be an object (got ${typeof args})`);
+    }
+    const data = await this.#t.json('POST', P.WORKSPACES, {
+      body: P.workspaceNameBody(args.name),
+      signal: opts.signal,
+    });
+    return toWorkspace(data, `the workspace from POST ${P.WORKSPACES}`);
+  }
+
+  /**
+   * Rename a workspace. Its id does not change, so the keys confined to it
+   * and the computers in it are untouched. The name follows the rules
+   * {@link Workspaces.create} gives; an id this key cannot see is a
+   * {@link NotFoundError}.
+   */
+  async rename(workspaceId: string, name: string, opts: CallOptions = {}): Promise<Workspace> {
+    const path = P.workspace(workspaceId);
+    const data = await this.#t.json('PATCH', path, {
+      body: P.workspaceNameBody(name),
+      signal: opts.signal,
+    });
+    return toWorkspace(data, `the workspace from PATCH ${path}`);
+  }
+
+  /**
+   * Delete a workspace. Every API key confined to it is REVOKED in the same
+   * step, whoever holds it, and the answer says how many. The computers in it
+   * are not touched: they keep the deleted workspace's id, and account-wide
+   * keys reach them as before.
+   */
+  async delete(workspaceId: string, opts: CallOptions = {}): Promise<WorkspaceDeleted> {
+    const path = P.workspace(workspaceId);
+    return toWorkspaceDeleted(
+      await this.#t.json('DELETE', path, { signal: opts.signal }),
+      `the answer to DELETE ${path}`,
+    );
   }
 }
 

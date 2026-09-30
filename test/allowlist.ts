@@ -147,9 +147,13 @@ export const ALLOWED: ReadonlySet<string> = new Set(
       ['PUT', 'secrets/:id'],
       ['DELETE', 'secrets/:id'],
 
-      // The account's workspaces, read only (OPL-5057).
+      // The account's workspaces (OPL-5057), and their create, rename and
+      // delete (OPL-5473).
       ['GET', 'workspaces'],
+      ['POST', 'workspaces'],
       ['GET', 'workspaces/:id'],
+      ['PATCH', 'workspaces/:id'],
+      ['DELETE', 'workspaces/:id'],
       ['GET', 'workspaces/:id/members'],
 
       // Who the credential is, and the holder's own API keys (OPL-5053).
@@ -444,9 +448,13 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
   ['PUT secrets/:id', ['body:revision_id', 'body:value', 'body:workspace_id']],
   ['DELETE secrets/:id', ['query:revision_id', 'query:workspace_id']],
 
-  // The account's workspaces, read only (OPL-5057). None takes a parameter.
+  // The account's workspaces (OPL-5057). The reads take no parameter; the
+  // create and the rename take a name (OPL-5473).
   ['GET workspaces', []],
+  ['POST workspaces', ['body:name']],
   ['GET workspaces/:id', []],
+  ['PATCH workspaces/:id', ['body:name']],
+  ['DELETE workspaces/:id', []],
   ['GET workspaces/:id/members', []],
 
   // Who the credential is, and the holder's own API keys (OPL-5053).

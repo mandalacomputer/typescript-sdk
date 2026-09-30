@@ -1746,6 +1746,78 @@ describe('snapshots', () => {
     ]);
   });
 
+  // The writes (platform OPL-5473): create by name, rename and rm by name or
+  // id, and rm only with --yes, because it revokes the workspace's keys.
+  it('creates a workspace with the name as typed', async () => {
+    const h = harness();
+    const made = await h.run(['workspaces', 'create', 'customer-acme']);
+    expect(made.code).toBe(0);
+    expect(h.rec.routes()).toEqual([['POST', 'workspaces']]);
+    expect(h.rec.last().body).toEqual({ name: 'customer-acme' });
+    expect(made.frames[0].data).toEqual(WORKSPACE);
+  });
+
+  it('refuses an empty workspace name before any request', async () => {
+    const h = harness();
+    const result = await h.run(['workspaces', 'create', '  ']);
+    expect(result.code).not.toBe(0);
+    expect(h.rec.calls).toHaveLength(0);
+  });
+
+  it.each([
+    ['by name', WORKSPACE.name],
+    ['by id', WORKSPACE.id],
+  ])('renames a workspace %s', async (_how, target) => {
+    const h = harness();
+    const renamed = await h.run(['workspaces', 'rename', target, 'customers-2']);
+    expect(renamed.code).toBe(0);
+    expect(h.rec.routes()).toEqual([
+      ['GET', 'workspaces'],
+      ['PATCH', `workspaces/${WORKSPACE.id}`],
+    ]);
+    expect(h.rec.last().body).toEqual({ name: 'customers-2' });
+  });
+
+  it.each([
+    ['by name', WORKSPACE.name],
+    ['by id', WORKSPACE.id],
+  ])('deletes a workspace %s with --yes and reports the keys it revoked', async (_how, target) => {
+    const h = harness();
+    const gone = await h.run(['workspaces', 'rm', target, '--yes']);
+    expect(gone.code).toBe(0);
+    expect(h.rec.routes()).toEqual([
+      ['GET', 'workspaces'],
+      ['DELETE', `workspaces/${WORKSPACE.id}`],
+    ]);
+    expect(gone.frames[0].data).toEqual({ ok: true, revoked_keys: 2 });
+  });
+
+  it('refuses to delete a workspace without --yes, before any request, saying what it would revoke', async () => {
+    const h = harness();
+    const result = await h.run(['workspaces', 'rm', WORKSPACE.name]);
+    expect(result.code).toBe(1);
+    expect(result.frames[0].error.code).toBe('confirmation_required');
+    expect(result.frames[0].error.message).toMatch(/revokes every API key confined to it/);
+    expect(result.frames[0].error.message).toContain('--yes');
+    expect(h.rec.calls).toHaveLength(0);
+  });
+
+  it('refuses to rename or delete a workspace name that fits more than one', async () => {
+    const twin = { ...WORKSPACE, id: 'wsp-bbbbbbbbbbbb' };
+    const h = harness((call) =>
+      call.path === '/workspaces' ? json([WORKSPACE, twin]) : anyRoute(call),
+    );
+    for (const args of [
+      ['workspaces', 'rename', WORKSPACE.name, 'x'],
+      ['workspaces', 'rm', WORKSPACE.name, '--yes'],
+    ]) {
+      const result = await h.run(args);
+      expect(result.code).toBe(1);
+      expect(result.frames[0].error.code).toBe('ambiguous_workspace');
+    }
+    expect(h.rec.calls.every((c) => c.method === 'GET')).toBe(true);
+  });
+
   it('clones the exact snapshot with a new computer name', async () => {
     const h = harness();
     const result = await h.run(['snapshots', 'clone', 'snapshot-8', '--name', 'recovered']);

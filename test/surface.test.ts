@@ -540,10 +540,13 @@ async function exerciseEverything(client: Client): Promise<void> {
   const minted = await client.apiKeys.create({ name: 'ci', workspaceId: 'wsp-1' });
   await client.apiKeys.revoke(minted.id);
 
-  // The account's workspaces (OPL-5057), read only.
+  // The account's workspaces (OPL-5057), and their writes (OPL-5473).
   await client.workspaces.list();
   await client.workspaces.get('wsp-0123456789ab');
   await client.workspaces.members('wsp-0123456789ab');
+  await client.workspaces.create({ name: 'customer-acme' });
+  await client.workspaces.rename('wsp-0123456789ab', 'customer-acme-prod');
+  await client.workspaces.delete('wsp-0123456789ab');
 
   // Lifecycle operations (OPL-5055): a read, a page with every parameter it
   // sends, and the wait over the read.

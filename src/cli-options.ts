@@ -488,6 +488,22 @@ export const COMMANDS: readonly Command[] = [
     ['workspace'],
   ),
   command(
+    'workspaces create',
+    "Make a workspace; needs an owner's key that is not confined to a workspace",
+    ['name'],
+  ),
+  command(
+    'workspaces rename',
+    "Rename a workspace, by name or ID; its id, keys and computers are unchanged; needs an owner's account-wide key",
+    ['workspace', 'new-name'],
+  ),
+  command(
+    'workspaces rm',
+    "Delete a workspace, by name or ID, REVOKING every API key confined to it (its computers are kept); needs an owner's account-wide key",
+    ['workspace'],
+    [bool('yes', 'Confirm the deletion and the key revocation (required)')],
+  ),
+  command(
     'files list',
     'List one guest directory: names, types and file sizes (bounded, not paged)',
     ['computer', 'path'],

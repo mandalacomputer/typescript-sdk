@@ -811,6 +811,9 @@ export const WORKSPACE = {
   created_at: '2026-09-01T00:00:00.000Z',
 };
 
+/** What `DELETE workspaces/:id` answers (OPL-5473): the ack, and the keys it revoked. */
+export const WORKSPACE_DELETED = { ok: true, revoked_keys: 2 };
+
 /** One member, as `GET workspaces/:id/members` lists them (OPL-5057). */
 export const WORKSPACE_MEMBER = {
   user_id: 'usr-0123456789abcdef',
@@ -1081,9 +1084,13 @@ export const anyRoute: Responder = (call) => {
   if (/\/activities\/[^/]+\/results$/.test(path)) return json(ACTIVITY_RESULTS);
   if (/\/activities\/[^/]+$/.test(path)) return json(ACTIVITY);
   if (path.endsWith('/signals')) return json(SIGNAL_PAGE);
-  if (path === '/workspaces') return json([WORKSPACE]);
+  // A create is a 201 and the workspace; a delete is the ack with the count
+  // of keys it revoked, a shape no other route answers.
+  if (path === '/workspaces')
+    return json(get ? [WORKSPACE] : WORKSPACE, get ? {} : { status: 201 });
   if (/^\/workspaces\/[^/]+\/members$/.test(path)) return json([WORKSPACE_MEMBER]);
-  if (/^\/workspaces\/[^/]+$/.test(path)) return json(WORKSPACE);
+  if (/^\/workspaces\/[^/]+$/.test(path))
+    return json(method === 'DELETE' ? WORKSPACE_DELETED : WORKSPACE);
   if (path === '/operations') return json({ operations: [OPERATION], next_cursor: null });
   if (/^\/operations\/[^/]+$/.test(path)) return json(OPERATION);
   if (path === '/moves') return json({ moves: [MOVE_DONE] });
