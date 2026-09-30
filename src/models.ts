@@ -3515,6 +3515,11 @@ export function toSecretList(d: unknown, method: string, path: string): SecretLi
  */
 export type TypeResult = {
   mechanism: 'physical' | 'unicode' | 'mixed' | (string & {}) | undefined;
+  /**
+   * The desktop just after the typing, for a call made with
+   * `{ context: true }`. Absent otherwise.
+   */
+  context?: InputContext;
   raw: Record<string, unknown>;
 };
 

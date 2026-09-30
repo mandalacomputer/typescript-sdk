@@ -86,13 +86,22 @@ This is the summary you read to decide whether to upgrade.
   `{ count }`, 1 to 10, pressing the button that many times at double-click
   pacing. `doubleClick` and `tripleClick` refuse one. Needs a platform that
   accepts `count`; an older one answers 400.
-- **Post-action window context**: every click takes `{ context: true }` and
-  then resolves to an `InputContext` — the windows `windows()` lists by
-  default and the `focused` one, as they stand just after the click — instead
-  of `undefined`. When the windows cannot be read, `windows` is `null` and
-  `error` says why; the click still happened. New exports: `ClickOptions`,
-  `InputContext`. A click without `context` is still typed `Promise<void>`;
-  `{ context: true }` is typed `Promise<InputContext>`.
+- **Post-action window context on every input action**: the clicks, `move`,
+  `drag`, `mouseDown`, `mouseUp`, `scroll`, `type`, `paste`, `key` (array
+  form), `holdKey` and `wait` take `{ context: true }` and then answer an
+  `InputContext` — the windows `windows()` lists by default and the `focused`
+  one, as they stand just after the action. An action that answered nothing
+  resolves to it instead of `undefined`; `type` carries it as
+  `TypeResult.context`. When the windows cannot be read, `windows` is `null`
+  and `error` says why; the action still happened. New exports: `ClickOptions`,
+  `InputOptions`, `PasteOptions`, `InputContext`. A call without `context` is
+  typed as it was; `{ context: true }` is typed `Promise<InputContext>` (or a
+  `TypeResult` whose `context` is set).
+- **A `User-Agent` naming this SDK and its version**:
+  `mandala-computer-ts/<VERSION> node/<version>`, so the platform can tell
+  which client and release sent a request. The new `userAgent` client option
+  appends your own token, such as `my-app/1.2`. Not sent in a browser, which
+  does not allow it.
 - **`computer.waitForDesktop()`** polls a no-output `true` in the desktop
   session until it finishes with exit 0. A probe that times out inside the
   guest is polled through, not taken as a session. It returns at once for a Windows guest or a

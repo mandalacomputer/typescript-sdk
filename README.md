@@ -90,6 +90,9 @@ Requests go to `https://app.mandala.computer/api/v1`; `MANDALA_BASE_URL` or
 option for the key. `timeoutMs` on the client is the per-request budget — 60
 seconds unless a call knows it needs longer, `0` to disable — and `fetch` takes
 an implementation of your own if you have proxies or certificates to configure.
+Every request carries `User-Agent: mandala-computer-ts/<VERSION> node/<version>`;
+`userAgent: 'my-app/1.2'` appends your own token to it. In a browser, which does
+not let a page set that header, none is sent.
 The `timeoutMs` a *wait* takes is a different number and is documented with each:
 it bounds the whole loop rather than one request, and can be far longer, because
 what those wait for outlives any single request. Each method takes
@@ -486,6 +489,24 @@ application accepted the text, so check the result — and a failure part-way ca
 leave partial text, so look before retrying. For long text, `paste` writes the
 clipboard (up to 8192 bytes) and presses the shortcut; it replaces the clipboard
 and leaves it replaced, and a success likewise means delivered, not inserted.
+
+Every one of these but `cursorPosition` takes `{ context: true }` (on `key`, in
+the array form) and then answers the desktop as it stands just after the
+action: the windows `windows()` lists by default and the `focused` one, saving
+a second request. An action that answers nothing resolves to that
+`InputContext` instead of `undefined`, and `type` carries it as
+`result.context`:
+
+```ts
+const after = await c.key(['ctrl', 'l'], { context: true });
+after.focused?.title;                        // what has the keyboard now
+const { mechanism, context } = await c.type('hello', { context: true });
+```
+
+The windows are read once, straight after the action, with no settle wait, so a
+window still opening may not be listed yet. When they cannot be read — a
+Windows guest, no desktop session — `windows` is `null` and `error` says why;
+the action itself still happened, so do not send it again.
 
 ### Screenshots, and the one flag a drive loop needs
 
