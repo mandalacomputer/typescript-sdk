@@ -29,6 +29,17 @@ This is the summary you read to decide whether to upgrade.
 
 ### Added
 
+- **A click repeat count**: `click`, `rightClick` and `middleClick` take
+  `{ count }`, 1 to 10, pressing the button that many times at double-click
+  pacing. `doubleClick` and `tripleClick` refuse one. Needs a platform that
+  accepts `count`; an older one answers 400.
+- **Post-action window context**: every click takes `{ context: true }` and
+  then resolves to an `InputContext` — the windows `windows()` lists by
+  default and the `focused` one, as they stand just after the click — instead
+  of `undefined`. When the windows cannot be read, `windows` is `null` and
+  `error` says why; the click still happened. New exports: `ClickOptions`,
+  `InputContext`. A click without `context` is still typed `Promise<void>`;
+  `{ context: true }` is typed `Promise<InputContext>`.
 - **`computer.waitForDesktop()`** polls a no-output `true` in the desktop
   session until it finishes with exit 0. A probe that times out inside the
   guest is polled through, not taken as a session. It returns at once for a Windows guest or a

@@ -336,6 +336,7 @@ async function exerciseEverything(client: Client): Promise<void> {
   await c.click(1, 2);
   await c.click();
   await c.click(1, 2, ['shift']);
+  await c.click(1, 2, [], { count: 3, context: true });
   await c.rightClick(1, 2);
   await c.middleClick(1, 2);
   await c.doubleClick(1, 2);

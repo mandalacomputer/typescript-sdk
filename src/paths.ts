@@ -1774,6 +1774,7 @@ export function clickBody(
   x?: number,
   y?: number,
   modifiers: readonly string[] = [],
+  count?: number,
 ): Json {
   // The spelling is the CALLER'S, not this builder's. Five click methods reach
   // here and `scroll` reaches it too, where the advice a click needs is not
@@ -1791,7 +1792,33 @@ export function clickBody(
     body.y = y;
   }
   if (modifiers.length) body.text = modifiers.join(MODIFIER_JOIN);
+  if (count !== undefined) body.count = clickCount(action, count);
   return body;
+}
+
+/** The most presses one click action makes (`count`), as the platform bounds it. */
+export const MAX_CLICK_COUNT = 10;
+
+/**
+ * A click's repeat count, refused client-side where the platform would refuse
+ * it: only `left_click`, `right_click` and `middle_click` take one, and it is a
+ * whole number from 1 to {@link MAX_CLICK_COUNT}.
+ */
+function clickCount(action: string, count: unknown): number {
+  if (!['left_click', 'right_click', 'middle_click'].includes(action)) {
+    throw new ValidationError(`${action} takes no count; it is a fixed number of clicks by name`);
+  }
+  if (
+    typeof count !== 'number' ||
+    !Number.isInteger(count) ||
+    count < 1 ||
+    count > MAX_CLICK_COUNT
+  ) {
+    throw new ValidationError(
+      `count must be a whole number from 1 to ${MAX_CLICK_COUNT} (got ${String(count)})`,
+    );
+  }
+  return count;
 }
 
 /**

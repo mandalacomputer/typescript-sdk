@@ -3518,6 +3518,53 @@ export type TypeResult = {
   raw: Record<string, unknown>;
 };
 
+/**
+ * The desktop just after an input action, for a call made with
+ * `{ context: true }` (platform `?context=1`).
+ *
+ * `windows` is what {@link Computer.windows} would list by default, read once
+ * straight after the action — there is no settle wait, so a window still opening
+ * is not in it yet. `focused` is the one of them holding the keyboard, or `null`
+ * when none does (focus on the desktop itself included).
+ *
+ * `windows` is `null`, never `[]`, when the platform could not read them — a
+ * Windows guest, no desktop session, a guest agent slow to answer — and `error`
+ * then says why. The action itself still happened: do not send it again.
+ */
+export type InputContext = {
+  windows: GuestWindow[] | null;
+  focused: GuestWindow | null;
+  error: string | null;
+};
+
+/**
+ * Decode the context an input answer carries, refused when it carries neither a
+ * context nor the reason it has none. Called only for a request that asked.
+ */
+export function toInputContext(d: unknown, what: string): InputContext {
+  const r = isRecord(d) ? d : {};
+  if (isRecord(r.context)) {
+    const c = r.context;
+    if (!Array.isArray(c.windows)) {
+      throw new MandalaError(`expected context.windows to be an array from ${what}`);
+    }
+    if (c.focused !== null && !isRecord(c.focused)) {
+      throw new MandalaError(`expected context.focused to be a window or null from ${what}`);
+    }
+    return {
+      windows: toWindowListing(c.windows, what),
+      focused: c.focused === null ? null : toGuestWindow(c.focused),
+      error: null,
+    };
+  }
+  if (typeof r.context_error === 'string' && r.context_error) {
+    return { windows: null, focused: null, error: r.context_error };
+  }
+  throw new MandalaError(
+    `expected context or context_error from ${what}, which was asked for context`,
+  );
+}
+
 export function toTypeResult(d: unknown): TypeResult {
   const r = isRecord(d) ? d : {};
   return {

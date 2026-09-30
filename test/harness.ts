@@ -994,6 +994,11 @@ export const anyRoute: Responder = (call) => {
   // bug instead of catching it and neither method had ever worked (OPL-4176).
   if (path.endsWith('/windows')) return json({ windows: [WINDOW] });
   if (/\/windows\/[^/]+$/.test(path)) return json({ ok: true, gone: false, window: WINDOW });
+  // An input call that asked for the desktop afterwards (OPL-5472) gets it, in
+  // the platform's shape; one that did not gets the plain ack below.
+  if (path.endsWith('/input') && call.query.context === '1') {
+    return json({ ok: true, context: { windows: [WINDOW], focused: WINDOW } });
+  }
   if (path.endsWith('/schedule')) return json({ enabled: true, hour: 4, minute: 0, tz: 'UTC' });
   // Told apart by the request, like the exec above: `stream: true` is a
   // different response MEDIUM, not a different payload, and a mock that
