@@ -161,6 +161,32 @@ async function operationsComputer(
   }
 }
 
+/**
+ * `workspaces get` and `workspaces members`: a workspace by name or id, as a
+ * computer argument is. The listing is the whole of what this key can reach,
+ * so it decides: an id in it is taken as it is (an id wins over a name), a name
+ * that fits exactly one workspace becomes that workspace's id, and a name that
+ * fits more than one is refused with their ids. Anything else is sent as typed,
+ * and the platform's 404 says there is no such workspace.
+ */
+async function resolveWorkspaceId(
+  client: Client,
+  target: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  P.workspace(target);
+  const listing = await client.workspaces.list({ signal });
+  if (listing.some((w) => w.id === target)) return target;
+  const named = listing.filter((w) => w.name === target);
+  if (named.length === 1) return named[0]!.id;
+  if (named.length)
+    throw new CliError(
+      'ambiguous_workspace',
+      `${target} names ${named.length} workspaces — use an id: ${named.map((w) => w.id).join(', ')}`,
+    );
+  return target;
+}
+
 /** Format the SDK's public projection explicitly; never expose desktop credentials. */
 const computerData = (computer: Computer) => computer.toJSON();
 
@@ -789,10 +815,14 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
         return output.result(raw(await client.operations.get(target, call)));
       case 'workspaces list':
         return output.result((await client.workspaces.list(call)).map(raw));
-      case 'workspaces get':
-        return output.result(raw(await client.workspaces.get(target, call)));
-      case 'workspaces members':
-        return output.result((await client.workspaces.members(target, call)).map(raw));
+      case 'workspaces get': {
+        const id = await resolveWorkspaceId(client, target, signal);
+        return output.result(raw(await client.workspaces.get(id, call)));
+      }
+      case 'workspaces members': {
+        const id = await resolveWorkspaceId(client, target, signal);
+        return output.result((await client.workspaces.members(id, call)).map(raw));
+      }
       case 'operations wait':
         return output.result(raw(await client.operations.wait(target, wait)));
       case 'usage': {

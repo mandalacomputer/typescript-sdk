@@ -17,6 +17,15 @@ This is the summary you read to decide whether to upgrade.
   logged in, and an `exec(..., { desktop: true })` sent in between was refused
   with a 409 "no active desktop session". A computer that never gets a desktop
   session now makes `launch()` throw a `TimeoutError` instead of returning.
+- **`mandala workspaces get` and `mandala workspaces members` take a workspace
+  name** as well as an id, as computer arguments do. An id wins over a name,
+  and a name that fits more than one workspace is refused
+  (`ambiguous_workspace`) with their ids.
+- **`mandala logout` with no saved profile exits 0** and says `Not logged in;
+  nothing to remove.` (with `--json`, `removed: false`). A named profile that
+  is not saved while others are is still `not_logged_in`.
+- `mandala --help` lists `operations wait` beside `operations list` and
+  `operations get`.
 
 ### Added
 

@@ -708,13 +708,26 @@ describe('logout', () => {
     expect(r.err).toContain('MANDALA_API_KEY is set in this environment');
   });
 
-  it('refuses a profile that is not saved, and writes nothing', async () => {
-    const none = await cli().run(['logout', '--json']);
-    expect(none.code).toBe(1);
-    expect(none.json.error).toMatchObject({ code: 'not_logged_in' });
-    expect(fs.existsSync(store())).toBe(false);
-    // Nothing to remove creates nothing either: no ~/.mandala appears.
+  it('succeeds with nothing saved, saying so, and writes nothing', async () => {
+    // It exited 1 (`not_logged_in`), failing a script that logs out before it
+    // logs in (OPL-5471).
+    const text = await cli(anyRoute, { MANDALA_API_KEY: '' }).run(['logout']);
+    expect(text.code).toBe(0);
+    expect(text.out).toBe('');
+    expect(text.err).toContain('Not logged in; nothing to remove.');
+    const none = await cli(anyRoute, { MANDALA_API_KEY: '' }).run(['logout', '--json']);
+    expect(none.code).toBe(0);
+    expect(none.json.data).toEqual({
+      profile: 'default',
+      removed: false,
+      path: store(),
+      key_id: null,
+      default_profile: null,
+    });
     expect(fs.existsSync(join(home, '.mandala'))).toBe(false);
+  });
+
+  it('refuses a profile that is not saved while others are, and writes nothing', async () => {
     await expect(removeCredentials('work')).resolves.toEqual({
       profile: 'work',
       removed: false,
