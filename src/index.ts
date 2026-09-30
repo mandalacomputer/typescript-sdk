@@ -100,6 +100,7 @@ export type {
   AgentUsage,
 } from './agent.js';
 export type {
+  ClickOptions,
   DeleteOptions,
   DragOptions,
   FileChunk,
@@ -199,6 +200,7 @@ export type {
   GuestDirectoryEntry,
   GuestWindow,
   Holdings,
+  InputContext,
   LifecycleAck,
   Move,
   Operation,

@@ -77,6 +77,7 @@ import type {
   GuestDirectory,
   GuestWindow,
   Holdings,
+  InputContext,
   Move,
   Point,
   Schedule,
@@ -112,6 +113,7 @@ import {
   toExecResult,
   toGuestDirectory,
   toHoldings,
+  toInputContext,
   toMove,
   toSchedule,
   toSecretBinding,
@@ -278,6 +280,26 @@ export type ScrollOptions = CallOptions & {
 };
 
 /** What {@link Computer.drag} accepts beside the two ends. */
+/**
+ * Options for a click. Both are optional and change nothing when left out.
+ */
+export type ClickOptions = CallOptions & {
+  /**
+   * How many times to press the button, 1 to 10 — for `click`, `rightClick`
+   * and `middleClick` only (`doubleClick` and `tripleClick` are two and three
+   * by name, and refuse one). The presses are paced as a double-click's are, so
+   * the guest sees one multi-click; what an application does past three is up
+   * to it.
+   */
+  count?: number;
+  /**
+   * Answer the desktop's windows as they stand just after the click — see
+   * {@link InputContext}. Costs one windows read, bounded at 3 seconds; the
+   * click resolves to `undefined` without it.
+   */
+  context?: boolean;
+};
+
 export type DragOptions = CallOptions & {
   /** Keys held down for the whole drag, e.g. `['shift']` to extend a selection. */
   modifiers?: readonly string[];
@@ -3719,14 +3741,35 @@ export class Computer {
     body: Record<string, unknown>,
     opts: CallOptions = {},
     minTimeoutMs?: number,
+    query?: Query,
   ): Promise<Record<string, unknown>> {
     return (
       (await this.#t.json<Record<string, unknown>>('POST', P.computerAction(this.id, 'input'), {
         body,
         minTimeoutMs,
+        query,
         signal: opts.signal,
       })) ?? {}
     );
+  }
+
+  /**
+   * One of the five clicks, with its count and, when asked, the context the
+   * platform answers after it.
+   */
+  async #click(
+    action: string,
+    x: number | undefined,
+    y: number | undefined,
+    modifiers: readonly string[],
+    opts: ClickOptions,
+  ): Promise<InputContext | undefined> {
+    // Read before the body is built, so a malformed option is refused before
+    // anything is sent — the same order the body's own checks run in.
+    const context = P.flag(opts?.context, 'context');
+    const body = P.clickBody(action, x, y, modifiers, opts?.count);
+    const data = await this.#input(body, opts, undefined, context ? { context: '1' } : undefined);
+    return context ? toInputContext(data, `POST ${P.computerAction(this.id, 'input')}`) : undefined;
   }
 
   /**
@@ -3744,51 +3787,62 @@ export class Computer {
    *
    * `modifiers` are held down for the click, e.g.
    * `click(100, 200, ['shift'])` to extend a selection.
+   *
+   * `{ count: 4 }` presses the button four times (1 to 10). `{ context: true }`
+   * resolves to the desktop's windows as they stand just after the click — see
+   * {@link InputContext} — which saves listing them separately; without it the
+   * click resolves to `undefined`.
    */
   async click(
     x?: number,
     y?: number,
     modifiers: readonly string[] = [],
-    opts: CallOptions = {},
-  ): Promise<void> {
-    await this.#input(P.clickBody('left_click', x, y, modifiers), opts);
+    opts: ClickOptions = {},
+  ): Promise<InputContext | undefined> {
+    return this.#click('left_click', x, y, modifiers, opts);
   }
 
+  /** A right click. Takes `count` and `context` as {@link click} does. */
   async rightClick(
     x?: number,
     y?: number,
     modifiers: readonly string[] = [],
-    opts: CallOptions = {},
-  ): Promise<void> {
-    await this.#input(P.clickBody('right_click', x, y, modifiers), opts);
+    opts: ClickOptions = {},
+  ): Promise<InputContext | undefined> {
+    return this.#click('right_click', x, y, modifiers, opts);
   }
 
+  /** A middle click. Takes `count` and `context` as {@link click} does. */
   async middleClick(
     x?: number,
     y?: number,
     modifiers: readonly string[] = [],
-    opts: CallOptions = {},
-  ): Promise<void> {
-    await this.#input(P.clickBody('middle_click', x, y, modifiers), opts);
+    opts: ClickOptions = {},
+  ): Promise<InputContext | undefined> {
+    return this.#click('middle_click', x, y, modifiers, opts);
   }
 
+  /** Two clicks. Takes `context` as {@link click} does; a `count` is refused. */
   async doubleClick(
     x?: number,
     y?: number,
     modifiers: readonly string[] = [],
-    opts: CallOptions = {},
-  ): Promise<void> {
-    await this.#input(P.clickBody('double_click', x, y, modifiers), opts);
+    opts: Omit<ClickOptions, 'count'> = {},
+  ): Promise<InputContext | undefined> {
+    return this.#click('double_click', x, y, modifiers, opts);
   }
 
-  /** Three clicks, which is how most editors select a whole line. */
+  /**
+   * Three clicks, which is how most editors select a whole line. Takes
+   * `context` as {@link click} does; a `count` is refused.
+   */
   async tripleClick(
     x?: number,
     y?: number,
     modifiers: readonly string[] = [],
-    opts: CallOptions = {},
-  ): Promise<void> {
-    await this.#input(P.clickBody('triple_click', x, y, modifiers), opts);
+    opts: Omit<ClickOptions, 'count'> = {},
+  ): Promise<InputContext | undefined> {
+    return this.#click('triple_click', x, y, modifiers, opts);
   }
 
   /**
