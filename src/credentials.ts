@@ -94,10 +94,40 @@ function openDirectory(create = false): Directory | undefined {
   }
 }
 
+/**
+ * A file in ~/.mandala that is read and replaced with this module's checks:
+ * credentials.json, and the CLI's defaults.json beside it. Each has its own
+ * lock and temporary-file names, so a writer of one never waits on the other.
+ */
+export type LocalStore<F> = {
+  /** The file's name in ~/.mandala. */
+  file: string;
+  /** The sibling lock file's name. */
+  lock: string;
+  /** The prefix of the sibling temporary file a replacement is written to. */
+  tempPrefix: string;
+  /** Decode and validate the file's bytes, throwing a {@link CredentialsError}. */
+  parse: (bytes: Uint8Array) => F;
+  /** Validate and encode the next contents, throwing a {@link CredentialsError}. */
+  encode: (next: F) => Uint8Array;
+};
+const CREDENTIALS_STORE: LocalStore<CredentialsFile> = {
+  file: 'credentials.json',
+  lock: '.credentials.lock',
+  tempPrefix: '.credentials-',
+  parse: parseCredentials,
+  encode: (next) => {
+    validateCredentials(next);
+    const bytes = Buffer.from(`${JSON.stringify(next, null, 2)}\n`);
+    if (bytes.length > MAX_CREDENTIAL_BYTES) credentialError('file_too_large');
+    return bytes;
+  },
+};
+
 /** Verify both the opened object and its named path, before and after bounded reads. */
-function readDirectory(dir: Directory): CredentialsFile | undefined {
+function readDirectory<F>(dir: Directory, store: LocalStore<F>): F | undefined {
   let fd: number | undefined;
-  const name = path.join(dir.name, 'credentials.json');
+  const name = path.join(dir.name, store.file);
   try {
     // Node has no atomic directory-relative open. Pin the directory's change
     // timestamp for this read as well as its identity to detect rename/restore
@@ -153,7 +183,7 @@ function readDirectory(dir: Directory): CredentialsFile | undefined {
     )
       credentialError('unsafe_file');
     checkDirectory(dir, readCtimeNs);
-    return parseCredentials(bytes.subarray(0, count));
+    return store.parse(bytes.subarray(0, count));
   } catch (error) {
     if (error instanceof CredentialsError) throw error;
     credentialError('unsafe_file');
@@ -161,14 +191,18 @@ function readDirectory(dir: Directory): CredentialsFile | undefined {
     if (fd !== undefined) fs.closeSync(fd);
   }
 }
-export function readCredentials(): CredentialsFile | undefined {
+/** Read one store in ~/.mandala; undefined when it, or the directory, is missing. */
+export function readLocalStore<F>(store: LocalStore<F>): F | undefined {
   const dir = openDirectory();
   if (!dir) return undefined;
   try {
-    return readDirectory(dir);
+    return readDirectory(dir, store);
   } finally {
     fs.closeSync(dir.fd);
   }
+}
+export function readCredentials(): CredentialsFile | undefined {
+  return readLocalStore(CREDENTIALS_STORE);
 }
 export function resolveCredentials(
   options: CredentialOptions = {},
@@ -223,7 +257,8 @@ export async function saveCredentials(
   options: { signal?: AbortSignal; lockTimeoutMs?: number } = {},
 ): Promise<SavedCredentials> {
   if (profile !== undefined) validateProfileName(profile);
-  return rewriteLocked(
+  return rewriteLocalStore<CredentialsFile, SavedCredentials>(
+    CREDENTIALS_STORE,
     options,
     (old, file) => {
       const name = profile ?? old?.default_profile ?? 'default';
@@ -285,7 +320,8 @@ export async function removeCredentials(
   options: { signal?: AbortSignal; lockTimeoutMs?: number } = {},
 ): Promise<RemovedCredentials> {
   if (profile !== undefined) validateProfileName(profile);
-  return rewriteLocked<RemovedCredentials>(
+  return rewriteLocalStore<CredentialsFile, RemovedCredentials>(
+    CREDENTIALS_STORE,
     { ...options, create: false },
     (old, file) => {
       const name = profile ?? old?.default_profile ?? 'default';
@@ -323,18 +359,16 @@ export async function removeCredentials(
 }
 
 /**
- * The store's one writer: take the lock, read, compute the next store, and
+ * A store's one writer: take the lock, read, compute the next store, and
  * replace the file with it (or remove it, for `next: null`), checking at every
  * step that nothing moved underneath. `next` absent writes nothing. With
  * `create: false` a missing ~/.mandala is left missing: the computation sees no
  * store, and must then write nothing.
  */
-async function rewriteLocked<T>(
+export async function rewriteLocalStore<F, T>(
+  spec: LocalStore<F>,
   options: { signal?: AbortSignal; lockTimeoutMs?: number; create?: boolean },
-  compute: (
-    old: CredentialsFile | undefined,
-    file: string,
-  ) => { next?: CredentialsFile | null; result: T },
+  compute: (old: F | undefined, file: string) => { next?: F | null; result: T },
   failure: (committed: boolean) => CredentialsError,
 ): Promise<T> {
   const lockTimeoutMs = options.lockTimeoutMs ?? 5000;
@@ -347,15 +381,12 @@ async function rewriteLocked<T>(
   if (!dir) {
     // No ~/.mandala: there is no store to change, so the caller's answer is
     // computed from nothing, and nothing is created on the way to giving it.
-    const { next, result } = compute(
-      undefined,
-      path.join(os.homedir(), '.mandala', 'credentials.json'),
-    );
+    const { next, result } = compute(undefined, path.join(os.homedir(), '.mandala', spec.file));
     if (next === undefined) return result;
     throw failure(false);
   }
-  const lock = path.join(dir.name, '.credentials.lock');
-  const store = path.join(dir.name, 'credentials.json');
+  const lock = path.join(dir.name, spec.lock);
+  const store = path.join(dir.name, spec.file);
   let lockFd: number | undefined;
   let lockInfo: Stats | undefined;
   let temp: string | undefined;
@@ -402,17 +433,15 @@ async function rewriteLocked<T>(
         await pause(Math.min(50, Math.max(1, deadline - performance.now())), signal);
       }
     }
-    const old = readDirectory(dir);
+    const old = readDirectory(dir, spec);
     const { next, result } = compute(old, store);
     if (next === undefined) return result;
-    let bytes: Buffer | undefined;
+    let bytes: Uint8Array | undefined;
     if (next !== null) {
-      validateCredentials(next);
-      bytes = Buffer.from(`${JSON.stringify(next, null, 2)}\n`);
-      if (bytes.length > MAX_CREDENTIAL_BYTES) credentialError('file_too_large');
+      bytes = spec.encode(next);
       signal?.throwIfAborted();
       checkDirectory(dir);
-      temp = path.join(dir.name, `.credentials-${randomUUID()}.tmp`);
+      temp = path.join(dir.name, `${spec.tempPrefix}${randomUUID()}.tmp`);
       tempFd = fs.openSync(
         temp,
         fs.constants.O_WRONLY |
@@ -433,7 +462,7 @@ async function rewriteLocked<T>(
     if ((temp && !same(fs.lstatSync(temp), tempInfo!)) || !same(fs.lstatSync(lock), lockInfo!))
       credentialError('unsafe_file');
     // The old store was validated under the lock. Verify it still names the same complete state.
-    const latest = readDirectory(dir);
+    const latest = readDirectory(dir, spec);
     if (JSON.stringify(latest) !== JSON.stringify(old)) credentialError('unsafe_file');
     signal?.throwIfAborted();
     if (temp) fs.renameSync(temp, store);

@@ -3008,7 +3008,7 @@ network access and never prompt for input; `logout` needs no network.
 | `secrets` | `list`, `set`, `rm` |
 | `api-keys` | `list`, `create`, `revoke` |
 | `operations` | `list`, `get`, `wait` |
-| `workspaces` | `list`, `get`, `members` |
+| `workspaces` | `list`, `get`, `members`, `create`, `rename`, `rm`, `use`, `current` |
 | `files` | `list`, `upload`, `download` |
 | `agent` | `run` |
 | `ssh-key` | `list`, `add`, `rm` |
@@ -3097,6 +3097,44 @@ without `--yes` (`confirmation_required`), because deleting a workspace revokes
 every API key confined to it; its answer's `revoked_keys` says how many. Its
 computers are kept. An id the key cannot see is `not_found`, the same as one
 that does not exist.
+
+#### A default workspace per profile
+
+```sh
+mandala workspaces use research      # by name or id; saved for this profile only
+mandala workspaces current           # which workspace applies, and why
+mandala workspaces use --clear       # back to account-wide
+```
+
+`workspaces use` saves a default workspace for the saved profile in use
+(`--profile`, `MANDALA_PROFILE`, else the default). `secrets list`, `set` and
+`rm`, and `api-keys create`, then use it whenever `--workspace` is not given,
+and say so in one stderr line; an explicit `--workspace` always wins, and
+`workspaces use --clear` is the way back to account-wide (there is no
+per-command override). The workspace is resolved through the API, as `get`
+resolves it; no key is minted, and the profile's key and scope are unchanged.
+
+The default lives in `~/.mandala/defaults.json` (mode 0600, written under its
+own `.defaults.lock` with the same checks as `credentials.json`), keyed by
+profile and by the account the profile was logged in to: after a login to
+another account it is ignored, and `workspaces current` says so.
+`credentials.json` is never changed, so an older CLI or SDK reading it is
+unaffected. A `defaults.json` that cannot be read (not valid JSON, another
+version, or readable by others) is ignored with a note by `secrets list`, which
+only reads. `secrets set`, `secrets rm` and `api-keys create` refuse instead,
+sending nothing, rather than act account-wide: pass `--workspace`, or fix or
+delete the file. It is never overwritten: `workspaces use` asks you to delete
+or fix it. `logout` removes the profile's default as well.
+
+A profile whose key is confined to a workspace already has that one:
+`workspaces use` of another is refused (log in again without `--workspace` for
+an account-wide key), and of its own saves nothing. With `MANDALA_API_KEY` set
+there is no profile to save a default in, so `workspaces use` is refused and no
+default applies.
+
+`workspaces current --json` answers `{ profile, workspace: { id, name } | null,
+source }`, where `source` is `key` (the key is confined to it), `profile` (the
+saved default) or `none` (account-wide). It needs no network.
 
 ### Account quota and historical usage
 

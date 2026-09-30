@@ -60,7 +60,10 @@ const computers = flag('computer', 'Computer ID filter; repeat for several', {
   repeatable: true,
   conflicts: ['all-computers'],
 });
-const secretScope = flag('workspace', 'Workspace ID (default: the account-wide secrets)');
+const secretScope = flag(
+  'workspace',
+  "Workspace ID (default: the saved profile's workspace from workspaces use, else the account-wide secrets)",
+);
 /**
  * The binding flags `computers create` and `computers secrets set` share: one
  * syntax, one validation (cli-secrets.ts bindingSpecs) for both.
@@ -474,7 +477,7 @@ export const COMMANDS: readonly Command[] = [
       flag('name', 'Label for the key (up to 60 characters)'),
       flag(
         'workspace',
-        "Confine the key to this workspace ID (default: the calling key's own scope)",
+        "Confine the key to this workspace ID (default: the saved profile's workspace from workspaces use, else the calling key's own scope)",
       ),
     ],
   ),
@@ -527,6 +530,16 @@ export const COMMANDS: readonly Command[] = [
     "Delete a workspace, by name or ID, REVOKING every API key confined to it (its computers are kept); needs an owner's account-wide key",
     ['workspace'],
     [bool('yes', 'Confirm the deletion and the key revocation (required)')],
+  ),
+  command(
+    'workspaces use',
+    'Save a default workspace, by name or ID, in the saved profile for secrets and api-keys create (an explicit --workspace still wins); --clear goes back to account-wide. Never changes the key or credentials.json',
+    ['workspace?'],
+    [bool('clear', "Remove the profile's default workspace")],
+  ),
+  command(
+    'workspaces current',
+    "Show the workspace secrets and api-keys create use, and why: the key's own workspace, the profile's default, or none (account-wide); needs no network",
   ),
   command(
     'files list',
