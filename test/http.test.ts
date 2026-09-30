@@ -5,7 +5,7 @@ import { createServer } from 'node:http';
 import { type AddressInfo, createServer as createSocketServer, type Socket } from 'node:net';
 import os from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   errorForStatus,
   MAPPED_STATUSES,
@@ -102,6 +102,26 @@ describe('auth', () => {
     expect(() => new Client({ apiKey: 'com_test', baseUrl: 'not-a-url' })).toThrow(
       /baseUrl must be an absolute URL/,
     );
+  });
+
+  it.each(['https://h.test/api/v1?t=x', 'https://h.test/api/v1?', 'https://h.test/api/v1#frag'])(
+    'refuses a base URL with a query or a fragment: %s',
+    (baseUrl) => {
+      // Joined as `${baseUrl}/${path}`, the query swallowed every path.
+      expect(() => new Client({ apiKey: 'com_test', baseUrl })).toThrow(ValidationError);
+      expect(() => new Client({ apiKey: 'com_test', baseUrl })).toThrow(/query or a fragment/);
+    },
+  );
+
+  it('refuses one from the environment too', () => {
+    const saved = process.env.MANDALA_BASE_URL;
+    try {
+      process.env.MANDALA_BASE_URL = 'https://h.test/api/v1?t=x';
+      expect(() => new Client({ apiKey: 'com_test' })).toThrow(/query or a fragment/);
+    } finally {
+      if (saved === undefined) delete process.env.MANDALA_BASE_URL;
+      else process.env.MANDALA_BASE_URL = saved;
+    }
   });
 
   it('keeps the key off the error, which is the thing that gets logged', async () => {
@@ -1534,6 +1554,89 @@ describe('server-sent events', () => {
     const rec = recorder(anyRoute);
     const c = await client(rec).computers.get('vm-1');
     await expect(c.agent({ prompt: 'go', modelKey: '' })).rejects.toThrow(/does not store one/);
+  });
+});
+
+describe('an event stream that goes silent', () => {
+  // Restored here rather than in each test's finally: a test that times out
+  // never reaches its finally, and fake timers would leak into the real-socket
+  // tests after it.
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const live = () => {
+    let source!: ReadableStreamDefaultController<Uint8Array>;
+    const response = new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          source = controller;
+        },
+      }),
+      { headers: { 'content-type': 'text/event-stream' } },
+    );
+    const send = (text: string) => source.enqueue(new TextEncoder().encode(text));
+    return { response, send };
+  };
+
+  it('fails as interrupted after 60 s with nothing, not even a keepalive', async () => {
+    const { response, send } = live();
+    const rec = recorder((call) => (call.path.endsWith('/agent') ? response : anyRoute(call)));
+    const c = await client(rec).computers.get('vm-1');
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const iterator = c.agentStream({ prompt: 'go', modelKey: 'sk' });
+    const next = iterator.next();
+    let settled: unknown = 'pending';
+    next.then(
+      () => {
+        settled = 'resolved';
+      },
+      (e: unknown) => {
+        settled = e;
+      },
+    );
+    send(': keepalive\n\n');
+    await vi.advanceTimersByTimeAsync(59_000);
+    expect(settled).toBe('pending');
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(settled).toBeInstanceOf(ConnectionInterruptedError);
+    expect(String((settled as Error).message)).toMatch(/sent nothing, not even a keepalive/);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('keeps a stream open for as long as keepalives arrive', async () => {
+    const { response, send } = live();
+    const rec = recorder((call) => (call.path.endsWith('/agent') ? response : anyRoute(call)));
+    const c = await client(rec).computers.get('vm-1');
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const iterator = c.agentStream({ prompt: 'go', modelKey: 'sk' });
+    const next = iterator.next();
+    for (let i = 0; i < 12; i++) {
+      send(': keepalive\n\n');
+      await vi.advanceTimersByTimeAsync(10_000);
+    }
+    send('event: done\ndata: {"stop":"end_turn"}\n\n');
+    expect((await next).value?.type).toBe('done');
+    await iterator.return(undefined);
+    // Nothing armed while the caller holds an event, or after the stream ends.
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('bounds the wait for the answer’s headers too', async () => {
+    const rec = recorder((call) =>
+      call.path.endsWith('/agent') ? new Promise<Response>(() => {}) : anyRoute(call),
+    );
+    const c = await client(rec).computers.get('vm-1');
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    let settled: unknown = 'pending';
+    c.agentStream({ prompt: 'go', modelKey: 'sk' })
+      .next()
+      .catch((e: unknown) => {
+        settled = e;
+      });
+    await vi.advanceTimersByTimeAsync(60_001);
+    expect(settled).toBeInstanceOf(ConnectionInterruptedError);
+    expect(vi.getTimerCount()).toBe(0);
   });
 });
 

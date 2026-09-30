@@ -275,6 +275,7 @@ function unreachableTypes(
 
 export type ScrollOptions = CallOptions & {
   direction?: P.ScrollDirection;
+  /** Notches to scroll, a whole number from 1 to 50; 3 when left out. */
   amount?: number;
   modifiers?: readonly string[];
 };
@@ -376,6 +377,14 @@ const noTotal = (path: string): MandalaError =>
   new MandalaError(
     `the platform answered 206 for ${path} without a total, so there is no length to page ` +
       'towards and no way to tell a short answer from the end of the file',
+  );
+
+/** A paging read whose file got shorter part-way, which cannot be finished as one file. */
+const shrank = (path: string, was: number, now: number): MandalaError =>
+  new MandalaError(
+    `${path} was ${was} bytes and is ${now} part-way through a paging read; the chunks ` +
+      'already read came from a file that no longer exists, so going on would splice two ' +
+      'versions of it together',
   );
 
 /** {@link Bytes} off the files route, read as a window of a file. */
@@ -712,6 +721,15 @@ const SNAPSHOT_WAIT_MS = 1_800_000;
 const SNAPSHOT_POLL_MS = 5_000;
 
 /**
+ * How long a `type()` of text that is not all ASCII may take: the platform
+ * gives the guest helper 75 seconds for the whole request and its proxy 95,
+ * plus 15 seconds of slack. The Python client's `UNICODE_TYPE_TIMEOUT` is the
+ * same figure (95 plus its 15-second deadline slack). Plain ASCII keeps the
+ * client's default timeout.
+ */
+const UNICODE_TYPE_TIMEOUT_MS = 95_000 + 15_000;
+
+/**
  * A create-only upload's 409, never left looking like a passing conflict.
  *
  * The platform answers a create-only upload's taken path with 409 `exists`,
@@ -755,12 +773,15 @@ function createOnlyRefusal(err: unknown): unknown {
 }
 
 /**
- * A `noWake` transfer's reasonless 409, never left looking like a passing
- * conflict. See {@link ComputerNotRunningError}.
+ * A `noWake` transfer's 409 with no reason or with `unavailable`, as what it
+ * says: the computer is not running. See {@link ComputerNotRunningError}. A 409
+ * carrying any other word, or already classified, is returned as it is.
  */
 function notRunningRefusal(err: unknown): unknown {
   if (!(err instanceof ConflictError) || err instanceof ComputerNotRunningError) return err;
-  if (typeof err.reason === 'string' && err.reason.trim() !== '') return err;
+  if (err instanceof FileExistsError || err instanceof CreateOnlyConflictError) return err;
+  const reason = typeof err.reason === 'string' ? err.reason.trim() : '';
+  if (reason !== '' && reason !== 'unavailable') return err;
   const refusal = new ComputerNotRunningError(
     `${err.message} — noWake was set and the computer is not running (or the refusal ` +
       'carried no reason to say otherwise): start it, or send the transfer without noWake',
@@ -774,7 +795,9 @@ function notRunningRefusal(err: unknown): unknown {
       method: err.method,
     },
   );
-  (refusal as { reason?: string }).reason = undefined;
+  // `unavailable` is kept; a blank or absent word is `undefined`, as it is on
+  // CreateOnlyConflictError.
+  (refusal as { reason?: string }).reason = reason === '' ? undefined : reason;
   return refusal;
 }
 
@@ -4042,9 +4065,15 @@ export class Computer {
    * A failure part-way can leave partial text, so inspect before retrying —
    * this SDK never replays it. For fast insertion of long text use
    * {@link paste}.
+   *
+   * Text that is not all ASCII is sent with a request deadline of at least 110
+   * seconds, whatever the client's default: the platform gives the guest helper
+   * 75 seconds and its proxy 95.
    */
   async type(text: string, opts: CallOptions = {}): Promise<TypeResult> {
-    return toTypeResult(await this.#input(P.typeBody(text), opts));
+    const body = P.typeBody(text);
+    const ascii = ![...text].some((ch) => ch.charCodeAt(0) > 0x7f);
+    return toTypeResult(await this.#input(body, opts, ascii ? undefined : UNICODE_TYPE_TIMEOUT_MS));
   }
 
   /**
@@ -4586,7 +4615,15 @@ export class Computer {
     return (await this.#readFileRequest(path, opts)).bytes;
   }
 
-  /** {@link readFile}, decoded as UTF-8. */
+  /**
+   * {@link readFile}, decoded as UTF-8.
+   *
+   * Strictly: bytes that are not valid UTF-8 throw a {@link MandalaError}
+   * rather than being replaced, so a text read never hands back something
+   * other than the file. Use {@link readFile} for the raw bytes of a file that
+   * may not be text. The Python SDK's `read_text_file` replaces invalid bytes
+   * with U+FFFD instead.
+   */
   async readTextFile(
     path: string,
     opts: { timeoutMs?: number; noWake?: boolean } & CallOptions = {},
@@ -4821,12 +4858,8 @@ export class Computer {
                 'asked for',
             );
           }
-          if (chunk.total !== undefined && chunk.total !== total) {
-            throw new MandalaError(
-              `the total for ${path} changed from ${total} to ${chunk.total} during a paging ` +
-                'read; the chunks may belong to different versions of the file',
-            );
-          }
+          if (chunk.total !== undefined && chunk.total < total)
+            throw shrank(path, total, chunk.total);
         }
         yield chunk;
         return;
@@ -4850,14 +4883,13 @@ export class Computer {
         );
       }
       if (chunk.total === undefined) throw noTotal(path);
-      if (total === undefined) {
-        total = chunk.total;
-      } else if (chunk.total !== total) {
-        throw new MandalaError(
-          `the total for ${path} changed from ${total} to ${chunk.total} during a paging read; ` +
-            'the chunks may belong to different versions of the file',
-        );
-      }
+      // Growing is followed and shrinking is not, as in the Python client's
+      // download. Bytes appended to a file leave the ones already read where
+      // they were, so paging on to the new end is still one file. A file that
+      // got shorter was rewritten or truncated, and finishing would splice two
+      // files together at whatever offset the change landed on.
+      if (total !== undefined && chunk.total < total) throw shrank(path, total, chunk.total);
+      total = chunk.total;
       yield chunk;
       // Unreachable for a real answer: a Content-Range names at least one byte,
       // and toFileChunk refuses a 206 whose body does not fill the window it
@@ -4989,8 +5021,13 @@ export class Computer {
         signal: opts.signal,
       })
       .catch((err: unknown) => {
-        // Create-only first: its class claims less (a reason unknown) than the
-        // not-running one, which is the honest answer when both were asked.
+        // `unavailable` under noWake is the computer not running, whatever else
+        // was asked. Otherwise create-only first: for a 409 with no word at all
+        // its class claims less (a reason unknown) than the not-running one,
+        // which is the honest answer when both were asked.
+        if (opts.noWake === true && err instanceof ConflictError && err.reason === 'unavailable') {
+          throw notRunningRefusal(err);
+        }
         if (opts.overwrite === false) throw createOnlyRefusal(err);
         throw opts.noWake === true ? notRunningRefusal(err) : err;
       });
@@ -5285,6 +5322,14 @@ export class Computer {
       throw new MandalaError(`expected snapshot holdings from GET ${path}`);
     }
     return toHoldings(data);
+  }
+
+  /**
+   * {@link holdings}, under the name the Python SDK's method and the MCP
+   * server's tool use, `snapshot_holdings`. The same request and answer.
+   */
+  async snapshotHoldings(opts: CallOptions = {}): Promise<Holdings> {
+    return this.holdings(opts);
   }
 
   /** The automatic daily snapshot schedule. */

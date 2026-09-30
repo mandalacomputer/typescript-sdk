@@ -322,12 +322,22 @@ const REASON_CLEARS: ReadonlySet<string> = new Set(['contention', 'starting']);
  * {@link ConflictError}, which {@link isTransient} calls worth sending again, and
  * a caller looping on that would resend the same resize until it gave up.
  */
+/**
+ * `name_taken` and `stale_revision` are the secret store's 409s: a secret
+ * created or renamed to a name another secret already has, and a binding or a
+ * change that names a revision that is no longer the one it would replace.
+ * Neither clears by waiting: choose another name, or read the secret again and
+ * send its current revision. A platform that does not send either word yet
+ * leaves the status rule standing, which is what an unknown word does.
+ */
 const REASON_PERMANENT: ReadonlySet<string> = new Set([
   'unavailable',
   'unsupported',
   'revoked',
   'exists',
   'running',
+  'name_taken',
+  'stale_revision',
 ]);
 
 /**
@@ -689,13 +699,15 @@ export class CreateOnlyConflictError extends ConflictError {
  *
  * `readFile(path, { noWake: true })` and `writeFile(..., { noWake: true })`
  * ask the platform NOT to resume a suspended computer for the transfer. One
- * that is not running is refused with 409 — today with no `reason`, and with
- * `reason: "unavailable"` on a platform that classifies it. Without a word, a
- * bare {@link ConflictError} is what {@link isTransient} calls worth sending
- * again, and it never clears by waiting: start the computer, or drop `noWake`.
- * So the request's own context decides what the status alone cannot, the way
- * {@link CreateOnlyConflictError} is decided. A 409 that DID carry a string
- * reason keeps the platform's classification instead.
+ * that is not running is refused with 409, with `reason: "unavailable"` or
+ * with no `reason` at all (a body cut short, or a platform that sends none).
+ * Either way it never clears by waiting: start the computer, or drop
+ * `noWake`. So the request's own context decides what the status alone
+ * cannot, the way {@link CreateOnlyConflictError} is decided, and `reason` is
+ * kept as it came (`"unavailable"`, or `undefined`). A 409 carrying any other
+ * word keeps the platform's classification instead. A create-only `noWake`
+ * upload refused with no word at all is a {@link CreateOnlyConflictError}, the
+ * class that claims less.
  *
  * A subclass of {@link ConflictError}, so `instanceof ConflictError` still
  * catches it.

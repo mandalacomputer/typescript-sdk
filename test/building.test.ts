@@ -965,7 +965,16 @@ describe('finite numbers', () => {
   it('still takes the zeros and the ordinary values', () => {
     expect(P.pointerBody('move', 0, 0)).toEqual({ action: 'move', x: 0, y: 0 });
     expect(P.waitBody(0.5)).toEqual({ action: 'wait', duration: 0.5 });
-    expect(P.scrollBody({ direction: 'down', amount: 0 }).amount).toBe(0);
+    expect(P.scrollBody({ direction: 'down', amount: 1 }).amount).toBe(1);
+  });
+
+  it('refuses a scroll amount the platform would not take as asked', () => {
+    // 0 became the platform's default of 3, and 2.5 went on the wire (OPL-5520).
+    for (const amount of [0, -1, 2.5, 51]) {
+      expect(() => P.scrollBody({ direction: 'down', amount })).toThrow(ValidationError);
+      expect(() => P.scrollBody({ direction: 'down', amount })).toThrow(/1 to 50/);
+    }
+    expect(P.scrollBody({ direction: 'down', amount: 50 }).amount).toBe(50);
   });
 });
 

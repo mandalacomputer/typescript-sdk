@@ -1389,6 +1389,11 @@ const bytes = await c.readFile('/home/user/out.bin');
 const text = await c.readTextFile('/home/user/out.txt');
 ```
 
+`readTextFile` decodes strictly: a file that is not valid UTF-8 throws a
+`MandalaError` rather than coming back with replacement characters, and
+`readFile` gives the raw bytes for anything else. The Python SDK's
+`read_text_file` replaces invalid bytes instead.
+
 Paths are absolute, inside the guest. There is no shell and no working directory
 behind a transfer, so a relative path is refused before the request is made.
 Works while the computer is running or suspended — a suspended one is resumed
@@ -2849,8 +2854,10 @@ prose and is rewritten. For ordinary request refusals, `contention` and `startin
 own, `unavailable` means the computer is not running and only starting it helps,
 `unsupported` means this computer cannot do it at all, `exists` means a
 create-only upload found its path taken, `running` means the computer is
-running and this call needs it stopped (stop it: waiting never helps), and
-`revoked` is about the
+running and this call needs it stopped (stop it: waiting never helps),
+`name_taken` and `stale_revision` are the secret store's (a name another secret
+already has; a revision that is no longer the current one, so read it again),
+and `revoked` is about the
 caller rather than the computer — the authority the request arrived with no
 longer holds, so sending it again unchanged is refused the same way (a 401 means
 present a credential again; a 403 means the role changed and signing in again

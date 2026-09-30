@@ -420,6 +420,7 @@ async function exerciseEverything(client: Client): Promise<void> {
   await c.snapshot();
   await c.snapshot({ memory: true, name: 'before-upgrade' });
   await c.holdings();
+  await c.snapshotHoldings();
   await c.schedule();
   await c.setSchedule({ enabled: true, hour: 4 });
   await c.setSchedule({ enabled: true, hour: 3, minute: 30, tz: 'Europe/London' });

@@ -95,12 +95,21 @@ describe('binding secrets at create', () => {
       ['an empty revision id', [{ secretId: A, env: 'X', revisionId: '' }]],
       ['a padded secret id', [{ secretId: ` ${A} `, env: 'X' }]],
       ['a padded revision id', [{ secretId: A, env: 'X', revisionId: ' csr-1 ' }]],
+      // The wire's spelling, which used to be dropped and pin nothing (OPL-5520).
+      ['a snake-case revision id', [{ secretId: A, env: 'X', revision_id: 'csr-1' } as never]],
+      ['a snake-case secret id', [{ secret_id: A, secretId: A, env: 'X' } as never]],
     ];
     for (const [name, secrets] of bad) {
       await expect(c.computers.create({ template: 'base', secrets }), name).rejects.toThrow(
         ValidationError,
       );
     }
+    await expect(
+      c.computers.create({
+        template: 'base',
+        secrets: [{ secretId: A, env: 'X', revision_id: 'csr-1' } as never],
+      }),
+    ).rejects.toThrow(/unknown key "revision_id"/);
     // A variable and a file may share a spelling: two namespaces.
     await c.computers.create({
       template: 'base',

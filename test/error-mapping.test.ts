@@ -532,3 +532,14 @@ it('keeps concurrent request IDs distinct, each in its own CLI error envelope', 
   });
   expect(errorInfo(errors[1])).toMatchObject({ request_id: '/sizes' });
 });
+
+describe('the secret store’s refusal words', () => {
+  it.each(['name_taken', 'stale_revision'])('reads a 409 with %s as final', (reason) => {
+    for (const method of ['POST', 'PATCH', 'PUT', 'GET']) {
+      const err = errorForStatus(409, 'x', { error: 'x', reason }, { method });
+      expect(err).toBeInstanceOf(ConflictError);
+      expect((err as APIError).reason).toBe(reason);
+      expect(isTransient(err)).toBe(false);
+    }
+  });
+});
