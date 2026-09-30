@@ -48,7 +48,7 @@ describe('auth', () => {
     delete process.env.MANDALA_API_KEY;
     delete process.env.MANDALA_PROFILE;
     try {
-      expect(() => new Client()).toThrow(/Settings → API keys/);
+      expect(() => new Client()).toThrow(/Settings → Credentials → API keys/);
     } finally {
       if (saved !== undefined) process.env.MANDALA_API_KEY = saved;
       if (selected !== undefined) process.env.MANDALA_PROFILE = selected;

@@ -36,7 +36,7 @@ export class CredentialsError extends MandalaError {
 export function credentialError(code: string): never {
   const instructions =
     code === 'missing_credentials'
-      ? 'No API key. Pass apiKey, set MANDALA_API_KEY, or run mandala login (or create a key at Settings → API keys).'
+      ? 'No API key. Pass apiKey, set MANDALA_API_KEY, or run mandala login (or create a key at Settings → Credentials → API keys).'
       : `Cannot use local credentials (${code}). Check ~/.mandala/credentials.json or run mandala login; explicit API-key authentication remains available.`;
   throw new CredentialsError(code, instructions);
 }
