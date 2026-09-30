@@ -3403,8 +3403,11 @@ last read (stdout and stderr to the local streams, or base64 and decoded text
 under `--json`, with `running` and `exit_code`) and a line on stderr saying
 whether it is still running. The output is a cursor, not a buffer: each poll
 hands over only what is new, and while the platform says more is waiting the
-command reads on, up to 16 reads, before it says to poll again. `exec-poll`
-exits 0 while the command runs, and once it has finished exits with its status
+command reads on, up to 16 reads, before it says to poll again. If one of those
+later reads fails, what was already read is still printed (or kept in the
+`--json` result, with `more: true` and the failure as `drain_error`) and the
+command exits 1 (130 when cancelled): run `exec-poll` again for the rest.
+`exec-poll` exits 0 while the command runs, and once it has finished exits with its status
 as foreground exec does (0 through 255, or 1 when it is unknown), so a script
 polls until `--json`'s `running` is false.
 `computers exec-kill COMPUTER PID` kills it and everything it started, prints

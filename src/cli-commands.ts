@@ -1632,19 +1632,47 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
         // says another is waiting, so the output is read until it is not (to a
         // bound, past which a note says to poll again). A kill answers once,
         // with whatever had not been read.
+        //
+        // The platform does not hand a chunk over twice, so once one read has
+        // answered, nothing it gave may be lost to a later read's failure: a
+        // person's output is written as each chunk arrives, and a later read
+        // that fails ends the drain with what was read and a note to poll again
+        // (exit 1, or 130 when cancelled), rather than an error that drops it.
+        // Only the first read's failure is thrown, since nothing was consumed.
         let state = kill ? await c.execKill(pid!, call) : await c.execPoll(pid!, call);
         const stdout = [state.stdout];
         const stderr = [state.stderr];
+        const emit = (chunk: BackgroundExec) => {
+          if (json) return;
+          io.stdout.write(chunk.stdout);
+          io.stderr.write(chunk.stderr);
+        };
+        emit(state);
+        let drainError: unknown;
         for (let reads = 1; !kill && state.more && reads < EXEC_POLL_DRAIN; reads++) {
-          state = await c.execPoll(pid!, call);
+          try {
+            state = await c.execPoll(pid!, call);
+          } catch (error) {
+            drainError = error;
+            break;
+          }
           stdout.push(state.stdout);
           stderr.push(state.stderr);
+          emit(state);
         }
+        const drained = drainError === undefined;
         const out = Buffer.concat(stdout);
         const err = Buffer.concat(stderr);
         // A kill that worked is the command's success; the status the killed
         // process ended with is in the output.
-        const code = kill ? 0 : backgroundExitStatus(state);
+        const code = !drained
+          ? controller.signal.aborted
+            ? 130
+            : 1
+          : kill
+            ? 0
+            : backgroundExitStatus(state);
+        const more = !drained || state.more;
         const {
           stdout: _out,
           stderr: _err,
@@ -1657,18 +1685,25 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
           return output.result(
             snakeKeys({
               ...fields,
+              more,
               stdoutBase64: out.toString('base64'),
               stderrBase64: err.toString('base64'),
               stdoutText: new TextDecoder().decode(out),
               stderrText: new TextDecoder().decode(err),
+              // The output above was read and is not given out again; the read
+              // after it failed, so the rest waits for another exec-poll.
+              ...(drained ? {} : { drainError: errorInfo(drainError) }),
             }),
             code,
           );
-        io.stdout.write(out);
-        io.stderr.write(err);
         if (state.outTruncated || state.errTruncated)
           output.diagnostic('mandala: command output is incomplete (truncated)');
-        if (state.more)
+        if (!drained)
+          output.diagnostic(
+            `mandala: a later read failed (${errorInfo(drainError).message}); the output above was read and is not given out again; run computers exec-poll again for the rest`,
+            { keepNewlines: false },
+          );
+        else if (more)
           output.diagnostic(`mandala: more output is waiting; run computers exec-poll again`);
         output.diagnostic(
           kill

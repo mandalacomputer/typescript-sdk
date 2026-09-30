@@ -5,7 +5,7 @@ import os, { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { main } from '../src/cli.js';
 import { dashboardUrl, type LegacyCommands, runCli } from '../src/cli-commands.js';
 import { type Flag, GLOBAL_FLAGS, parseArgs } from '../src/cli-options.js';
@@ -4616,6 +4616,88 @@ describe('background exec follow-up: exec-poll and exec-kill (OPL-5524)', () => 
     const result = await h.run(['computers', 'exec-poll', COMPUTER.id, '42']);
     expect(polls).toBe(2);
     expect(result.frames[0].data).toMatchObject({ stdout_text: 'one two', more: false });
+  });
+
+  // The poll is a consuming cursor: a chunk one read handed over is not given
+  // out again, so a later read's failure must not drop it.
+  const failsSecondPoll =
+    (second: () => Response | Promise<Response>): Responder =>
+    (call) => {
+      if (!/\/exec\/42$/.test(call.path)) return anyRoute(call);
+      pollCalls++;
+      return pollCalls === 1
+        ? json(
+            handle({
+              running: true,
+              more: true,
+              stdout_b64: b64('CONSUMED'),
+              stderr_b64: b64('E1'),
+            }),
+          )
+        : second();
+    };
+  let pollCalls = 0;
+  beforeEach(() => {
+    pollCalls = 0;
+  });
+
+  it('prints what was read when a later poll in the drain fails, and exits 1', async () => {
+    const h = harness(failsSecondPoll(() => json({ error: 'bad poll' }, { status: 400 })));
+    const result = await h.run(['computers', 'exec-poll', COMPUTER.id, '42'], false);
+    expect(pollCalls).toBe(2);
+    expect(result.code).toBe(1);
+    expect(result.out).toBe('CONSUMED');
+    expect(result.err).toContain('E1');
+    expect(result.err).toContain('a later read failed');
+    expect(result.err).toContain('run computers exec-poll again');
+  });
+
+  it('keeps what was read in the JSON frame when a later poll fails, with more and drain_error', async () => {
+    const h = harness(failsSecondPoll(() => json({ error: 'bad poll' }, { status: 400 })));
+    const result = await h.run(['computers', 'exec-poll', COMPUTER.id, '42']);
+    expect(pollCalls).toBe(2);
+    expect(result.code).toBe(1);
+    expect(result.frames[0]).toMatchObject({
+      command: 'computers exec-poll',
+      ok: false,
+      exit_code: 1,
+      data: {
+        pid: 42,
+        running: true,
+        more: true,
+        stdout_text: 'CONSUMED',
+        stderr_text: 'E1',
+        stdout_base64: b64('CONSUMED'),
+        drain_error: { status: 400 },
+      },
+    });
+  });
+
+  it('keeps what was read when the drain is cancelled after the first read, and exits 130', async () => {
+    const h = harness(
+      failsSecondPoll(() => {
+        process.emit('SIGINT');
+        throw new DOMException('The operation was aborted.', 'AbortError');
+      }),
+    );
+    const result = await h.run(['computers', 'exec-poll', COMPUTER.id, '42']);
+    expect(pollCalls).toBe(2);
+    expect(result.code).toBe(130);
+    expect(result.frames[0]).toMatchObject({
+      ok: false,
+      exit_code: 130,
+      data: { more: true, stdout_text: 'CONSUMED', drain_error: { code: 'cancelled' } },
+    });
+  });
+
+  it('still fails with the error when the first poll fails, since nothing was read', async () => {
+    const h = harness((call) =>
+      /\/exec\/42$/.test(call.path) ? json({ error: 'bad poll' }, { status: 400 }) : anyRoute(call),
+    );
+    const result = await h.run(['computers', 'exec-poll', COMPUTER.id, '42']);
+    expect(result.code).toBe(1);
+    expect(result.frames[0]).toMatchObject({ ok: false, error: { status: 400 } });
+    expect(result.frames[0]).not.toHaveProperty('data');
   });
 
   it('kills the pid with DELETE and exits 0', async () => {

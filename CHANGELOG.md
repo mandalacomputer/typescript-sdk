@@ -41,7 +41,8 @@ This is the summary you read to decide whether to upgrade.
 
 - **`mandala computers exec-poll COMPUTER PID` and `exec-kill COMPUTER PID`**:
   follow up a `computers exec --background`. `exec-poll` prints what the
-  command wrote since the last read (reading on while more is waiting) and
+  command wrote since the last read (reading on while more is waiting, and
+  keeping what it read if a later read fails, with a non-zero exit) and
   whether it is still running; it exits 0 while it runs and then with the
   command's own status, 0 through 255 (1 when unknown). `exec-kill` kills it,
   prints what had not been read, and exits 0. `--json` gives the raw fields
