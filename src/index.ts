@@ -69,7 +69,7 @@ export class Client {
    * @param opts.baseUrl defaults to `MANDALA_BASE_URL`, then the public API.
    */
   constructor(opts: ClientOptions = {}) {
-    this.#t = new Transport(opts);
+    this.#t = new Transport(opts, `mandala-computer-ts/${VERSION}`);
     this.account = new Account(this.#t);
     this.apiKeys = new ApiKeys(this.#t);
     this.builds = new Builds(this.#t);
@@ -104,6 +104,8 @@ export type {
   DeleteOptions,
   DragOptions,
   FileChunk,
+  InputOptions,
+  PasteOptions,
   ScrollOptions,
   WaitForOptions,
   WaitOptions,

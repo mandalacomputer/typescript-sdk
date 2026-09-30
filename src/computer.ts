@@ -273,18 +273,31 @@ function unreachableTypes(
   );
 }
 
-export type ScrollOptions = CallOptions & {
+/**
+ * What every input action takes beside its own arguments: the call options,
+ * and whether to answer the desktop as it stands just after the action.
+ */
+export type InputOptions = CallOptions & {
+  /**
+   * Answer the desktop's windows as they stand just after the action — see
+   * {@link InputContext}. Costs one windows read, bounded at 3 seconds. An
+   * action that answers nothing resolves to the context instead of
+   * `undefined`; `type` carries it as {@link TypeResult.context}.
+   */
+  context?: boolean;
+};
+
+export type ScrollOptions = InputOptions & {
   direction?: P.ScrollDirection;
   /** Notches to scroll, a whole number from 1 to 50; 3 when left out. */
   amount?: number;
   modifiers?: readonly string[];
 };
 
-/** What {@link Computer.drag} accepts beside the two ends. */
 /**
  * Options for a click. Both are optional and change nothing when left out.
  */
-export type ClickOptions = CallOptions & {
+export type ClickOptions = InputOptions & {
   /**
    * How many times to press the button, 1 to 10 — for `click`, `rightClick`
    * and `middleClick` only (`doubleClick` and `tripleClick` are two and three
@@ -293,17 +306,18 @@ export type ClickOptions = CallOptions & {
    * to it.
    */
   count?: number;
-  /**
-   * Answer the desktop's windows as they stand just after the click — see
-   * {@link InputContext}. Costs one windows read, bounded at 3 seconds; the
-   * click resolves to `undefined` without it.
-   */
-  context?: boolean;
 };
 
-export type DragOptions = CallOptions & {
+/** What {@link Computer.drag} accepts beside the two ends. */
+export type DragOptions = InputOptions & {
   /** Keys held down for the whole drag, e.g. `['shift']` to extend a selection. */
   modifiers?: readonly string[];
+};
+
+/** What {@link Computer.paste} accepts beside the text. */
+export type PasteOptions = InputOptions & {
+  /** `ctrl+v` when left out; `ctrl+shift+v` is what a terminal needs. */
+  shortcut?: P.PasteShortcut;
 };
 
 export type DeleteOptions = {
@@ -728,6 +742,9 @@ const SNAPSHOT_POLL_MS = 5_000;
  * client's default timeout.
  */
 const UNICODE_TYPE_TIMEOUT_MS = 95_000 + 15_000;
+
+/** The query that asks an input action for the desktop after it. */
+const CONTEXT_QUERY: Query = { context: '1' };
 
 /**
  * A create-only upload's 409, never left looking like a passing conflict.
@@ -3777,32 +3794,58 @@ export class Computer {
   }
 
   /**
+   * An input action that answers nothing of its own, resolving to the context
+   * the platform answers after it when asked and to `undefined` otherwise.
+   *
+   * `build` runs after `context` is read, so a malformed option is refused
+   * before anything is sent — the same order the body's own checks run in.
+   */
+  async #acted(
+    opts: InputOptions | undefined,
+    build: () => Record<string, unknown>,
+    minTimeoutMs?: number,
+  ): Promise<InputContext | undefined> {
+    const context = P.flag(opts?.context, 'context');
+    const data = await this.#input(
+      build(),
+      opts,
+      minTimeoutMs,
+      context ? CONTEXT_QUERY : undefined,
+    );
+    return context ? this.#context(data) : undefined;
+  }
+
+  /**
    * One of the five clicks, with its count and, when asked, the context the
    * platform answers after it.
    */
-  async #click(
+  #click(
     action: string,
     x: number | undefined,
     y: number | undefined,
     modifiers: readonly string[],
     opts: ClickOptions,
   ): Promise<InputContext | undefined> {
-    // Read before the body is built, so a malformed option is refused before
-    // anything is sent — the same order the body's own checks run in.
-    const context = P.flag(opts?.context, 'context');
-    const body = P.clickBody(action, x, y, modifiers, opts?.count);
-    const data = await this.#input(body, opts, undefined, context ? { context: '1' } : undefined);
-    return context ? toInputContext(data, `POST ${P.computerAction(this.id, 'input')}`) : undefined;
+    return this.#acted(opts, () => P.clickBody(action, x, y, modifiers, opts?.count));
+  }
+
+  /** The context an input answer carries, for a request that asked for it. */
+  #context(data: Record<string, unknown>): InputContext {
+    return toInputContext(data, `POST ${P.computerAction(this.id, 'input')}`);
   }
 
   /**
    * Move the pointer to `(x, y)` in this computer's screen space.
    *
    * Coordinates are in the computer's own {@link resolution}, which is a
-   * create-time choice — not a fixed 1280x800.
+   * create-time choice — not a fixed 1280x800. Takes `context` as
+   * {@link click} does.
    */
-  async move(x: number, y: number, opts: CallOptions = {}): Promise<void> {
-    await this.#input(P.pointerBody('move', x, y), opts);
+  move(x: number, y: number, opts?: InputOptions & { context?: false }): Promise<void>;
+  move(x: number, y: number, opts: InputOptions & { context: true }): Promise<InputContext>;
+  move(x: number, y: number, opts?: InputOptions): Promise<InputContext | undefined>;
+  async move(x: number, y: number, opts: InputOptions = {}): Promise<unknown> {
+    return this.#acted(opts, () => P.pointerBody('move', x, y));
   }
 
   /**
@@ -3976,9 +4019,28 @@ export class Computer {
    *
    * `modifiers` are held down for the whole drag, pressed before the pointer
    * moves and released after the button:
-   * `drag(400, 300, { x: 100, y: 100 }, { modifiers: ['shift'] })`.
+   * `drag(400, 300, { x: 100, y: 100 }, { modifiers: ['shift'] })`. Takes
+   * `context` as {@link click} does.
    */
-  async drag(toX: number, toY: number, from?: Point, opts: DragOptions = {}): Promise<void> {
+  drag(
+    toX: number,
+    toY: number,
+    from?: Point,
+    opts?: DragOptions & { context?: false },
+  ): Promise<void>;
+  drag(
+    toX: number,
+    toY: number,
+    from: Point | undefined,
+    opts: DragOptions & { context: true },
+  ): Promise<InputContext>;
+  drag(
+    toX: number,
+    toY: number,
+    from?: Point,
+    opts?: DragOptions,
+  ): Promise<InputContext | undefined>;
+  async drag(toX: number, toY: number, from?: Point, opts: DragOptions = {}): Promise<unknown> {
     // `from` is an optional positional in front of `CallOptions`, so a
     // JavaScript `drag(x, y, { signal })` binds the options object here — and
     // an options object is a `Point` at runtime as far as anything could tell:
@@ -4003,7 +4065,7 @@ export class Computer {
           "drag(toX, toY, from, { modifiers: ['shift'] })",
       );
     }
-    await this.#input(P.dragBody(toX, toY, from?.x, from?.y, opts.modifiers), opts);
+    return this.#acted(opts, () => P.dragBody(toX, toY, from?.x, from?.y, opts.modifiers));
   }
 
   /**
@@ -4011,15 +4073,29 @@ export class Computer {
    *
    * Pair with {@link mouseUp}. Between the two the desktop is mid-gesture, so a
    * call that throws in between leaves the button held — wrap them in
-   * `try`/`finally` if that matters.
+   * `try`/`finally` if that matters. Takes `context` as {@link click} does.
    */
-  async mouseDown(x?: number, y?: number, opts: CallOptions = {}): Promise<void> {
-    await this.#input(P.buttonBody('left_mouse_down', x, y), opts);
+  mouseDown(x?: number, y?: number, opts?: InputOptions & { context?: false }): Promise<void>;
+  mouseDown(
+    x: number | undefined,
+    y: number | undefined,
+    opts: InputOptions & { context: true },
+  ): Promise<InputContext>;
+  mouseDown(x?: number, y?: number, opts?: InputOptions): Promise<InputContext | undefined>;
+  async mouseDown(x?: number, y?: number, opts: InputOptions = {}): Promise<unknown> {
+    return this.#acted(opts, () => P.buttonBody('left_mouse_down', x, y));
   }
 
-  /** Release the left button. */
-  async mouseUp(x?: number, y?: number, opts: CallOptions = {}): Promise<void> {
-    await this.#input(P.buttonBody('left_mouse_up', x, y), opts);
+  /** Release the left button. Takes `context` as {@link click} does. */
+  mouseUp(x?: number, y?: number, opts?: InputOptions & { context?: false }): Promise<void>;
+  mouseUp(
+    x: number | undefined,
+    y: number | undefined,
+    opts: InputOptions & { context: true },
+  ): Promise<InputContext>;
+  mouseUp(x?: number, y?: number, opts?: InputOptions): Promise<InputContext | undefined>;
+  async mouseUp(x?: number, y?: number, opts: InputOptions = {}): Promise<unknown> {
+    return this.#acted(opts, () => P.buttonBody('left_mouse_up', x, y));
   }
 
   /**
@@ -4029,9 +4105,16 @@ export class Computer {
    *
    * `direction` is up, down, left or right. Horizontal scrolling needs a
    * hypervisor running QEMU 7.1 or newer; an older one refuses it by name rather
-   * than scrolling the wrong way.
+   * than scrolling the wrong way. Takes `context` as {@link click} does.
    */
-  async scroll(x?: number, y?: number, opts: ScrollOptions = {}): Promise<void> {
+  scroll(x?: number, y?: number, opts?: ScrollOptions & { context?: false }): Promise<void>;
+  scroll(
+    x: number | undefined,
+    y: number | undefined,
+    opts: ScrollOptions & { context: true },
+  ): Promise<InputContext>;
+  scroll(x?: number, y?: number, opts?: ScrollOptions): Promise<InputContext | undefined>;
+  async scroll(x?: number, y?: number, opts: ScrollOptions = {}): Promise<unknown> {
     // The mirror of the misbinding `requireModifiers` catches, and this method
     // is the one place it lands. `click(100, 200, ['shift'])` is correct, so
     // `scroll(100, 200, ['shift'])` is the natural thing to write next — and
@@ -4045,7 +4128,7 @@ export class Computer {
       );
     }
     const { direction = 'down', amount = 3, modifiers } = opts;
-    await this.#input(P.scrollBody({ direction, amount, x, y, modifiers }), opts);
+    return this.#acted(opts, () => P.scrollBody({ direction, amount, x, y, modifiers }));
   }
 
   /**
@@ -4069,11 +4152,27 @@ export class Computer {
    * Text that is not all ASCII is sent with a request deadline of at least 110
    * seconds, whatever the client's default: the platform gives the guest helper
    * 75 seconds and its proxy 95.
+   *
+   * `{ context: true }` adds the desktop just after the typing, as
+   * {@link TypeResult.context} — see {@link click}.
    */
-  async type(text: string, opts: CallOptions = {}): Promise<TypeResult> {
+  type(
+    text: string,
+    opts: InputOptions & { context: true },
+  ): Promise<TypeResult & { context: InputContext }>;
+  type(text: string, opts?: InputOptions): Promise<TypeResult>;
+  async type(text: string, opts: InputOptions = {}): Promise<TypeResult> {
+    const context = P.flag(opts?.context, 'context');
     const body = P.typeBody(text);
     const ascii = ![...text].some((ch) => ch.charCodeAt(0) > 0x7f);
-    return toTypeResult(await this.#input(body, opts, ascii ? undefined : UNICODE_TYPE_TIMEOUT_MS));
+    const data = await this.#input(
+      body,
+      opts,
+      ascii ? undefined : UNICODE_TYPE_TIMEOUT_MS,
+      context ? CONTEXT_QUERY : undefined,
+    );
+    const result = toTypeResult(data);
+    return context ? { ...result, context: this.#context(data) } : result;
   }
 
   /**
@@ -4087,12 +4186,13 @@ export class Computer {
    * the paste before changing the clipboard again. Linux guests with working
    * clipboard support only. An interrupted paste can have side effects —
    * inspect before retrying, and do not fall back to typing automatically.
+   * Takes `context` as {@link click} does.
    */
-  async paste(
-    text: string,
-    opts: { shortcut?: P.PasteShortcut } & CallOptions = {},
-  ): Promise<void> {
-    await this.#input(P.pasteBody(text, opts.shortcut), opts);
+  paste(text: string, opts?: PasteOptions & { context?: false }): Promise<void>;
+  paste(text: string, opts: PasteOptions & { context: true }): Promise<InputContext>;
+  paste(text: string, opts?: PasteOptions): Promise<InputContext | undefined>;
+  async paste(text: string, opts: PasteOptions = {}): Promise<unknown> {
+    return this.#acted(opts, () => P.pasteBody(text, opts.shortcut));
   }
 
   /**
@@ -4102,13 +4202,18 @@ export class Computer {
    * computer-use model produces — `Page_Down`, `BackSpace`, `period` — work
    * without translation. An unknown key raises and names itself rather than
    * being silently dropped from the chord.
+   *
+   * The array form takes options, `context` among them as {@link click} takes
+   * it: `key(['ctrl', 'l'], { context: true })`.
    */
-  async key(keys: readonly string[], opts?: CallOptions): Promise<void>;
-  async key(...keys: string[]): Promise<void>;
+  key(keys: readonly string[], opts?: InputOptions & { context?: false }): Promise<void>;
+  key(keys: readonly string[], opts: InputOptions & { context: true }): Promise<InputContext>;
+  key(keys: readonly string[], opts?: InputOptions): Promise<InputContext | undefined>;
+  key(...keys: string[]): Promise<void>;
   async key(
     first: string | readonly string[] | undefined,
-    ...rest: (string | CallOptions | undefined)[]
-  ): Promise<void> {
+    ...rest: (string | InputOptions | undefined)[]
+  ): Promise<unknown> {
     // An array first is the form that can carry options — every other input
     // method takes a CallOptions, and this one could not, so a chord was the
     // one keystroke in this SDK that no signal could cancel. The rest-args
@@ -4147,17 +4252,37 @@ export class Computer {
           'the platform as a null keystroke rather than as the chord you asked for',
       );
     }
-    await this.#input(P.keyBody(keys), spread ? {} : ((rest[0] as CallOptions) ?? {}));
+    return this.#acted(spread ? {} : ((rest[0] as InputOptions) ?? {}), () => P.keyBody(keys));
   }
 
   /**
    * Hold a chord down for `seconds`, then release it.
    *
    * For the keys that mean something while held rather than when tapped — an
-   * arrow key that repeats, a modifier that changes what a UI shows.
+   * arrow key that repeats, a modifier that changes what a UI shows. Takes
+   * `context` as {@link click} does, read after the chord is released.
    */
-  async holdKey(keys: readonly string[], seconds: number, opts: CallOptions = {}): Promise<void> {
-    await this.#input(P.holdKeyBody(keys, seconds), opts, (seconds + 30) * 1_000);
+  holdKey(
+    keys: readonly string[],
+    seconds: number,
+    opts?: InputOptions & { context?: false },
+  ): Promise<void>;
+  holdKey(
+    keys: readonly string[],
+    seconds: number,
+    opts: InputOptions & { context: true },
+  ): Promise<InputContext>;
+  holdKey(
+    keys: readonly string[],
+    seconds: number,
+    opts?: InputOptions,
+  ): Promise<InputContext | undefined>;
+  async holdKey(
+    keys: readonly string[],
+    seconds: number,
+    opts: InputOptions = {},
+  ): Promise<unknown> {
+    return this.#acted(opts, () => P.holdKeyBody(keys, seconds), (seconds + 30) * 1_000);
   }
 
   /**
@@ -4166,10 +4291,14 @@ export class Computer {
    * Sleeping locally does the same thing for a script. This exists because a
    * computer-use model emits `wait` as an action, and because it does not block
    * the screenshot polls of anything else watching the desktop. Capped at 30
-   * seconds by the platform.
+   * seconds by the platform. Takes `context` as {@link click} does, read when
+   * the pause ends — the way to see what a slow action has opened by then.
    */
-  async wait(seconds: number, opts: CallOptions = {}): Promise<void> {
-    await this.#input(P.waitBody(seconds), opts, (seconds + 30) * 1_000);
+  wait(seconds: number, opts?: InputOptions & { context?: false }): Promise<void>;
+  wait(seconds: number, opts: InputOptions & { context: true }): Promise<InputContext>;
+  wait(seconds: number, opts?: InputOptions): Promise<InputContext | undefined>;
+  async wait(seconds: number, opts: InputOptions = {}): Promise<unknown> {
+    return this.#acted(opts, () => P.waitBody(seconds), (seconds + 30) * 1_000);
   }
 
   /**

@@ -451,7 +451,39 @@ export type TransportOptions = {
   retries?: { idempotent: number };
   /** Swap in a fetch implementation. Defaults to the global one. */
   fetch?: typeof globalThis.fetch;
+  /**
+   * Your own product token, such as `my-app/1.2`, appended to the
+   * `User-Agent` this SDK sends: `mandala-computer-ts/<VERSION> node/<version>
+   * my-app/1.2`. Printable ASCII only. Browsers do not let a page set a
+   * `User-Agent`, so outside Node (and the runtimes that report a Node
+   * version) none is sent and this is only checked.
+   */
+  userAgent?: string;
 };
+
+/**
+ * `node/<version>` in a runtime that reports a Node version — Node itself, and
+ * Bun and Deno, which do — or `undefined` in a browser, which forbids a page
+ * to set `User-Agent` and gets none from this SDK.
+ */
+export function runtimeToken(proc: unknown): string | undefined {
+  const node = isRecord(proc) && isRecord(proc.versions) ? proc.versions.node : undefined;
+  return typeof node === 'string' && node ? `node/${node}` : undefined;
+}
+
+/**
+ * The `User-Agent` a client sends: this SDK and its version, the runtime, then
+ * the caller's own token. `undefined` where there is no runtime token, which is
+ * a browser.
+ */
+export function userAgentHeader(
+  product: string | undefined,
+  suffix: string | undefined,
+  runtime: string | undefined,
+): string | undefined {
+  if (runtime === undefined) return undefined;
+  return [product, runtime, suffix].filter((part) => part).join(' ');
+}
 
 /**
  * A response, carried with the deadline the request was made under.
@@ -655,7 +687,24 @@ export class Transport {
   readonly #retryDelays = new WeakMap<APIError, number>();
   readonly #terminalBodies = new WeakSet<APIError>();
 
-  constructor(opts: TransportOptions = {}) {
+  /**
+   * @param product this SDK's own `User-Agent` token,
+   * `mandala-computer-ts/<VERSION>`. Passed by {@link Client}, which is where
+   * `VERSION` lives; the release check reads it there.
+   */
+  constructor(opts: TransportOptions = {}, product?: string) {
+    // Refused here rather than left to fetch: a CR or LF would be a header
+    // injection, which fetch refuses only when the first request is made, with
+    // a TypeError that names neither this option nor this SDK.
+    if (
+      opts.userAgent !== undefined &&
+      (typeof opts.userAgent !== 'string' ||
+        !/^[\x21-\x7e](?:[\x20-\x7e]*[\x21-\x7e])?$/.test(opts.userAgent))
+    ) {
+      throw new ValidationError(
+        `userAgent must be printable ASCII with no leading or trailing space, such as 'my-app/1.2' (got ${JSON.stringify(opts.userAgent)})`,
+      );
+    }
     const retries = opts.retries;
     if (
       retries !== undefined &&
@@ -690,6 +739,12 @@ export class Transport {
       );
     }
     this.#headers = { Authorization: `Bearer ${key}`, Accept: 'application/json' };
+    const userAgent = userAgentHeader(
+      product,
+      opts.userAgent,
+      runtimeToken((globalThis as { process?: unknown }).process),
+    );
+    if (userAgent !== undefined) this.#headers['User-Agent'] = userAgent;
     // Checked here for the reason #deadlineMs checks minTimeoutMs below — one
     // hazard with two doors into it, and only one of them was guarded. A NaN
     // (`timeoutMs: Number(unsetEnvVar)` is the usual spelling) reads as "no
