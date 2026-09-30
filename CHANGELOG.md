@@ -38,8 +38,8 @@ This is the summary you read to decide whether to upgrade.
   default and the `focused` one, as they stand just after the click — instead
   of `undefined`. When the windows cannot be read, `windows` is `null` and
   `error` says why; the click still happened. New exports: `ClickOptions`,
-  `InputContext`. The click methods' return type widened from
-  `Promise<void>` to `Promise<InputContext | undefined>`.
+  `InputContext`. A click without `context` is still typed `Promise<void>`;
+  `{ context: true }` is typed `Promise<InputContext>`.
 - **`computer.waitForDesktop()`** polls a no-output `true` in the desktop
   session until it finishes with exit 0. A probe that times out inside the
   guest is polled through, not taken as a session. It returns at once for a Windows guest or a

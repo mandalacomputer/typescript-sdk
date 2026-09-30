@@ -1,7 +1,13 @@
 /** A click's repeat count and the post-action window context (OPL-5472). */
 
-import { describe, expect, it } from 'vitest';
-import { Client, MandalaError, ValidationError } from '../src/index.js';
+import { describe, expect, expectTypeOf, it } from 'vitest';
+import {
+  Client,
+  type Computer,
+  type InputContext,
+  MandalaError,
+  ValidationError,
+} from '../src/index.js';
 import { anyRoute, BASE, json, type Responder, recorder, WINDOW } from './harness.js';
 
 const client = (respond: Responder) => {
@@ -112,5 +118,36 @@ describe('click context', () => {
     await expect(computer.click(1, 2, [], { context: 'yes' as never })).rejects.toThrow(
       /context must be a boolean/,
     );
+  });
+});
+
+/**
+ * Checked by `tsc --noEmit` (tsconfig includes test/), never run: a caller that
+ * never asks for context keeps the `Promise<void>` it compiled against before
+ * the option existed, and only `{ context: true }` is typed as the context.
+ */
+function clickTypes(c: Computer, dynamic: boolean): void {
+  const plain: Promise<void> = c.click(1, 2);
+  const retry = (fn: () => Promise<void>) => fn;
+  retry(() => c.click(1, 2));
+  retry(() => c.rightClick(1, 2, ['ctrl'], { count: 2 }));
+  retry(() => c.middleClick());
+  const voidFn = async (): Promise<void> => c.click(1, 2, [], { context: false });
+  const twice: Promise<void> = c.doubleClick(1, 2);
+  const thrice: Promise<void> = c.tripleClick(1, 2);
+  const asked: Promise<InputContext> = c.click(1, 2, [], { context: true });
+  const askedTwice: Promise<InputContext> = c.doubleClick(1, 2, [], { context: true });
+  expectTypeOf(c.click(1, 2)).toEqualTypeOf<Promise<void>>();
+  expectTypeOf(c.rightClick(1, 2, [], { context: true })).toEqualTypeOf<Promise<InputContext>>();
+  expectTypeOf(c.middleClick(1, 2, [], { context: dynamic })).toEqualTypeOf<
+    Promise<InputContext | undefined>
+  >();
+  expectTypeOf(c.tripleClick(1, 2, [], { context: true })).toEqualTypeOf<Promise<InputContext>>();
+  void [plain, voidFn, twice, thrice, asked, askedTwice];
+}
+
+describe('click return types', () => {
+  it('are pinned at compile time by clickTypes', () => {
+    expect(typeof clickTypes).toBe('function');
   });
 });

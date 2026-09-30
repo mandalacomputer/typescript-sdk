@@ -3791,44 +3791,121 @@ export class Computer {
    * `{ count: 4 }` presses the button four times (1 to 10). `{ context: true }`
    * resolves to the desktop's windows as they stand just after the click — see
    * {@link InputContext} — which saves listing them separately; without it the
-   * click resolves to `undefined`.
+   * click resolves to `undefined`. The overloads keep the plain call typed
+   * `Promise<void>` as it always was; only `{ context: true }` is typed
+   * `Promise<InputContext>`, and a `context` known only at run time gets the
+   * union.
    */
+  click(
+    x?: number,
+    y?: number,
+    modifiers?: readonly string[],
+    opts?: ClickOptions & { context?: false },
+  ): Promise<void>;
+  click(
+    x: number | undefined,
+    y: number | undefined,
+    modifiers: readonly string[],
+    opts: ClickOptions & { context: true },
+  ): Promise<InputContext>;
+  click(
+    x?: number,
+    y?: number,
+    modifiers?: readonly string[],
+    opts?: ClickOptions,
+  ): Promise<InputContext | undefined>;
   async click(
     x?: number,
     y?: number,
     modifiers: readonly string[] = [],
     opts: ClickOptions = {},
-  ): Promise<InputContext | undefined> {
+  ): Promise<unknown> {
+    // `unknown` only because an implementation must be compatible with a
+    // `Promise<void>` overload; callers see the overloads, never this.
     return this.#click('left_click', x, y, modifiers, opts);
   }
 
   /** A right click. Takes `count` and `context` as {@link click} does. */
+  rightClick(
+    x?: number,
+    y?: number,
+    modifiers?: readonly string[],
+    opts?: ClickOptions & { context?: false },
+  ): Promise<void>;
+  rightClick(
+    x: number | undefined,
+    y: number | undefined,
+    modifiers: readonly string[],
+    opts: ClickOptions & { context: true },
+  ): Promise<InputContext>;
+  rightClick(
+    x?: number,
+    y?: number,
+    modifiers?: readonly string[],
+    opts?: ClickOptions,
+  ): Promise<InputContext | undefined>;
   async rightClick(
     x?: number,
     y?: number,
     modifiers: readonly string[] = [],
     opts: ClickOptions = {},
-  ): Promise<InputContext | undefined> {
+  ): Promise<unknown> {
     return this.#click('right_click', x, y, modifiers, opts);
   }
 
   /** A middle click. Takes `count` and `context` as {@link click} does. */
+  middleClick(
+    x?: number,
+    y?: number,
+    modifiers?: readonly string[],
+    opts?: ClickOptions & { context?: false },
+  ): Promise<void>;
+  middleClick(
+    x: number | undefined,
+    y: number | undefined,
+    modifiers: readonly string[],
+    opts: ClickOptions & { context: true },
+  ): Promise<InputContext>;
+  middleClick(
+    x?: number,
+    y?: number,
+    modifiers?: readonly string[],
+    opts?: ClickOptions,
+  ): Promise<InputContext | undefined>;
   async middleClick(
     x?: number,
     y?: number,
     modifiers: readonly string[] = [],
     opts: ClickOptions = {},
-  ): Promise<InputContext | undefined> {
+  ): Promise<unknown> {
     return this.#click('middle_click', x, y, modifiers, opts);
   }
 
   /** Two clicks. Takes `context` as {@link click} does; a `count` is refused. */
+  doubleClick(
+    x?: number,
+    y?: number,
+    modifiers?: readonly string[],
+    opts?: Omit<ClickOptions, 'count'> & { context?: false },
+  ): Promise<void>;
+  doubleClick(
+    x: number | undefined,
+    y: number | undefined,
+    modifiers: readonly string[],
+    opts: Omit<ClickOptions, 'count'> & { context: true },
+  ): Promise<InputContext>;
+  doubleClick(
+    x?: number,
+    y?: number,
+    modifiers?: readonly string[],
+    opts?: Omit<ClickOptions, 'count'>,
+  ): Promise<InputContext | undefined>;
   async doubleClick(
     x?: number,
     y?: number,
     modifiers: readonly string[] = [],
     opts: Omit<ClickOptions, 'count'> = {},
-  ): Promise<InputContext | undefined> {
+  ): Promise<unknown> {
     return this.#click('double_click', x, y, modifiers, opts);
   }
 
@@ -3836,12 +3913,30 @@ export class Computer {
    * Three clicks, which is how most editors select a whole line. Takes
    * `context` as {@link click} does; a `count` is refused.
    */
+  tripleClick(
+    x?: number,
+    y?: number,
+    modifiers?: readonly string[],
+    opts?: Omit<ClickOptions, 'count'> & { context?: false },
+  ): Promise<void>;
+  tripleClick(
+    x: number | undefined,
+    y: number | undefined,
+    modifiers: readonly string[],
+    opts: Omit<ClickOptions, 'count'> & { context: true },
+  ): Promise<InputContext>;
+  tripleClick(
+    x?: number,
+    y?: number,
+    modifiers?: readonly string[],
+    opts?: Omit<ClickOptions, 'count'>,
+  ): Promise<InputContext | undefined>;
   async tripleClick(
     x?: number,
     y?: number,
     modifiers: readonly string[] = [],
     opts: Omit<ClickOptions, 'count'> = {},
-  ): Promise<InputContext | undefined> {
+  ): Promise<unknown> {
     return this.#click('triple_click', x, y, modifiers, opts);
   }
 
