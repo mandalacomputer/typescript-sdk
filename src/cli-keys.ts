@@ -164,9 +164,13 @@ export async function whoamiCommand(
  * `mandala logout [--profile NAME]`: forget one saved profile — the one
  * `--profile` or `MANDALA_PROFILE` names, else the default.
  *
- * A profile that is not there is an error rather than a quiet success: the
- * person believes they are signed in somewhere, and "nothing to do" would let
- * them keep believing the wrong thing about which profile that was.
+ * With nothing saved at all, there is nothing to be wrong about: it says so
+ * and succeeds, so a script that logs out before logging in does not fail.
+ *
+ * A profile that is not there while others are is an error rather than a quiet
+ * success: the person believes they are signed in somewhere, and "nothing to
+ * do" would let them keep believing the wrong thing about which profile that
+ * was.
  */
 export async function logoutCommand(
   profile: string | undefined,
@@ -175,6 +179,20 @@ export async function logoutCommand(
   signal: AbortSignal,
 ): Promise<number> {
   const removed = await removeCredentials(selectedProfile({ profile }, io.env), { signal });
+  // No store, or one with no profiles: the store names a default whenever it
+  // holds any, so a null default here means nothing is saved.
+  if (!removed.removed && removed.defaultProfile === null) {
+    output.diagnostic('Not logged in; nothing to remove.');
+    envKeyNote(io, output);
+    if (!output.json) return 0;
+    return output.result({
+      profile: removed.profile,
+      removed: false,
+      path: removed.path,
+      key_id: null,
+      default_profile: null,
+    });
+  }
   if (!removed.removed)
     throw new CliError(
       'not_logged_in',
@@ -188,10 +206,7 @@ export async function logoutCommand(
   );
   if (removed.defaultProfile !== null && removed.defaultProfile !== removed.profile)
     output.diagnostic(`The default profile is ${removed.defaultProfile}.`);
-  if (io.env.MANDALA_API_KEY?.trim())
-    output.diagnostic(
-      'MANDALA_API_KEY is set in this environment, and it still authenticates every command.',
-    );
+  envKeyNote(io, output);
   if (!output.json) return 0;
   return output.result({
     profile: removed.profile,
@@ -200,4 +215,12 @@ export async function logoutCommand(
     key_id: removed.keyId,
     default_profile: removed.defaultProfile,
   });
+}
+
+/** An API key in the environment authenticates whatever logout removed. */
+function envKeyNote(io: CliIO, output: Output): void {
+  if (io.env.MANDALA_API_KEY?.trim())
+    output.diagnostic(
+      'MANDALA_API_KEY is set in this environment, and it still authenticates every command.',
+    );
 }

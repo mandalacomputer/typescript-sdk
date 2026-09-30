@@ -1656,6 +1656,96 @@ describe('snapshots', () => {
     expect(members.frames.at(-1).data).toEqual([WORKSPACE_MEMBER]);
   });
 
+  // A workspace by name, as a computer is taken by name (OPL-5471). It was
+  // sent as typed, and `workspaces get customers` answered not found.
+  it.each([
+    ['get', `/workspaces/${WORKSPACE.id}`],
+    ['members', `/workspaces/${WORKSPACE.id}/members`],
+  ])('reads workspaces %s by name as well as by id', async (verb, path) => {
+    const h = harness();
+    const byName = await h.run(['workspaces', verb, WORKSPACE.name]);
+    expect(byName.code).toBe(0);
+    expect(h.rec.routes()).toEqual([
+      ['GET', 'workspaces'],
+      ['GET', path.slice(1)],
+    ]);
+    const before = h.rec.calls.length;
+    const byId = await h.run(['workspaces', verb, WORKSPACE.id]);
+    expect(byId.code).toBe(0);
+    expect(h.rec.calls.slice(before).map((c) => c.path)).toEqual(['/workspaces', path]);
+  });
+
+  it('prefers a workspace id over a workspace that is named like it', async () => {
+    const other = { ...WORKSPACE, id: 'wsp-bbbbbbbbbbbb', name: WORKSPACE.id };
+    const h = harness((call) =>
+      call.path === '/workspaces' ? json([WORKSPACE, other]) : anyRoute(call),
+    );
+    await h.run(['workspaces', 'get', WORKSPACE.id]);
+    expect(h.rec.last().path).toBe(`/workspaces/${WORKSPACE.id}`);
+  });
+
+  it('refuses a workspace name that fits more than one, naming their ids', async () => {
+    const twin = { ...WORKSPACE, id: 'wsp-bbbbbbbbbbbb' };
+    const h = harness((call) =>
+      call.path === '/workspaces' ? json([WORKSPACE, twin]) : anyRoute(call),
+    );
+    const result = await h.run(['workspaces', 'members', WORKSPACE.name]);
+    expect(result.code).toBe(1);
+    expect(result.frames[0].error.code).toBe('ambiguous_workspace');
+    expect(result.frames[0].error.message).toContain(`${WORKSPACE.id}, ${twin.id}`);
+    expect(h.rec.routes()).toEqual([['GET', 'workspaces']]);
+  });
+
+  it('sends a workspace nobody is named as typed, and the 404 is not found', async () => {
+    const h = harness((call) =>
+      call.path === '/workspaces/nobody'
+        ? json({ error: 'workspace not found' }, { status: 404 })
+        : anyRoute(call),
+    );
+    const result = await h.run(['workspaces', 'get', 'nobody']);
+    expect(result.code).toBe(1);
+    expect(result.frames[0].error.code).toBe('not_found');
+    expect(h.rec.routes()).toEqual([
+      ['GET', 'workspaces'],
+      ['GET', 'workspaces/nobody'],
+    ]);
+  });
+
+  // A listing that fails must not stop an id from being read (OPL-5471 review):
+  // the direct read is what worked before names were taken.
+  it.each([
+    ['get', `/workspaces/${WORKSPACE.id}`],
+    ['members', `/workspaces/${WORKSPACE.id}/members`],
+  ])('reads workspaces %s by id when the listing fails', async (verb, path) => {
+    const h = harness((call) =>
+      call.path === '/workspaces' ? json({ error: 'down' }, { status: 503 }) : anyRoute(call),
+    );
+    const result = await h.run(['workspaces', verb, WORKSPACE.id]);
+    expect(result.code).toBe(0);
+    expect(h.rec.routes()).toEqual([
+      ['GET', 'workspaces'],
+      ['GET', path.slice(1)],
+    ]);
+  });
+
+  it('reports the failed listing, not not found, for a name it could not resolve', async () => {
+    const h = harness((call) =>
+      call.path === '/workspaces'
+        ? json({ error: 'down' }, { status: 503 })
+        : call.path === `/workspaces/${WORKSPACE.name}`
+          ? json({ error: 'workspace not found' }, { status: 404 })
+          : anyRoute(call),
+    );
+    const result = await h.run(['workspaces', 'get', WORKSPACE.name]);
+    expect(result.code).toBe(1);
+    expect(result.frames[0].error.code).not.toBe('not_found');
+    expect(result.frames[0].error.message).toContain('down');
+    expect(h.rec.routes()).toEqual([
+      ['GET', 'workspaces'],
+      ['GET', `workspaces/${WORKSPACE.name}`],
+    ]);
+  });
+
   it('clones the exact snapshot with a new computer name', async () => {
     const h = harness();
     const result = await h.run(['snapshots', 'clone', 'snapshot-8', '--name', 'recovered']);

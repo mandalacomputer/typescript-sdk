@@ -474,18 +474,18 @@ export const COMMANDS: readonly Command[] = [
     ],
   ),
   command('operations get', 'Read one lifecycle operation', ['id']),
-  command('workspaces list', "List the account's workspaces, oldest first"),
-  command('workspaces get', 'Read one workspace', ['workspace']),
-  command(
-    'workspaces members',
-    'List the people who reach a workspace; needs a key that is not confined to a workspace',
-    ['workspace'],
-  ),
   command(
     'operations wait',
     'Wait until an operation succeeds (exit 0) or fails (operation_failed); succeeded is not a booted desktop',
     ['id'],
     waits,
+  ),
+  command('workspaces list', "List the account's workspaces, oldest first"),
+  command('workspaces get', 'Read one workspace, by name or ID', ['workspace']),
+  command(
+    'workspaces members',
+    'List the people who reach a workspace, by name or ID; needs a key that is not confined to a workspace',
+    ['workspace'],
   ),
   command(
     'files list',

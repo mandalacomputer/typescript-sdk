@@ -2971,8 +2971,10 @@ until it is revoked — under Credentials in the dashboard, or with
 `mandala api-keys revoke <id>` from a key that can manage keys — and logout prints
 its id for that. Removing the default while other profiles remain makes the first
 of them by name the default, and says so; removing the last one removes the file.
-A profile that is not saved is an error (`not_logged_in`) and writes nothing. An
-API key in `MANDALA_API_KEY` is untouched and still authenticates every command.
+With no profile saved at all it says `Not logged in; nothing to remove.` and exits
+0. A profile that is not saved while others are is an error (`not_logged_in`) and
+writes nothing. An API key in `MANDALA_API_KEY` is untouched and still
+authenticates every command.
 
 `login --json` puts the URL/code and progress on stderr. Its final stdout envelope
 contains only `profile`, `base_url`, `account`, `scope`, and `saved: true`. It does
@@ -3073,7 +3075,7 @@ stderr naming them and the command to run next.
 
 ```sh
 mandala workspaces list                   # oldest first; a scoped key sees its own
-mandala workspaces get wsp-...
+mandala workspaces get wsp-...             # or its name, as computers take one
 mandala workspaces members wsp-...        # needs a key not confined to a workspace
 ```
 

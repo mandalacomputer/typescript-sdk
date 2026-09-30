@@ -80,10 +80,10 @@ const expectedCommands = [
   'api-keys revoke',
   'operations list',
   'operations get',
+  'operations wait',
   'workspaces list',
   'workspaces get',
   'workspaces members',
-  'operations wait',
   'files list',
   'files upload',
   'files download',
@@ -147,6 +147,25 @@ async function offline(args: string[]) {
 }
 
 describe('one command inventory', () => {
+  it('lists operations wait beside operations list and get in help', () => {
+    // It sat after the workspaces commands, away from the other two.
+    const lines = help('')
+      .split('\n')
+      .filter((line) => line.startsWith('  ') && !line.startsWith('    '))
+      .map((line) =>
+        line
+          .trim()
+          .replace(/^mandala /, '')
+          .split(' ')
+          .slice(0, 2)
+          .join(' '),
+      );
+    const at = (path: string) => lines.indexOf(path);
+    expect(at('operations get')).toBeGreaterThan(-1);
+    expect(at('operations wait')).toBe(at('operations get') + 1);
+    expect(at('workspaces list')).toBe(at('operations wait') + 1);
+  });
+
   it('contains the entire supported tree with no deferred endpoints', () => {
     expect(COMMANDS.map((c) => c.path)).toEqual(expectedCommands);
     expect(new Set(COMMANDS.map((c) => c.path)).size).toBe(expectedCommands.length);
