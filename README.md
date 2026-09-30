@@ -48,8 +48,8 @@ the account and scope, and approve. The first command requests access to the
 whole account. The CLI always prints the URL and code for manual or headless use.
 A successful login saves a normal device-named API key in
 `~/.mandala/credentials.json`; it never prints the key. Revoke it in **Settings →
-API keys** when access is no longer needed. Treat the file like a password and
-never ship a credential to browser users.
+Credentials → API keys** when access is no longer needed. Treat the file like a
+password and never ship a credential to browser users.
 
 You can also create a key in Settings and use `MANDALA_API_KEY` or `apiKey`.
 Resolution happens once when constructing a client: a supplied `apiKey` wins,

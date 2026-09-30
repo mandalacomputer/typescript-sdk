@@ -24,6 +24,9 @@ This is the summary you read to decide whether to upgrade.
 - **`mandala logout` with no saved profile exits 0** and says `Not logged in;
   nothing to remove.` (with `--json`, `removed: false`). A named profile that
   is not saved while others are is still `not_logged_in`.
+- **The missing-key error points to Settings → Credentials → API keys**, the
+  dashboard tab that holds API keys, instead of a Settings tab named "API keys"
+  that no longer exists. The README says the same.
 - `mandala --help` lists `operations wait` beside `operations list` and
   `operations get`.
 
