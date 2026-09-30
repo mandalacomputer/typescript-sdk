@@ -162,8 +162,11 @@ async function operationsComputer(
   }
 }
 
+/** A workspace id: `wsp-` and twelve lowercase hex characters. */
+const WORKSPACE_ID = /^wsp-[0-9a-f]{12}$/;
+
 /**
- * `workspaces get` and `workspaces members`: a workspace by name or id, as a
+ * `workspaces get`, `members`, `rename` and `rm`: a workspace by name or id, as a
  * computer argument is. The listing is the whole of what this key can reach,
  * so it decides: an id in it is taken as it is (an id wins over a name), a name
  * that fits exactly one workspace becomes that workspace's id, and a name that
@@ -174,14 +177,22 @@ async function operationsComputer(
  * a computer: the target is sent as typed. Only when that read answers not
  * found is the listing's failure what is reported, because without a listing a
  * name cannot be resolved and the 404 would wrongly say no such workspace.
+ *
+ * `rename` and `rm` pass `idShapedIsId`: a target shaped like a workspace id
+ * (`wsp-` and twelve lowercase hex) is sent as that id and never resolved as a
+ * name. Otherwise a retried `rm <id> --yes`, whose workspace the first attempt
+ * already deleted, would land on another workspace NAMED that id string and
+ * revoke its keys; sent as the id, the retry is the platform's 404.
  */
 async function readWorkspace<T>(
   client: Client,
   target: string,
   signal: AbortSignal,
   read: (workspaceId: string) => Promise<T>,
+  idShapedIsId = false,
 ): Promise<T> {
   P.workspace(target);
+  if (idShapedIsId && WORKSPACE_ID.test(target)) return read(target);
   let listing: Workspace[];
   try {
     listing = await client.workspaces.list({ signal });
@@ -700,6 +711,16 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
       P.updateBody(resize);
     }
     if (path === 'computers rename') P.updateBody({ name: args[1]! });
+    if (path === 'workspaces create') P.workspaceNameBody(target);
+    if (path === 'workspaces rename') P.workspaceNameBody(args[1]!);
+    // A delete revokes every key confined to the workspace, whoever holds them,
+    // so it is not done on a bare command: refused before any request, as a
+    // usage mistake is, and the message says what --yes agrees to.
+    if (path === 'workspaces rm' && !b('yes'))
+      throw new CliError(
+        'confirmation_required',
+        `deleting workspace ${target} revokes every API key confined to it; its computers are kept. Pass --yes to delete it`,
+      );
     if (path === 'files list') P.directoryQuery(args[1]!);
     const deletion = { deleteSnapshots: b('delete-snapshots'), expect: s('expect'), signal };
     if (path === 'computers delete') {
@@ -841,6 +862,33 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
           (
             await readWorkspace(client, target, signal, (id) => client.workspaces.members(id, call))
           ).map(raw),
+        );
+      case 'workspaces create':
+        return output.result(raw(await client.workspaces.create({ name: target }, call)));
+      case 'workspaces rename':
+        return output.result(
+          raw(
+            await readWorkspace(
+              client,
+              target,
+              signal,
+              (id) => client.workspaces.rename(id, args[1]!, call),
+              true,
+            ),
+          ),
+        );
+      case 'workspaces rm':
+        // The answer carries `revoked_keys`: how many keys stopped working.
+        return output.result(
+          raw(
+            await readWorkspace(
+              client,
+              target,
+              signal,
+              (id) => client.workspaces.delete(id, call),
+              true,
+            ),
+          ),
         );
       case 'operations wait':
         return output.result(raw(await client.operations.wait(target, wait)));

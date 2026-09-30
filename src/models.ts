@@ -4112,6 +4112,17 @@ export type Workspace = {
 };
 
 /**
+ * What deleting a workspace answers (platform OPL-5473): how many API keys were
+ * confined to it and were revoked with it, whoever held them. Its computers are
+ * not touched.
+ */
+export type WorkspaceDeleted = {
+  /** The API keys confined to the workspace, revoked in the same step. */
+  revokedKeys: number;
+  raw: Record<string, unknown>;
+};
+
+/**
  * Somebody who reaches a workspace: a member of the account, since workspaces
  * do not divide people. `role` is their role on the account, which is their
  * role in every workspace.
@@ -4137,6 +4148,21 @@ export function toWorkspace(d: unknown, what = 'a workspace'): Workspace {
     throw new MandalaError(`expected ${what} to carry its id`);
   }
   return { id: d.id, name: str(d.name), createdAt: str(d.created_at), raw: { ...d } };
+}
+
+/**
+ * Strict: a delete that cannot say how many keys it revoked is not one to
+ * report as having revoked none.
+ */
+export function toWorkspaceDeleted(d: unknown, what = 'a workspace deletion'): WorkspaceDeleted {
+  if (!isRecord(d) || d.ok !== true) {
+    throw new MandalaError(`expected ${what} to answer ok: true`);
+  }
+  const n = d.revoked_keys;
+  if (typeof n !== 'number' || !Number.isSafeInteger(n) || n < 0) {
+    throw new MandalaError(`expected ${what} to say how many API keys it revoked`);
+  }
+  return { revokedKeys: n, raw: { ...d } };
 }
 
 /**

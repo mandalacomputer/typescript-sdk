@@ -2498,15 +2498,25 @@ may have happened, so list and revoke rather than send it again.
 
 ### Workspaces
 
-`client.workspaces` reads the account's workspaces, which partition its
-computers: a key confined to one reaches that workspace's computers only.
-Workspaces are created, renamed and deleted in the dashboard.
+`client.workspaces` reads, creates, renames and deletes the account's
+workspaces, which partition its computers: a key confined to one reaches that
+workspace's computers only.
 
 ```ts
 const all = await client.workspaces.list();            // oldest first
 const ws = await client.workspaces.get('wsp-0123456789ab');
 const people = await client.workspaces.members(ws.id); // the account's members
+
+const acme = await client.workspaces.create({ name: 'customer-acme' });
+await client.workspaces.rename(acme.id, 'customer-acme-prod');
+const { revokedKeys } = await client.workspaces.delete(acme.id);
 ```
+
+Creating, renaming and deleting need an owner's account-wide key; a key confined
+to a workspace is refused them with a `PermissionDeniedError`. Deleting a
+workspace REVOKES every API key confined to it, whoever holds it, and
+`revokedKeys` says how many. Its computers are not touched: they keep the
+deleted workspace's id, and account-wide keys reach them as before.
 
 A key confined to a workspace lists that one workspace only, and any other id
 is a `NotFoundError`, the same as one that does not exist (so is the id of a
@@ -3077,10 +3087,16 @@ stderr naming them and the command to run next.
 mandala workspaces list                   # oldest first; a scoped key sees its own
 mandala workspaces get wsp-...             # or its name, as computers take one
 mandala workspaces members wsp-...        # needs a key not confined to a workspace
+mandala workspaces create customer-acme    # needs an owner's account-wide key
+mandala workspaces rename customer-acme customer-acme-prod
+mandala workspaces rm customer-acme-prod --yes  # revokes the keys confined to it
 ```
 
-Read only: workspaces are created, renamed and deleted in the dashboard. An id
-the key cannot see is `not_found`, the same as one that does not exist.
+`rename` and `rm` take a name or an id, as `get` does. `rm` does nothing
+without `--yes` (`confirmation_required`), because deleting a workspace revokes
+every API key confined to it; its answer's `revoked_keys` says how many. Its
+computers are kept. An id the key cannot see is `not_found`, the same as one
+that does not exist.
 
 ### Account quota and historical usage
 
