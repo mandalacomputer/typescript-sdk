@@ -90,6 +90,8 @@ const expectedCommands = [
   'workspaces create',
   'workspaces rename',
   'workspaces rm',
+  'workspaces use',
+  'workspaces current',
   'files list',
   'files upload',
   'files download',

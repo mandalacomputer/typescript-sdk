@@ -42,7 +42,22 @@ import {
   sshSetup,
 } from './cli-ssh.js';
 import type { Computer } from './computer.js';
-import { CredentialSaveError } from './credentials.js';
+import {
+  type CredentialProfile,
+  CredentialSaveError,
+  credentialError,
+  readCredentials,
+  resolveSuppliedCredential,
+  selectedProfile,
+} from './credentials.js';
+import {
+  DEFAULTS_PATH,
+  DefaultsError,
+  readDefaults,
+  removeWorkspaceDefault,
+  saveWorkspaceDefault,
+  workspaceDefault,
+} from './defaults.js';
 import { MandalaError, NotFoundError, ValidationError } from './errors.js';
 import {
   type AccountQuota,
@@ -221,6 +236,180 @@ async function readWorkspace<T>(
       `${target} names ${named.length} workspaces — use an id: ${named.map((w) => w.id).join(', ')}`,
     );
   return read(named.length === 1 ? named[0]!.id : target);
+}
+
+/** The saved profile a command's key comes from, as `createClient` resolves it. */
+type SavedProfile = { name: string; entry: CredentialProfile };
+
+/**
+ * The saved profile in use: `--profile`, `MANDALA_PROFILE`, else the default.
+ * Undefined when MANDALA_API_KEY supplies the key, as it does before any
+ * profile; a missing store or profile fails as the client's resolution does.
+ */
+function savedProfile(profile: string | undefined, io: CliIO): SavedProfile | undefined {
+  if (resolveSuppliedCredential({}, io.env)) return undefined;
+  const selected = selectedProfile({ profile }, io.env);
+  const file = readCredentials();
+  if (!file) credentialError('missing_credentials');
+  const name = selected ?? file.default_profile;
+  if (!Object.hasOwn(file.profiles, name)) credentialError('missing_selected_profile');
+  return { name, entry: file.profiles[name]! };
+}
+
+/**
+ * defaults.json for a command that only reads it: one that cannot be used is
+ * reported in a line and read as holding nothing, never failing the command.
+ */
+function readDefaultsOrNote(note: (line: string) => void) {
+  try {
+    return readDefaults();
+  } catch (error) {
+    if (!(error instanceof DefaultsError)) throw error;
+    note(`ignoring ${DEFAULTS_PATH}: ${error.reason}`);
+    return undefined;
+  }
+}
+
+/**
+ * `secrets` and `api-keys create` without `--workspace`: the saved profile's
+ * default from `workspaces use`, when the key is account-wide and the default
+ * was saved for the account the profile is logged in to now. Otherwise
+ * undefined, and the command goes on as it always has.
+ */
+function defaultWorkspace(
+  profile: string | undefined,
+  io: CliIO,
+  output: Output,
+): string | undefined {
+  const saved = savedProfile(profile, io);
+  if (!saved || saved.entry.scope.type !== 'account') return undefined;
+  const note = (line: string) => {
+    if (!output.json) output.diagnostic(line);
+  };
+  const { entry } = workspaceDefault(readDefaultsOrNote(note), saved.name, saved.entry.account.id);
+  if (!entry) return undefined;
+  note(
+    `(workspace ${entry.workspace.name} from \`workspaces use\`; \`workspaces use --clear\` for account-wide)`,
+  );
+  return entry.workspace.id;
+}
+
+const workspaceText = (w: { id: string; name: string }) => `workspace ${w.name} (${w.id})`;
+
+/**
+ * `mandala workspaces use <workspace>` and `workspaces use --clear`: save, or
+ * remove, the saved profile's default workspace in ~/.mandala/defaults.json.
+ * It never mints a key or touches credentials.json. A profile whose key is
+ * confined to a workspace has that one and no other, so another is refused
+ * and its own is not saved.
+ */
+async function workspacesUse(
+  profile: string | undefined,
+  target: string | undefined,
+  clear: boolean,
+  io: CliIO,
+  output: Output,
+  signal: AbortSignal,
+): Promise<number> {
+  if (clear && target !== undefined)
+    throw new CliError('invalid_arguments', 'give a workspace or --clear, not both');
+  if (!clear && target === undefined)
+    throw new CliError(
+      'invalid_arguments',
+      'say which workspace, by name or ID, or --clear to go back to account-wide',
+    );
+  const saved = savedProfile(profile, io);
+  if (!saved)
+    throw new CliError(
+      'no_saved_profile',
+      'workspaces use saves a default in a saved profile; MANDALA_API_KEY is set, so there is no profile to save it in.',
+    );
+  const line = (text: string) => io.stdout.write(`${terminalSafe(text)}\n`);
+  if (clear) {
+    const removed = await removeWorkspaceDefault(saved.name, { signal });
+    if (output.json) return output.result({ profile: saved.name, workspace: null, removed });
+    line(
+      removed
+        ? `Profile ${saved.name} no longer has a default workspace; secrets and api-keys create use the key's own scope.`
+        : `Profile ${saved.name} has no default workspace; nothing to clear.`,
+    );
+    return 0;
+  }
+  const { scope } = saved.entry;
+  if (scope.type === 'workspace') {
+    const own = { id: scope.workspace_id, name: scope.workspace_name };
+    if (target !== own.id && target !== own.name)
+      throw new CliError(
+        'workspace_confined',
+        `This profile's key is confined to ${workspaceText(own)}; it cannot use another workspace. Log in again without --workspace for an account-wide key.`,
+      );
+    if (output.json) return output.result({ profile: saved.name, workspace: own, source: 'key' });
+    line(
+      `Profile ${saved.name}'s key is already confined to ${workspaceText(own)}; nothing was saved.`,
+    );
+    return 0;
+  }
+  const client = io.createClient();
+  const found = await readWorkspace(client, target!, signal, (id) =>
+    client.workspaces.get(id, { signal }),
+  );
+  const workspace = { id: found.id, name: found.name };
+  await saveWorkspaceDefault(
+    saved.name,
+    { account_id: saved.entry.account.id, workspace },
+    { signal },
+  );
+  if (output.json) return output.result({ profile: saved.name, workspace, source: 'profile' });
+  line(
+    `Profile ${saved.name} now uses ${workspaceText(workspace)} by default for secrets and api-keys create.`,
+  );
+  return 0;
+}
+
+/**
+ * `mandala workspaces current`: the workspace `secrets` and `api-keys create`
+ * use, and why: the key's own (a key confined to one), the saved profile's
+ * default, or none (account-wide). Read from this machine alone; no request.
+ */
+function workspacesCurrent(profile: string | undefined, io: CliIO, output: Output): number {
+  const line = (text: string) => io.stdout.write(`${terminalSafe(text)}\n`);
+  const note = (text: string) => output.diagnostic(text);
+  const saved = savedProfile(profile, io);
+  if (!saved) {
+    if (output.json) return output.result({ profile: null, workspace: null, source: 'none' });
+    line(
+      "none: MANDALA_API_KEY is set, so no saved default applies; commands use that key's own scope (mandala whoami shows it).",
+    );
+    return 0;
+  }
+  const { scope } = saved.entry;
+  if (scope.type === 'workspace') {
+    const own = { id: scope.workspace_id, name: scope.workspace_name };
+    if (output.json) return output.result({ profile: saved.name, workspace: own, source: 'key' });
+    line(`${workspaceText(own)}: profile ${saved.name}'s key is confined to it.`);
+    return 0;
+  }
+  const { entry, ignored } = workspaceDefault(
+    readDefaultsOrNote(note),
+    saved.name,
+    saved.entry.account.id,
+  );
+  if (ignored)
+    note(
+      `The default ${workspaceText(ignored.workspace)} saved for profile ${saved.name} is ignored: it was saved for account ${ignored.account_id}, and the profile is now logged in to ${saved.entry.account.id}. Run workspaces use again, or workspaces use --clear.`,
+    );
+  if (output.json)
+    return output.result({
+      profile: saved.name,
+      workspace: entry ? entry.workspace : null,
+      source: entry ? 'profile' : 'none',
+    });
+  line(
+    entry
+      ? `${workspaceText(entry.workspace)}: profile ${saved.name}'s default from workspaces use (workspaces use --clear for account-wide).`
+      : `none: account-wide (profile ${saved.name} has no default workspace; set one with workspaces use).`,
+  );
+  return 0;
 }
 
 /** Format the SDK's public projection explicitly; never expose desktop credentials. */
@@ -655,7 +844,30 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
     if (path === 'logout') {
       process.on('SIGINT', cancel);
       process.on('SIGTERM', cancel);
-      return await logoutCommand(f.profile as string | undefined, io, output, signal);
+      // Which profile logout removes, read before it removes it: afterwards
+      // the store may name another default, or be gone.
+      let removing: string | undefined;
+      try {
+        removing =
+          selectedProfile({ profile: f.profile as string | undefined }, io.env) ??
+          readCredentials()?.default_profile;
+      } catch {
+        // logout reports the store's problem itself.
+      }
+      const code = await logoutCommand(f.profile as string | undefined, io, output, signal);
+      // Best effort: the profile is gone whatever happens to its default.
+      if (code === 0 && removing !== undefined) {
+        try {
+          await removeWorkspaceDefault(removing, { signal });
+        } catch (error) {
+          output.diagnostic(
+            `mandala: the profile was removed, but its default workspace in ${DEFAULTS_PATH} was not: ${
+              error instanceof DefaultsError ? error.reason : errorInfo(error).message
+            }`,
+          );
+        }
+      }
+      return code;
     }
     if (path === 'terminal') {
       if (json)
@@ -938,8 +1150,22 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
       );
       return 0;
     }
+    if (path === 'workspaces current')
+      return workspacesCurrent(f.profile as string | undefined, io, output);
+    if (path === 'workspaces use')
+      return await workspacesUse(
+        f.profile as string | undefined,
+        args[0],
+        b('clear') === true,
+        io,
+        output,
+        signal,
+      );
     const client = io.createClient();
     const computer = () => resolveComputer(client, target, signal);
+    // An explicit --workspace always wins; without one, the profile's default.
+    const scopeFlag = () =>
+      s('workspace') ?? defaultWorkspace(f.profile as string | undefined, io, output);
     switch (path) {
       case 'account': {
         const quota = await client.account.read(call);
@@ -958,7 +1184,7 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
           client,
           io,
           output,
-          { name: s('name'), workspace: s('workspace') },
+          { name: s('name'), workspace: scopeFlag() },
           signal,
         );
       case 'api-keys revoke':
@@ -1393,13 +1619,13 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
       case 'webhooks deliveries':
         return output.result((await client.webhooks.deliveries(target, call)).map(raw));
       case 'secrets list':
-        return await secretsList(client, io, output, s('workspace'), signal);
+        return await secretsList(client, io, output, scopeFlag(), signal);
       case 'secrets set':
-        return await secretsSet(client, io, output, target, s('workspace'), signal, {
+        return await secretsSet(client, io, output, target, scopeFlag(), signal, {
           valueCheck: !b('no-value-check'),
         });
       case 'secrets rm':
-        return await secretsRemove(client, io, output, target, s('workspace'), signal);
+        return await secretsRemove(client, io, output, target, scopeFlag(), signal);
       case 'files list': {
         const dir = await (await computer()).listDirectory(args[1]!, call);
         const { raw: _raw, ...data } = dir;
