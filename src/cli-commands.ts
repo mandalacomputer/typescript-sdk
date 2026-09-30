@@ -44,6 +44,7 @@ import {
   type Listing,
   type UsageReport,
   VERSION,
+  type Workspace,
 } from './index.js';
 import * as P from './paths.js';
 import { checkWait } from './wait.js';
@@ -168,23 +169,39 @@ async function operationsComputer(
  * that fits exactly one workspace becomes that workspace's id, and a name that
  * fits more than one is refused with their ids. Anything else is sent as typed,
  * and the platform's 404 says there is no such workspace.
+ *
+ * A listing that fails does not stop an id from being read, as it does not for
+ * a computer: the target is sent as typed. Only when that read answers not
+ * found is the listing's failure what is reported, because without a listing a
+ * name cannot be resolved and the 404 would wrongly say no such workspace.
  */
-async function resolveWorkspaceId(
+async function readWorkspace<T>(
   client: Client,
   target: string,
-  signal?: AbortSignal,
-): Promise<string> {
+  signal: AbortSignal,
+  read: (workspaceId: string) => Promise<T>,
+): Promise<T> {
   P.workspace(target);
-  const listing = await client.workspaces.list({ signal });
-  if (listing.some((w) => w.id === target)) return target;
+  let listing: Workspace[];
+  try {
+    listing = await client.workspaces.list({ signal });
+  } catch (listingError) {
+    signal.throwIfAborted();
+    try {
+      return await read(target);
+    } catch (error) {
+      signal.throwIfAborted();
+      throw error instanceof NotFoundError ? listingError : error;
+    }
+  }
+  if (listing.some((w) => w.id === target)) return read(target);
   const named = listing.filter((w) => w.name === target);
-  if (named.length === 1) return named[0]!.id;
-  if (named.length)
+  if (named.length > 1)
     throw new CliError(
       'ambiguous_workspace',
       `${target} names ${named.length} workspaces — use an id: ${named.map((w) => w.id).join(', ')}`,
     );
-  return target;
+  return read(named.length === 1 ? named[0]!.id : target);
 }
 
 /** Format the SDK's public projection explicitly; never expose desktop credentials. */
@@ -815,14 +832,16 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
         return output.result(raw(await client.operations.get(target, call)));
       case 'workspaces list':
         return output.result((await client.workspaces.list(call)).map(raw));
-      case 'workspaces get': {
-        const id = await resolveWorkspaceId(client, target, signal);
-        return output.result(raw(await client.workspaces.get(id, call)));
-      }
-      case 'workspaces members': {
-        const id = await resolveWorkspaceId(client, target, signal);
-        return output.result((await client.workspaces.members(id, call)).map(raw));
-      }
+      case 'workspaces get':
+        return output.result(
+          raw(await readWorkspace(client, target, signal, (id) => client.workspaces.get(id, call))),
+        );
+      case 'workspaces members':
+        return output.result(
+          (
+            await readWorkspace(client, target, signal, (id) => client.workspaces.members(id, call))
+          ).map(raw),
+        );
       case 'operations wait':
         return output.result(raw(await client.operations.wait(target, wait)));
       case 'usage': {

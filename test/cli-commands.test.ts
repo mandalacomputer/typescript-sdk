@@ -1711,6 +1711,41 @@ describe('snapshots', () => {
     ]);
   });
 
+  // A listing that fails must not stop an id from being read (OPL-5471 review):
+  // the direct read is what worked before names were taken.
+  it.each([
+    ['get', `/workspaces/${WORKSPACE.id}`],
+    ['members', `/workspaces/${WORKSPACE.id}/members`],
+  ])('reads workspaces %s by id when the listing fails', async (verb, path) => {
+    const h = harness((call) =>
+      call.path === '/workspaces' ? json({ error: 'down' }, { status: 503 }) : anyRoute(call),
+    );
+    const result = await h.run(['workspaces', verb, WORKSPACE.id]);
+    expect(result.code).toBe(0);
+    expect(h.rec.routes()).toEqual([
+      ['GET', 'workspaces'],
+      ['GET', path.slice(1)],
+    ]);
+  });
+
+  it('reports the failed listing, not not found, for a name it could not resolve', async () => {
+    const h = harness((call) =>
+      call.path === '/workspaces'
+        ? json({ error: 'down' }, { status: 503 })
+        : call.path === `/workspaces/${WORKSPACE.name}`
+          ? json({ error: 'workspace not found' }, { status: 404 })
+          : anyRoute(call),
+    );
+    const result = await h.run(['workspaces', 'get', WORKSPACE.name]);
+    expect(result.code).toBe(1);
+    expect(result.frames[0].error.code).not.toBe('not_found');
+    expect(result.frames[0].error.message).toContain('down');
+    expect(h.rec.routes()).toEqual([
+      ['GET', 'workspaces'],
+      ['GET', `workspaces/${WORKSPACE.name}`],
+    ]);
+  });
+
   it('clones the exact snapshot with a new computer name', async () => {
     const h = harness();
     const result = await h.run(['snapshots', 'clone', 'snapshot-8', '--name', 'recovered']);
