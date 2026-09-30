@@ -38,7 +38,11 @@ This is the summary you read to decide whether to upgrade.
   `~/.mandala/defaults.json`, keyed by profile and account, so
   `credentials.json` and older readers of it are unaffected. `use` is refused
   with `MANDALA_API_KEY` set, and for another workspace when the profile's key
-  is confined to one; `logout` removes the profile's default.
+  is confined to one; `logout` removes the profile's default. A
+  `defaults.json` that cannot be read is ignored with a note by `secrets list`,
+  but `secrets set`, `secrets rm` and `api-keys create` refuse without sending
+  anything rather than act account-wide (pass `--workspace`, or fix or delete
+  the file).
 - **`mandala billing`**: the plan and the current billing period on one
   screen — totals, how far it is settled, and the five computers with the most
   run hours — from the `account` and `usage` reads; `--json` returns both

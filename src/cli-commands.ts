@@ -271,22 +271,44 @@ function readDefaultsOrNote(note: (line: string) => void) {
 }
 
 /**
+ * defaults.json for a command that writes: one that cannot be used fails the
+ * command before any request. Read as holding nothing, it would send a create,
+ * a replace or a delete account-wide when the profile's default says a
+ * workspace, and with --json not even a note would say so.
+ */
+function readDefaultsOrRefuse() {
+  try {
+    return readDefaults();
+  } catch (error) {
+    if (!(error instanceof DefaultsError)) throw error;
+    throw new CliError(
+      'defaults_unreadable',
+      `${DEFAULTS_PATH} cannot be read (${error.reason}), so this command was not sent: without the profile's default workspace it would act account-wide. Pass --workspace, or fix or delete the file.`,
+    );
+  }
+}
+
+/**
  * `secrets` and `api-keys create` without `--workspace`: the saved profile's
  * default from `workspaces use`, when the key is account-wide and the default
  * was saved for the account the profile is logged in to now. Otherwise
- * undefined, and the command goes on as it always has.
+ * undefined, and the command goes on as it always has. A command that writes
+ * (`mutating`) is refused, not widened, when defaults.json cannot be read;
+ * only `secrets list` reads past it.
  */
 function defaultWorkspace(
   profile: string | undefined,
   io: CliIO,
   output: Output,
+  mutating = false,
 ): string | undefined {
   const saved = savedProfile(profile, io);
   if (!saved || saved.entry.scope.type !== 'account') return undefined;
   const note = (line: string) => {
     if (!output.json) output.diagnostic(line);
   };
-  const { entry } = workspaceDefault(readDefaultsOrNote(note), saved.name, saved.entry.account.id);
+  const file = mutating ? readDefaultsOrRefuse() : readDefaultsOrNote(note);
+  const { entry } = workspaceDefault(file, saved.name, saved.entry.account.id);
   if (!entry) return undefined;
   note(
     `(workspace ${entry.workspace.name} from \`workspaces use\`; \`workspaces use --clear\` for account-wide)`,
@@ -1164,8 +1186,10 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
     const client = io.createClient();
     const computer = () => resolveComputer(client, target, signal);
     // An explicit --workspace always wins; without one, the profile's default.
-    const scopeFlag = () =>
-      s('workspace') ?? defaultWorkspace(f.profile as string | undefined, io, output);
+    // A command that writes refuses an unreadable defaults.json rather than
+    // going account-wide; only `secrets list` reads past it.
+    const scopeFlag = (mutating = true) =>
+      s('workspace') ?? defaultWorkspace(f.profile as string | undefined, io, output, mutating);
     switch (path) {
       case 'account': {
         const quota = await client.account.read(call);
@@ -1619,7 +1643,7 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
       case 'webhooks deliveries':
         return output.result((await client.webhooks.deliveries(target, call)).map(raw));
       case 'secrets list':
-        return await secretsList(client, io, output, scopeFlag(), signal);
+        return await secretsList(client, io, output, scopeFlag(false), signal);
       case 'secrets set':
         return await secretsSet(client, io, output, target, scopeFlag(), signal, {
           valueCheck: !b('no-value-check'),

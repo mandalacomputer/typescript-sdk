@@ -393,6 +393,78 @@ describe('the default applied', () => {
   });
 });
 
+describe('an unreadable defaults.json and the commands that write', () => {
+  const broken: [string, (path: string) => Promise<void> | void, string][] = [
+    [
+      'not JSON',
+      (path) => fs.writeFileSync(path, '{"version":1,', { mode: 0o600 }),
+      'it is not valid JSON',
+    ],
+    [
+      'readable by others',
+      async (path) => {
+        await saveWorkspaceDefault('default', { account_id: 'acc-000000000001', workspace: OTHER });
+        fs.chmodSync(path, 0o644);
+      },
+      'it must be a regular file',
+    ],
+  ];
+  const writers: [string, string[]][] = [
+    ['secrets set', ['secrets', 'set', 'NEW_SECRET']],
+    ['secrets rm', ['secrets', 'rm', 'OPENAI_API_KEY']],
+    ['api-keys create', ['api-keys', 'create', '--name', 'ci']],
+  ];
+  const cases = broken.flatMap(([label, make, why]) =>
+    writers.flatMap(([command, args]) =>
+      [false, true].map((json) => ({ label, make, why, command, args, json })),
+    ),
+  );
+
+  it.each(cases)(
+    '$command refuses, sending nothing, on a defaults.json $label (json: $json)',
+    async ({ make, why, args, json }) => {
+      await saveCredentials(ACCOUNT_WIDE);
+      await make(defaultsPath());
+      const before = fs.readFileSync(defaultsPath());
+      const h = cli({}, 'value-from-stdin');
+      const r = await h.run(json ? [...args, '--json'] : args);
+      expect(r.code).not.toBe(0);
+      const said = r.out + r.err;
+      expect(said).toContain(`~/.mandala/defaults.json cannot be read (${why}`);
+      expect(said).toContain('Pass --workspace, or fix or delete the file.');
+      expect(h.rec.calls.filter((c) => c.method !== 'GET')).toEqual([]);
+      expect(fs.readFileSync(defaultsPath())).toEqual(before);
+    },
+  );
+
+  it.each(cases)(
+    '$command with --workspace goes ahead on a defaults.json $label (json: $json)',
+    async ({ make, args, json }) => {
+      await saveCredentials(ACCOUNT_WIDE);
+      await make(defaultsPath());
+      const h = cli({}, 'value-from-stdin');
+      const withFlag = [...args, '--workspace', WORKSPACE.id];
+      const r = await h.run(json ? [...withFlag, '--json'] : withFlag);
+      expect(r.code).toBe(0);
+      const writes = h.rec.calls.filter((c) => c.method !== 'GET');
+      expect(writes.length).toBeGreaterThan(0);
+      for (const call of writes) expect(sentWorkspace(call)).toBe(WORKSPACE.id);
+      expect(r.err).not.toContain('defaults.json');
+    },
+  );
+
+  it('does not refuse when the key is confined or MANDALA_API_KEY supplies it', async () => {
+    fs.mkdirSync(join(home, '.mandala'), { recursive: true, mode: 0o700 });
+    await saveCredentials(CONFINED);
+    fs.writeFileSync(defaultsPath(), '{"version":1,', { mode: 0o600 });
+    const confined = await cli().run(['api-keys', 'create', '--json']);
+    expect(confined.code).toBe(0);
+    await saveCredentials(ACCOUNT_WIDE);
+    const env = await cli({ MANDALA_API_KEY: 'com_env_key' }).run(['api-keys', 'create', '--json']);
+    expect(env.code).toBe(0);
+  });
+});
+
 describe('logout', () => {
   it("removes the profile's default and keeps the others", async () => {
     await saveCredentials(ACCOUNT_WIDE, 'home');
