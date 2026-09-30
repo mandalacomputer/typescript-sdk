@@ -39,6 +39,41 @@ This is the summary you read to decide whether to upgrade.
 
 ### Added
 
+- **`mandala computers exec-poll COMPUTER PID` and `exec-kill COMPUTER PID`**:
+  follow up a `computers exec --background`. `exec-poll` prints what the
+  command wrote since the last read (reading on while more is waiting) and
+  whether it is still running; it exits 0 while it runs and then with the
+  command's own status, 0 through 255 (1 when unknown). `exec-kill` kills it,
+  prints what had not been read, and exits 0. `--json` gives the raw fields
+  with the output as base64 and decoded text.
+- **`mandala computers move COMPUTER --ram-mb N [--cpu N] [--disk-gb N] [--wait]`
+  and `mandala moves list [--computer C]`**: move a stopped computer to another
+  host in its region that can run a size its own cannot, and list the moves
+  running or finished in the last day. With `--wait`, `move` exits 0 only when
+  the move's state is `done`. A `computers resize` refused with `move_required`
+  now names the `computers move` command to run when another host can take it.
+- **`mandala computers idle-suspend COMPUTER MINUTES|off|default`**: set the
+  idle-suspend window; `off` never suspends it and `default` follows the
+  host's own window.
+- **`mandala secrets get NAME|ID [--workspace W]`**: one secret's metadata
+  (id, name, workspace, revision and dates, never its value), found by name or
+  id as `secrets rm` finds one, in the saved default workspace when
+  `--workspace` is not given.
+- **`--idempotency-key KEY` on every keyed command** (`computers create`,
+  `start`, `stop`, `suspend`, `restart`, `clone`, `delete`, `rename`, `resize`,
+  `move`, `idle-suspend`, the proxy `set` and `clear` commands, and `snapshots
+  restore` and `clone`), sent instead of a new key and checked locally first
+  (1-255 printable ASCII, no space); any other command refuses it by name. The
+  error line that names a lost call's key now also says to resend the command
+  with it.
+- **`computers exec --retain-output`** (foreground only) keeps the output as a
+  retained result and names its `result_id`; **`files upload` and `files
+  download --no-wake`** fail with `not_running` rather than resume a suspended
+  computer; **`computers secrets set --keep-revision`** keeps the revision a
+  computer holds for each secret it is already bound to, sending the bindings'
+  `version` read with it.
+- **`computers wait --until desktop`**: wait until the desktop session is
+  logged in and takes commands, which comes a few seconds after `guest`.
 - **`mandala workspaces use` and `workspaces current`**: save a default
   workspace, by name or id, for the saved profile in use; `secrets list`, `set`
   and `rm` and `api-keys create` then use it when `--workspace` is not given

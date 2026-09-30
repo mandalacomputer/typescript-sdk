@@ -1,5 +1,5 @@
 /**
- * `mandala secrets list | set | rm` — the account's secret store (OPL-4984) —
+ * `mandala secrets list | get | set | rm` — the account's secret store (OPL-4984) —
  * and `mandala computers secrets get | set`, what one computer is bound to.
  *
  * A value goes IN and never comes back out: the platform answers names, ids and
@@ -832,6 +832,49 @@ export async function secretsSet(
   return 0;
 }
 
+/**
+ * `mandala secrets get NAME [--workspace ID]`: one secret's metadata, by name
+ * or id, as `rm` finds it: its id, name, workspace, revision and dates. The
+ * platform never answers a value, so none can be printed.
+ *
+ * Found in the scope's listing first, as `rm` finds one, so a name works and a
+ * name that also spells another secret's id is refused rather than guessed;
+ * then read by id. An id the listing does not hold is read as typed, and the
+ * platform's 404 says whether it is there.
+ */
+export async function secretsGet(
+  client: Client,
+  io: CliIO,
+  output: Output,
+  nameOrId: string,
+  workspace: string | undefined,
+  signal: AbortSignal,
+): Promise<number> {
+  const ws = scope(workspace);
+  P.secretScopeQuery(ws);
+  const found = byNameOrId(await scopeRows(client, ws, signal), nameOrId, 'nothing was read');
+  if (!found && !SECRET_ID.test(nameOrId)) {
+    // Quoted only when safe to repeat: the operand may be the value itself.
+    const shownAs = quotedOperand(nameOrId);
+    throw new CliError(
+      'not_found',
+      shownAs
+        ? `no secret named ${shownAs} in this scope`
+        : 'no secret with that name or id in this scope',
+    );
+  }
+  const secret = await client.secrets.get(found?.id ?? nameOrId, { ...ws, signal });
+  if (output.json) return output.result(shown(secret));
+  const used = secret.lastUsedAt ? `last used ${secret.lastUsedAt}` : 'never delivered';
+  // Escaped whole, as a listing line is.
+  io.stdout.write(
+    `${terminalSafe(
+      `${secret.id}  ${secret.name}  ${secret.revisionId}  ${secret.workspaceId ?? 'account-wide'}  created ${secret.createdAt}  updated ${secret.updatedAt}  ${used}`,
+    )}\n`,
+  );
+  return 0;
+}
+
 /** `mandala secrets rm NAME [--workspace ID]`: delete it, by name or id. */
 export async function secretsRemove(
   client: Client,
@@ -909,6 +952,13 @@ export async function computerSecretsGet(
  * another operation holds it; its refusal is passed through as it came, less
  * every typed variable or file ({@link scrubTypedTargets}), as is the answer
  * ({@link withoutTypedTargets}).
+ *
+ * `keepRevision` (`--keep-revision`) reads the bindings first and sends, for
+ * each secret the computer is already bound to, the revision it holds now,
+ * which keeps that revision rather than recording the latest; a secret new to
+ * the computer gets the latest. That list was read, so its `version` is sent
+ * too: a change made in between is refused by the platform rather than
+ * overwritten with revisions read before it.
  */
 export async function computerSecretsSet(
   client: Client,
@@ -916,12 +966,26 @@ export async function computerSecretsSet(
   specs: readonly BindingSpec[],
   output: Output,
   signal: AbortSignal,
+  { keepRevision = false }: { keepRevision?: boolean } = {},
 ): Promise<number> {
   const unchanged = 'no binding was changed';
-  const bindings = await secretBindings(client, specs, signal, unchanged);
+  let bindings = await secretBindings(client, specs, signal, unchanged);
+  let version: number | undefined;
+  if (keepRevision) {
+    const current = await computer.secrets({ signal });
+    const held = new Map(current.secrets.map((b) => [b.secretId, b.revisionId]));
+    bindings = bindings.map((b) => {
+      const revisionId = held.get(b.secretId);
+      return revisionId === undefined ? b : { ...b, revisionId };
+    });
+    version = current.version;
+  }
   let answer: SecretBindings;
   try {
-    answer = await computer.setSecrets(bindings, { signal });
+    answer = await computer.setSecrets(
+      bindings,
+      version === undefined ? { signal } : { signal, version },
+    );
   } catch (error) {
     throw scrubTypedTargets(error, specs);
   }
