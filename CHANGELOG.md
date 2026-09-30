@@ -42,7 +42,9 @@ This is the summary you read to decide whether to upgrade.
 - **`mandala artifacts export`, `get`, `download` and `rm`**: keep a guest file
   as an immutable artifact (its size and SHA-256 read on the computer first,
   unless `--size` and `--sha256` give them), read its metadata, save its
-  verified bytes, and delete it with `--yes`.
+  verified bytes, and delete it with `--yes`. The automatic read is Linux-only:
+  a Windows computer, or one whose os is not given, needs `--size` and
+  `--sha256`, and no command is run on it.
 - `mandala computers view`'s help says the desktop there needs no VNC password.
 - **Workspace create, rename and delete**: `client.workspaces.create({ name })`,
   `rename(id, name)` and `delete(id)`, and `mandala workspaces create`,

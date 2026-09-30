@@ -1432,6 +1432,17 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
               'not_running',
               `${c.id} is ${terminalSafe(c.status)}; an artifact is captured from a running computer, so start it first`,
             );
+          // The read is a POSIX shell command (bash, wc, sha256sum) with the
+          // path quoted for that shell. On any other guest, Windows' cmd.exe
+          // above all, the quoting means nothing and a path holding `&`, `|`
+          // or `>` would run extra commands, so only a Linux computer is read;
+          // an empty or unknown os is refused too.
+          if (c.os !== 'linux')
+            throw new CliError(
+              'unsupported',
+              `the size and SHA-256 can only be read on a Linux computer, and ${c.id} runs ${terminalSafe(c.os || 'an unknown os')}; ` +
+                'give them with --size and --sha256 to publish without this read',
+            );
           expected = await guestFileDigest(c, args[1]!, signal);
           const cap = keep.maxBytes ?? ARTIFACT_DEFAULT_BYTES;
           if (expected.size > cap)

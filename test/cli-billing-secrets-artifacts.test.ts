@@ -470,6 +470,59 @@ describe('artifacts', () => {
     expect(h.rec.routes()).toEqual([['GET', 'computers']]);
   });
 
+  // The read is quoted for a POSIX shell; cmd.exe would split this path on `&`
+  // and run `whoami`. Nothing is sent to exec, and nothing is published.
+  const WIN_PATH = 'C:\\reports\\quarter & whoami & rem .txt';
+  const onWindows =
+    (respond: Responder): Responder =>
+    (call) =>
+      call.path === '/computers' ? json([{ ...COMPUTER, os: 'windows' }]) : respond(call);
+
+  it('refuses to read the size and SHA-256 on a Windows computer', async () => {
+    const h = harness(onWindows(artifactRoutes()));
+    const result = await h.run(['artifacts', 'export', 'vm-1', WIN_PATH]);
+    expect(result.code).not.toBe(0);
+    expect(result.frame.error).toMatchObject({ code: 'unsupported' });
+    expect(result.frame.error.message).toContain('--size and --sha256');
+    expect(result.frame.error.message).toContain('Linux');
+    expect(h.rec.routes()).not.toContainEqual(['POST', 'computers/vm-1/exec']);
+    expect(h.rec.routes()).not.toContainEqual(['POST', 'computers/vm-1/artifacts']);
+  });
+
+  it('refuses the read on a computer whose os is not given', async () => {
+    const h = harness((call) =>
+      call.path === '/computers' ? json([{ ...COMPUTER, os: '' }]) : artifactRoutes()(call),
+    );
+    const result = await h.run(['artifacts', 'export', 'vm-1', '/tmp/report.txt']);
+    expect(result.code).not.toBe(0);
+    expect(result.frame.error).toMatchObject({ code: 'unsupported' });
+    expect(h.rec.routes()).not.toContainEqual(['POST', 'computers/vm-1/exec']);
+  });
+
+  it('publishes from a Windows computer with --size and --sha256, without exec', async () => {
+    const h = harness(onWindows(artifactRoutes()));
+    const result = await h.run([
+      'artifacts',
+      'export',
+      'vm-1',
+      WIN_PATH,
+      '--size',
+      String(CONTENT.length),
+      '--sha256',
+      HASH,
+    ]);
+    expect(result.code).toBe(0);
+    expect(h.rec.routes()).toEqual([
+      ['GET', 'computers'],
+      ['POST', 'computers/vm-1/artifacts'],
+    ]);
+    expect(h.rec.last().body).toEqual({
+      path: WIN_PATH,
+      expected_size: CONTENT.length,
+      expected_sha256: HASH,
+    });
+  });
+
   it.each([
     [['artifacts', 'export', 'vm-1', '/tmp/x', '--size', '3'], /--size and --sha256 go together/],
     [['artifacts', 'export', 'vm-1', 'relative/path'], /artifact path must be absolute/],

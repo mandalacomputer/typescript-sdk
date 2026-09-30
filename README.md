@@ -3587,9 +3587,10 @@ mandala artifacts rm my-computer art_0123456789abcdef0123456789abcdef --yes
 
 `export` needs the computer running. The platform keeps only bytes that match
 a size and SHA-256 named in advance, so the CLI first reads both on the
-computer with one `exec` (`wc -c` and `sha256sum`, so a Linux image), and a file
-that changes before the capture is refused rather than kept part-way; give
-`--size` and `--sha256` yourself to skip that read. It refuses a file over
+computer with one `exec` (`wc -c` and `sha256sum`), and a file that changes
+before the capture is refused rather than kept part-way; give `--size` and
+`--sha256` yourself to skip that read. The read is Linux-only: on a Windows (or
+any other) computer `export` refuses unless `--size` and `--sha256` are given. It refuses a file over
 8 MiB unless `--max-bytes` (at most 64 MiB) allows it, and `--retention-seconds`
 sets how long it is kept (a day unless set, a week at most). `download` saves the bytes only once they match the
 artifact's SHA-256, to `-o FILE` or `./ARTIFACT_ID.bin`. `rm` needs `--yes`: a
