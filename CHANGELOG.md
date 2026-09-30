@@ -9,6 +9,23 @@ This is the summary you read to decide whether to upgrade.
 
 ## [Unreleased]
 
+### Changed
+
+- **`launch()` now waits for the desktop session** on a Linux computer,
+  after its guest, secrets and proxy waits and inside the same readiness
+  budget. The guest agent answers a few seconds before the desktop user is
+  logged in, and an `exec(..., { desktop: true })` sent in between was refused
+  with a 409 "no active desktop session". A computer that never gets a desktop
+  session now makes `launch()` throw a `TimeoutError` instead of returning.
+
+### Added
+
+- **`computer.waitForDesktop()`** polls a no-output `true` in the desktop
+  session until it finishes with exit 0. A probe that times out inside the
+  guest is polled through, not taken as a session. It returns at once for a Windows guest or a
+  computer whose `os` is not reported. An absent `computer.desktop` is an X11
+  desktop and is waited on.
+
 ## [0.8.0] — 2026-09-29
 
 ### Added
