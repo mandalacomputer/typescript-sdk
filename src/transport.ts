@@ -1361,8 +1361,9 @@ export class Transport {
 
   async *#sseAttempt(method: string, path: string, opts: RequestOptions): AsyncGenerator<SSEEvent> {
     // The idle bound (SSE_IDLE_MS). Armed only while this waits on the network,
-    // for the answer's headers and then for each chunk, and always disarmed
-    // when that wait ends, however it ends, so no timer outlives the stream.
+    // for the answer's headers, for the body of an answer that is not an event
+    // stream, and then for each chunk, and always disarmed when that wait ends,
+    // however it ends, so no timer outlives the stream.
     const idle = new AbortController();
     const signal = opts.signal ? AbortSignal.any([opts.signal, idle.signal]) : idle.signal;
     const watched = async <T>(step: () => Promise<T>): Promise<T> => {
@@ -1406,7 +1407,13 @@ export class Transport {
     // it.
     const contentType = resp.headers.get('content-type') ?? '';
     if (!contentType.toLowerCase().includes('text/event-stream')) {
-      const text = await textUpTo(resp, MAX_ERROR_BODY_BYTES, opts.signal).catch(() => '');
+      // Read under the idle bound and the composed signal: a proxy page that
+      // sends a first chunk and then stalls without a close would otherwise
+      // hold this read, and the caller, for ever. A body that goes silent is
+      // quoted as empty; the wrong content type is still the news.
+      const text = await watched(() => textUpTo(resp, MAX_ERROR_BODY_BYTES, signal)).catch(
+        () => '',
+      );
       // Cancellation wins even when the diagnostic read completed in the same
       // turn. An unreadable body still falls back to the content-type message.
       opts.signal?.throwIfAborted();

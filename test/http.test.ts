@@ -1638,6 +1638,69 @@ describe('an event stream that goes silent', () => {
     expect(settled).toBeInstanceOf(ConnectionInterruptedError);
     expect(vi.getTimerCount()).toBe(0);
   });
+
+  it('bounds the read of an answer that is not an event stream at all', async () => {
+    // A proxy's HTML page that sends a first chunk and then stalls without a
+    // close. The body is read only to quote it in the error, and that read was
+    // the one network wait the idle bound did not cover.
+    let source!: ReadableStreamDefaultController<Uint8Array>;
+    const response = new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          source = controller;
+        },
+      }),
+      { headers: { 'content-type': 'text/html' } },
+    );
+    const rec = recorder((call) => (call.path.endsWith('/agent') ? response : anyRoute(call)));
+    const c = await client(rec).computers.get('vm-1');
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    let settled: unknown = 'pending';
+    c.agentStream({ prompt: 'go', modelKey: 'sk' })
+      .next()
+      .catch((e: unknown) => {
+        settled = e;
+      });
+    source.enqueue(new TextEncoder().encode('<html><body>Sign in to the Wi-Fi'));
+    await vi.advanceTimersByTimeAsync(59_000);
+    expect(settled).toBe('pending');
+    await vi.advanceTimersByTimeAsync(2_000);
+    // The wrong content type is the news, so that is what the caller hears.
+    expect(settled).toBeInstanceOf(MandalaError);
+    expect(settled).not.toBeInstanceOf(ConnectionInterruptedError);
+    expect(String((settled as Error).message)).toMatch(
+      /expected an event stream .* got text\/html/,
+    );
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('still lets the caller cancel the read of an answer that is not an event stream', async () => {
+    let source!: ReadableStreamDefaultController<Uint8Array>;
+    const response = new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          source = controller;
+        },
+      }),
+      { headers: { 'content-type': 'text/html' } },
+    );
+    const rec = recorder((call) => (call.path.endsWith('/agent') ? response : anyRoute(call)));
+    const c = await client(rec).computers.get('vm-1');
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const caller = new AbortController();
+    let settled: unknown = 'pending';
+    c.agentStream({ prompt: 'go', modelKey: 'sk', signal: caller.signal })
+      .next()
+      .catch((e: unknown) => {
+        settled = e;
+      });
+    source.enqueue(new TextEncoder().encode('<html>'));
+    await vi.advanceTimersByTimeAsync(1_000);
+    caller.abort(new Error('mine'));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(String((settled as Error).message)).toBe('mine');
+    expect(vi.getTimerCount()).toBe(0);
+  });
 });
 
 describe('filenameFrom', () => {

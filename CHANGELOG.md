@@ -113,7 +113,9 @@ This is the summary you read to decide whether to upgrade.
 - **An event stream (`agentStream`, `builds.events`) that sends nothing for
   60 seconds**, not even the platform's 10-second keepalive, fails with a
   `ConnectionInterruptedError`. A connection dropped without a close used to
-  leave the caller waiting for ever.
+  leave the caller waiting for ever. An answer that is not an event stream at
+  all, such as a proxy's HTML page, is bounded the same way while its body is
+  read for the error, which then names the content type it got.
 - **`readFileChunks` follows a file that grows** while it is read, to its new
   end. Only a file that gets shorter is refused.
 - **A base URL with a query or a fragment is refused** when the client is
