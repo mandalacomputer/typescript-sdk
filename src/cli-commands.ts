@@ -162,6 +162,9 @@ async function operationsComputer(
   }
 }
 
+/** A workspace id: `wsp-` and twelve lowercase hex characters. */
+const WORKSPACE_ID = /^wsp-[0-9a-f]{12}$/;
+
 /**
  * `workspaces get`, `members`, `rename` and `rm`: a workspace by name or id, as a
  * computer argument is. The listing is the whole of what this key can reach,
@@ -174,14 +177,22 @@ async function operationsComputer(
  * a computer: the target is sent as typed. Only when that read answers not
  * found is the listing's failure what is reported, because without a listing a
  * name cannot be resolved and the 404 would wrongly say no such workspace.
+ *
+ * `rename` and `rm` pass `idShapedIsId`: a target shaped like a workspace id
+ * (`wsp-` and twelve lowercase hex) is sent as that id and never resolved as a
+ * name. Otherwise a retried `rm <id> --yes`, whose workspace the first attempt
+ * already deleted, would land on another workspace NAMED that id string and
+ * revoke its keys; sent as the id, the retry is the platform's 404.
  */
 async function readWorkspace<T>(
   client: Client,
   target: string,
   signal: AbortSignal,
   read: (workspaceId: string) => Promise<T>,
+  idShapedIsId = false,
 ): Promise<T> {
   P.workspace(target);
+  if (idShapedIsId && WORKSPACE_ID.test(target)) return read(target);
   let listing: Workspace[];
   try {
     listing = await client.workspaces.list({ signal });
@@ -857,8 +868,12 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
       case 'workspaces rename':
         return output.result(
           raw(
-            await readWorkspace(client, target, signal, (id) =>
-              client.workspaces.rename(id, args[1]!, call),
+            await readWorkspace(
+              client,
+              target,
+              signal,
+              (id) => client.workspaces.rename(id, args[1]!, call),
+              true,
             ),
           ),
         );
@@ -866,7 +881,13 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
         // The answer carries `revoked_keys`: how many keys stopped working.
         return output.result(
           raw(
-            await readWorkspace(client, target, signal, (id) => client.workspaces.delete(id, call)),
+            await readWorkspace(
+              client,
+              target,
+              signal,
+              (id) => client.workspaces.delete(id, call),
+              true,
+            ),
           ),
         );
       case 'operations wait':

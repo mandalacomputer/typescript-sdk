@@ -1764,33 +1764,32 @@ describe('snapshots', () => {
     expect(h.rec.calls).toHaveLength(0);
   });
 
+  // By name the listing resolves it; an id-shaped target is sent as the id
+  // with no listing at all (see the id-shaped test below).
   it.each([
-    ['by name', WORKSPACE.name],
-    ['by id', WORKSPACE.id],
-  ])('renames a workspace %s', async (_how, target) => {
+    ['by name', WORKSPACE.name, [['GET', 'workspaces']]],
+    ['by id', WORKSPACE.id, []],
+  ])('renames a workspace %s', async (_how, target, listed) => {
     const h = harness();
     const renamed = await h.run(['workspaces', 'rename', target, 'customers-2']);
     expect(renamed.code).toBe(0);
-    expect(h.rec.routes()).toEqual([
-      ['GET', 'workspaces'],
-      ['PATCH', `workspaces/${WORKSPACE.id}`],
-    ]);
+    expect(h.rec.routes()).toEqual([...listed, ['PATCH', `workspaces/${WORKSPACE.id}`]]);
     expect(h.rec.last().body).toEqual({ name: 'customers-2' });
   });
 
   it.each([
-    ['by name', WORKSPACE.name],
-    ['by id', WORKSPACE.id],
-  ])('deletes a workspace %s with --yes and reports the keys it revoked', async (_how, target) => {
-    const h = harness();
-    const gone = await h.run(['workspaces', 'rm', target, '--yes']);
-    expect(gone.code).toBe(0);
-    expect(h.rec.routes()).toEqual([
-      ['GET', 'workspaces'],
-      ['DELETE', `workspaces/${WORKSPACE.id}`],
-    ]);
-    expect(gone.frames[0].data).toEqual({ ok: true, revoked_keys: 2 });
-  });
+    ['by name', WORKSPACE.name, [['GET', 'workspaces']]],
+    ['by id', WORKSPACE.id, []],
+  ])(
+    'deletes a workspace %s with --yes and reports the keys it revoked',
+    async (_how, target, listed) => {
+      const h = harness();
+      const gone = await h.run(['workspaces', 'rm', target, '--yes']);
+      expect(gone.code).toBe(0);
+      expect(h.rec.routes()).toEqual([...listed, ['DELETE', `workspaces/${WORKSPACE.id}`]]);
+      expect(gone.frames[0].data).toEqual({ ok: true, revoked_keys: 2 });
+    },
+  );
 
   it('refuses to delete a workspace without --yes, before any request, saying what it would revoke', async () => {
     const h = harness();
@@ -1816,6 +1815,27 @@ describe('snapshots', () => {
       expect(result.frames[0].error.code).toBe('ambiguous_workspace');
     }
     expect(h.rec.calls.every((c) => c.method === 'GET')).toBe(true);
+  });
+
+  // A retried rm (or rename) of a workspace already gone must not land on
+  // another workspace whose NAME is that id: an id-shaped target is always an
+  // id, and the platform's 404 is the answer.
+  it.each([
+    [['workspaces', 'rm', 'wsp-0123456789ab', '--yes'], 'DELETE'],
+    [['workspaces', 'rename', 'wsp-0123456789ab', 'x'], 'PATCH'],
+  ])('sends an id-shaped workspace target as an id, never as a name (%s)', async (args, method) => {
+    const namedLikeIt = { ...WORKSPACE, id: 'wsp-bbbbbbbbbbbb', name: 'wsp-0123456789ab' };
+    const h = harness((call) =>
+      call.path === '/workspaces'
+        ? json([namedLikeIt])
+        : call.path === '/workspaces/wsp-0123456789ab'
+          ? json({ error: 'workspace not found' }, { status: 404 })
+          : anyRoute(call),
+    );
+    const result = await h.run(args);
+    expect(result.code).not.toBe(0);
+    expect(h.rec.calls.some((c) => c.path.includes(namedLikeIt.id))).toBe(false);
+    expect(h.rec.routes()).toContainEqual([method, 'workspaces/wsp-0123456789ab']);
   });
 
   it('clones the exact snapshot with a new computer name', async () => {
