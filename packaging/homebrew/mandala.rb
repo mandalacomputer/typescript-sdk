@@ -5,8 +5,8 @@
 class Mandala < Formula
   desc "Command-line client for Mandala Computer cloud desktops"
   homepage "https://mandala.computer"
-  url "https://registry.npmjs.org/mandala-computer/-/mandala-computer-0.8.0.tgz"
-  sha256 "e68910754ec04876a1e7a7889d0f897a7725701f37cc0de08f82c44b250af00e"
+  url "https://registry.npmjs.org/mandala-computer/-/mandala-computer-0.9.0.tgz"
+  sha256 "76ee88befb2972539b0fb6978a13b4427b23762bfbe34d64fa7f5996d3f9b7e8"
   license "MIT"
 
   livecheck do
