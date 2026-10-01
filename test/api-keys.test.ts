@@ -10,7 +10,7 @@ import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { main } from '../src/cli.js';
-import { parseArgs } from '../src/cli-options.js';
+import { help, parseArgs } from '../src/cli-options.js';
 import type { CliIO } from '../src/cli-runtime.js';
 import {
   type CredentialProfile,
@@ -38,7 +38,7 @@ import {
 } from './harness.js';
 
 const NO_PERMISSION =
-  'This API key cannot manage API keys. Turn on “Manage keys” for it under Credentials in the dashboard, or use a key that has it.';
+  'This API key cannot manage API keys. Allow it in the dashboard under Settings → Credentials → API keys → the key’s menu → Allow managing keys, or use a key that has it.';
 const NO_ESCALATION =
   'An API key cannot mint a key that manages keys. Turn that on for the new key from the dashboard.';
 
@@ -748,5 +748,25 @@ describe('logout', () => {
 
   it('refuses an invalid profile name before touching the store', async () => {
     await expect(removeCredentials('../x')).rejects.toMatchObject({ code: 'invalid_profile' });
+  });
+});
+
+// The dashboard control is the key's menu → "Allow managing keys"; there is no
+// "Manage keys" checkbox to look for, so neither the help nor the README names one.
+describe('the api-keys permission is named as the dashboard names it', () => {
+  it('says so in the api-keys list and create help', () => {
+    for (const path of ['api-keys list', 'api-keys create']) {
+      const text = help(path);
+      expect(text).toContain('allowed to manage keys');
+      expect(text).not.toContain('Manage keys');
+    }
+    expect(help('api-keys list')).toContain('Allow managing keys');
+  });
+
+  it('says so in the README', () => {
+    const readme = fs.readFileSync(new URL('../README.md', import.meta.url), 'utf8');
+    expect(readme).not.toContain('Manage keys');
+    expect(readme).not.toContain('checkbox');
+    expect(readme.replace(/\s+/g, ' ')).toContain("the key's menu → **Allow managing keys**");
   });
 });

@@ -2503,15 +2503,15 @@ await vault.put('mandala-ci', ci.key); // shown ONCE: store it now
 await client.apiKeys.revoke(ci.id);
 ```
 
-**Every `apiKeys` call needs the calling key's "Manage keys" permission.** It
-is off for every key until its holder turns it on in a signed-in dashboard
-session (**Credentials** in the dashboard, the **Manage keys** checkbox), and no API
-call turns it on. Without it each call is a `PermissionDeniedError` whose
-message says exactly that. A key minted here never has the permission (asking
-for one is refused, so the SDK has no option for it), so a leaked manage-keys
-key cannot pass the permission on. The plain keys it minted DO keep working
-after it is revoked: find them by `mintedByKeyId` and revoke them too (the
-dashboard can revoke a key's children in one step).
+**Every `apiKeys` call needs the calling key to be allowed to manage keys.**
+That permission is off for every key until its holder turns it on in a signed-in
+dashboard session (Settings → Credentials → API keys → the key's menu → **Allow
+managing keys**), and no API call turns it on. Without it each call is a
+`PermissionDeniedError` whose message says exactly that. A key minted here never
+has the permission (asking for one is refused, so the SDK has no option for it),
+so a leaked manage-keys key cannot pass the permission on. The plain keys it
+minted DO keep working after it is revoked: find them by `mintedByKeyId` and
+revoke them too (the dashboard can revoke a key's children in one step).
 
 Reach follows the key: its holder's own keys only (anybody else's answers like
 an id that does not exist, `NotFoundError`), and a key confined to a workspace
@@ -3090,9 +3090,10 @@ mandala api-keys revoke key-...
 ```
 
 `whoami` needs no permission. The three `api-keys` commands need the calling
-key's **Manage keys** permission, which only a signed-in dashboard session turns
-on; without it they fail with the platform's own sentence, which names the page
-and the checkbox (`--json`: `error.code` `permission_denied`, status 403). A key
+key to be allowed to manage keys, which only a signed-in dashboard session turns
+on (Settings → Credentials → API keys → the key's menu → **Allow managing
+keys**); without it they fail with the platform's own sentence, which says where
+to allow it (`--json`: `error.code` `permission_denied`, status 403). A key
 minted from the CLI never has the permission. `create` prints only the key on
 stdout, so `KEY=$(mandala api-keys create --name ci)` captures it, and writes
 what it made and the warning to stderr; `--json` answers the platform's object,

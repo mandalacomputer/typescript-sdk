@@ -559,11 +559,11 @@ export const COMMANDS: readonly Command[] = [
   command('secrets rm', 'Delete a secret by name or id', ['name'], [secretScope]),
   command(
     'api-keys list',
-    "List your API keys this key can reach (never the keys themselves); needs the key's Manage keys permission",
+    "List your API keys this key can reach (never the keys themselves); the key must be allowed to manage keys (dashboard: the key's menu → Allow managing keys)",
   ),
   command(
     'api-keys create',
-    'Mint an API key and print it once; needs Manage keys, and the new key never has it',
+    'Mint an API key and print it once; the calling key must be allowed to manage keys, and the new key never is',
     [],
     [
       flag('name', 'Label for the key (up to 60 characters)'),

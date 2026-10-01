@@ -2,10 +2,11 @@
  * `mandala whoami`, `mandala api-keys list | create | revoke` and
  * `mandala logout` (platform OPL-5053).
  *
- * The three `api-keys` verbs need the calling key's "Manage keys" permission,
- * which only a dashboard session turns on. Without it the platform answers 403
- * with a sentence that says exactly that, and it is printed as it came: it
- * names the page and the checkbox, which nothing here could say better.
+ * The three `api-keys` verbs need the calling key to be allowed to manage keys,
+ * which only a dashboard session turns on (the key's menu → Allow managing
+ * keys). Without it the platform answers 403 with a sentence that says exactly
+ * that, and it is printed as it came: it says where to allow it, which nothing
+ * here could say better.
  *
  * `logout` touches nothing but this machine: it forgets a saved profile. The key
  * it held stays valid until it is revoked, and the output says so.
