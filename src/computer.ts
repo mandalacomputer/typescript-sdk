@@ -3014,6 +3014,10 @@ export class Computer {
    * that just created the computer with it. A read that leaves the setting out
    * then counts as "cannot tell" and is waited past, rather than as "none
    * set", which would return before the guest had anything.
+   *
+   * Reads again 250ms after the first read, then doubling up to `pollMs`
+   * (default 2,000), as {@link waitForSecrets} does; a read that failed and is
+   * polled through waits `pollMs` (or its `Retry-After`).
    */
   async waitForBrowserProxy(
     opts: WaitOptions & { expectBrowserProxy?: boolean } = {},
@@ -3109,6 +3113,10 @@ export class Computer {
    * computer that is stopped or suspended while the platform says it has
    * admitted no start (`start()` is the fix), a create's computer whose first
    * start failed, and a failed build.
+   *
+   * Reads again 250ms after the first read, then doubling up to `pollMs`
+   * (default 2,000), as {@link waitForSecrets} does; a read that failed and is
+   * polled through waits `pollMs` (or its `Retry-After`).
    */
   async waitForEgressProxy(opts: WaitOptions = {}): Promise<this> {
     return this.#waitForState(

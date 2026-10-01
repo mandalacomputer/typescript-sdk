@@ -32,7 +32,12 @@ import { MAX_TIMER_MS } from './transport.js';
 export type WaitOptions = {
   /** Milliseconds before giving up. */
   timeoutMs?: number;
-  /** Milliseconds between polls. */
+  /**
+   * Milliseconds between polls. For the readiness waits that ramp
+   * (`waitForDesktop`, `waitForSecrets`, `waitForBrowserProxy`,
+   * `waitForEgressProxy`) it is the ceiling: they poll 250ms after the first
+   * read and double up to it; see {@link rampDelay}.
+   */
   pollMs?: number;
   signal?: AbortSignal;
 };
