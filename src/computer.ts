@@ -162,6 +162,7 @@ import {
   deadlineSignal,
   isDeadlineAbort,
   isTransientForPoll,
+  rampDelay,
   retryDelay,
   sleepUntilNextPoll,
   type WaitOptions,
@@ -2742,6 +2743,10 @@ export class Computer {
    * absence as "no desktop" would skip the wait exactly where it is needed.
    *
    * Like {@link waitForGuest}, the probe resumes a suspended computer.
+   *
+   * Polls 250ms after the first probe, then doubling up to `pollMs`, so a
+   * session that appears a moment after a probe is not a whole interval late;
+   * a refusal polled through waits `pollMs` (or its `Retry-After`).
    */
   async waitForDesktop(opts: WaitOptions = {}): Promise<this> {
     const { timeoutMs = 180_000, pollMs = 3_000, signal } = opts;
@@ -2749,8 +2754,11 @@ export class Computer {
     if (this.os !== 'linux' || this.desktop === '') return this;
     const deadline = Date.now() + timeoutMs;
     let probed = false;
+    // Ordinary "not yet" answers so far, which is what ramps the sleep: see
+    // rampDelay. A refusal polled through sets its own delay and leaves it.
+    let notYet = 0;
     for (;;) {
-      let delayMs = pollMs;
+      let delayMs: number | undefined;
       if (Date.now() < deadline) {
         try {
           probed = true;
@@ -2790,7 +2798,7 @@ export class Computer {
                 'timeout.',
         );
       }
-      await sleepUntilNextPoll(delayMs, deadline, signal);
+      await sleepUntilNextPoll(delayMs ?? rampDelay(notYet++, pollMs), deadline, signal);
     }
   }
 
@@ -2820,6 +2828,11 @@ export class Computer {
    * that just created the computer with them. A read that leaves the list of
    * bindings out then counts as "cannot tell" and is waited past, rather than
    * as "nothing bound", which would return before anything was delivered.
+   *
+   * Reads again 250ms after the first read, then doubling up to `pollMs`
+   * (default 2,000), as {@link waitForBrowserProxy} and
+   * {@link waitForEgressProxy} do: a delivery usually finishes a second or two
+   * in, and a flat interval made the caller wait out the rest of it.
    */
   async waitForSecrets(opts: WaitOptions & { expectSecrets?: boolean } = {}): Promise<this> {
     const { expectSecrets = false } = opts;
@@ -2851,7 +2864,9 @@ export class Computer {
    * {@link waitForEgressProxy} share:
    * read the computer, ask `judge` where things are, and return on `done`,
    * throw the refusal `judge` hands back, or sleep and read again until the
-   * deadline, when `timedOut` words the {@link TimeoutError}.
+   * deadline, when `timedOut` words the {@link TimeoutError}. The sleep after a
+   * read that answered ramps ({@link rampDelay}); after one that failed it is
+   * {@link retryDelay}'s.
    *
    * No verdict on state read before this call: the handle may be a create's
    * answer or an old listing, and "done" concluded from either is a claim
@@ -2879,8 +2894,11 @@ export class Computer {
     let fresh = false;
     let initialStartError = this.startError;
     let state = initial;
+    // Reads that answered "not yet", which is what ramps the sleep: see
+    // rampDelay. A read that failed sets its own delay and leaves this alone.
+    let notYet = 0;
     for (;;) {
-      let delayMs = pollMs;
+      let delayMs: number | undefined;
       if (Date.now() < deadline) {
         try {
           await this.refresh({ signal: deadlineSignal(deadline - Date.now(), signal) });
@@ -2903,7 +2921,7 @@ export class Computer {
       if (Date.now() >= deadline) {
         throw new TimeoutError(timedOut(timeoutMs, observed, fresh, state));
       }
-      await sleepUntilNextPoll(delayMs, deadline, signal);
+      await sleepUntilNextPoll(delayMs ?? rampDelay(notYet++, pollMs), deadline, signal);
     }
   }
 
@@ -2996,6 +3014,10 @@ export class Computer {
    * that just created the computer with it. A read that leaves the setting out
    * then counts as "cannot tell" and is waited past, rather than as "none
    * set", which would return before the guest had anything.
+   *
+   * Reads again 250ms after the first read, then doubling up to `pollMs`
+   * (default 2,000), as {@link waitForSecrets} does; a read that failed and is
+   * polled through waits `pollMs` (or its `Retry-After`).
    */
   async waitForBrowserProxy(
     opts: WaitOptions & { expectBrowserProxy?: boolean } = {},
@@ -3091,6 +3113,10 @@ export class Computer {
    * computer that is stopped or suspended while the platform says it has
    * admitted no start (`start()` is the fix), a create's computer whose first
    * start failed, and a failed build.
+   *
+   * Reads again 250ms after the first read, then doubling up to `pollMs`
+   * (default 2,000), as {@link waitForSecrets} does; a read that failed and is
+   * polled through waits `pollMs` (or its `Retry-After`).
    */
   async waitForEgressProxy(opts: WaitOptions = {}): Promise<this> {
     return this.#waitForState(

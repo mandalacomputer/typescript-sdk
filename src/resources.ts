@@ -338,7 +338,11 @@ export class Computers {
    * create returns. Disk, running, guest, secrets, browser proxy, egress
    * proxy and desktop waits share the remaining time; elapsed start work also consumes it. Create and start keep their usual
    * transport deadlines, so this is not a total wall-clock limit on launch.
-   * `pollMs` defaults to 3,000 for every stage. `signal` cancels all stages.
+   * `pollMs` defaults to 3,000 for every stage, and is the ceiling for the
+   * secrets, browser proxy, egress proxy and desktop stages, which poll 250ms
+   * after their first read and double from there: a stage whose answer lands
+   * just after a read is noticed within moments rather than a whole interval
+   * later. `signal` cancels all stages.
    *
    * `idempotencyKey` is sent on the create only, so a launch resent under the
    * same key after its answer was lost does not create a second computer; the

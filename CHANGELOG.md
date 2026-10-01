@@ -9,6 +9,15 @@ This is the summary you read to decide whether to upgrade.
 
 ## [Unreleased]
 
+### Changed
+
+- **A bound `launch()` returns within moments of its secrets landing**, rather
+  than up to a whole poll interval later. `waitForSecrets`,
+  `waitForBrowserProxy`, `waitForEgressProxy` and `waitForDesktop` (and the
+  matching `launch()` stages) now poll 250ms after their first read, doubling up
+  to `pollMs`, which stays the ceiling and keeps its default. A poll that failed
+  still waits `pollMs`, or the `Retry-After` the platform sent.
+
 ## [0.9.0] — 2026-09-30
 
 ### Changed
