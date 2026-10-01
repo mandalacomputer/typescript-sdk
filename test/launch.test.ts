@@ -1423,3 +1423,114 @@ describe('computer.waitForDesktop', () => {
     expect(rec.calls.filter((call) => call.method === 'POST')).toHaveLength(0);
   });
 });
+
+// --- fast first poll (OPL-5536) ---------------------------------------------
+//
+// A flat interval rounded every readiness stage up to a whole `pollMs`: a
+// secret that landed just after a read made a bound launch sleep out the rest
+// of three seconds. The ordinary "not yet" sleep now ramps 250ms, doubling, up
+// to `pollMs`; a failed poll keeps its own delay (Retry-After included).
+
+describe('fast first poll', () => {
+  // Each wait's sleeps, read off the fake clock as the gaps between the
+  // requests a predicate picks out.
+  const gaps = (stamps: number[]) => stamps.slice(1).map((t, i) => t - stamps[i]!);
+  const settle = async <T>(p: Promise<T>): Promise<T> => {
+    let done = false;
+    const out = p.finally(() => {
+      done = true;
+    });
+    for (let i = 0; i < 1_000 && !done; i++) await vi.advanceTimersByTimeAsync(50);
+    return out;
+  };
+
+  it('waitForSecrets reads again at 250ms, doubling up to pollMs', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'performance', 'setTimeout', 'clearTimeout'] });
+    const stamps: number[] = [];
+    const rec = recorder(() => {
+      stamps.push(Date.now());
+      return json(stamps.length < 8 ? bound(true) : bound(false, { secrets_applied: RECEIPT }));
+    });
+    const client = new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: rec.fetch });
+    const c = await client.computers.get('launch-42');
+    stamps.length = 0;
+    await settle(c.waitForSecrets({ timeoutMs: 60_000, pollMs: 3_000, expectSecrets: true }));
+    expect(gaps(stamps)).toEqual([250, 500, 1_000, 2_000, 3_000, 3_000, 3_000]);
+  });
+
+  it('launch notices secrets that land just after a read within 250ms', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'performance', 'setTimeout', 'clearTimeout'] });
+    let gets = 0;
+    const reads: number[] = [];
+    const rec = recorder((call) => {
+      if (call.path.endsWith('/exec')) return json(guest);
+      if (call.method === 'POST') return json(bound(true), { status: 201 });
+      gets++;
+      reads.push(Date.now());
+      return json(gets < 3 ? bound(true) : bound(false, { secrets_applied: RECEIPT }));
+    });
+    const client = new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: rec.fetch });
+    const c = await settle(
+      client.computers.launch({ secrets: [{ secretId: BINDING.secret_id, env: 'TOKEN' }] }),
+    );
+    expect(c.secretsDelivering).toBe(false);
+    // The first read is waitUntilRunning's; the secrets wait reads at once and
+    // again 250ms later, where it used to sleep the whole 3,000.
+    expect(gaps(reads).slice(1)).toEqual([250]);
+  });
+
+  it('a rate-limited read still waits its Retry-After, and the ramp carries on after it', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'performance', 'setTimeout', 'clearTimeout'] });
+    const stamps: number[] = [];
+    const rec = recorder(() => {
+      stamps.push(Date.now());
+      const n = stamps.length;
+      if (n === 3)
+        return json({ error: 'rate limited' }, { status: 429, headers: { 'Retry-After': '4' } });
+      return json(n < 5 ? bound(true) : bound(false, { secrets_applied: RECEIPT }));
+    });
+    const client = new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: rec.fetch });
+    const c = await client.computers.get('launch-42');
+    stamps.length = 0;
+    await settle(c.waitForSecrets({ timeoutMs: 60_000, pollMs: 3_000, expectSecrets: true }));
+    // 250 and 500 ramp; the 429 waits its four seconds, not a ramped 1,000;
+    // the next ordinary sleep resumes the ramp where it was.
+    expect(gaps(stamps)).toEqual([250, 500, 4_000, 1_000]);
+  });
+
+  const UNFINISHED = { exit_code: -1, timed_out: true, stdout_b64: '', stderr_b64: '' };
+  const desktopGet = (respond: () => Response) => {
+    const probes: number[] = [];
+    const rec = recorder((call) => {
+      if (call.method === 'GET') return json({ ...computer(), os: 'linux', desktop: 'wayland' });
+      probes.push(Date.now());
+      return respond();
+    });
+    const client = new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: rec.fetch });
+    return { probes, get: () => client.computers.get('launch-42') };
+  };
+
+  it('waitForDesktop probes again at 250ms, doubling up to pollMs', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'performance', 'setTimeout', 'clearTimeout'] });
+    let n = 0;
+    const { probes, get } = desktopGet(() => json(++n < 6 ? UNFINISHED : guest));
+    const c = await get();
+    await settle(c.waitForDesktop({ timeoutMs: 60_000, pollMs: 1_500 }));
+    expect(gaps(probes)).toEqual([250, 500, 1_000, 1_500, 1_500]);
+  });
+
+  it('waitForDesktop waits out a 429 Retry-After rather than ramping', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'performance', 'setTimeout', 'clearTimeout'] });
+    let n = 0;
+    const { probes, get } = desktopGet(() => {
+      n++;
+      if (n === 1) return json(UNFINISHED);
+      if (n === 2)
+        return json({ error: 'rate limited' }, { status: 429, headers: { 'Retry-After': '5' } });
+      return json(n < 4 ? UNFINISHED : guest);
+    });
+    const c = await get();
+    await settle(c.waitForDesktop({ timeoutMs: 60_000, pollMs: 3_000 }));
+    expect(gaps(probes)).toEqual([250, 5_000, 500]);
+  });
+});

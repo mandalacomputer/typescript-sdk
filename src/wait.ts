@@ -242,6 +242,24 @@ export const retryDelay = (pollMs: number, err: unknown): number =>
     ? Math.max(pollMs, err.retryAfterMs)
     : pollMs;
 
+/** The first sleep of a ramped wait; see {@link rampDelay}. */
+export const FIRST_POLL_MS = 250;
+
+/**
+ * The sleep after a wait's `turn`th ordinary "not yet" (counting from 0):
+ * 250ms, doubling, and never more than `pollMs`, so a caller's `pollMs` is the
+ * ceiling (one below 250ms is used as is).
+ *
+ * For the readiness waits whose answer usually arrives within a second or two
+ * of the first read. A flat interval rounds every one of those up to a whole
+ * `pollMs`: a secret that landed a few hundred milliseconds after a read made
+ * `launch()` sleep out the rest of three seconds before noticing. A poll that
+ * FAILED does not ramp; that is {@link retryDelay}'s business, and it still
+ * honours `Retry-After`.
+ */
+export const rampDelay = (turn: number, pollMs: number): number =>
+  Math.min(FIRST_POLL_MS * 2 ** Math.min(turn, 30), pollMs);
+
 /** A poll sleep that cannot carry its loop beyond the loop's own deadline. */
 export const sleepUntilNextPoll = (
   delayMs: number,
