@@ -87,8 +87,8 @@ export const SECRETS = 'secrets';
  */
 export const WHOAMI = 'whoami';
 /**
- * The holder's own API keys (platform OPL-5053). Every verb needs the key's
- * opt-in "Manage keys" permission, which only a dashboard session can turn on;
+ * The holder's own API keys (platform OPL-5053). Every verb needs the key to be
+ * allowed to manage keys, an opt-in only a dashboard session can turn on;
  * without it the platform answers 403 with a sentence that says so.
  */
 export const API_KEYS = 'api-keys';

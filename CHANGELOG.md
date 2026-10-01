@@ -148,6 +148,10 @@ This is the summary you read to decide whether to upgrade.
 
 ### Fixed
 
+- **The `api-keys` help, the README and the `ApiKeys` docs name the real
+  dashboard control** that allows a key to manage keys: Settings → Credentials
+  → API keys → the key's menu → **Allow managing keys**. They used to point at
+  a "Manage keys" checkbox that does not exist.
 - **A `noWake` file transfer to a computer that is not running** is a
   `ComputerNotRunningError` when the platform says `unavailable`, as well as
   when it says nothing, with `reason` kept. It was a plain `ConflictError`.
