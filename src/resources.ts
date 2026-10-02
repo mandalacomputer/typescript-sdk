@@ -2196,8 +2196,12 @@ export class SshKeys {
    * });
    * ```
    *
-   * Registering a key that is already registered is a `ConflictError`; compare
-   * {@link SshKey.fingerprint} from {@link list} first to make it idempotent.
+   * Registering a key that is already registered is a `ConflictError`. A
+   * matching {@link SshKey.fingerprint} in {@link list} proves only that the
+   * key is registered to you, not that this account accepts it: {@link list}
+   * shows every key you hold, including one bound to another account's
+   * credential, which this account's computers refuse. To use such a key here,
+   * {@link remove} it and add it again with this client, or add a distinct key.
    */
   async add(args: P.SshKeyAddArgs, opts: CallOptions = {}): Promise<SshKey> {
     const data = await this.#t.json('POST', P.SSH_KEYS, {
