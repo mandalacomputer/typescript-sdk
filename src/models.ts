@@ -3109,8 +3109,11 @@ export function toWebhookDelivery(d: Record<string, unknown>): WebhookDelivery {
 /**
  * One OpenSSH public key registered to the person the credential belongs to.
  *
- * A key is a person's, not an account's: every computer on every account that
- * person can reach accepts it once SSH is switched on there.
+ * A key is a person's, and is listed whichever account the credential acts on.
+ * One added from the dashboard is accepted by every computer on every account
+ * that person can reach, once SSH is switched on there; one added through an
+ * API key or a connected app only by that credential's account, until the
+ * credential is revoked.
  */
 export type SshKey = {
   /** `sshk-` and sixteen hex characters. */

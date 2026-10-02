@@ -2161,10 +2161,15 @@ export class Webhooks {
 /**
  * The caller's SSH public keys.
  *
- * Keys belong to the person the credential belongs to, not to a computer: a
- * registered key opens every computer that person can reach, on each computer
- * where SSH is switched on ({@link Computer.setSshAccess}). A key can belong to
- * one person only, so registering one somebody else holds is a
+ * Keys belong to the person the credential belongs to, not to a computer, and
+ * {@link list} shows all of them whichever account the credential acts on. A
+ * key added here, with an API key or a connected app, is bound to the account
+ * that credential acts on and to the credential itself: it opens the
+ * computers of that account only, on each where SSH is switched on
+ * ({@link Computer.setSshAccess}), and it is removed when the credential is
+ * revoked. A key added from the dashboard instead opens every computer the
+ * person can reach, on every account where they are an owner or member. A key
+ * can belong to one person only, so registering one somebody else holds is a
  * `ConflictError`, as is a person's key past the per-person limit.
  */
 export class SshKeys {
@@ -2182,7 +2187,8 @@ export class SshKeys {
   }
 
   /**
-   * Register one public key.
+   * Register one public key, bound to the account this client's credential
+   * acts on and removed when that credential is revoked.
    *
    * ```ts
    * const key = await client.sshKeys.add({

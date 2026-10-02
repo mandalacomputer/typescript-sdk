@@ -68,9 +68,11 @@ export const RETENTION = 'retention';
  */
 export const WEBHOOKS = 'webhooks';
 /**
- * The caller's own SSH public keys. Scoped to the person rather than to a
- * computer or an account: one key opens every computer that person can reach
- * once SSH is switched on there.
+ * The caller's own SSH public keys. Listed per person rather than per computer
+ * or account. A key added from the dashboard opens every computer that person
+ * can reach once SSH is switched on there; a key added through an API key or a
+ * connected app reaches only the account that credential acts on, and is
+ * removed when the credential is revoked.
  */
 export const SSH_KEYS = 'ssh-keys';
 /**
