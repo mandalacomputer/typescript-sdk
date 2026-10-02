@@ -11,6 +11,15 @@ This is the summary you read to decide whether to upgrade.
 
 ### Changed
 
+- **The `SshKeys` documentation says a key added through the API is bound to
+  its credential.** A key registered with `client.sshKeys.add()` now reaches
+  only the account the API key (or connected app) acts on, and is removed when
+  that credential is revoked; a key added from the dashboard still reaches
+  every account where you are an owner or member. The `add()` documentation no
+  longer suggests a fingerprint match in `list()` makes registration
+  idempotent: `list()` shows every key you hold, including one bound to another
+  account, which this account's computers refuse. No API change.
+
 - **A bound `launch()` returns within moments of its secrets landing**, rather
   than up to a whole poll interval later. `waitForSecrets`,
   `waitForBrowserProxy`, `waitForEgressProxy` and `waitForDesktop` (and the

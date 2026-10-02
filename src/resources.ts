@@ -2161,10 +2161,15 @@ export class Webhooks {
 /**
  * The caller's SSH public keys.
  *
- * Keys belong to the person the credential belongs to, not to a computer: a
- * registered key opens every computer that person can reach, on each computer
- * where SSH is switched on ({@link Computer.setSshAccess}). A key can belong to
- * one person only, so registering one somebody else holds is a
+ * Keys belong to the person the credential belongs to, not to a computer, and
+ * {@link list} shows all of them whichever account the credential acts on. A
+ * key added here, with an API key or a connected app, is bound to the account
+ * that credential acts on and to the credential itself: it opens the
+ * computers of that account only, on each where SSH is switched on
+ * ({@link Computer.setSshAccess}), and it is removed when the credential is
+ * revoked. A key added from the dashboard instead opens every computer the
+ * person can reach, on every account where they are an owner or member. A key
+ * can belong to one person only, so registering one somebody else holds is a
  * `ConflictError`, as is a person's key past the per-person limit.
  */
 export class SshKeys {
@@ -2182,7 +2187,8 @@ export class SshKeys {
   }
 
   /**
-   * Register one public key.
+   * Register one public key, bound to the account this client's credential
+   * acts on and removed when that credential is revoked.
    *
    * ```ts
    * const key = await client.sshKeys.add({
@@ -2190,8 +2196,12 @@ export class SshKeys {
    * });
    * ```
    *
-   * Registering a key that is already registered is a `ConflictError`; compare
-   * {@link SshKey.fingerprint} from {@link list} first to make it idempotent.
+   * Registering a key that is already registered is a `ConflictError`. A
+   * matching {@link SshKey.fingerprint} in {@link list} proves only that the
+   * key is registered to you, not that this account accepts it: {@link list}
+   * shows every key you hold, including one bound to another account's
+   * credential, which this account's computers refuse. To use such a key here,
+   * {@link remove} it and add it again with this client, or add a distinct key.
    */
   async add(args: P.SshKeyAddArgs, opts: CallOptions = {}): Promise<SshKey> {
     const data = await this.#t.json('POST', P.SSH_KEYS, {
