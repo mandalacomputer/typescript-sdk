@@ -971,7 +971,7 @@ describe('argument handling', () => {
 
   it('names an unknown command rather than guessing', async () => {
     const { code, out } = await run(['sync', 'a', 'b']);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(out).toContain('unknown command sync');
   });
 
@@ -988,31 +988,31 @@ describe('argument handling', () => {
 
   it('refuses an scp missing an operand', async () => {
     const { code, out } = await run(['scp', 'demo:/a']);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(out).toContain('mandala scp <src> <dst>');
   });
 
   it('refuses extra scp operands instead of dropping them', async () => {
     const { code, out } = await run(['scp', 'a.txt', 'demo:/a', 'ignored.txt']);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(out).toContain('mandala scp <src> <dst>');
   });
 
   it('refuses a terminal with no computer', async () => {
     const { code, out } = await run(['terminal']);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(out).toContain('mandala terminal <computer>');
   });
 
   it('refuses --session with nothing after it', async () => {
     const { code, out } = await run(['terminal', 'demo', '--session']);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(out).toContain('--session needs a name');
   });
 
   it('refuses an empty equals-form session name', async () => {
     const { code, out } = await run(['terminal', 'demo', '--session=']);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(out).toContain('--session needs a name');
   });
 
@@ -1052,7 +1052,7 @@ describe('argument handling', () => {
     // does not have it. Ignoring the tail opened an interactive shell instead, which
     // looks like it worked.
     const { code, out } = await run(['terminal', 'demo', 'ls']);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(out).toContain('runs no command');
   });
 
@@ -1060,8 +1060,8 @@ describe('argument handling', () => {
     const { main } = await import('../src/cli.js');
     for (const [args, code, wanted] of [
       [['ssh', '--help'], 0, 'OpenSSH session through the Mandala gateway'],
-      [['ssh'], 1, 'mandala ssh <computer> [ssh-args...]'],
-      [['ssh', '--session', 'x', 'demo'], 1, 'unknown option --session'],
+      [['ssh'], 2, 'mandala ssh <computer> [ssh-args...]'],
+      [['ssh', '--session', 'x', 'demo'], 2, 'unknown option --session'],
     ] as const) {
       let out = '';
       let err = '';

@@ -3677,6 +3677,9 @@ when argument parsing fails before an invocation is established. `error` always
 has string `code` and `message` fields, and may include numeric HTTP `status`,
 the platform's own `reason` word, command-specific `details`, or — for a
 mistyped command — its full `usage`, which human output prints under the message.
+An unknown command word shows the help of the group it was typed under (the
+whole command list for an unknown first word), and under `secrets` the word
+itself is not repeated, as it may be a secret value.
 
 **`code` is always one snake_case word naming the kind of failure**, never a
 class name, and the words are the same in `mandala-py`. For the CLI's own
@@ -3731,8 +3734,12 @@ number sent; `confirmed` says whether the server acknowledged that byte count,
 and `accounting` labels an unacknowledged count as `"N bytes sent"`. A short
 acknowledged write is an error.
 
-The process exits zero on success and 1 on ordinary errors, invalid template
-validation, failed builds, or unfinished agent runs. Foreground exec preserves
+The process exits zero on success; 2 on a usage error, a command line the
+parser refuses (an unknown command or option, a missing or extra argument, or
+an option value of the wrong type or outside its listed choices); and 1 on
+other ordinary errors — a value or combination refused once the line has
+parsed, such as `--cpu 0`, included — invalid template validation, failed
+builds, or unfinished agent runs. Foreground exec preserves
 integer remote exit codes from 0 through 255, uses 124 for a timeout, and 1 when the
 reported code cannot be represented or is unknown. `terminal` exits with the
 shell's own status, 255 when it never read one, and 1 when its output could not

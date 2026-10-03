@@ -478,7 +478,7 @@ describe('mandala api-keys', () => {
   it('refuses revoke without an id before any request', async () => {
     const h = cli();
     const r = await h.run(['api-keys', 'revoke']);
-    expect(r.code).toBe(1);
+    expect(r.code).toBe(2);
     expect(r.err).toContain('missing <id>');
     expect(h.rec.calls).toEqual([]);
   });
