@@ -761,6 +761,37 @@ describe('mandala ssh', () => {
     expect(r.ran).toHaveLength(1);
   });
 
+  it('refuses before running ssh when every key is bound to another account (OPL-5653)', async () => {
+    const elsewhere = { ...SSH_KEY, reach: 'another_account' };
+    const r = await cli(['ssh', 'demo'], {
+      respond: withSsh(SSH_ACCESS, [elsewhere, { ...elsewhere, id: 'sshk-2' }]),
+    });
+    expect(r.code).toBe(1);
+    expect(r.out).toBe('');
+    expect(r.err).toBe(
+      "mandala: every SSH key you hold is bound to another account, so this account's computers refuse it; " +
+        'run "mandala ssh --setup demo --key PATH" with a separate key, or re-add it from the dashboard\n',
+    );
+    expect(r.ran).toEqual([]);
+    expect(writes(r)).toEqual([]);
+    expect(fs.existsSync(knownHostsPath(r.home))).toBe(false);
+  });
+
+  it.each(['this_account', 'everywhere', null, 'some_new_word'])(
+    'runs ssh when one key beside a refused one has reach %s (OPL-5653)',
+    async (reach) => {
+      const r = await cli(['ssh', 'demo'], {
+        respond: withSsh(SSH_ACCESS, [
+          { ...SSH_KEY, reach: 'another_account' },
+          { ...SSH_KEY, id: 'sshk-2', reach },
+        ]),
+      });
+      expect(r.code).toBe(0);
+      expect(r.err).toBe('');
+      expect(r.ran).toHaveLength(1);
+    },
+  );
+
   it('exits 127 without touching the API when there is no ssh client', async () => {
     const r = await cli(['ssh', 'demo'], { ssh: null });
     expect(r.code).toBe(127);
@@ -1084,14 +1115,39 @@ describe('mandala ssh-key, ssh-access, ssh-config', () => {
     const human = await cli(['ssh-key', 'list']);
     expect(human.rec.routes()).toEqual([['GET', 'ssh-keys']]);
     expect(human.out).toBe(
-      'ID                     TYPE         FINGERPRINT                                         LAST USED  NAME\n' +
-        'sshk-a1b2c3d4e5f60718  ssh-ed25519  SHA256:09QlEDFrF+XXV/2u4X/pBAufS+8iaKwRzW6+EvIPVkg  never      laptop\n',
+      'ID                     TYPE         FINGERPRINT                                         LAST USED  REACH          NAME\n' +
+        'sshk-a1b2c3d4e5f60718  ssh-ed25519  SHA256:09QlEDFrF+XXV/2u4X/pBAufS+8iaKwRzW6+EvIPVkg  never      every account  laptop\n',
     );
+    expect(human.err).toBe('');
     const asJson = await cli(['ssh-key', 'list', '--json']);
     expect(JSON.parse(asJson.out).data).toEqual([SSH_KEY]);
     const none = await cli(['ssh-key', 'list'], { respond: withSsh(SSH_ACCESS, []) });
     expect(none.out).toBe('');
     expect(none.err).toBe('no SSH keys\n');
+  });
+
+  it("shows each key's reach, and what to do about one this account refuses (OPL-5653)", async () => {
+    const keys = [
+      SSH_KEY,
+      { ...SSH_KEY, id: 'sshk-2', name: 'ci', reach: 'this_account' },
+      { ...SSH_KEY, id: 'sshk-3', name: 'old\u001b[2Jbox', reach: 'another_account' },
+      { ...SSH_KEY, id: 'sshk-4', name: 'legacy', reach: null },
+    ];
+    const human = await cli(['ssh-key', 'list'], { respond: withSsh(SSH_ACCESS, keys) });
+    expect(human.code).toBe(0);
+    expect(human.out).toBe(
+      'ID                     TYPE         FINGERPRINT                                         LAST USED  REACH                           NAME\n' +
+        'sshk-a1b2c3d4e5f60718  ssh-ed25519  SHA256:09QlEDFrF+XXV/2u4X/pBAufS+8iaKwRzW6+EvIPVkg  never      every account                   laptop\n' +
+        'sshk-2                 ssh-ed25519  SHA256:09QlEDFrF+XXV/2u4X/pBAufS+8iaKwRzW6+EvIPVkg  never      this account                    ci\n' +
+        'sshk-3                 ssh-ed25519  SHA256:09QlEDFrF+XXV/2u4X/pBAufS+8iaKwRzW6+EvIPVkg  never      another account (refused here)  old\\u001b[2Jbox\n' +
+        'sshk-4                 ssh-ed25519  SHA256:09QlEDFrF+XXV/2u4X/pBAufS+8iaKwRzW6+EvIPVkg  never      -                               legacy\n',
+    );
+    expect(human.err).toBe(
+      "mandala: key SHA256:09QlEDFrF+XXV/2u4X/pBAufS+8iaKwRzW6+EvIPVkg (old\\u001b[2Jbox) is registered for another of your accounts, so this account's computers refuse it. To use it on every account, remove it and add it again from the dashboard (a computer's Settings, SSH tab); or use a separate key: mandala ssh --setup <computer> --key PATH\n",
+    );
+    const asJson = await cli(['ssh-key', 'list', '--json'], { respond: withSsh(SSH_ACCESS, keys) });
+    expect(JSON.parse(asJson.out).data).toEqual(keys);
+    expect(asJson.err).toBe('');
   });
 
   it('adds a key with a name', async () => {
@@ -1124,6 +1180,33 @@ describe('mandala ssh-key, ssh-access, ssh-config', () => {
     expect(r.out).toBe('removed sshk-a1b2c3d4e5f60718\n');
     const asJson = await cli(['ssh-key', 'rm', 'sshk-1', '--json']);
     expect(JSON.parse(asJson.out).data).toEqual({ id: 'sshk-1', removed: true });
+  });
+
+  it('names both causes of a 404 on removal, keeping its code and status (OPL-5653)', async () => {
+    const respond = (call: Call) =>
+      call.method === 'DELETE' && call.path === '/ssh-keys/sshk-2'
+        ? json(
+            { error: 'ssh key not found' },
+            { status: 404, headers: { 'x-request-id': 'req-1' } },
+          )
+        : anyRoute(call);
+    const message =
+      'no SSH key sshk-2 that this API key can remove: a key added from the dashboard (reach every ' +
+      'account) or bound to another account (reach another account) is removed from the dashboard; ' +
+      "`ssh-key list` shows each key's reach";
+    const human = await cli(['ssh-key', 'rm', 'sshk-2'], { respond });
+    expect(human.code).toBe(1);
+    expect(human.out).toBe('');
+    expect(human.err).toBe(`mandala: ${message}\nmandala: request id req-1\n`);
+    const asJson = await cli(['ssh-key', 'rm', 'sshk-2', '--json'], { respond });
+    expect(asJson.code).toBe(1);
+    expect(JSON.parse(asJson.out)).toEqual({
+      schema_version: 2,
+      command: 'ssh-key rm',
+      ok: false,
+      error: { code: 'not_found', message, status: 404, request_id: 'req-1' },
+      exit_code: 1,
+    });
   });
 
   it('shows and switches SSH for a computer', async () => {

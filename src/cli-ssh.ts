@@ -32,7 +32,7 @@ import { CliError } from './cli-options.js';
 import { type Output, terminalSafe } from './cli-output.js';
 import type { CliIO } from './cli-runtime.js';
 import type { Computer } from './computer.js';
-import { ConflictError } from './errors.js';
+import { ConflictError, NotFoundError } from './errors.js';
 import type { Client, Listing, SshAccess, SshKey } from './index.js';
 
 /** The public gateway. `MANDALA_SSH_GATEWAY` overrides it (`host:port`). */
@@ -872,10 +872,21 @@ export async function sshConnect(
       'ssh_disabled',
       `SSH is off for ${label}; run "mandala ssh --setup ${quoted}" to turn it on, ${terminalHint(target)}`,
     );
-  if (!(await client.sshKeys.list({ signal })).length)
+  const keys = await client.sshKeys.list({ signal });
+  if (!keys.length)
     throw new CliError(
       'ssh_no_keys',
       `you have no SSH keys registered; run "mandala ssh --setup ${quoted}" to add one, ${terminalHint(target)}`,
+    );
+  // Listed is not accepted: a key bound to another account is refused by this
+  // account's computers, so holding only those keys would end in an
+  // authentication failure inside ssh. A reach the platform did not report
+  // counts as usable.
+  if (!keys.some((k) => k.reach !== 'another_account'))
+    throw new CliError(
+      'ssh_key_elsewhere',
+      "every SSH key you hold is bound to another account, so this account's computers refuse it; " +
+        `run "mandala ssh --setup ${quoted} --key PATH" with a separate key, or re-add it from the dashboard`,
     );
   const knownHosts = knownHostsPath(home);
   ensureKnownHosts(gw, knownHosts);
@@ -917,10 +928,23 @@ async function ensureKey(
  * conflict, since a key is registered once, and an API key cannot remove a key
  * bound elsewhere; the dashboard can, and a key added there works everywhere.
  */
-export const keyElsewhereMessage = (key: SshKey, target: string) =>
+export const keyElsewhereMessage = (key: SshKey, target?: string) =>
   `key ${key.fingerprint} (${key.name}) is registered for another of your accounts, so this account's ` +
   'computers refuse it. To use it on every account, remove it and add it again from the dashboard ' +
-  `(a computer's Settings, SSH tab); or use a separate key: mandala ssh --setup ${shellWord(target)} --key PATH`;
+  `(a computer's Settings, SSH tab); or use a separate key: mandala ssh --setup ${target === undefined ? '<computer>' : shellWord(target)} --key PATH`;
+
+/**
+ * A key's reach as `ssh-key list` shows it, in the MCP server's words: whether
+ * this account's computers accept the key, and so whether this credential can
+ * remove it (only a `this_account` key). A word this CLI does not know is shown
+ * as sent; a platform that does not report reach shows `-`.
+ */
+export function reachLabel(reach: SshKey['reach']): string {
+  if (reach === 'everywhere') return 'every account';
+  if (reach === 'this_account') return 'this account';
+  if (reach === 'another_account') return 'another account (refused here)';
+  return reach || '-';
+}
 
 /** `mandala ssh --setup <computer> [--key PATH]`. */
 export async function sshSetup(
@@ -999,16 +1023,26 @@ export async function sshKeyList(client: Client, io: CliIO, output: Output): Pro
   if (keys.length)
     io.stdout.write(
       `${table(
-        ['ID', 'TYPE', 'FINGERPRINT', 'LAST USED', 'NAME'],
+        ['ID', 'TYPE', 'FINGERPRINT', 'LAST USED', 'REACH', 'NAME'],
         // Escaped before the widths are measured, so the columns still line up.
         keys.map((k) =>
-          [k.id, k.keyType, k.fingerprint, k.lastUsedAt ?? 'never', k.name].map((cell) =>
-            terminalSafe(cell),
-          ),
+          [
+            k.id,
+            k.keyType,
+            k.fingerprint,
+            k.lastUsedAt ?? 'never',
+            reachLabel(k.reach),
+            k.name,
+          ].map((cell) => terminalSafe(cell)),
         ),
       )}\n`,
     );
   else output.diagnostic('no SSH keys');
+  // What to do about a key this account refuses, after the table, on stderr so
+  // the table still pipes clean. One line each: the name is someone's text.
+  for (const k of keys)
+    if (k.reach === 'another_account')
+      output.diagnostic(`mandala: ${keyElsewhereMessage(k)}`, { keepNewlines: false });
   return 0;
 }
 
@@ -1035,7 +1069,24 @@ export async function sshKeyRemove(
   output: Output,
   id: string,
 ): Promise<number> {
-  await client.sshKeys.remove(id);
+  try {
+    await client.sshKeys.remove(id);
+  } catch (error) {
+    // The platform answers 404 both for an id it does not know and for a key
+    // this credential may not remove (reach `everywhere` or `another_account`).
+    // Same class, status and ids, so `--json` and the exit status are as they
+    // were; only the sentence names both causes and where the second is fixed.
+    if (!(error instanceof NotFoundError)) throw error;
+    throw new NotFoundError(
+      `no SSH key ${id} that this API key can remove: a key added from the dashboard (reach every ` +
+        'account) or bound to another account (reach another account) is removed from the ' +
+        "dashboard; `ssh-key list` shows each key's reach",
+      error.status,
+      error.body,
+      error.retryAfterMs,
+      { requestId: error.requestId, method: error.method },
+    );
+  }
   if (output.json) return output.result({ id, removed: true });
   io.stdout.write(`removed ${id}\n`);
   return 0;
