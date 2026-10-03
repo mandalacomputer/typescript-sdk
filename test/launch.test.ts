@@ -1206,6 +1206,38 @@ describe('waitForEgressProxy', () => {
     );
   });
 
+  // A building computer whose read leaves egress_proxy out. Told the proxy
+  // names credentials, the wait is not answered "none" by that read: it polls
+  // until the computer runs, where the platform reports the wait itself.
+  it('without expectCredentials, answers a building read that omits the proxy at once', async () => {
+    const { rec, get } = handle((n) => computer(n < 4 ? 'building' : 'running'));
+    const c = await get();
+    await c.waitForEgressProxy({ timeoutMs: 60_000, pollMs: 1 });
+    expect(c.status).toBe('building');
+    expect(rec.calls).toHaveLength(2);
+  });
+
+  it('with expectCredentials, waits past a building read that omits the proxy', async () => {
+    const { rec, get } = handle((n) => computer(n < 4 ? 'building' : 'running'));
+    const c = await get();
+    await expect(
+      c.waitForEgressProxy({ timeoutMs: 60_000, pollMs: 1, expectCredentials: true }),
+    ).resolves.toBe(c);
+    expect(c.status).toBe('running');
+    expect(rec.calls).toHaveLength(4);
+  });
+
+  it('with expectCredentials, still refuses a stopped computer nobody is starting', async () => {
+    const { get } = handle(() => computer('stopped', 0));
+    const c = await get();
+    const error = await c
+      .waitForEgressProxy({ timeoutMs: 60_000, pollMs: 1, expectCredentials: true })
+      .catch((e) => e);
+    expect(error).toBeInstanceOf(MandalaError);
+    expect(error).not.toBeInstanceOf(TimeoutError);
+    expect(error.message).toMatch(/launch-42 is "stopped".*call start\(\)/);
+  });
+
   it('refuses a stopped computer with credentials and no start under way', async () => {
     const { get } = handle(() => egress(undefined, { status: 'stopped', running_ram_mb: 0 }));
     const c = await get();
@@ -1235,6 +1267,8 @@ describe('launch with an egress proxy', () => {
       { pollMs: 1 },
     );
     expect(waited).toHaveBeenCalledOnce();
+    // Told the proxy names credentials, so a read that leaves it out is waited past.
+    expect(waited.mock.calls[0]![0]).toMatchObject({ expectCredentials: true });
     expect(c.egressProxyPending).toBe(false);
     expect(gets).toBe(4);
   });

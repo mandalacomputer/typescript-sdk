@@ -3118,16 +3118,25 @@ export class Computer {
    * admitted no start (`start()` is the fix), a create's computer whose first
    * start failed, and a failed build.
    *
+   * `expectCredentials` is for a caller that knows the proxy names
+   * credentials, such as one that just created the computer with them: a read
+   * that leaves the setting out is then not taken for "none" while the
+   * computer is not running yet. A running computer that reports nothing
+   * pending still answers at once.
+   *
    * Reads again 250ms after the first read, then doubling up to `pollMs`
    * (default 2,000), as {@link waitForSecrets} does; a read that failed and is
    * polled through waits `pollMs` (or its `Retry-After`).
    */
-  async waitForEgressProxy(opts: WaitOptions = {}): Promise<this> {
+  async waitForEgressProxy(
+    opts: WaitOptions & { expectCredentials?: boolean } = {},
+  ): Promise<this> {
+    const { expectCredentials = false } = opts;
     return this.#waitForState(
       opts,
       'applied',
       'applying',
-      (startFailed) => this.#egressProxyState(startFailed),
+      (startFailed) => this.#egressProxyState(expectCredentials, startFailed),
       (timeoutMs, observed, fresh) =>
         !observed
           ? `${this.id} could not be observed within ${timeoutMs}ms, so whether its host holds ` +
@@ -3144,11 +3153,13 @@ export class Computer {
    * it. Only credentials are waited on: a proxy without them is in effect from
    * the first packet. The platform reports the wait only on a running
    * computer, so a stopped one with credentials is waited on while a start is
-   * admitted and refused while none is.
+   * admitted and refused while none is. `expectCredentials` treats a read
+   * that leaves the setting out as one that names them, so a computer not
+   * running yet is waited through rather than answered "none".
    */
-  #egressProxyState(startFailed = ''): EgressProxyState {
+  #egressProxyState(expectCredentials = false, startFailed = ''): EgressProxyState {
     if (this.egressProxyPending) return 'applying';
-    if (!this.egressProxy?.credentialsSecretId) return 'applied';
+    if (!expectCredentials && !this.egressProxy?.credentialsSecretId) return 'applied';
     const terminal = this.#terminalFailure();
     if (terminal) return terminal;
     if (this.isBuilding) return 'applying';
