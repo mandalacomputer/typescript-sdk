@@ -3754,7 +3754,7 @@ export class Computer {
    * a computer created before then — and a computer keeps the image it was
    * created from. The refusal is a 400 that says so, and it is PERMANENT:
    * install `xclip` in the guest, which you can do since you have root there,
-   * or create a new computer. Do not retry it.
+   * or create a new computer from an image that includes it. Do not retry it.
    *
    * A READ, not a subscription. Nothing notices a Ctrl-C in the guest on its
    * own, and this call does NOT resume a suspended computer — what somebody
