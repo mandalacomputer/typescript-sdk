@@ -2040,8 +2040,10 @@ export function isSettled(err: unknown): boolean {
  * those clear on the next attempt or two. Five is the backoff's first four
  * steps — about eight seconds at the defaults — before saying so.
  *
- * Not `maxRetries`, which is the caller's number and stays theirs: a caller who
- * set it lower stops sooner, with the same sentence unsettled.
+ * Not `maxRetries`, which is the caller's number and stays theirs. It counts
+ * retries after the first attempt, so `maxRetries: N` allows N+1 attempts: a
+ * caller who set it to 1-3 stops before the fifth refusal, with the same
+ * sentence unsettled, and 4 or more settles here.
  */
 export const RUNNING_REFUSALS_TO_SETTLE = 5;
 

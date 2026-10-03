@@ -1222,8 +1222,9 @@ one of your own streams closes. A single such refusal looks like any dropped
 connection and is retried, so the SDK reports it after five in a row on a
 running computer: `events()` ends and `waitFor()` fails with a settled
 `ConnectionError` saying to close another stream on that computer (each
-`waitFor`/`events` call holds one). A `maxRetries` you set lower still stops
-sooner.
+`waitFor`/`events` call holds one). `maxRetries: N` allows N+1 attempts, so a
+`maxRetries` of 1 to 3 gives up before the fifth refusal, with the same sentence
+unsettled; 4 or more settles at the fifth.
 
 `waitFor('file.changed')` ends on a **change**, and not on the arming marker or
 a loss. Three shapes share that type and only one of them is a change, so a wait

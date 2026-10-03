@@ -2339,6 +2339,37 @@ describe('a refusal on the upgrade', () => {
     expect(attempts).toBe(RUNNING_REFUSALS_TO_SETTLE);
   });
 
+  it('settles at maxRetries 4 and stops unsettled at 3: the boundary is attempts', async () => {
+    // `maxRetries` counts retries after the first attempt, so N allows N+1
+    // attempts. 4 reaches the fifth refusal and settles; 3 gives up at the
+    // fourth, before the run of five, with the sentence unsettled.
+    const { computer: c } = await computer();
+    const run = async (maxRetries: number) => {
+      let attempts = 0;
+      const err = await collect(
+        c.events({
+          backoffMs: 1,
+          maxRetries,
+          webSocket: socketFactory((s) => {
+            attempts += 1;
+            s.emitError();
+          }),
+        }),
+      ).catch((e) => e);
+      return { err, attempts };
+    };
+    const four = await run(RUNNING_REFUSALS_TO_SETTLE - 1);
+    expect(four.err).toBeInstanceOf(ConnectionError);
+    expect(isSettled(four.err)).toBe(true);
+    expect(String(four.err)).toContain('128 per account');
+    expect(four.attempts).toBe(RUNNING_REFUSALS_TO_SETTLE);
+    const three = await run(RUNNING_REFUSALS_TO_SETTLE - 2);
+    expect(three.err).toBeInstanceOf(ConnectionError);
+    expect(isSettled(three.err)).toBe(false);
+    expect(String(three.err)).toContain('128 per account');
+    expect(three.attempts).toBe(RUNNING_REFUSALS_TO_SETTLE - 1);
+  });
+
   it('lets the read that failed be the answer', async () => {
     // A 404 says the computer is gone and a 401 says the key is. Both are
     // better sentences than anything this SDK could infer from a 1006 — and
