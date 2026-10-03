@@ -955,15 +955,23 @@ export type EventUrlSource = (signal?: AbortSignal) => Promise<string>;
  * on Node 26: a 409, a 401 and a TCP reset all arrive as an `error` event
  * carrying a `TypeError` whose message is the empty string, followed by `close`
  * with code 1006 — the status line and the body the platform wrote are not
- * exposed anywhere on the `WebSocket` API. So the two refusals the reference
+ * exposed anywhere on the `WebSocket` API. So the three refusals the reference
  * names (`409` with `resume_required` on a suspended computer, `409` with
- * `reason: "unavailable"` on a stopped one) cannot be read off the failure.
+ * `reason: "unavailable"` on a stopped one, and a `409` with no `reason` for a
+ * stream past 8 open on one computer or 128 per account on one server) cannot
+ * be read off the failure.
  *
- * They can be read off the COMPUTER, which is what this does: one
+ * The first two can be read off the COMPUTER, which is what this does: one
  * `GET computers/:id` on the failure path, and the state it answers with is
  * what the message says. Inference, and named as such wherever it is reported —
  * but the alternative is "the connection failed" about a machine somebody
  * suspended, which is a true sentence that helps nobody.
+ *
+ * The third cannot: the computer reads `running`, exactly as it does for a
+ * rotated credential or a host that dropped one connection. So a refusal on a
+ * running computer is marked with {@link refusedWhileRunning} and retried, and
+ * the stream settles after {@link RUNNING_REFUSALS_TO_SETTLE} of them in a row —
+ * see where `#run` counts them.
  */
 export type EventRefusal = (signal?: AbortSignal) => Promise<Error>;
 
@@ -1318,6 +1326,11 @@ export class ComputerEvents implements AsyncIterable<ComputerEvent> {
 
   async *#run(): AsyncGenerator<ComputerEvent> {
     let failures = 0;
+    // Refused upgrades in a row on a computer that read `running` afterwards.
+    // Separate from `failures`, and deliberately: `maxRetries` is the caller's
+    // number and defaults to "never give up", while this is the one failure
+    // that reconnecting cannot clear — see RUNNING_REFUSALS_TO_SETTLE.
+    let refusedRunning = 0;
     // Capped from the FIRST sleep, and from every RESET of it. The doubling
     // below is clamped to `maxBackoffMs`; the starting value was taken raw in
     // both places it is set, so a caller who set both got a wait past the
@@ -1352,12 +1365,28 @@ export class ComputerEvents implements AsyncIterable<ComputerEvent> {
         // alternative is this loop knocking on a machine that is off every
         // fifteen seconds for as long as the process lives.
         if (!this.#reconnect || isSettled(err)) throw err;
+        // A refusal on a running computer is retried, because it is also what a
+        // rotated credential or a host dropping one connection looks like. But
+        // it is also the platform's cap on open streams, which does not lift
+        // until one of the caller's own streams closes — so after a run of them
+        // with nothing in between, it is reported as that and the stream ends.
+        // Anything else (a re-read that did not say `running`, a handshake that
+        // timed out) breaks the run.
+        if (isRefusedWhileRunning(err)) {
+          refusedRunning += 1;
+          if (refusedRunning >= RUNNING_REFUSALS_TO_SETTLE) throw settled(err);
+        } else {
+          refusedRunning = 0;
+        }
         failures += 1;
         if (this.#maxRetries > 0 && failures > this.#maxRetries) throw err;
         await delay(backoff, this.#stop.signal);
         backoff = Math.min(backoff * 2, this.#maxBackoffMs);
         continue;
       }
+      // Upgraded and greeted: whatever refused the ones before, it was not the
+      // stream cap, which refuses the upgrade itself.
+      refusedRunning = 0;
 
       let fatal: Error | undefined;
       for (;;) {
@@ -1995,6 +2024,42 @@ export function settled<E extends Error>(err: E): E {
 /** Whether {@link settled} marked this. */
 export function isSettled(err: unknown): boolean {
   return !!err && typeof err === 'object' && (err as Record<symbol, unknown>)[SETTLED] === true;
+}
+
+/**
+ * How many refused upgrades in a row, each on a computer that read `running`
+ * afterwards, end a stream rather than being retried.
+ *
+ * The platform refuses a stream past 8 open on one computer, or 128 per account
+ * on one server, with a `409` on the upgrade and no `reason` — and waiting does
+ * not lift it until one of the caller's own streams closes. That `409` reaches
+ * a websocket client as the same empty error and 1006 close as everything else
+ * (see {@link EventRefusal}), and the computer reads `running` throughout, so
+ * one such refusal cannot be told from a rotated credential or a host that
+ * dropped a single connection. A run of them can be told from those, because
+ * those clear on the next attempt or two. Five is the backoff's first four
+ * steps — about eight seconds at the defaults — before saying so.
+ *
+ * Not `maxRetries`, which is the caller's number and stays theirs: a caller who
+ * set it lower stops sooner, with the same sentence unsettled.
+ */
+export const RUNNING_REFUSALS_TO_SETTLE = 5;
+
+const REFUSED_RUNNING = Symbol('mandala.refusedWhileRunning');
+
+/**
+ * Mark a refused upgrade on a computer that reads `running` afterwards — the
+ * one refusal the stream retries, and the one it counts.
+ */
+export function refusedWhileRunning<E extends Error>(err: E): E {
+  (err as unknown as Record<symbol, boolean>)[REFUSED_RUNNING] = true;
+  return err;
+}
+
+function isRefusedWhileRunning(err: unknown): err is Error {
+  return (
+    err instanceof Error && (err as unknown as Record<symbol, unknown>)[REFUSED_RUNNING] === true
+  );
 }
 
 function checkStreamNumbers(o: {
