@@ -805,6 +805,37 @@ describe('secrets set refuses a NAME that looks like a value', () => {
   });
 });
 
+describe('secrets set and a piped trailing newline', () => {
+  const sent = async (stdin: string, ...flags: string[]) => {
+    const r = await run(['secrets', 'set', 'KUBECONFIG', ...flags], store([]), stdin);
+    expect(r.code).toBe(0);
+    const post = r.rec.calls.find((x) => x.method === 'POST');
+    return (post?.body as { value?: string } | undefined)?.value;
+  };
+
+  it('drops one LF or CRLF by default', async () => {
+    expect(await sent('a\n')).toBe('a');
+    expect(await sent('a\r\n')).toBe('a');
+    expect(await sent('a\n\n')).toBe('a\n');
+    expect(await sent('a')).toBe('a');
+  });
+
+  it('keeps it with --keep-newline, byte for byte', async () => {
+    expect(await sent('a\n', '--keep-newline')).toBe('a\n');
+    expect(await sent('a\r\n', '--keep-newline')).toBe('a\r\n');
+    expect(await sent('a', '--keep-newline')).toBe('a');
+    const pem = '-----BEGIN KEY-----\nAAAA\n-----END KEY-----\n';
+    expect(await sent(pem, '--keep-newline')).toBe(pem);
+  });
+
+  it('still refuses a value that is only a newline when it is dropped', async () => {
+    const r = await run(['secrets', 'set', 'KUBECONFIG'], store([]), '\n');
+    expect(r.code).not.toBe(0);
+    expect(r.err).toContain('the value is empty');
+    expect(r.rec.calls.some((x) => x.method === 'POST')).toBe(false);
+  });
+});
+
 describe('secrets rm repeats the NAME only when it is safe to', () => {
   it('does not repeat a value typed as the name, in text or --json', async () => {
     const text = await run(['secrets', 'rm', TOKEN], store([]));

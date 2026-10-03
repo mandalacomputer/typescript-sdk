@@ -556,6 +556,10 @@ export const COMMANDS: readonly Command[] = [
         'no-value-check',
         "Send NAME as typed, even one that looks like a secret's value rather than a name. The check is best-effort: it can miss a URL-safe base64 or short key",
       ),
+      bool(
+        'keep-newline',
+        'Keep the one trailing newline (LF or CRLF) otherwise dropped from a value piped on stdin',
+      ),
     ],
   ),
   command(

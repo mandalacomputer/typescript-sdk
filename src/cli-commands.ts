@@ -1887,6 +1887,7 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
       case 'secrets set':
         return await secretsSet(client, io, output, target, scopeFlag(), signal, {
           valueCheck: !b('no-value-check'),
+          keepNewline: b('keep-newline'),
         });
       case 'secrets get':
         return await secretsGet(client, io, output, target, scopeFlag(false), signal);

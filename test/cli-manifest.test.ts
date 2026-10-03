@@ -219,6 +219,13 @@ describe('one command inventory', () => {
       { name: 'as', repeatable: true, follows: 'secret' },
       { name: 'path', repeatable: true, follows: 'secret-file' },
     ]);
+    // Only `secrets set` reads a value from stdin; binding one reads none.
+    const flagsOf = (path: string) =>
+      tree.commands.find((c) => c.path.join(' ') === path)?.flags.map((f) => f.name);
+    expect(flagsOf('secrets set')).toEqual(
+      expect.arrayContaining(['workspace', 'no-value-check', 'keep-newline']),
+    );
+    expect(flagsOf('computers secrets set')).not.toContain('keep-newline');
     expect(tree.commands.find((c) => c.path[0] === 'completion')?.arguments[0]).toMatchObject({
       choices: ['bash', 'zsh', 'fish'],
     });

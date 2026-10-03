@@ -800,6 +800,8 @@ export async function secretsList(
  * request, without quoting it: sent, it would be stored as a name every member
  * of the scope can read, and printed in the prompt and the result. `valueCheck`
  * false (`--no-value-check`) sends a real name the heuristic misreads.
+ * `keepNewline` (`--keep-newline`) stores a piped value's trailing newline
+ * rather than dropping it; see {@link readSecretValue}.
  */
 export async function secretsSet(
   client: Client,
@@ -808,7 +810,7 @@ export async function secretsSet(
   name: string,
   workspace: string | undefined,
   signal: AbortSignal,
-  { valueCheck = true }: { valueCheck?: boolean } = {},
+  { valueCheck = true, keepNewline = false }: { valueCheck?: boolean; keepNewline?: boolean } = {},
 ): Promise<number> {
   if (valueCheck && looksLikeSecretValue(name.trim()))
     throw new CliError(
@@ -822,7 +824,7 @@ export async function secretsSet(
   // Checked before the value is asked for, so a mistyped scope is not found
   // out only after someone has typed a secret into a prompt.
   P.secretScopeQuery(ws);
-  const value = await readSecretValue(io, trimmed, signal);
+  const value = await readSecretValue(io, trimmed, signal, { keepNewline });
   io.secrets?.add(value);
   if (!value)
     throw new CliError('invalid_arguments', 'the value is empty: pipe it on stdin or type it');

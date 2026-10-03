@@ -36,6 +36,14 @@ This is the summary you read to decide whether to upgrade.
   still means the windows could not be read. A platform without page context
   decodes as before, with `dom: null`.
 
+- **`mandala secrets set --keep-newline` stores a piped value byte for byte.**
+  `secrets set` drops one trailing `\n` or `\r\n` from what stdin gives, so
+  `echo "$TOKEN" | mandala secrets set NAME` stores the token alone; a PEM or
+  kubeconfig whose final newline matters lost it, with no flag to keep it.
+  `--keep-newline` keeps it, as `mandala-py secrets set --keep-newline` does.
+  A value typed at the prompt is unchanged: the Enter that ends it is never
+  part of the value.
+
 - **`SshKey.reach` says whether this account accepts a listed key**:
   `'everywhere'` (added from the dashboard), `'this_account'` or
   `'another_account'` (added through an API key or connected app on that
