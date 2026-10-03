@@ -2937,13 +2937,20 @@ export type Webhook = {
   computers: string[];
   /**
    * Whether deliveries are made. Set `false` by the platform when the endpoint
-   * has failed for a day — see {@link disabledReason} — and back to `true` by
-   * you with an update, which starts fresh.
+   * has failed for a day, or when the account moves to a plan without
+   * webhooks — see {@link disabledReason}. Back to `true` by you with an
+   * update, which starts fresh, or, for `plan`, by the platform when you choose
+   * a plan that includes webhooks.
    */
   enabled: boolean;
   /**
    * Why {@link enabled} is false: `customer` when you disabled it, `failing`
-   * when the platform did. Absent while enabled.
+   * when the platform did after a day of failures, `plan` when the account
+   * moved to a plan without webhooks. A `plan` subscription is enabled again,
+   * oldest first, as many as the plan allows, when the account chooses a plan
+   * that includes webhooks; until then `enabled: true` is refused (402). A
+   * plain string, not a closed set: the platform may add reasons. Absent while
+   * enabled.
    */
   disabledReason?: string;
   disabledAt?: string;
