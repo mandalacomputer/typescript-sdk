@@ -679,10 +679,12 @@ rather than an X window id. Both are `0x` and hex and both are what
 The desktop's `CLIPBOARD` selection — what Ctrl-C writes and Ctrl-V pastes — read
 and written from outside the guest. Linux only, and it needs nothing of the
 *hardware*: no cold boot, no permission from a browser. What it does need is
-`xclip` in the guest, which every image built since August 2026 carries — so in
-practice this is the road that works on every computer, and where it is not, the
-refusal says so. (The other road is RFB extended cut text over the desktop
-socket, which is live and conditional; see
+the desktop's clipboard tool in the guest — `xclip` on an X11 image, or
+`wl-clipboard` (`wl-paste`/`wl-copy`) on a Wayland one such as Omarchy, and
+`c.desktop` says which — and every current image carries the tool its desktop
+needs. So in practice this is the road that works on every computer, and where
+it is not, the refusal says so. (The other road is RFB extended cut text over
+the desktop socket, which is live and conditional; see
 [Showing somebody the desktop](#showing-somebody-the-desktop).)
 
 ```ts
@@ -721,10 +723,11 @@ which is what it used to do, and what a blanket retry loop spun on until its
 deadline. An unclassified refusal falls back to the old type answer, so bound a
 loop that meets one.
 
-A **400** is the other one to know, because it never clears: a computer built
-from an image that predates `xclip` is refused permanently. Install `xclip` in
-the guest — you have root there — or create a new computer from an image that
-includes it.
+A **400** is the other one to know, because it never clears: a computer whose
+image lacks its desktop's clipboard tool (`xclip` on X11, `wl-clipboard` on
+Wayland) is refused permanently, and the refusal names the tool. Install that
+tool in the guest — you have root there — or create a new computer from an
+image that includes it.
 
 The two differ on one thing worth knowing: `setClipboard()` **resumes a
 suspended computer**, because putting text on a clipboard is the first half of
@@ -2064,8 +2067,9 @@ get.
 [`clipboard()` and `setClipboard()`](#clipboard) are the route to build on — the
 reliable one, not merely the fallback — because they need nothing of the
 *hardware*: no cold boot, no permission from a browser. They ask one thing of
-the image (`xclip`, in every image built since August 2026) and say so in the
-answer when it is missing, which is one condition stated instead of two inferred. Where
+the image (its desktop's clipboard tool: `xclip` on X11, `wl-clipboard` on
+Wayland) and say so in the answer when it is missing, which is one condition
+stated instead of two inferred. Where
 the socket *does* carry the clipboard the two do not fight over it: those
 methods write the same X `CLIPBOARD` selection the agent then offers onward.
 

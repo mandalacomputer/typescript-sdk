@@ -3749,12 +3749,15 @@ export class Computer {
    * {@link VncConnect}.
    *
    * It does want one thing of the IMAGE, and unlike the socket's conditions it
-   * is stated in the answer rather than left to be inferred: `xclip` in the
-   * guest. Every golden built since August 2026 carries it, so in practice this is
-   * a computer created before then — and a computer keeps the image it was
-   * created from. The refusal is a 400 that says so, and it is PERMANENT:
-   * install `xclip` in the guest, which you can do since you have root there,
-   * or create a new computer from an image that includes it. Do not retry it.
+   * is stated in the answer rather than left to be inferred: the desktop's
+   * clipboard tool in the guest — `xclip` on an X11 image, `wl-clipboard`
+   * (`wl-paste`/`wl-copy`) on a Wayland one such as Omarchy; {@link desktop}
+   * says which. Every current image carries the tool its desktop needs, so in
+   * practice a computer without it was created from an older or custom image —
+   * and a computer keeps the image it was created from. The refusal is a 400
+   * that names the tool, and it is PERMANENT: install that tool in the guest,
+   * which you can do since you have root there, or create a new computer from
+   * an image that includes it. Do not retry it.
    *
    * A READ, not a subscription. Nothing notices a Ctrl-C in the guest on its
    * own, and this call does NOT resume a suspended computer — what somebody
@@ -3823,9 +3826,10 @@ export class Computer {
    * the type answer, so bound a loop that meets one.
    *
    * And two 400s here never clear at all, which matters more on this method
-   * than on the read for exactly that reason: the guest needs `xclip` in its
-   * image (see {@link clipboard}), and Windows is refused outright. Both say
-   * which they are.
+   * than on the read for exactly that reason: the guest needs its desktop's
+   * clipboard tool in its image (`xclip` on X11, `wl-clipboard` on Wayland;
+   * see {@link clipboard}), and Windows is refused outright. Both say which
+   * they are.
    */
   async setClipboard(text: string, opts: CallOptions = {}): Promise<void> {
     await this.#t.json('PUT', P.computerAction(this.id, 'clipboard'), {
