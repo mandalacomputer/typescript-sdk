@@ -122,13 +122,18 @@ This is the summary you read to decide whether to upgrade.
 
 - **Behaviour change: the CLI's usage errors now exit 2 (was 1)**, as
   `mandala-py` and POSIX tools do: a command line the parser refuses — an
-  unknown command or option, a missing or extra argument, or an option value
-  of the wrong type or outside its choices. `--json` reports `exit_code: 2`.
+  unknown command or option, a group typed without a command, a missing,
+  extra or blank argument, a repeated option, an option value of the wrong
+  type or outside its choices, a missing required option, two options the
+  command declares as conflicting (`webhooks update --enable --disable`), or
+  an `--as`/`--path` not directly after the option it names. `--json` reports
+  `exit_code: 2`.
   An unknown command word now carries the help of the group it was typed under
   as `usage` (the whole command list for an unknown first word), printed under
   the message; under `secrets` the word itself is still not repeated. A value
-  refused once the line has parsed (`--cpu 0`), and every refusal from the
-  platform, still exit 1.
+  or combination the CLI refuses after parsing (`--cpu 0`,
+  `--browser-proxy-bypass` without `--browser-proxy`), and every refusal from
+  the platform, still exit 1.
 
 - **`setSshAccess()` and `SshAccess.keyCount` say which keys log in.** They
   said every registered key of every member of the account; keys bound to

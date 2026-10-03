@@ -3735,11 +3735,14 @@ and `accounting` labels an unacknowledged count as `"N bytes sent"`. A short
 acknowledged write is an error.
 
 The process exits zero on success; 2 on a usage error, a command line the
-parser refuses (an unknown command or option, a missing or extra argument, or
-an option value of the wrong type or outside its listed choices); and 1 on
-other ordinary errors — a value or combination refused once the line has
-parsed, such as `--cpu 0`, included — invalid template validation, failed
-builds, or unfinished agent runs. Foreground exec preserves
+parser refuses (an unknown command or option, a group typed without a command,
+a missing, extra or blank argument, a repeated option, an option value of the
+wrong type or outside its listed choices, a missing required option, two
+options the command declares as conflicting, or an `--as`/`--path` not
+directly after the option it names); and 1 on other ordinary errors — a value
+or combination the CLI refuses after parsing, such as `--cpu 0` or
+`--browser-proxy-bypass` without `--browser-proxy`, included — invalid
+template validation, failed builds, or unfinished agent runs. Foreground exec preserves
 integer remote exit codes from 0 through 255, uses 124 for a timeout, and 1 when the
 reported code cannot be represented or is unknown. `terminal` exits with the
 shell's own status, 255 when it never read one, and 1 when its output could not

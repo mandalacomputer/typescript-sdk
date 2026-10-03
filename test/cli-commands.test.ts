@@ -2478,6 +2478,12 @@ describe('malformed arguments are offline failures', () => {
     [2, ['completion', 'unknown']],
     [2, ['computers', 'get', '']],
     [2, ['computers', 'get', 'vm', 'extra']],
+    // Parser refusals the README's exit-status paragraph lists as exit 2: a
+    // repeated option, a missing required option, a stray --as / --path.
+    [2, ['computers', 'create', '--cpu', '1', '--cpu', '2']],
+    [2, ['computers', 'move', 'vm']],
+    [2, ['computers', 'create', '--as', 'VAR']],
+    [2, ['computers', 'create', '--secret', 'A', '--path', 'f']],
   ])('exits %i for %j, making no requests', async (code, argv) => {
     const h = harness();
     const result = await h.run(argv);
