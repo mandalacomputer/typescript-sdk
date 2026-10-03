@@ -280,8 +280,10 @@ function unreachableTypes(
  */
 export type InputOptions = CallOptions & {
   /**
-   * Answer the desktop's windows as they stand just after the action — see
-   * {@link InputContext}. Costs one windows read, bounded at 3 seconds. An
+   * Answer the desktop's windows as they stand just after the action, and the
+   * page on screen when the focused window is Chromium — see
+   * {@link InputContext}. Costs one windows read and at most one page read,
+   * bounded at 3 seconds together. An
    * action that answers nothing resolves to the context instead of
    * `undefined`; `type` carries it as {@link TypeResult.context}.
    */

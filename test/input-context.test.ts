@@ -115,7 +115,12 @@ describe('input context on every action', () => {
     const { client: c } = client(inputAnswers({ ok: true, context_error: said }));
     const computer = await c.computers.get('vm-1');
     for (const { action, asked } of actions(computer)) {
-      expect(await asked(), action).toEqual({ windows: null, focused: null, error: said });
+      expect(await asked(), action).toEqual({
+        windows: null,
+        focused: null,
+        dom: null,
+        error: said,
+      });
     }
   });
 
@@ -169,7 +174,7 @@ describe('type with context', () => {
     );
     const computer = await c.computers.get('vm-1');
     const res = await computer.type('hello', { context: true });
-    expect(res.context).toEqual({ windows: null, focused: null, error: said });
+    expect(res.context).toEqual({ windows: null, focused: null, dom: null, error: said });
   });
 
   it('leaves the TypeResult as it was when not asked', async () => {

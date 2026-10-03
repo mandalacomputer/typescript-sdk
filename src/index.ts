@@ -209,6 +209,8 @@ export type {
   OperationKind,
   OperationPage,
   OperationState,
+  PageContext,
+  PageElement,
   PlatformSignal,
   PlatformSignalGap,
   Point,

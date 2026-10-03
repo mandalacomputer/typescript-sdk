@@ -521,6 +521,25 @@ window still opening may not be listed yet. When they cannot be read — a
 Windows guest, no desktop session — `windows` is `null` and `error` says why;
 the action itself still happened, so do not send it again.
 
+When the focused window is Chromium, the context also carries the page on
+screen as `dom`: its `url`, `title`, and the interactive elements visible in it
+— links, buttons, form fields — each with a box in screen pixels, so you can
+click one without a screenshot to find it:
+
+```ts
+const ctx = await c.click(640, 400, [], { context: true });
+const next = ctx.dom?.elements.find((e) => e.text === 'Next');
+if (next) await c.click(next.x + Math.floor(next.width / 2), next.y + Math.floor(next.height / 2));
+else console.log(ctx.error);                 // why there is no page, when there is none
+```
+
+Firefox, the default browser, has no `dom`, and neither does any other window:
+`dom` is `null` and `error` says why, beside the windows. Open the page in
+Chromium to get one:
+`c.exec('nohup chromium https://example.com >/dev/null 2>&1 &', { desktop: true })`.
+A password field's value is never read, and a computer made from an image built
+before page context answers `error` saying so.
+
 ### Screenshots, and the one flag a drive loop needs
 
 ```ts
