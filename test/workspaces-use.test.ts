@@ -456,6 +456,59 @@ describe('the default applied', () => {
       },
     );
 
+    // A name in one scope that spells a secret's id in the other is as
+    // ambiguous as the same collision within one scope, and refused the same
+    // way: the workspace's name must not quietly win over an id the caller
+    // typed, nor an account-wide name over a workspace secret's id.
+    describe.each([
+      ['--secret', ['--as', 'TOK']],
+      ['--secret-file', ['--path', 'tok']],
+    ])('%s naming a secret by id in one scope and by name in the other', (flag, target) => {
+      const colliding =
+        (workspace: ReadonlyArray<[string, string]>, shared: ReadonlyArray<[string, string]>) =>
+        (call: Parameters<Responder>[0]) => {
+          if (call.method === 'GET' && call.path === '/secrets') {
+            const ws = call.query.workspace_id;
+            const secrets =
+              ws === undefined
+                ? shared.map(([id, name]) => row(id, name, null))
+                : ws === OTHER.id
+                  ? workspace.map(([id, name]) => row(id, name, OTHER.id))
+                  : [];
+            return new Response(JSON.stringify({ ...SECRET_LIST, secrets }), {
+              headers: { 'content-type': 'application/json' },
+            });
+          }
+          return respond(call);
+        };
+      const refused = async (responder: Responder) => {
+        await saveCredentials(ACCOUNT_WIDE);
+        const h = cli({}, undefined, responder);
+        const r = await h.run([
+          'computers',
+          'create',
+          '--template',
+          'base',
+          flag,
+          SHARED_ID,
+          ...target,
+          '--workspace',
+          OTHER.id,
+          '--json',
+        ]);
+        expect(r.code).not.toBe(0);
+        expect(r.out + r.err).toContain('ambiguous_secret');
+        expect(r.out + r.err).toContain('rename one of them first');
+        expect(bound(h)).toEqual([]);
+      };
+
+      it("a workspace secret named like an account-wide secret's id", () =>
+        refused(colliding([[OWN_ID, SHARED_ID]], [[SHARED_ID, 'API_KEY']])));
+
+      it("an account-wide secret named like a workspace secret's id", () =>
+        refused(colliding([[SHARED_ID, 'API_KEY']], [[OWN_ID, SHARED_ID]])));
+    });
+
     it('in no workspace, the account-wide scope alone, as before', async () => {
       await saveCredentials(ACCOUNT_WIDE);
       const h = cli({}, undefined, scoped);

@@ -20,8 +20,9 @@ This is the summary you read to decide whether to upgrade.
   without it, use the profile's default from `workspaces use` as `secrets` and
   `api-keys create` do; there, a `--secret` or `--secret-file` name is looked
   up in that workspace's own secrets first and then account-wide, so a name
-  both hold binds the workspace's. A workspace the key cannot reach is a
-  `NotFoundError`.
+  both hold binds the workspace's, and a name in either scope that is another
+  secret's id in either is refused as `ambiguous_secret`. A workspace the key
+  cannot reach is a `NotFoundError`.
   Needs a platform that accepts `workspace_id` on these two routes; an older
   one creates in no workspace and lists everything.
 

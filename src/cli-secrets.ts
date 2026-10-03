@@ -74,15 +74,20 @@ function quotedOperand(typed: string): string | undefined {
  * A name that spells a different secret's id is ambiguous, and refused: guessing
  * wrong deletes the wrong credential. The refusal quotes the key only when
  * {@link quotedOperand} finds it safe to repeat, unless the caller names it.
+ *
+ * `scopes` are the listings looked in, in order: a name is looked for in each
+ * in turn (the first scope holding it wins), and an id in all of them, so a
+ * name in one scope that spells a secret's id in another is refused as well.
  */
 function byNameOrId(
-  secrets: readonly Secret[],
+  scopes: readonly (readonly Secret[])[],
   key: string,
   unchanged = 'nothing was deleted',
   shownAs = quotedOperand(key) ?? 'that name or id',
 ): Secret | undefined {
-  const named = byName(secrets, key);
-  const identified = secrets.find((s) => s.id === key);
+  let named: Secret | undefined;
+  for (const scope of scopes) if (!named) named = byName(scope, key);
+  const identified = scopes.flat().find((s) => s.id === key);
   if (named && identified && named.id !== identified.id)
     throw new CliError(
       'ambiguous_secret',
@@ -648,9 +653,14 @@ export async function secretBindings(
     seen.set(slot, label);
   };
   return specs.map(({ flag, key, target, label: position }) => {
-    const found =
-      (own && byNameOrId(own.secrets, key, unchanged, position)) ??
-      byNameOrId(list.secrets, key, unchanged, position);
+    // Both scopes at once: a name in either that spells a different secret's
+    // id in either is refused, not settled by which scope was read first.
+    const found = byNameOrId(
+      own ? [own.secrets, list.secrets] : [list.secrets],
+      key,
+      unchanged,
+      position,
+    );
     // Named by position alone: a key that matched no stored secret and is not
     // shaped like an id may be the value typed where the name was meant.
     if (!found && !SECRET_ID.test(key))
@@ -866,7 +876,7 @@ export async function secretsGet(
 ): Promise<number> {
   const ws = scope(workspace);
   P.secretScopeQuery(ws);
-  const found = byNameOrId(await scopeRows(client, ws, signal), nameOrId, 'nothing was read');
+  const found = byNameOrId([await scopeRows(client, ws, signal)], nameOrId, 'nothing was read');
   if (!found && !SECRET_ID.test(nameOrId)) {
     // Quoted only when safe to repeat: the operand may be the value itself.
     const shownAs = quotedOperand(nameOrId);
@@ -902,7 +912,7 @@ export async function secretsRemove(
   P.secretScopeQuery(ws);
   let removed: Secret | undefined;
   for (let attempt = 1; !removed; attempt++) {
-    const current = byNameOrId(await scopeRows(client, ws, signal), nameOrId);
+    const current = byNameOrId([await scopeRows(client, ws, signal)], nameOrId);
     if (!current) {
       // Quoted only when safe to repeat: the operand may be the value itself.
       const shownAs = quotedOperand(nameOrId);

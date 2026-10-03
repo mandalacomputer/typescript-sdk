@@ -3186,7 +3186,9 @@ explicit `--workspace` always wins, and
 `workspaces use --clear` is the way back to account-wide (there is no
 per-command override). A `computers create` in a workspace looks up each
 `--secret` and `--secret-file` name in that workspace's own secrets first and
-then in the account-wide ones, so a name both hold binds the workspace's. The workspace is resolved through the API, as `get`
+then in the account-wide ones, so a name both hold binds the workspace's; a
+name in either that is another secret's id in either is refused as
+ambiguous. The workspace is resolved through the API, as `get`
 resolves it; no key is minted, and the profile's key and scope are unchanged.
 
 The default lives in `~/.mandala/defaults.json` (mode 0600, written under its
