@@ -723,7 +723,8 @@ loop that meets one.
 
 A **400** is the other one to know, because it never clears: a computer built
 from an image that predates `xclip` is refused permanently. Install `xclip` in
-the guest — you have root there — or create a new computer.
+the guest — you have root there — or create a new computer from an image that
+includes it.
 
 The two differ on one thing worth knowing: `setClipboard()` **resumes a
 suspended computer**, because putting text on a clipboard is the first half of
