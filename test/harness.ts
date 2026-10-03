@@ -771,6 +771,7 @@ export const SSH_KEY = {
   key_type: 'ssh-ed25519',
   created_at: '2026-09-16T12:00:00.000Z',
   last_used_at: null,
+  reach: 'everywhere',
 };
 
 /** One API key, as `GET api-keys` lists it (OPL-5053): never the raw key. */

@@ -3755,7 +3755,11 @@ mandala ssh --setup dev --key ~/.ssh/work.pub
 ```
 
 `--setup` is safe to repeat: a key whose fingerprint is already registered is
-not uploaded again. With `--json` it prints one finite result whose `data` is
+not uploaded again. It stops instead (`ssh_key_elsewhere`, exit 1, SSH left as
+it was) when that key is bound to another of your accounts, because this
+account's computers would refuse it: remove it and add it again from the
+dashboard to use it on every account, or pass `--key` with a separate key. With
+`--json` it prints one finite result whose `data` is
 `{computer, name, key, key_added, ssh, command}`. Then connect. Everything after
 the computer goes to `ssh` unchanged, and `mandala ssh` exits with `ssh`'s own
 status:
@@ -3796,7 +3800,12 @@ mandala ssh-access dev on          # or off
 A key belongs to you rather than to an account. One added from the dashboard
 reaches the computers of every account you are an owner or member of; one added
 with an API key (the CLI and this SDK) reaches only the account that key acts
-on, and is removed when the key is revoked. Each person holds eight.
+on, and is removed when the key is revoked. Each person holds eight. The listing
+shows every key you hold, whichever account asks; each key's `reach` says where
+it works from there: `everywhere`, `this_account` or `another_account` (which
+account is not said). A key is registered once, so a key bound to another
+account cannot be added again here, and an API key cannot remove it: remove it
+from the dashboard.
 
 #### Without the CLI: `ssh-config`, VS Code, scp and sftp
 
@@ -3908,8 +3917,10 @@ const dev = await client.computers.get('vm-…');
 const access = await dev.setSshAccess(true); // or dev.sshAccess() to read
 ```
 
-`SshAccess` has `enabled`, `available`, `pending`, `keyCount`, `keysPushed` and
-`error`. `available` is `false` for a computer made from a template that
+`SshKey.reach` is `'everywhere'`, `'this_account'` or `'another_account'`
+(`null` from a platform that does not report it); this account's computers
+refuse a key whose reach is `'another_account'`. `SshAccess` has `enabled`,
+`available`, `pending`, `keyCount`, `keysPushed` and `error`. `available` is `false` for a computer made from a template that
 predates SSH, and `null` until the computer has been asked, which happens when
 it next starts. Registering a key that is already registered is a
 `ConflictError`.

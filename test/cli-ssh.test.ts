@@ -937,6 +937,68 @@ describe('mandala ssh --setup', () => {
     expect(writes(r)).toEqual([['POST', 'ssh-keys']]);
   });
 
+  it('refuses a listed key bound to another account, and switches nothing on (OPL-5617)', async () => {
+    const home = await homeWithKey();
+    const elsewhere = { ...SSH_KEY, reach: 'another_account' };
+    const message =
+      "key SHA256:09QlEDFrF+XXV/2u4X/pBAufS+8iaKwRzW6+EvIPVkg (laptop) is registered for another of your accounts, so this account's computers refuse it. To use it on every account, remove it and add it again from the dashboard (a computer's Settings, SSH tab); or use a separate key: mandala ssh --setup demo --key PATH";
+    const human = await cli(['ssh', '--setup', 'demo'], {
+      home,
+      respond: withSsh(SSH_ACCESS, [elsewhere]),
+    });
+    expect(human.code).toBe(1);
+    expect(human.out).toBe('');
+    expect(human.err).toBe(`mandala: ${message}\n`);
+    expect(writes(human)).toEqual([]);
+    expect(fs.existsSync(knownHostsPath(home))).toBe(false);
+    const asJson = await cli(['ssh', '--setup', 'demo', '--json'], {
+      home,
+      respond: withSsh(SSH_ACCESS, [elsewhere]),
+    });
+    expect(asJson.code).toBe(1);
+    expect(JSON.parse(asJson.out)).toEqual({
+      schema_version: 2,
+      command: 'ssh',
+      ok: false,
+      error: { code: 'ssh_key_elsewhere', message },
+      exit_code: 1,
+    });
+    expect(writes(asJson)).toEqual([]);
+  });
+
+  it('refuses a conflict that turns out to be its own key bound to another account (OPL-5617)', async () => {
+    const home = await homeWithKey();
+    let lists = 0;
+    const r = await cli(['ssh', '--setup', 'demo', '--json'], {
+      home,
+      respond: (call) => {
+        if (call.path === '/ssh-keys' && call.method === 'GET')
+          return json(lists++ ? [{ ...SSH_KEY, reach: 'another_account' }] : []);
+        if (call.path === '/ssh-keys')
+          return json({ error: 'That key is already registered.' }, { status: 409 });
+        return anyRoute(call);
+      },
+    });
+    expect(r.code).toBe(1);
+    expect(JSON.parse(r.out).error.code).toBe('ssh_key_elsewhere');
+    expect(writes(r)).toEqual([['POST', 'ssh-keys']]);
+  });
+
+  it.each(['everywhere', 'this_account', null])(
+    'switches SSH on for a listed key whose reach is %s',
+    async (reach) => {
+      const home = await homeWithKey();
+      const listed = reach === null ? { ...SSH_KEY, reach: undefined } : { ...SSH_KEY, reach };
+      const r = await cli(['ssh', '--setup', 'demo'], {
+        home,
+        respond: withSsh(SSH_ACCESS, [listed]),
+      });
+      expect(r.code).toBe(0);
+      expect(writes(r)).toEqual([['PUT', 'computers/vm-1/ssh']]);
+      expect(r.out).toContain('(laptop) already registered\nSSH is on for demo\n');
+    },
+  );
+
   it('refuses a computer already known not to run SSH before uploading or switching anything', async () => {
     const home = await homeWithKey();
     for (const extra of [[], ['--json']]) {
@@ -2089,6 +2151,7 @@ describe('SSH SDK methods', () => {
         keyType: 'ssh-ed25519',
         createdAt: SSH_KEY.created_at,
         lastUsedAt: null,
+        reach: 'everywhere',
         raw: SSH_KEY,
       },
     ]);

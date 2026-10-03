@@ -911,6 +911,17 @@ async function ensureKey(
   }
 }
 
+/**
+ * Why `--setup` stops for a key this account refuses (platform OPL-5617): it is
+ * registered to you, bound to another of your accounts. Adding it again is a
+ * conflict, since a key is registered once, and an API key cannot remove a key
+ * bound elsewhere; the dashboard can, and a key added there works everywhere.
+ */
+export const keyElsewhereMessage = (key: SshKey, target: string) =>
+  `key ${key.fingerprint} (${key.name}) is registered for another of your accounts, so this account's ` +
+  'computers refuse it. To use it on every account, remove it and add it again from the dashboard ' +
+  `(a computer's Settings, SSH tab); or use a separate key: mandala ssh --setup ${shellWord(target)} --key PATH`;
+
 /** `mandala ssh --setup <computer> [--key PATH]`. */
 export async function sshSetup(
   client: Client,
@@ -932,6 +943,10 @@ export async function sshSetup(
   if ((await computer.sshAccess({ signal })).available === false)
     throw new CliError('ssh_unavailable', predates(label));
   const { key: registered, added } = await ensureKey(client, line, print, signal);
+  // Listed is not accepted: a key bound to another account is refused here, so
+  // SSH is not switched on for it and nothing reads as success.
+  if (registered.reach === 'another_account')
+    throw new CliError('ssh_key_elsewhere', keyElsewhereMessage(registered, target));
   const access = await computer.setSshAccess(true, { signal });
   // Nothing that reads as success is printed when SSH cannot work here.
   if (access.available === false) throw new CliError('ssh_unavailable', predates(label));
