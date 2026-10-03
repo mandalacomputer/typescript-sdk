@@ -608,10 +608,11 @@ export function equalsDeprecation(specs: readonly BindingSpec[]): string | undef
  * an API key is confined to.
  *
  * A create into a workspace (`workspaceId`, from `--workspace` or the
- * `workspaces use` default) looks in that workspace's own secrets FIRST and
- * then in the default scope, as such a computer may be bound to either: a
- * name the workspace holds is that workspace's secret even where the
- * account-wide scope holds one by the same name, never the account-wide one.
+ * `workspaces use` default), or a rebinding of a computer in one (its own
+ * workspace), looks in that workspace's own secrets FIRST and then in the
+ * default scope, as such a computer may be bound to either: a name the
+ * workspace holds is that workspace's secret even where the account-wide
+ * scope holds one by the same name, never the account-wide one.
  *
  * An id that listing does not hold is sent as it is, for a secret in a scope
  * the listing did not cover; the platform refuses one it cannot bind, and the
@@ -628,7 +629,7 @@ export async function secretBindings(
   signal: AbortSignal,
   /** What a refusal says was left undone: a create's computer, or a rebinding. */
   unchanged = 'nothing was created',
-  /** The workspace a create puts the computer in, whose own secrets are looked in first. */
+  /** The workspace the computer is created in or is in, whose own secrets are looked in first. */
   workspaceId?: string,
 ): Promise<P.SecretBindingArgs[]> {
   if (!specs.length) return [];
@@ -969,9 +970,15 @@ export async function computerSecretsGet(
  *
  * `specs` are what {@link bindingSpecs} already checked, the very checks
  * `computers create --secret` runs, and each secret is found by name or id as
- * a create finds it ({@link secretBindings}). No `version` is sent: the list
- * given is the whole of what the computer is to hold, so there is nothing read
- * earlier for a concurrent change to have made stale. The platform refuses a
+ * a create into the computer's workspace finds it ({@link secretBindings}):
+ * in that workspace's own secrets first, then the default scope. It is the
+ * COMPUTER's workspace, never the `workspaces use` default (the command takes
+ * no `--workspace`), since that is the workspace its bindings may reach; a
+ * computer reported in no workspace looks in the default scope alone.
+ *
+ * No `version` is sent: the list given is the whole of what the computer is
+ * to hold, so there is nothing read earlier for a concurrent change to have
+ * made stale. The platform refuses a
  * computer's FIRST binding while it runs, and a change while a delivery or
  * another operation holds it; its refusal is passed through as it came, less
  * every typed variable or file ({@link scrubTypedTargets}), as is the answer
@@ -993,7 +1000,14 @@ export async function computerSecretsSet(
   { keepRevision = false }: { keepRevision?: boolean } = {},
 ): Promise<number> {
   const unchanged = 'no binding was changed';
-  let bindings = await secretBindings(client, specs, signal, unchanged);
+  // '' is a computer reported in no workspace: the default scope alone.
+  let bindings = await secretBindings(
+    client,
+    specs,
+    signal,
+    unchanged,
+    computer.workspaceId || undefined,
+  );
   let version: number | undefined;
   if (keepRevision) {
     const current = await computer.secrets({ signal });
