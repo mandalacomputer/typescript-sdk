@@ -54,6 +54,16 @@ This is the summary you read to decide whether to upgrade.
   idempotent: `list()` shows every key you hold, including one bound to another
   account, which this account's computers refuse. No API change.
 
+- **The `Builds` and `Templates` documentation says which methods need an
+  account-wide key.** The platform refuses an API key confined to a workspace
+  with a `403` (`PermissionDeniedError`) on every build route and on
+  publishing, reading the account's own template back and retiring one; such a
+  key can still list templates, read `system` ones and launch a computer from a
+  template by its ref. `builds.start()` no longer says build secrets resolve in
+  the key's scope, workspace first: they resolve among the account-wide
+  secrets. `builds.list()` no longer describes what a workspace-scoped key sees
+  in a build listing. Documentation only; no API change.
+
 - **A bound `launch()` returns within moments of its secrets landing**, rather
   than up to a whole poll interval later. `waitForSecrets`,
   `waitForBrowserProxy`, `waitForEgressProxy` and `waitForDesktop` (and the

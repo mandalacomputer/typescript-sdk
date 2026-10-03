@@ -1382,6 +1382,12 @@ export class Templates {
   /**
    * Publish a document under a ref of your own, so a create can launch it by name.
    *
+   * NEEDS AN ACCOUNT-WIDE KEY. Templates are the account's catalogue, not a
+   * workspace's: an API key confined to a workspace is refused this with a
+   * {@link PermissionDeniedError} (`403`) whatever it sends, as it is
+   * {@link get} on the account's own namespace and {@link retire}. Such a key
+   * can still {@link list} templates and launch a computer from one by its ref.
+   *
    * THE NAMESPACE IS YOUR ACCOUNT. `metadata.namespace` has to be your account
    * id — anything else is a 403, `system` included — and this SDK does not
    * rewrite it, because silently relocating somebody's document would publish a
@@ -1429,6 +1435,11 @@ export class Templates {
    * layering onto. Another account's namespace is a {@link NotFoundError}, the
    * same answer a name that does not exist gets.
    *
+   * Your account's own namespace needs an account-wide key: an API key confined
+   * to a workspace is a {@link PermissionDeniedError} (`403`) there, because the
+   * document is the account's and may carry its build steps and scripts. It can
+   * still read `system` templates.
+   *
    * Without `version` this is the newest published version of that name — which
    * is also what a create naming the unpinned `namespace/name` resolves to.
    * {@link PublishedTemplate.versions} lists the rest.
@@ -1471,6 +1482,9 @@ export class Templates {
    * afterwards is a {@link ConflictError}, identical bytes included, and
    * {@link RetiredTemplates.refsClaimed} does not go down. Publish the next
    * version instead.
+   *
+   * Retiring is for an account-wide key: an API key confined to a workspace is a
+   * {@link PermissionDeniedError} (`403`) whatever it names.
    */
   async retire(
     namespace: string,
@@ -1495,6 +1509,12 @@ export class Templates {
  * not a ref, and the job it answers with outlives the request and is read back
  * by its own id. Publishing and building are separate acts with very different
  * costs, and the platform keeps them apart for that reason.
+ *
+ * ACCOUNT-WIDE KEYS ONLY. Builds are the account's, like the templates they
+ * build: an API key confined to a workspace is refused every method here with a
+ * {@link PermissionDeniedError} (`403`) — starting, listing, reading, polling,
+ * streaming and waiting alike. Such a key launches a computer from a published
+ * template by its ref instead.
  */
 export class Builds {
   #t: Transport;
@@ -1521,12 +1541,13 @@ export class Builds {
    *
    * A document may name secrets for its build steps under `spec.secrets` (on by
    * default), by id and the variable to read each `as` — never by value. They
-   * are resolved in the key's scope (the workspace's own first, then the
-   * account's), each at the revision current when the build is submitted, and
-   * there may be at most 32; `templates.validate()` does not check that limit.
-   * A malformed reference is a `400` saying what is wrong, and one that does not
-   * resolve a `400` that does not say which (so a secret you cannot see cannot
-   * be probed for); neither is worth retrying.
+   * are resolved among the account-wide secrets, each at the revision current
+   * when the build is submitted, and there may be at most 32;
+   * `templates.validate()` does not check that limit. A malformed reference is a
+   * `400` saying what is wrong, and one that does not resolve — a workspace's
+   * secret, another account's, or one that was deleted — a `400` that does not
+   * say which (so a secret you cannot see cannot be probed for); neither is
+   * worth retrying.
    *
    * A {@link ConflictError} means a hypervisor is busy — one build runs per host
    * at a time — or that a secret's value could not be read just now, rather than
@@ -1577,9 +1598,7 @@ export class Builds {
    * snapshot's is the `{ id, unreachable: true }` stub and nothing more, while
    * a computer's carries the identity the control plane has on record (name,
    * os, template, size, workspace, `created_at`, `state`) and nothing only its
-   * host knows, so it has no `status`. A snapshot listing appends none of those
-   * for a workspace-scoped key, so on such a key builds and snapshots are both
-   * the status and nothing else.
+   * host knows, so it has no `status`.
    */
   async list(opts: ListOptions = {}): Promise<TemplateBuild[]> {
     return (await this.listWithStatus(opts)).items;

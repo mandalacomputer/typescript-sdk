@@ -217,6 +217,12 @@ A template is a `mandala/v1` document — the image family it resolves to, what 
 is layered onto, and the shape a computer gets when the create names no numbers.
 Publishing one gives it a ref you can launch by name.
 
+Templates are the account's catalogue, not a workspace's, so publishing,
+reading one of the account's own back and retiring need an account-wide key.
+An API key confined to a workspace is refused all three with a
+`PermissionDeniedError` (`403`); it can still list templates, read `system`
+ones and launch a computer from a template by its ref.
+
 ```ts
 const doc = await readFile('devbox.yaml', 'utf8');
 
@@ -358,14 +364,21 @@ retrying. `builds.get(id)` is the job, `builds.progress(id)` is what it is doing
 and stays readable after it has finished, and `builds.list()` is every build the
 fleet still holds a record of.
 
+Builds are the account's, like the templates they build, and need an
+account-wide key: an API key confined to a workspace gets a
+`PermissionDeniedError` (`403`) from every `builds` method — `start`, `list`,
+`get`, `progress`, `events` and `wait` alike. It launches a computer from a
+published template by its ref instead.
+
 A build's steps can read secrets: list them under `spec.secrets` (on by
 default), each by its id and the variable to read it `as`, never by value. They
-are resolved in your key's scope — a workspace's own first, then the account's —
-each frozen at the revision current when the build is submitted, and a document
-may name at most 32 (`templates.validate()` does not check that limit). A
-malformed reference is a `400` that says what is wrong; one that does not
-resolve is a `400` that does not say which; neither is worth retrying. A `503`
-saying secrets are not available is worth retrying, like the `409` above.
+are resolved among the account-wide secrets, each frozen at the revision current
+when the build is submitted, and a document may name at most 32
+(`templates.validate()` does not check that limit). A malformed reference is a
+`400` that says what is wrong; one that does not resolve — a workspace's
+secret, another account's, or one that was deleted — is a `400` that does not
+say which; neither is worth retrying. A `503` saying secrets are not available
+is worth retrying, like the `409` above.
 
 For a terminal, stream it instead of polling:
 
@@ -2662,7 +2675,8 @@ account: naming the missing ids means reading them out of a placement cache with
 no workspace column, and handing a confined credential ids from the workspaces
 it is confined away from is not something the platform will do. So on a
 workspace-scoped key a snapshot listing is the status and nothing else, exactly
-as a build listing always is.
+as a build listing always is. (Such a key cannot list builds at all: every
+`builds` method is a `403` for it.)
 
 A computer's unreachable row is fuller, and is the one exception to that scoping.
 It carries `unreachable: true` plus the identity the control plane keeps on
