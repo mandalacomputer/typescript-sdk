@@ -54,7 +54,9 @@ This is the summary you read to decide whether to upgrade.
   the stream now ends with a settled `ConnectionError` saying to close another
   stream on that computer. A connection that opens, or a re-read that does not
   say `running`, starts the count again, so a briefly unreachable server still
-  recovers; a `maxRetries` you set is unchanged.
+  recovers. The run of five applies whatever `maxRetries` says: a `maxRetries`
+  you set below five still stops sooner, unsettled, and one of five or more
+  (or 0) settles at the fifth refusal in a row.
 
 - **`mandala terminal` exits 255, not 0, when the session ends without the
   shell's exit status** — a dropped link, a session another connection took,

@@ -2318,6 +2318,27 @@ describe('a refusal on the upgrade', () => {
     expect(attempts).toBe(3);
   });
 
+  it('settles the run of five even when maxRetries the caller set is higher', async () => {
+    // The run is its own rule, not a default for `maxRetries`: a caller who
+    // allows ten reconnects still hears about the cap at the fifth refusal.
+    const { computer: c } = await computer();
+    let attempts = 0;
+    const err = await collect(
+      c.events({
+        backoffMs: 1,
+        maxRetries: 10,
+        webSocket: socketFactory((s) => {
+          attempts += 1;
+          s.emitError();
+        }),
+      }),
+    ).catch((e) => e);
+    expect(err).toBeInstanceOf(ConnectionError);
+    expect(isSettled(err)).toBe(true);
+    expect(String(err)).toContain('128 per account');
+    expect(attempts).toBe(RUNNING_REFUSALS_TO_SETTLE);
+  });
+
   it('lets the read that failed be the answer', async () => {
     // A 404 says the computer is gone and a 401 says the key is. Both are
     // better sentences than anything this SDK could infer from a 1006 — and
