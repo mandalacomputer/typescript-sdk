@@ -164,3 +164,48 @@ describe('client.workspaces', () => {
     );
   });
 });
+
+/**
+ * Creating into a workspace and listing one (platform OPL-5543): an
+ * account-wide key names the workspace with `workspaceId`, and the listing
+ * takes a workspace id or `'unassigned'`.
+ */
+describe('computers in a workspace', () => {
+  it('sends workspace_id on create, launch and the listing', async () => {
+    const { rec, client } = sdk();
+    await client.computers.create({ template: 'base', workspaceId: WORKSPACE.id });
+    expect(rec.last().body).toMatchObject({ template: 'base', workspace_id: WORKSPACE.id });
+
+    rec.calls.length = 0;
+    await client.computers.launch({ template: 'base', workspaceId: WORKSPACE.id }).catch(() => {});
+    const create = rec.calls.find((c) => c.method === 'POST' && c.path === '/computers');
+    expect(create?.body).toMatchObject({ workspace_id: WORKSPACE.id });
+
+    await client.computers.list({ workspaceId: WORKSPACE.id });
+    expect(rec.last().query).toEqual({ workspace_id: WORKSPACE.id });
+    await client.computers.listWithStatus({ workspaceId: 'unassigned', state: 'live' });
+    expect(rec.last().query).toEqual({ workspace_id: 'unassigned', state: 'live' });
+  });
+
+  it('sends neither without one', async () => {
+    const { rec, client } = sdk();
+    await client.computers.create({ template: 'base' });
+    expect(rec.last().body).not.toHaveProperty('workspace_id');
+    await client.computers.list();
+    expect(rec.last().query).toEqual({});
+  });
+
+  it.each(['', ' wsp-0123456789ab', 7])(
+    'refuses a workspace id the platform would refuse (%j), sending nothing',
+    async (bad) => {
+      const { rec, client } = sdk();
+      await expect(
+        client.computers.create({ template: 'base', workspaceId: bad as string }),
+      ).rejects.toBeInstanceOf(ValidationError);
+      await expect(client.computers.list({ workspaceId: bad as string })).rejects.toBeInstanceOf(
+        ValidationError,
+      );
+      expect(rec.calls).toEqual([]);
+    },
+  );
+});

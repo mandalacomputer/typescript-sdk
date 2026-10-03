@@ -163,6 +163,10 @@ export const COMMANDS: readonly Command[] = [
       flag('state', 'Computer lifecycle state', {
         choices: ['live', 'unreachable', 'deleting', 'deleted', 'lost'],
       }),
+      flag(
+        'workspace',
+        "Only this workspace ID's computers, or `unassigned` for those in none (default: the saved profile's workspace from workspaces use, else all the key can see)",
+      ),
     ],
   ),
   command(
@@ -181,6 +185,10 @@ export const COMMANDS: readonly Command[] = [
       num('disk-gb', 'Disk in GiB'),
       flag('resolution', 'WIDTHxHEIGHT or WIDTHxHEIGHTxDEPTH'),
       bool('no-start', 'Create without starting'),
+      flag(
+        'workspace',
+        "Create it in this workspace ID (default: the saved profile's workspace from workspaces use, else the key's own scope); --secret and --secret-file names are then looked up in that workspace first, then account-wide",
+      ),
       ...bindingFlags,
       flag(
         'browser-proxy',
@@ -631,13 +639,13 @@ export const COMMANDS: readonly Command[] = [
   ),
   command(
     'workspaces use',
-    'Save a default workspace, by name or ID, in the saved profile for secrets and api-keys create (an explicit --workspace still wins); --clear goes back to account-wide. Never changes the key or credentials.json',
+    'Save a default workspace, by name or ID, in the saved profile for secrets, api-keys create, computers create and computers list (an explicit --workspace still wins); --clear goes back to account-wide. Never changes the key or credentials.json',
     ['workspace?'],
     [bool('clear', "Remove the profile's default workspace")],
   ),
   command(
     'workspaces current',
-    "Show the workspace secrets and api-keys create use, and why: the key's own workspace, the profile's default, or none (account-wide); needs no network",
+    "Show the workspace secrets, api-keys create, computers create and computers list use, and why: the key's own workspace, the profile's default, or none (account-wide); needs no network",
   ),
   command(
     'files list',

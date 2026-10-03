@@ -11,6 +11,21 @@ This is the summary you read to decide whether to upgrade.
 
 ### Added
 
+- **Create a computer in a workspace, and list one workspace's computers, with
+  an account-wide key.** `computers.create()`, `launch()` and `ephemeral()`
+  take `workspaceId`, which also names the create's secrets from that
+  workspace's scope; `computers.list()` and `listWithStatus()` take
+  `workspaceId`, a workspace id or `'unassigned'` for the computers in none.
+  The CLI's `computers create` and `computers list` take `--workspace`, and,
+  without it, use the profile's default from `workspaces use` as `secrets` and
+  `api-keys create` do; there, a `--secret` or `--secret-file` name is looked
+  up in that workspace's own secrets first and then account-wide, so a name
+  both hold binds the workspace's, and a name in either scope that is another
+  secret's id in either is refused as `ambiguous_secret`. A workspace the key
+  cannot reach is a `NotFoundError`.
+  Needs a platform that accepts `workspace_id` on these two routes; an older
+  one creates in no workspace and lists everything.
+
 - **`SshKey.reach` says whether this account accepts a listed key**:
   `'everywhere'` (added from the dashboard), `'this_account'` or
   `'another_account'` (added through an API key or connected app on that

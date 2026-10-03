@@ -2702,6 +2702,26 @@ The filter is the control plane's, not a host's: it is read where the record is,
 and never forwarded. A word outside the five is refused here rather than at the
 platform's 400.
 
+### Computers in a workspace
+
+An account-wide key can create a computer in one of the account's workspaces,
+and list one workspace's computers, without a key confined to it:
+
+```ts
+const c = await client.computers.create({ template: 'base', workspaceId: 'wsp-0123456789ab' });
+const ci = await client.computers.list({ workspaceId: 'wsp-0123456789ab' });
+const loose = await client.computers.list({ workspaceId: 'unassigned' }); // in no workspace
+```
+
+`launch()` and `ephemeral()` take `workspaceId` too. A create in a workspace
+names its `secrets` (and an egress proxy's `credentialsSecretId`) from that
+workspace's scope: its own secrets and the account-wide ones. Without
+`workspaceId` nothing changes: a key confined to a workspace creates and lists
+in it, and an account-wide key creates in none and lists everything. A
+workspace the key cannot reach (another account's, one that does not exist, or
+any but its own for a confined key) is a `NotFoundError`, and so is
+`'unassigned'` from a confined key. The listing filter combines with `state`.
+
 ### Optional retries for reads
 
 Retries are off by default. Opt in when constructing the client:
@@ -3160,10 +3180,15 @@ mandala workspaces use --clear       # back to account-wide
 
 `workspaces use` saves a default workspace for the saved profile in use
 (`--profile`, `MANDALA_PROFILE`, else the default). `secrets list`, `set` and
-`rm`, and `api-keys create`, then use it whenever `--workspace` is not given,
-and say so in one stderr line; an explicit `--workspace` always wins, and
+`rm`, `api-keys create`, `computers create` and `computers list` then use it
+whenever `--workspace` is not given, and say so in one stderr line; an
+explicit `--workspace` always wins, and
 `workspaces use --clear` is the way back to account-wide (there is no
-per-command override). The workspace is resolved through the API, as `get`
+per-command override). A `computers create` in a workspace looks up each
+`--secret` and `--secret-file` name in that workspace's own secrets first and
+then in the account-wide ones, so a name both hold binds the workspace's; a
+name in either that is another secret's id in either is refused as
+ambiguous. The workspace is resolved through the API, as `get`
 resolves it; no key is minted, and the profile's key and scope are unchanged.
 
 The default lives in `~/.mandala/defaults.json` (mode 0600, written under its
@@ -3172,9 +3197,10 @@ profile and by the account the profile was logged in to: after a login to
 another account it is ignored, and `workspaces current` says so.
 `credentials.json` is never changed, so an older CLI or SDK reading it is
 unaffected. A `defaults.json` that cannot be read (not valid JSON, another
-version, or readable by others) is ignored with a note by `secrets list`, which
-only reads. `secrets set`, `secrets rm` and `api-keys create` refuse instead,
-sending nothing, rather than act account-wide: pass `--workspace`, or fix or
+version, or readable by others) is ignored with a note by `secrets list` and
+`computers list`, which only read. `secrets set`, `secrets rm`, `api-keys
+create` and `computers create` refuse instead, sending nothing, rather than act
+account-wide: pass `--workspace`, or fix or
 delete the file. It is never overwritten: `workspaces use` asks you to delete
 or fix it. `logout` removes the profile's default as well.
 
@@ -3262,6 +3288,8 @@ Listing filters and webhook filters that say `--computer` take IDs.
 mandala computers list --json
 mandala computers create --name workbench --template base --cpu 2 --ram-mb 4096 --disk-gb 40
 mandala computers create --name agent --secret OPENAI_API_KEY --secret-file GH_TOKEN --path gh
+mandala computers create --name ci-runner --workspace wsp-0123456789ab   # into a workspace
+mandala computers list --workspace unassigned --json                    # or a workspace id
 mandala computers wait workbench --until guest --timeout-ms 180000 --poll-ms 2000
 mandala computers get workbench
 mandala computers screenshot workbench -o screen.png --fresh

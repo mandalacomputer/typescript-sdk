@@ -29,7 +29,15 @@ import {
   workspaceDefault,
 } from '../src/defaults.js';
 import { Client } from '../src/index.js';
-import { anyRoute, BASE, type Responder, recorder, WORKSPACE } from './harness.js';
+import {
+  anyRoute,
+  BASE,
+  type Responder,
+  recorder,
+  SECRET,
+  SECRET_LIST,
+  WORKSPACE,
+} from './harness.js';
 
 const OTHER = { id: 'wsp-ba9876543210', name: 'research', created_at: WORKSPACE.created_at };
 const ACCOUNT_WIDE: CredentialProfile = {
@@ -71,8 +79,8 @@ const credentialsPath = () => join(home, '.mandala', 'credentials.json');
 const defaultsPath = () => join(home, '.mandala', 'defaults.json');
 
 /** The CLI with a saved profile in use: no MANDALA_API_KEY unless a test sets one. */
-function cli(environment: NodeJS.ProcessEnv = {}, input?: string) {
-  const rec = recorder(respond);
+function cli(environment: NodeJS.ProcessEnv = {}, input?: string, responder = respond) {
+  const rec = recorder(responder);
   const stdout: Buffer[] = [];
   const stderr: Buffer[] = [];
   const io: Partial<CliIO> = {
@@ -124,7 +132,7 @@ describe('workspaces use', () => {
     const r = await h.run(['workspaces', 'use', OTHER.id]);
     expect(r.code).toBe(0);
     expect(r.out).toBe(
-      `Profile default now uses workspace research (${OTHER.id}) by default for secrets and api-keys create.\n`,
+      `Profile default now uses workspace research (${OTHER.id}) by default for secrets, api-keys create, computers create and computers list.\n`,
     );
     // Resolved through the API; no key minted.
     expect(h.rec.routes()).toEqual([
@@ -316,6 +324,221 @@ describe('the default applied', () => {
     expect(h.rec.last().body).toEqual({});
   });
 
+  it('scopes computers create and list (platform OPL-5543), unless --workspace or --clear', async () => {
+    await saveCredentials(ACCOUNT_WIDE);
+    const h = cli();
+    await h.run(['workspaces', 'use', OTHER.id]);
+    h.rec.calls.length = 0;
+    const createSent = () =>
+      h.rec.calls.filter((c) => c.method === 'POST' && c.path === '/computers');
+
+    const listed = await h.run(['computers', 'list']);
+    expect(listed.code).toBe(0);
+    expect(h.rec.last().query).toEqual({ workspace_id: OTHER.id });
+    expect(listed.err).toContain('(workspace research from `workspaces use`');
+
+    const made = await h.run(['computers', 'create', '--template', 'base', '--json']);
+    expect(made.code).toBe(0);
+    expect(createSent().map((c) => sentWorkspace(c))).toEqual([OTHER.id]);
+
+    // An explicit --workspace always wins, and the listing takes `unassigned`.
+    h.rec.calls.length = 0;
+    await h.run([
+      'computers',
+      'create',
+      '--template',
+      'base',
+      '--workspace',
+      WORKSPACE.id,
+      '--json',
+    ]);
+    expect(createSent().map((c) => sentWorkspace(c))).toEqual([WORKSPACE.id]);
+    await h.run(['computers', 'list', '--workspace', 'unassigned', '--json']);
+    expect(h.rec.last().query).toEqual({ workspace_id: 'unassigned' });
+
+    // --clear is the way back to the key's own scope.
+    await h.run(['workspaces', 'use', '--clear']);
+    h.rec.calls.length = 0;
+    await h.run(['computers', 'list', '--json']);
+    expect(h.rec.last().query).toEqual({});
+    await h.run(['computers', 'create', '--template', 'base', '--json']);
+    expect(createSent().map((c) => sentWorkspace(c))).toEqual([undefined]);
+  });
+
+  describe("names a create's --secret in the workspace the computer is created in", () => {
+    const SHARED_ID = 'csec-00000000000000aa';
+    const OWN_ID = 'csec-00000000000000bb';
+    const row = (id: string, name: string, workspace_id: string | null) => ({
+      ...SECRET,
+      id,
+      name,
+      workspace_id,
+    });
+    // The account-wide scope holds API_KEY and SHARED_ONLY; OTHER holds its
+    // own API_KEY and OWN_ONLY. A workspace's listing never shows the
+    // account-wide secrets, nor the default listing a workspace's.
+    const scoped: Responder = (call) => {
+      if (call.method === 'GET' && call.path === '/secrets') {
+        const ws = call.query.workspace_id;
+        const secrets =
+          ws === undefined
+            ? [row(SHARED_ID, 'API_KEY', null), row('csec-00000000000000ac', 'SHARED_ONLY', null)]
+            : ws === OTHER.id
+              ? [
+                  row(OWN_ID, 'API_KEY', OTHER.id),
+                  row('csec-00000000000000bc', 'OWN_ONLY', OTHER.id),
+                ]
+              : [];
+        return new Response(JSON.stringify({ ...SECRET_LIST, secrets }), {
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      return respond(call);
+    };
+    const bound = (h: ReturnType<typeof cli>) =>
+      h.rec.calls
+        .filter((c) => c.method === 'POST' && c.path === '/computers')
+        .map((c) => (c.body as { secrets?: unknown }).secrets);
+    const create = (...more: string[]) => [
+      'computers',
+      'create',
+      '--template',
+      'base',
+      '--secret',
+      'API_KEY',
+      ...more,
+      '--json',
+    ];
+
+    it.each([
+      [
+        'the workspaces use default',
+        async () => {
+          await saveWorkspaceDefault('default', {
+            account_id: 'acc-000000000001',
+            workspace: OTHER,
+          });
+          return [] as string[];
+        },
+      ],
+      ['--workspace', async () => ['--workspace', OTHER.id]],
+    ])(
+      "through %s: the workspace's own secret, never the account-wide one by that name",
+      async (_, given) => {
+        await saveCredentials(ACCOUNT_WIDE);
+        const more = await given();
+        const h = cli({}, undefined, scoped);
+        const r = await h.run(create(...more));
+        expect(r.code).toBe(0);
+        expect(bound(h)).toEqual([[{ secret_id: OWN_ID, env: 'API_KEY' }]]);
+        // A name only the workspace holds is found; one only the account-wide
+        // scope holds still is, as the computer may be bound to either.
+        h.rec.calls.length = 0;
+        const both = await h.run([
+          'computers',
+          'create',
+          '--template',
+          'base',
+          '--secret',
+          'OWN_ONLY',
+          '--secret',
+          'SHARED_ONLY',
+          ...more,
+          '--json',
+        ]);
+        expect(both.code).toBe(0);
+        expect(bound(h)).toEqual([
+          [
+            { secret_id: 'csec-00000000000000bc', env: 'OWN_ONLY' },
+            { secret_id: 'csec-00000000000000ac', env: 'SHARED_ONLY' },
+          ],
+        ]);
+      },
+    );
+
+    // A name in one scope that spells a secret's id in the other is as
+    // ambiguous as the same collision within one scope, and refused the same
+    // way: the workspace's name must not quietly win over an id the caller
+    // typed, nor an account-wide name over a workspace secret's id.
+    describe.each([
+      ['--secret', ['--as', 'TOK']],
+      ['--secret-file', ['--path', 'tok']],
+    ])('%s naming a secret by id in one scope and by name in the other', (flag, target) => {
+      const colliding =
+        (workspace: ReadonlyArray<[string, string]>, shared: ReadonlyArray<[string, string]>) =>
+        (call: Parameters<Responder>[0]) => {
+          if (call.method === 'GET' && call.path === '/secrets') {
+            const ws = call.query.workspace_id;
+            const secrets =
+              ws === undefined
+                ? shared.map(([id, name]) => row(id, name, null))
+                : ws === OTHER.id
+                  ? workspace.map(([id, name]) => row(id, name, OTHER.id))
+                  : [];
+            return new Response(JSON.stringify({ ...SECRET_LIST, secrets }), {
+              headers: { 'content-type': 'application/json' },
+            });
+          }
+          return respond(call);
+        };
+      const refused = async (responder: Responder) => {
+        await saveCredentials(ACCOUNT_WIDE);
+        const h = cli({}, undefined, responder);
+        const r = await h.run([
+          'computers',
+          'create',
+          '--template',
+          'base',
+          flag,
+          SHARED_ID,
+          ...target,
+          '--workspace',
+          OTHER.id,
+          '--json',
+        ]);
+        expect(r.code).not.toBe(0);
+        expect(r.out + r.err).toContain('ambiguous_secret');
+        expect(r.out + r.err).toContain('rename one of them first');
+        expect(bound(h)).toEqual([]);
+      };
+
+      it("a workspace secret named like an account-wide secret's id", () =>
+        refused(colliding([[OWN_ID, SHARED_ID]], [[SHARED_ID, 'API_KEY']])));
+
+      it("an account-wide secret named like a workspace secret's id", () =>
+        refused(colliding([[SHARED_ID, 'API_KEY']], [[OWN_ID, SHARED_ID]])));
+    });
+
+    it('in no workspace, the account-wide scope alone, as before', async () => {
+      await saveCredentials(ACCOUNT_WIDE);
+      const h = cli({}, undefined, scoped);
+      const r = await h.run(create());
+      expect(r.code).toBe(0);
+      expect(bound(h)).toEqual([[{ secret_id: SHARED_ID, env: 'API_KEY' }]]);
+      const own = await h.run([
+        'computers',
+        'create',
+        '--template',
+        'base',
+        '--secret',
+        'OWN_ONLY',
+        '--json',
+      ]);
+      expect(own.code).not.toBe(0);
+      expect(own.out + own.err).toContain('no secret by that name or id in this scope');
+    });
+  });
+
+  it('is not applied to computers create or list for a profile whose key is confined', async () => {
+    await saveCredentials(CONFINED);
+    await saveWorkspaceDefault('default', { account_id: 'acc-000000000001', workspace: OTHER });
+    const h = cli();
+    await h.run(['computers', 'list', '--json']);
+    expect(h.rec.last().query).toEqual({});
+    await h.run(['computers', 'create', '--template', 'base', '--json']);
+    expect(h.rec.last().body).not.toHaveProperty('workspace_id');
+  });
+
   it('sends the set in the default workspace', async () => {
     await saveCredentials(ACCOUNT_WIDE);
     await saveWorkspaceDefault('default', { account_id: 'acc-000000000001', workspace: OTHER });
@@ -413,6 +636,7 @@ describe('an unreadable defaults.json and the commands that write', () => {
     ['secrets set', ['secrets', 'set', 'NEW_SECRET']],
     ['secrets rm', ['secrets', 'rm', 'OPENAI_API_KEY']],
     ['api-keys create', ['api-keys', 'create', '--name', 'ci']],
+    ['computers create', ['computers', 'create', '--template', 'base']],
   ];
   const cases = broken.flatMap(([label, make, why]) =>
     writers.flatMap(([command, args]) =>
@@ -452,6 +676,17 @@ describe('an unreadable defaults.json and the commands that write', () => {
       expect(r.err).not.toContain('defaults.json');
     },
   );
+
+  it('computers list reads past it with a note, as secrets list does', async () => {
+    await saveCredentials(ACCOUNT_WIDE);
+    fs.mkdirSync(join(home, '.mandala'), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(defaultsPath(), '{"version":1,', { mode: 0o600 });
+    const h = cli();
+    const r = await h.run(['computers', 'list']);
+    expect(r.code).toBe(0);
+    expect(h.rec.last().query).toEqual({});
+    expect(r.err).toContain('defaults.json');
+  });
 
   it('does not refuse when the key is confined or MANDALA_API_KEY supplies it', async () => {
     fs.mkdirSync(join(home, '.mandala'), { recursive: true, mode: 0o700 });

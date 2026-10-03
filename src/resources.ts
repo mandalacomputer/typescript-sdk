@@ -121,7 +121,16 @@ export type ListOptions = { allowPartial?: boolean; signal?: AbortSignal };
  * `snapshots.list({ state: 'deleted' })` compile and then narrow nothing —
  * which is the silent no-op this SDK refuses everywhere else it can.
  */
-export type ComputerListOptions = ListOptions & { state?: P.ComputerState };
+export type ComputerListOptions = ListOptions & {
+  state?: P.ComputerState;
+  /**
+   * Only the computers in this workspace (an id from
+   * `client.workspaces.list()`), or with `'unassigned'` only the computers in
+   * no workspace. A workspace the key cannot reach — and `'unassigned'` from a
+   * key confined to a workspace — is a `NotFoundError`.
+   */
+  workspaceId?: string;
+};
 
 /** What every method here accepts beyond its own arguments. */
 export type CallOptions = { signal?: AbortSignal };
@@ -223,6 +232,9 @@ export class Computers {
    * `state` narrows the listing to one point of the lifecycle — and is the only
    * way to see a `deleted` or `lost` computer at all, since no host holds one to
    * list. See {@link P.ComputerState}.
+   *
+   * `workspaceId` narrows it to one workspace, or with `'unassigned'` to the
+   * computers in none; it combines with `state`.
    */
   async list(opts: ComputerListOptions = {}): Promise<Computer[]> {
     return (await this.listWithStatus(opts)).items;
@@ -246,6 +258,7 @@ export class Computers {
         // Refused here rather than at the platform's 400, for the reason
         // {@link P.computerState} gives.
         state: P.computerState(opts.state),
+        workspace_id: P.computerWorkspace(opts.workspaceId),
       },
       signal: opts.signal,
     });
@@ -280,6 +293,9 @@ export class Computers {
    * `template` and add its `template_transfer` as `templateTransfer`. The token
    * is not an idempotency key: stop after success and do not automatically
    * replay after an ambiguous response. This method never retries a create.
+   *
+   * `workspaceId` creates it in that workspace rather than the key's own, and
+   * names its secrets from there; see {@link P.CreateArgs.workspaceId}.
    *
    * `resolution` is `"WIDTHxHEIGHT"` or `"WIDTHxHEIGHTxDEPTH"` and defaults to
    * `"1280x800x24"`. It is a create-time choice and **only** a create-time
