@@ -3107,13 +3107,24 @@ export function toWebhookDelivery(d: Record<string, unknown>): WebhookDelivery {
 // --- SSH ------------------------------------------------------------------
 
 /**
+ * Where an SSH key can connect, from the account the credential acts on
+ * (platform OPL-5617). `everywhere`: added from the dashboard, accepted on every
+ * account where you are an owner or member. `this_account`: added through an
+ * API key or connected app on this account, accepted here only.
+ * `another_account`: added through an API key or connected app on a different
+ * account, and refused here; which account is never said. Open, so a value a
+ * newer platform adds reads as itself rather than failing the listing.
+ */
+export type SshKeyReach = 'everywhere' | 'this_account' | 'another_account' | (string & {});
+
+/**
  * One OpenSSH public key registered to the person the credential belongs to.
  *
  * A key is a person's, and is listed whichever account the credential acts on.
  * One added from the dashboard is accepted by every computer on every account
  * that person can reach, once SSH is switched on there; one added through an
  * API key or a connected app only by that credential's account, until the
- * credential is revoked.
+ * credential is revoked. {@link SshKey.reach} says which, from here.
  */
 export type SshKey = {
   /** `sshk-` and sixteen hex characters. */
@@ -3129,6 +3140,12 @@ export type SshKey = {
   createdAt: string;
   /** When the key last opened a connection to a computer; `null` until it has. */
   lastUsedAt: string | null;
+  /**
+   * Whether this account's computers accept the key: see {@link SshKeyReach}.
+   * A key whose reach is `another_account` is refused here even though it is
+   * listed. `null` from a platform that does not report it.
+   */
+  reach: SshKeyReach | null;
   raw: Record<string, unknown>;
 };
 
@@ -3141,6 +3158,7 @@ export function toSshKey(d: Record<string, unknown>): SshKey {
     keyType: str(d.key_type),
     createdAt: str(d.created_at),
     lastUsedAt: stamp(d.last_used_at) ?? null,
+    reach: nullableText(d.reach, "an SSH key's reach"),
     raw: { ...d },
   };
 }

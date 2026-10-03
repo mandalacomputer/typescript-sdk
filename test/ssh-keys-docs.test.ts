@@ -22,6 +22,11 @@ describe('SshKeys.add documentation', () => {
     const doc = addDoc();
     expect(doc).toMatch(/not that this account accepts it/);
     expect(doc).toMatch(/bound to another account/);
-    expect(doc).toMatch(/\{@link remove\} it and add it again/);
+    expect(doc).toMatch(/\{@link SshKey\.reach\}/);
+    // This client cannot remove a key bound elsewhere (platform OPL-5617), so
+    // the advice is the dashboard or a separate key, never `remove` and re-add.
+    expect(doc).not.toMatch(/\{@link remove\} it and add it again/);
+    expect(doc).toMatch(/add it again from the dashboard/);
+    expect(doc).toMatch(/separate key/);
   });
 });

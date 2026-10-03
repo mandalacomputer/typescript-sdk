@@ -2168,9 +2168,11 @@ export class Webhooks {
  * computers of that account only, on each where SSH is switched on
  * ({@link Computer.setSshAccess}), and it is removed when the credential is
  * revoked. A key added from the dashboard instead opens every computer the
- * person can reach, on every account where they are an owner or member. A key
- * can belong to one person only, so registering one somebody else holds is a
- * `ConflictError`, as is a person's key past the per-person limit.
+ * person can reach, on every account where they are an owner or member. Each
+ * listed key's {@link SshKey.reach} says which of those it is, from the account
+ * this credential acts on. A key is registered once across the platform, so
+ * registering one somebody else holds, or one you already hold on any account,
+ * is a `ConflictError`, as is a person's key past the per-person limit.
  */
 export class SshKeys {
   #t: Transport;
@@ -2200,8 +2202,11 @@ export class SshKeys {
    * matching {@link SshKey.fingerprint} in {@link list} proves only that the
    * key is registered to you, not that this account accepts it: {@link list}
    * shows every key you hold, including one bound to another account's
-   * credential, which this account's computers refuse. To use such a key here,
-   * {@link remove} it and add it again with this client, or add a distinct key.
+   * credential, which this account's computers refuse. {@link SshKey.reach}
+   * tells them apart: `another_account` is a key this account refuses. Adding
+   * it again is a `ConflictError`, and this client cannot remove it, so to use
+   * that key on every account remove it and add it again from the dashboard;
+   * otherwise add a separate key here.
    */
   async add(args: P.SshKeyAddArgs, opts: CallOptions = {}): Promise<SshKey> {
     const data = await this.#t.json('POST', P.SSH_KEYS, {
@@ -2212,7 +2217,12 @@ export class SshKeys {
     return toSshKey(data);
   }
 
-  /** Remove one key. Computers stop accepting it once they receive the new list. */
+  /**
+   * Remove one key. Computers stop accepting it once they receive the new list.
+   * A key whose {@link SshKey.reach} is `another_account` cannot be removed
+   * with an API key or connected app: it is a `NotFoundError`, as for a key
+   * that does not exist. Remove it from the dashboard.
+   */
   async remove(keyId: string, opts: CallOptions = {}): Promise<void> {
     await this.#t.json('DELETE', P.sshKey(keyId), { signal: opts.signal });
   }

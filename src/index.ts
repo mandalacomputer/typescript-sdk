@@ -229,6 +229,7 @@ export type {
   SnapshotPurge,
   SshAccess,
   SshKey,
+  SshKeyReach,
   Template,
   TemplateBuild,
   TemplateCheck,
