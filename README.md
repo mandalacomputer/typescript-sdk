@@ -1342,7 +1342,10 @@ about fourteen hours, then the delivery is `exhausted` and visible in `deliverie
 silently. No ordering is promised: order by `seq` per computer if you care. An
 endpoint that runs out of attempts and has accepted nothing for a day is
 disabled with `disabledReason: 'failing'`; `update(id, { enabled: true })`
-starts it fresh.
+starts it fresh. When the account moves to a plan without webhooks, its
+subscriptions are disabled with `disabledReason: 'plan'` and `enabled: true` is
+refused (402); choosing a plan with webhooks enables them again, oldest first,
+as many as the plan allows.
 
 ```ts
 const d = await client.webhooks.test(hook.id);            // one synthetic delivery, 202

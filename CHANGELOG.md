@@ -134,6 +134,14 @@ This is the summary you read to decide whether to upgrade.
   to `pollMs`, which stays the ceiling and keeps its default. A poll that failed
   still waits `pollMs`, or the `Retry-After` the platform sent.
 
+- **`Webhook.disabledReason` documents `plan`.** When the account moves to a
+  plan without webhooks the platform disables its subscriptions with
+  `disabledReason: 'plan'`, refuses `enabled: true` with a 402 meanwhile, and
+  enables them again, oldest first up to the plan's allowance, when a plan with
+  webhooks is chosen. `enabled` and `disabledReason` used to name only
+  `customer` and `failing`. The field stays a plain string. Documentation only;
+  no API change.
+
 ## [0.9.0] — 2026-09-30
 
 ### Changed
