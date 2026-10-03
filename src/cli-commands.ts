@@ -343,12 +343,13 @@ function readDefaultsOrRefuse() {
 }
 
 /**
- * `secrets` and `api-keys create` without `--workspace`: the saved profile's
- * default from `workspaces use`, when the key is account-wide and the default
- * was saved for the account the profile is logged in to now. Otherwise
- * undefined, and the command goes on as it always has. A command that writes
- * (`mutating`) is refused, not widened, when defaults.json cannot be read;
- * only `secrets list` reads past it.
+ * `secrets`, `api-keys create`, `computers create` and `computers list`
+ * without `--workspace`: the saved profile's default from `workspaces use`,
+ * when the key is account-wide and the default was saved for the account the
+ * profile is logged in to now. Otherwise undefined, and the command goes on as
+ * it always has. A command that writes (`mutating`) is refused, not widened,
+ * when defaults.json cannot be read; `secrets list` and `computers list` read
+ * past it.
  */
 function defaultWorkspace(
   profile: string | undefined,
@@ -406,7 +407,7 @@ async function workspacesUse(
     if (output.json) return output.result({ profile: saved.name, workspace: null, removed });
     line(
       removed
-        ? `Profile ${saved.name} no longer has a default workspace; secrets and api-keys create use the key's own scope.`
+        ? `Profile ${saved.name} no longer has a default workspace; secrets, api-keys create, computers create and computers list use the key's own scope.`
         : `Profile ${saved.name} has no default workspace; nothing to clear.`,
     );
     return 0;
@@ -437,7 +438,7 @@ async function workspacesUse(
   );
   if (output.json) return output.result({ profile: saved.name, workspace, source: 'profile' });
   line(
-    `Profile ${saved.name} now uses ${workspaceText(workspace)} by default for secrets and api-keys create.`,
+    `Profile ${saved.name} now uses ${workspaceText(workspace)} by default for secrets, api-keys create, computers create and computers list.`,
   );
   return 0;
 }
@@ -1269,7 +1270,8 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
     const computer = () => resolveComputer(client, target, signal);
     // An explicit --workspace always wins; without one, the profile's default.
     // A command that writes refuses an unreadable defaults.json rather than
-    // going account-wide; only `secrets list` reads past it.
+    // going account-wide; `secrets list` and `computers list` read past it.
+    // Called only on the paths that take one, since it may print a note.
     const scopeFlag = (mutating = true) =>
       s('workspace') ?? defaultWorkspace(f.profile as string | undefined, io, output, mutating);
     switch (path) {
@@ -1400,6 +1402,8 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
         const listing = await client.computers.listWithStatus({
           allowPartial: b('allow-partial'),
           state: s('state') as P.ComputerState | undefined,
+          // An id, or `unassigned` for the computers in no workspace.
+          workspaceId: scopeFlag(false),
           signal,
         });
         return output.result({
@@ -1408,11 +1412,14 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
         });
       }
       case 'computers create': {
+        // Before the secrets are looked up: an unreadable defaults.json refuses
+        // the create here, with nothing sent.
+        const workspaceId = scopeFlag();
         const secrets = await secretBindings(client, bindings, signal);
         let created: Computer;
         try {
           created = await client.computers.create(
-            secrets.length ? { ...create, secrets } : create,
+            { ...create, ...(secrets.length ? { secrets } : {}), workspaceId },
             keyed,
           );
         } catch (error) {

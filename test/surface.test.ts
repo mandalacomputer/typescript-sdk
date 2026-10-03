@@ -230,6 +230,9 @@ async function exerciseEverything(client: Client): Promise<void> {
   await client.computers.list();
   await client.computers.list({ allowPartial: true });
   await client.computers.listWithStatus({ allowPartial: true, state: 'live' });
+  // One workspace's computers, and the ones in none.
+  await client.computers.list({ workspaceId: 'wsp-0123456789ab' });
+  await client.computers.list({ workspaceId: 'unassigned' });
   await client.computers.get('vm-1');
 
   const c = await client.computers.create({ template: 'base' });
@@ -263,6 +266,8 @@ async function exerciseEverything(client: Client): Promise<void> {
       credentialsSecretId: 'csec-0123456789abcdef',
     },
   });
+  // Into a workspace, by an account-wide key.
+  await client.computers.create({ template: 'base', workspaceId: 'wsp-0123456789ab' });
   await client.computers.create({
     template: 'base',
     templateTransfer: 'prepare-token',

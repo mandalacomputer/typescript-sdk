@@ -238,7 +238,7 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
   ['GET sizes', []],
   ['GET account', []],
 
-  ['GET computers', ['query:allow_partial', 'query:state']],
+  ['GET computers', ['query:allow_partial', 'query:state', 'query:workspace_id']],
   [
     'POST computers',
     [
@@ -254,6 +254,7 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
       'body:secrets',
       'body:browser_proxy',
       'body:egress_proxy',
+      'body:workspace_id',
       // Every lifecycle call carries one (platform OPL-5127).
       'header:Idempotency-Key',
     ],

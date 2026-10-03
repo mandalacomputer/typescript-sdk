@@ -654,6 +654,17 @@ export type CreateArgs = {
    * credentials — answers `409` with reason `unsupported`.
    */
   egressProxy?: EgressProxyArgs;
+  /**
+   * The workspace to create the computer in — an id from
+   * `client.workspaces.list()`. Its {@link secrets} and an egress proxy's
+   * `credentialsSecretId` are then named from that workspace's scope: its own
+   * secrets and the account-wide ones. Omitted, the computer goes in the
+   * key's workspace, or in none for an account-wide key. A workspace the key
+   * cannot reach — another account's, one that does not exist, or any but its
+   * own for a key confined to a workspace — is a `NotFoundError`, and nothing
+   * is created.
+   */
+  workspaceId?: string;
 };
 
 /**
@@ -848,6 +859,7 @@ export function createBody(args: CreateArgs): Json {
     secrets,
     browserProxy,
     egressProxy,
+    workspaceId,
   } = args;
   // Defaulted after validation, not by destructuring: `start = true` fills in
   // only for `undefined`, so a `"false"` kept its own shape and went onto the
@@ -903,9 +915,32 @@ export function createBody(args: CreateArgs): Json {
           ? browserProxy
           : browserProxyBody(browserProxy),
       egress_proxy: egressProxy === undefined ? undefined : egressProxyBody(egressProxy),
+      workspace_id: workspaceIdArg(workspaceId, 'workspaceId'),
     }),
     start,
   };
+}
+
+/**
+ * A workspace id a create or a listing names, refused here when the platform
+ * would refuse it: not a string, empty, or with spaces around it. `undefined`
+ * stays undefined — the key's own scope.
+ */
+function workspaceIdArg(v: unknown, what: string): string | undefined {
+  if (v === undefined) return undefined;
+  const ws = requireString(v, what);
+  if (!ws.trim() || ws !== ws.trim()) {
+    throw new ValidationError(`${what} must be a workspace id, with no spaces around it`);
+  }
+  return ws;
+}
+
+/**
+ * The computer listing's workspace filter: a workspace id, or `'unassigned'`
+ * for the computers in no workspace.
+ */
+export function computerWorkspace(v: unknown): string | undefined {
+  return workspaceIdArg(v, 'workspaceId');
 }
 
 export type UpdateArgs = {

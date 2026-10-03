@@ -124,7 +124,7 @@ describe('workspaces use', () => {
     const r = await h.run(['workspaces', 'use', OTHER.id]);
     expect(r.code).toBe(0);
     expect(r.out).toBe(
-      `Profile default now uses workspace research (${OTHER.id}) by default for secrets and api-keys create.\n`,
+      `Profile default now uses workspace research (${OTHER.id}) by default for secrets, api-keys create, computers create and computers list.\n`,
     );
     // Resolved through the API; no key minted.
     expect(h.rec.routes()).toEqual([
@@ -316,6 +316,57 @@ describe('the default applied', () => {
     expect(h.rec.last().body).toEqual({});
   });
 
+  it('scopes computers create and list (platform OPL-5543), unless --workspace or --clear', async () => {
+    await saveCredentials(ACCOUNT_WIDE);
+    const h = cli();
+    await h.run(['workspaces', 'use', OTHER.id]);
+    h.rec.calls.length = 0;
+    const createSent = () =>
+      h.rec.calls.filter((c) => c.method === 'POST' && c.path === '/computers');
+
+    const listed = await h.run(['computers', 'list']);
+    expect(listed.code).toBe(0);
+    expect(h.rec.last().query).toEqual({ workspace_id: OTHER.id });
+    expect(listed.err).toContain('(workspace research from `workspaces use`');
+
+    const made = await h.run(['computers', 'create', '--template', 'base', '--json']);
+    expect(made.code).toBe(0);
+    expect(createSent().map((c) => sentWorkspace(c))).toEqual([OTHER.id]);
+
+    // An explicit --workspace always wins, and the listing takes `unassigned`.
+    h.rec.calls.length = 0;
+    await h.run([
+      'computers',
+      'create',
+      '--template',
+      'base',
+      '--workspace',
+      WORKSPACE.id,
+      '--json',
+    ]);
+    expect(createSent().map((c) => sentWorkspace(c))).toEqual([WORKSPACE.id]);
+    await h.run(['computers', 'list', '--workspace', 'unassigned', '--json']);
+    expect(h.rec.last().query).toEqual({ workspace_id: 'unassigned' });
+
+    // --clear is the way back to the key's own scope.
+    await h.run(['workspaces', 'use', '--clear']);
+    h.rec.calls.length = 0;
+    await h.run(['computers', 'list', '--json']);
+    expect(h.rec.last().query).toEqual({});
+    await h.run(['computers', 'create', '--template', 'base', '--json']);
+    expect(createSent().map((c) => sentWorkspace(c))).toEqual([undefined]);
+  });
+
+  it('is not applied to computers create or list for a profile whose key is confined', async () => {
+    await saveCredentials(CONFINED);
+    await saveWorkspaceDefault('default', { account_id: 'acc-000000000001', workspace: OTHER });
+    const h = cli();
+    await h.run(['computers', 'list', '--json']);
+    expect(h.rec.last().query).toEqual({});
+    await h.run(['computers', 'create', '--template', 'base', '--json']);
+    expect(h.rec.last().body).not.toHaveProperty('workspace_id');
+  });
+
   it('sends the set in the default workspace', async () => {
     await saveCredentials(ACCOUNT_WIDE);
     await saveWorkspaceDefault('default', { account_id: 'acc-000000000001', workspace: OTHER });
@@ -413,6 +464,7 @@ describe('an unreadable defaults.json and the commands that write', () => {
     ['secrets set', ['secrets', 'set', 'NEW_SECRET']],
     ['secrets rm', ['secrets', 'rm', 'OPENAI_API_KEY']],
     ['api-keys create', ['api-keys', 'create', '--name', 'ci']],
+    ['computers create', ['computers', 'create', '--template', 'base']],
   ];
   const cases = broken.flatMap(([label, make, why]) =>
     writers.flatMap(([command, args]) =>
@@ -452,6 +504,17 @@ describe('an unreadable defaults.json and the commands that write', () => {
       expect(r.err).not.toContain('defaults.json');
     },
   );
+
+  it('computers list reads past it with a note, as secrets list does', async () => {
+    await saveCredentials(ACCOUNT_WIDE);
+    fs.mkdirSync(join(home, '.mandala'), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(defaultsPath(), '{"version":1,', { mode: 0o600 });
+    const h = cli();
+    const r = await h.run(['computers', 'list']);
+    expect(r.code).toBe(0);
+    expect(h.rec.last().query).toEqual({});
+    expect(r.err).toContain('defaults.json');
+  });
 
   it('does not refuse when the key is confined or MANDALA_API_KEY supplies it', async () => {
     fs.mkdirSync(join(home, '.mandala'), { recursive: true, mode: 0o700 });
