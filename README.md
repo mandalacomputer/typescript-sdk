@@ -3107,19 +3107,22 @@ network access and never prompt for input; `logout` needs no network.
 
 | Command group | Available commands |
 | --- | --- |
-| `computers` | `list`, `create`, `get`, `start`, `stop`, `suspend`, `restart`, `delete`, `clone`, `rename`, `resize`, `browser-proxy set`, `browser-proxy clear`, `egress-proxy set`, `egress-proxy clear`, `view`, `screenshot`, `exec`, `wait` |
+| `computers` | `list`, `create`, `get`, `start`, `stop`, `suspend`, `restart`, `delete`, `clone`, `rename`, `resize`, `move`, `idle-suspend`, `browser-proxy set`, `browser-proxy clear`, `egress-proxy set`, `egress-proxy clear`, `secrets get`, `secrets set`, `view`, `screenshot`, `exec`, `exec-poll`, `exec-kill`, `wait` |
+| `sizes` | `list` |
 | `templates` | `list`, `get`, `validate`, `publish`, `build`, `watch`, `retire`, `schema` |
 | `builds` | `list`, `get`, `progress` |
 | `snapshots` | `list`, `create`, `restore`, `clone`, `delete`, `holdings`, `schedule get`, `schedule set`, `schedule clear`, `retention` |
 | `webhooks` | `list`, `create`, `get`, `update`, `delete`, `rotate`, `test`, `deliveries` |
-| `secrets` | `list`, `set`, `rm` |
+| `secrets` | `list`, `set`, `get`, `rm` |
 | `api-keys` | `list`, `create`, `revoke` |
 | `operations` | `list`, `get`, `wait` |
+| `moves` | `list` |
 | `workspaces` | `list`, `get`, `members`, `create`, `rename`, `rm`, `use`, `current` |
 | `files` | `list`, `upload`, `download` |
+| `artifacts` | `get`, `export`, `download`, `rm` |
 | `agent` | `run` |
 | `ssh-key` | `list`, `add`, `rm` |
-| Top-level commands | `login`, `logout`, `whoami`, `version`, `account`, `usage`, `ssh`, `ssh-access`, `ssh-config`, `terminal`, `scp`, `manifest`, `completion` |
+| Top-level commands | `login`, `logout`, `whoami`, `version`, `account`, `usage`, `billing`, `ssh`, `ssh-access`, `ssh-config`, `terminal`, `scp`, `manifest`, `completion` |
 
 Command-specific flags follow the command name. Flags with values accept
 `--name value` or `--name=value`; boolean flags take no value. Repeat only flags
