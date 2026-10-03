@@ -44,6 +44,21 @@ This is the summary you read to decide whether to upgrade.
 
 ### Fixed
 
+- **An event stream refused for the open-stream cap now ends instead of
+  reconnecting forever.** The platform refuses a stream past 8 open on one
+  computer or 128 per account on one server with a 409 and no reason, which a
+  websocket sees as an ordinary failed connection on a running computer. With
+  the default `maxRetries` (never give up) `events()` reconnected for as long as
+  the process lived and `waitFor()` ended only at its timeout, never naming the
+  cap. After five refused upgrades in a row on a computer that reads `running`,
+  the stream now ends with a settled `ConnectionError` saying to close another
+  stream on that computer. A connection that opens, or a re-read that does not
+  say `running`, starts the count again, so a briefly unreachable server still
+  recovers. The run of five applies whatever `maxRetries` says. `maxRetries: N`
+  allows N+1 attempts, so a `maxRetries` of 1 to 3 gives up before the fifth
+  refusal, unsettled, and one of 4 or more (or 0) settles at the fifth refusal
+  in a row.
+
 - **`mandala terminal` exits 255, not 0, when the session ends without the
   shell's exit status** — a dropped link, a session another connection took,
   or a refusal the server sent after the upgrade, whose message is now printed.

@@ -1215,6 +1215,17 @@ same 1006 close, so the SDK reads the computer afterwards and says which it was.
 A nomination the host will not honour arrives the same silent way, which is why
 `watch` is checked before a socket is opened.
 
+One refusal cannot be read off the computer: a stream past 8 open on one
+computer, or 128 per account on one server, is refused with a 409 and no
+reason, and the computer still reads `running`. Waiting does not lift it until
+one of your own streams closes. A single such refusal looks like any dropped
+connection and is retried, so the SDK reports it after five in a row on a
+running computer: `events()` ends and `waitFor()` fails with a settled
+`ConnectionError` saying to close another stream on that computer (each
+`waitFor`/`events` call holds one). `maxRetries: N` allows N+1 attempts, so a
+`maxRetries` of 1 to 3 gives up before the fifth refusal, with the same sentence
+unsettled; 4 or more settles at the fifth.
+
 `waitFor('file.changed')` ends on a **change**, and not on the arming marker or
 a loss. Three shapes share that type and only one of them is a change, so a wait
 matched on the name alone came back with the arming on a fresh nomination and

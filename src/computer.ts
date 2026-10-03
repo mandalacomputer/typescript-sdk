@@ -53,6 +53,8 @@ import {
   type ComputerEvent,
   ComputerEvents,
   type EventStreamOptions,
+  RUNNING_REFUSALS_TO_SETTLE,
+  refusedWhileRunning,
   STREAM_FRAME_TYPES,
   settled,
   unarmedTrees,
@@ -3213,6 +3215,12 @@ export class Computer {
    * API that does NOT resume one for you — and on a stopped one. Neither
    * reaches a websocket client as a status, so what you get is this SDK reading
    * the computer afterwards and saying which it was.
+   *
+   * Refused the same silent way past 8 streams open on one computer or 128 per
+   * account on one server, and there the computer reads `running`. That is
+   * retried, since one such refusal looks like any dropped connection, and
+   * after five in a row the stream ends with an error that says so: close
+   * another stream on the computer (each `waitFor`/`events` call holds one).
    */
   events(opts: EventStreamOptions = {}): ComputerEvents {
     return new ComputerEvents(
@@ -3422,9 +3430,14 @@ export class Computer {
    * A refused websocket tells its client nothing: a 409, a 401 and a TCP reset
    * all arrive as an error with an empty message and a 1006 close, and the
    * `WebSocket` API exposes neither the status nor the body. So the state is
-   * asked for directly, and the two refusals the reference names are named back
-   * — with `settled` on them, because neither a suspended computer nor a
-   * stopped one becomes reachable by being asked again.
+   * asked for directly, and two of the three refusals the reference names are
+   * named back — with `settled` on them, because neither a suspended computer
+   * nor a stopped one becomes reachable by being asked again.
+   *
+   * The third is the cap on open streams — 8 on one computer, 128 per account
+   * on one server — and the computer reads `running` through it. That answer
+   * is marked {@link refusedWhileRunning} rather than settled, and the stream
+   * settles it after {@link RUNNING_REFUSALS_TO_SETTLE} in a row.
    */
   async #eventsRefusal(signal: AbortSignal | undefined, watch: readonly string[]): Promise<Error> {
     try {
@@ -3454,27 +3467,34 @@ export class Computer {
       );
     }
     // It is running, so the refusal was about the connection rather than the
-    // machine — a rotated credential, a host that moved, an edge in the way.
-    // Retryable, and the reconnect is what retries it.
+    // machine — a rotated credential, a host that moved, an edge in the way, or
+    // the platform's cap on open streams. The first three clear on a retry and
+    // the last does not, and one refusal cannot tell them apart, so this is
+    // retryable and MARKED: the stream counts the marked ones in a row and
+    // settles this same sentence after RUNNING_REFUSALS_TO_SETTLE of them.
     //
     // A stream that nominates trees has two more ways to be refused, and both
-    // arrive here looking identical to the three above: a path this host cannot
+    // arrive here looking identical to the others: a path this host cannot
     // honour is a `400`, and a computer already watching its limit is a `409`.
     // Neither can be read off the socket, and neither can be told from a
-    // rotated credential — so this stays retryable and says what it cannot
-    // rule out, rather than guessing at one of them.
+    // rotated credential — so the sentence says what it cannot rule out,
+    // rather than guessing at one of them.
+    const capped =
+      `${this.id}'s event stream would not open, and it reports itself as running. The ` +
+      'platform refuses a stream past 8 open on one computer or 128 per account on one ' +
+      'server, and that refusal looks the same as a failed connection from here: close ' +
+      'another stream on this computer (each waitFor/events call holds one).';
     if (watch.length > 0) {
-      return new ConnectionError(
-        `${this.id}'s event stream would not open, and it reports itself as running. This ` +
-          `stream nominates ${watch.join(', ')} to watch, and a nomination this host cannot ` +
-          `honour is refused the same silent way: a path it will not accept, or a computer ` +
-          `already watching its limit of trees across every stream open on it. Open the stream ` +
-          `without watch to tell that apart from a connection that simply failed`,
+      return refusedWhileRunning(
+        new ConnectionError(
+          `${capped} This stream also nominates ${watch.join(', ')} to watch, and a nomination ` +
+            `this host cannot honour is refused the same silent way: a path it will not accept, ` +
+            `or a computer already watching its limit of trees across every stream open on it. ` +
+            `Open the stream without watch to tell that apart from a connection that simply failed`,
+        ),
       );
     }
-    return new ConnectionError(
-      `${this.id}'s event stream would not open, and it reports itself as running`,
-    );
+    return refusedWhileRunning(new ConnectionError(capped));
   }
 
   // --- observing ------------------------------------------------------

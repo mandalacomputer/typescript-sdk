@@ -23,6 +23,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { ValidationError } from '../src/errors.js';
 import {
   ComputerEvents,
+  RUNNING_REFUSALS_TO_SETTLE,
   toComputerEvent,
   toHello,
   withCursor,
@@ -2168,6 +2169,205 @@ describe('a refusal on the upgrade', () => {
     );
     expect(got.map((e) => e.type)).toEqual(['computer.idle']);
     expect(attempts).toBe(3);
+  });
+
+  it('settles a run of refusals on a running computer as the stream cap (OPL-5643)', async () => {
+    // The platform refuses a stream past 8 on one computer or 128 per account
+    // on one server with a 409 that carries no reason and does not lift by
+    // waiting. It reaches a websocket client as every other refusal does, and
+    // the computer reads `running` — so with the default `maxRetries` (never
+    // give up) this used to reconnect for as long as the process lived, and a
+    // `waitFor` ended only as a timeout that never named the cap.
+    const { computer: c } = await computer();
+    let attempts = 0;
+    const err = await collect(
+      c.events({
+        backoffMs: 1,
+        webSocket: socketFactory((s) => {
+          attempts += 1;
+          // A bound on the bug rather than a hang: the unfixed loop never stops.
+          if (attempts > 50) {
+            s.emitOpen();
+            s.send(hello({ ready: false }));
+            return;
+          }
+          s.emitError();
+        }),
+      }),
+      1,
+    ).catch((e) => e);
+    expect(err).toBeInstanceOf(ConnectionError);
+    expect(isSettled(err)).toBe(true);
+    expect(String(err)).toContain('past 8 open on one computer or 128 per account');
+    expect(String(err)).toContain('close another stream on this computer');
+    expect(attempts).toBe(RUNNING_REFUSALS_TO_SETTLE);
+  });
+
+  it('ends a waitFor with the cap rather than its timeout', async () => {
+    const { computer: c } = await computer();
+    const started = Date.now();
+    const err = await c
+      .waitFor('computer.idle', {
+        timeoutMs: 20_000,
+        backoffMs: 1,
+        webSocket: socketFactory((s) => s.emitError()),
+      })
+      .catch((e) => e);
+    expect(err).not.toBeInstanceOf(TimeoutError);
+    expect(isSettled(err)).toBe(true);
+    expect(String(err)).toContain('128 per account');
+    expect(Date.now() - started).toBeLessThan(10_000);
+  });
+
+  it('still recovers from refusals that stop short of the run', async () => {
+    // Fewer than five in a row is a rotated credential or a dropped
+    // connection, and the default reconnect is what fixes it.
+    const { computer: c } = await computer();
+    let attempts = 0;
+    const got = await collect(
+      c.events({
+        backoffMs: 1,
+        webSocket: socketFactory((s) => {
+          attempts += 1;
+          if (attempts <= RUNNING_REFUSALS_TO_SETTLE - 1) return s.emitError();
+          s.emitOpen();
+          s.send(hello({ ready: false }));
+          s.send(event());
+        }),
+      }),
+      1,
+    );
+    expect(got.map((e) => e.type)).toEqual(['computer.idle']);
+    expect(attempts).toBe(RUNNING_REFUSALS_TO_SETTLE);
+  });
+
+  it('counts refusals in a row, so an upgrade that worked starts the count again', async () => {
+    // Four refusals, a connection that greets and drops, four more, then one
+    // that delivers: never five in a row, so never the cap.
+    const { computer: c } = await computer();
+    let attempts = 0;
+    const got = await collect(
+      c.events({
+        backoffMs: 1,
+        webSocket: socketFactory((s) => {
+          attempts += 1;
+          if (attempts === 5) {
+            s.emitOpen();
+            s.send(hello({ ready: false }));
+            return s.close();
+          }
+          if (attempts < 10) return s.emitError();
+          s.emitOpen();
+          s.send(hello({ ready: false }));
+          s.send(event());
+        }),
+      }),
+      1,
+    );
+    expect(got.map((e) => e.type)).toEqual(['computer.idle']);
+    expect(attempts).toBe(10);
+  });
+
+  it('starts the count again when the re-read does not say running', async () => {
+    // A 503 on the read is the host being unreachable, which is weather the
+    // backoff exists for and not the cap — so it breaks the run.
+    let reads = 0;
+    const { computer: c } = await computer((call) => {
+      if (call.path === '/computers/vm-1') {
+        reads += 1;
+        // Read 1 is `get`; then each attempt reads twice (the URL, then the
+        // refusal). Attempt 5's refusal read is read 11.
+        if (reads === 11) return errorJson(503, 'host unreachable');
+      }
+      return json(COMPUTER);
+    });
+    let attempts = 0;
+    const got = await collect(
+      c.events({
+        backoffMs: 1,
+        webSocket: socketFactory((s) => {
+          attempts += 1;
+          if (attempts < 9) return s.emitError();
+          s.emitOpen();
+          s.send(hello({ ready: false }));
+          s.send(event());
+        }),
+      }),
+      1,
+    );
+    expect(got.map((e) => e.type)).toEqual(['computer.idle']);
+    expect(attempts).toBe(9);
+  });
+
+  it('leaves maxRetries the caller set as theirs, and unsettled', async () => {
+    const { computer: c } = await computer();
+    let attempts = 0;
+    const err = await collect(
+      c.events({
+        backoffMs: 1,
+        maxRetries: 2,
+        webSocket: socketFactory((s) => {
+          attempts += 1;
+          s.emitError();
+        }),
+      }),
+    ).catch((e) => e);
+    expect(err).toBeInstanceOf(ConnectionError);
+    expect(isSettled(err)).toBe(false);
+    expect(String(err)).toContain('128 per account');
+    expect(attempts).toBe(3);
+  });
+
+  it('settles the run of five even when maxRetries the caller set is higher', async () => {
+    // The run is its own rule, not a default for `maxRetries`: a caller who
+    // allows ten reconnects still hears about the cap at the fifth refusal.
+    const { computer: c } = await computer();
+    let attempts = 0;
+    const err = await collect(
+      c.events({
+        backoffMs: 1,
+        maxRetries: 10,
+        webSocket: socketFactory((s) => {
+          attempts += 1;
+          s.emitError();
+        }),
+      }),
+    ).catch((e) => e);
+    expect(err).toBeInstanceOf(ConnectionError);
+    expect(isSettled(err)).toBe(true);
+    expect(String(err)).toContain('128 per account');
+    expect(attempts).toBe(RUNNING_REFUSALS_TO_SETTLE);
+  });
+
+  it('settles at maxRetries 4 and stops unsettled at 3: the boundary is attempts', async () => {
+    // `maxRetries` counts retries after the first attempt, so N allows N+1
+    // attempts. 4 reaches the fifth refusal and settles; 3 gives up at the
+    // fourth, before the run of five, with the sentence unsettled.
+    const { computer: c } = await computer();
+    const run = async (maxRetries: number) => {
+      let attempts = 0;
+      const err = await collect(
+        c.events({
+          backoffMs: 1,
+          maxRetries,
+          webSocket: socketFactory((s) => {
+            attempts += 1;
+            s.emitError();
+          }),
+        }),
+      ).catch((e) => e);
+      return { err, attempts };
+    };
+    const four = await run(RUNNING_REFUSALS_TO_SETTLE - 1);
+    expect(four.err).toBeInstanceOf(ConnectionError);
+    expect(isSettled(four.err)).toBe(true);
+    expect(String(four.err)).toContain('128 per account');
+    expect(four.attempts).toBe(RUNNING_REFUSALS_TO_SETTLE);
+    const three = await run(RUNNING_REFUSALS_TO_SETTLE - 2);
+    expect(three.err).toBeInstanceOf(ConnectionError);
+    expect(isSettled(three.err)).toBe(false);
+    expect(String(three.err)).toContain('128 per account');
+    expect(three.attempts).toBe(RUNNING_REFUSALS_TO_SETTLE - 1);
   });
 
   it('lets the read that failed be the answer', async () => {
