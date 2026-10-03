@@ -3553,15 +3553,101 @@ export type TypeResult = {
  * is not in it yet. `focused` is the one of them holding the keyboard, or `null`
  * when none does (focus on the desktop itself included).
  *
+ * `dom` is the page on screen when `focused` is Chromium: its URL, title and the
+ * interactive elements visible in it, with boxes in screen pixels. It is `null`
+ * for any other focused window (Firefox, the default browser, included), and
+ * whenever the page could not be read.
+ *
  * `windows` is `null`, never `[]`, when the platform could not read them — a
  * Windows guest, no desktop session, a guest agent slow to answer — and `error`
- * then says why. The action itself still happened: do not send it again.
+ * then says why. `error` can also sit beside `windows`, saying why `dom` is
+ * `null`: no window has focus, the focused window is not Chromium, Chromium is
+ * not listening, or the page was not read in time. The action itself still
+ * happened either way: do not send it again.
  */
 export type InputContext = {
   windows: GuestWindow[] | null;
   focused: GuestWindow | null;
+  dom: PageContext | null;
   error: string | null;
 };
+
+/** The page in the focused Chromium window, after an input action. */
+export type PageContext = {
+  url: string;
+  title: string;
+  /**
+   * The interactive elements visible in the viewport, in document order: links,
+   * buttons, form fields and elements with an interactive role. At most 150.
+   */
+  elements: PageElement[];
+  /** The page had more interactive elements than `elements` holds. */
+  truncated: boolean;
+};
+
+/**
+ * One interactive element, with the visible part of its box in SCREEN pixels —
+ * the coordinates {@link Computer.click} takes. Click its centre:
+ * `x + width / 2`, `y + height / 2`.
+ */
+export type PageElement = {
+  /** The lower-case tag name: `a`, `button`, `input`. */
+  tag: string;
+  /** Its `role` attribute, or `''`. */
+  role: string;
+  /** Its accessible label (aria-label, title, placeholder, alt or name), or `''`. */
+  name: string;
+  /** Its text, or a field's value. A password field's value is never read. */
+  text: string;
+  /** A link's resolved target. Absent on anything but a link. */
+  href?: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+/** Decode `context.dom`, strictly: a page with a field missing is refused. */
+export function toPageContext(d: unknown, what: string): PageContext {
+  const bad = (field: string): never => {
+    throw new MandalaError(`expected context.dom.${field} from ${what}`);
+  };
+  if (!isRecord(d)) bad('to be an object');
+  const p = d as Record<string, unknown>;
+  if (typeof p.url !== 'string') bad('url to be a string');
+  if (typeof p.title !== 'string') bad('title to be a string');
+  if (typeof p.truncated !== 'boolean') bad('truncated to be a boolean');
+  if (!Array.isArray(p.elements)) bad('elements to be an array');
+  const elements = (p.elements as unknown[]).map((e, i): PageElement => {
+    if (!isRecord(e)) return bad(`elements[${i}] to be an object`);
+    for (const k of ['tag', 'role', 'name', 'text'] as const) {
+      if (typeof e[k] !== 'string') bad(`elements[${i}].${k} to be a string`);
+    }
+    for (const k of ['x', 'y', 'width', 'height'] as const) {
+      if (!Number.isInteger(e[k])) bad(`elements[${i}].${k} to be a whole number`);
+    }
+    if (e.href !== undefined && typeof e.href !== 'string')
+      bad(`elements[${i}].href to be a string`);
+    const el: PageElement = {
+      tag: e.tag as string,
+      role: e.role as string,
+      name: e.name as string,
+      text: e.text as string,
+      x: e.x as number,
+      y: e.y as number,
+      width: e.width as number,
+      height: e.height as number,
+    };
+    if (typeof e.href === 'string') el.href = e.href;
+    return el;
+  });
+  return {
+    url: p.url as string,
+    title: p.title as string,
+    elements,
+    truncated: p.truncated as boolean,
+  };
+}
 
 /**
  * Decode the context an input answer carries, refused when it carries neither a
@@ -3577,14 +3663,20 @@ export function toInputContext(d: unknown, what: string): InputContext {
     if (c.focused !== null && !isRecord(c.focused)) {
       throw new MandalaError(`expected context.focused to be a window or null from ${what}`);
     }
+    if (r.context_error !== undefined && typeof r.context_error !== 'string') {
+      throw new MandalaError(`expected context_error to be a string from ${what}`);
+    }
     return {
       windows: toWindowListing(c.windows, what),
       focused: c.focused === null ? null : toGuestWindow(c.focused),
-      error: null,
+      // Absent from a platform that predates page context, and whenever the
+      // focused window is not Chromium.
+      dom: c.dom === undefined || c.dom === null ? null : toPageContext(c.dom, what),
+      error: typeof r.context_error === 'string' && r.context_error ? r.context_error : null,
     };
   }
   if (typeof r.context_error === 'string' && r.context_error) {
-    return { windows: null, focused: null, error: r.context_error };
+    return { windows: null, focused: null, dom: null, error: r.context_error };
   }
   throw new MandalaError(
     `expected context or context_error from ${what}, which was asked for context`,

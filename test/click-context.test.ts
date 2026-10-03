@@ -82,7 +82,7 @@ describe('click context', () => {
       () => computer.doubleClick(1, 2, [], { context: true }),
       () => computer.tripleClick(1, 2, [], { context: true }),
     ]) {
-      expect(await call()).toEqual({ windows: [], focused: null, error: null });
+      expect(await call()).toEqual({ windows: [], focused: null, dom: null, error: null });
       expect(rec.last().query).toEqual({ context: '1' });
     }
   });
@@ -94,6 +94,7 @@ describe('click context', () => {
     expect(await computer.click(1, 2, [], { context: true })).toEqual({
       windows: null,
       focused: null,
+      dom: null,
       error: said,
     });
   });
