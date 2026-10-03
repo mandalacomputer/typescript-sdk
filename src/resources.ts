@@ -2207,7 +2207,9 @@ export class Webhooks {
  * listed key's {@link SshKey.reach} says which of those it is, from the account
  * this credential acts on. A key is registered once across the platform, so
  * registering one somebody else holds, or one you already hold on any account,
- * is a `ConflictError`, as is a person's key past the per-person limit.
+ * is a `ConflictError`, as is a person's key past the per-person limit. This
+ * client removes only keys whose reach is `this_account`; any other key is a
+ * `NotFoundError` to {@link remove}, and is removed from the dashboard.
  */
 export class SshKeys {
   #t: Transport;
@@ -2254,9 +2256,11 @@ export class SshKeys {
 
   /**
    * Remove one key. Computers stop accepting it once they receive the new list.
-   * A key whose {@link SshKey.reach} is `another_account` cannot be removed
-   * with an API key or connected app: it is a `NotFoundError`, as for a key
-   * that does not exist. Remove it from the dashboard.
+   * With an API key or connected app, which is what this client uses, only a
+   * key whose {@link SshKey.reach} is `this_account` can be removed. Any other
+   * key, `everywhere` (added from the dashboard, or through the API before keys
+   * were bound to an account) or `another_account`, is a `NotFoundError`, as
+   * for a key that does not exist. Remove it from the dashboard.
    */
   async remove(keyId: string, opts: CallOptions = {}): Promise<void> {
     await this.#t.json('DELETE', P.sshKey(keyId), { signal: opts.signal });
