@@ -3865,8 +3865,11 @@ on, and is removed when the key is revoked. Each person holds eight. The listing
 shows every key you hold, whichever account asks; each key's `reach` says where
 it works from there: `everywhere`, `this_account` or `another_account` (which
 account is not said). A key is registered once, so a key bound to another
-account cannot be added again here, and an API key cannot remove it: remove it
-from the dashboard.
+account cannot be added again here. An API key removes only a key whose reach is
+`this_account`: `mandala ssh-key rm` on any other key, one added from the
+dashboard (or with an API key before keys were bound to an account) or one bound
+to another account, fails as if the id were unknown. Remove those from the
+dashboard.
 
 #### Without the CLI: `ssh-config`, VS Code, scp and sftp
 
@@ -3980,7 +3983,10 @@ const access = await dev.setSshAccess(true); // or dev.sshAccess() to read
 
 `SshKey.reach` is `'everywhere'`, `'this_account'` or `'another_account'`
 (`null` from a platform that does not report it); this account's computers
-refuse a key whose reach is `'another_account'`. `SshAccess` has `enabled`,
+refuse a key whose reach is `'another_account'`. `client.sshKeys.remove()`
+removes only a key whose reach is `'this_account'`; any other key is a
+`NotFoundError`, as for an unknown id, and is removed from the dashboard.
+`SshAccess` has `enabled`,
 `available`, `pending`, `keyCount`, `keysPushed` and `error`. `available` is `false` for a computer made from a template that
 predates SSH, and `null` until the computer has been asked, which happens when
 it next starts. Registering a key that is already registered is a
