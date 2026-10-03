@@ -633,7 +633,7 @@ export const COMMANDS: readonly Command[] = [
   ),
   command(
     'workspaces rm',
-    "Delete a workspace, by name or ID, REVOKING every API key confined to it (its computers are kept); needs an owner's account-wide key",
+    "Delete a workspace, by name or ID, REVOKING every API key confined to it (it must hold no computers); needs an owner's account-wide key",
     ['workspace'],
     [bool('yes', 'Confirm the deletion and the key revocation (required)')],
   ),

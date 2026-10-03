@@ -2601,10 +2601,13 @@ export class Workspaces {
   }
 
   /**
-   * Delete a workspace. Every API key confined to it is REVOKED in the same
-   * step, whoever holds it, and the answer says how many. The computers in it
-   * are not touched: they keep the deleted workspace's id, and account-wide
-   * keys reach them as before.
+   * Delete a workspace. Only an empty workspace can be deleted: one that still
+   * holds computers is refused with a {@link ConflictError} (409) saying how
+   * many, and nothing is deleted or revoked; delete those computers first. If
+   * the platform cannot confirm the workspace is empty, the answer is an
+   * `UnavailableError` (503), also with nothing deleted; try again shortly. On
+   * success every API key confined to the workspace is REVOKED in the same
+   * step, whoever holds it, and the answer says how many.
    */
   async delete(workspaceId: string, opts: CallOptions = {}): Promise<WorkspaceDeleted> {
     const path = P.workspace(workspaceId);

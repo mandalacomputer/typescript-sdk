@@ -4231,8 +4231,8 @@ export type Workspace = {
 
 /**
  * What deleting a workspace answers (platform OPL-5473): how many API keys were
- * confined to it and were revoked with it, whoever held them. Its computers are
- * not touched.
+ * confined to it and were revoked with it, whoever held them. Only an empty
+ * workspace is deleted, so there is no answer for one that holds computers.
  */
 export type WorkspaceDeleted = {
   /** The API keys confined to the workspace, revoked in the same step. */
