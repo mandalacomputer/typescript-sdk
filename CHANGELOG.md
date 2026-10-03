@@ -52,6 +52,15 @@ This is the summary you read to decide whether to upgrade.
   account, or pass `--key` with a separate key. The `SshKeys.add()`
   documentation gives the same advice instead of "remove it and add it again
   with this client", which an API key cannot do for a key bound elsewhere.
+- **`mandala computers secrets set` finds a `--secret` or `--secret-file` name
+  in the computer's workspace, as `computers create` does.** For a computer in
+  a workspace it looked in the key's default scope alone, so with an
+  account-wide key a name only that workspace holds was refused as not found,
+  and a name both scopes hold bound the account-wide secret where a create into
+  that workspace binds the workspace's. It now looks in the computer's own
+  workspace first and then account-wide, and refuses a name in either that is
+  another secret's id in either as `ambiguous_secret`, changing nothing. A
+  computer in no workspace is looked up as before.
 
 ### Changed
 

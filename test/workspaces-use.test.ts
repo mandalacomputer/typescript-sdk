@@ -32,6 +32,7 @@ import { Client } from '../src/index.js';
 import {
   anyRoute,
   BASE,
+  COMPUTER,
   type Responder,
   recorder,
   SECRET,
@@ -526,6 +527,142 @@ describe('the default applied', () => {
       ]);
       expect(own.code).not.toBe(0);
       expect(own.out + own.err).toContain('no secret by that name or id in this scope');
+    });
+
+    // `computers secrets set` names its secrets as a create into the
+    // COMPUTER's workspace does (OPL-5634): never the key's default scope
+    // alone, and never the `workspaces use` default.
+    describe("and computers secrets set's, in the computer's own workspace", () => {
+      const reply = (body: unknown) =>
+        new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } });
+      const IN_OTHER = { ...COMPUTER, workspace_id: OTHER.id };
+      /** `computer` listed and readable by id; the rest as `inner` answers. */
+      const placed =
+        (computer: object, inner: Responder): Responder =>
+        (call) => {
+          if (call.method === 'GET' && call.path === '/computers') return reply([computer]);
+          if (call.method === 'GET' && call.path === `/computers/${COMPUTER.id}`)
+            return reply(computer);
+          return inner(call);
+        };
+      const rebound = (h: ReturnType<typeof cli>) =>
+        h.rec.calls
+          .filter((c) => c.method === 'PUT' && c.path === `/computers/${COMPUTER.id}/secrets`)
+          .map((c) => c.body);
+      const rebind = (...args: string[]) => [
+        'computers',
+        'secrets',
+        'set',
+        COMPUTER.id,
+        ...args,
+        '--json',
+      ];
+
+      it.each([
+        ['no workspaces use default', null],
+        ['a workspaces use default naming another workspace', WORKSPACE],
+      ])(
+        "with %s: the workspace's own secret, never the account-wide one by that name",
+        async (_, def) => {
+          await saveCredentials(ACCOUNT_WIDE);
+          if (def)
+            await saveWorkspaceDefault('default', {
+              account_id: 'acc-000000000001',
+              workspace: def,
+            });
+          const h = cli({}, undefined, placed(IN_OTHER, scoped));
+          const r = await h.run(rebind('--secret', 'API_KEY'));
+          expect(r.code).toBe(0);
+          expect(rebound(h)).toEqual([{ secrets: [{ secret_id: OWN_ID, env: 'API_KEY' }] }]);
+          // A name only the workspace holds is found, and one only the
+          // account-wide scope holds still is.
+          h.rec.calls.length = 0;
+          const both = await h.run(rebind('--secret', 'OWN_ONLY', '--secret', 'SHARED_ONLY'));
+          expect(both.code).toBe(0);
+          expect(rebound(h)).toEqual([
+            {
+              secrets: [
+                { secret_id: 'csec-00000000000000bc', env: 'OWN_ONLY' },
+                { secret_id: 'csec-00000000000000ac', env: 'SHARED_ONLY' },
+              ],
+            },
+          ]);
+        },
+      );
+
+      it('keeps the revision held with --keep-revision, and sends the version read', async () => {
+        await saveCredentials(ACCOUNT_WIDE);
+        const held = 'csr-00000000000000000000000b';
+        const h = cli(
+          {},
+          undefined,
+          placed(IN_OTHER, (call) =>
+            call.method === 'GET' && call.path === `/computers/${COMPUTER.id}/secrets`
+              ? reply({
+                  secrets: [{ secret_id: OWN_ID, revision_id: held, env: 'API_KEY' }],
+                  version: 7,
+                })
+              : scoped(call),
+          ),
+        );
+        const r = await h.run(rebind('--secret', 'API_KEY', '--keep-revision'));
+        expect(r.code).toBe(0);
+        expect(rebound(h)).toEqual([
+          { secrets: [{ secret_id: OWN_ID, env: 'API_KEY', revision_id: held }], version: 7 },
+        ]);
+      });
+
+      it.each([
+        [
+          "a workspace secret named like an account-wide secret's id",
+          [[OWN_ID, SHARED_ID]],
+          [[SHARED_ID, 'API_KEY']],
+        ],
+        [
+          "an account-wide secret named like a workspace secret's id",
+          [[SHARED_ID, 'API_KEY']],
+          [[OWN_ID, SHARED_ID]],
+        ],
+      ] as const)('refuses %s, changing nothing', async (_, workspace, shared) => {
+        await saveCredentials(ACCOUNT_WIDE);
+        const colliding: Responder = (call) => {
+          if (call.method === 'GET' && call.path === '/secrets') {
+            const ws = call.query.workspace_id;
+            const secrets =
+              ws === undefined
+                ? shared.map(([id, name]) => row(id, name, null))
+                : ws === OTHER.id
+                  ? workspace.map(([id, name]) => row(id, name, OTHER.id))
+                  : [];
+            return reply({ ...SECRET_LIST, secrets });
+          }
+          return respond(call);
+        };
+        const h = cli({}, undefined, placed(IN_OTHER, colliding));
+        const r = await h.run(rebind('--secret', SHARED_ID, '--as', 'TOK'));
+        expect(r.code).not.toBe(0);
+        expect(r.out + r.err).toContain('ambiguous_secret');
+        expect(r.out + r.err).toContain('no binding was changed: rename one of them first');
+        expect(rebound(h)).toEqual([]);
+      });
+
+      it.each([
+        ['reported in none', COMPUTER],
+        ['reported as null', { ...COMPUTER, workspace_id: null }],
+      ])('in no workspace (%s), the account-wide scope alone, as before', async (_, computer) => {
+        await saveCredentials(ACCOUNT_WIDE);
+        const h = cli({}, undefined, placed(computer, scoped));
+        const r = await h.run(rebind('--secret', 'API_KEY'));
+        expect(r.code).toBe(0);
+        expect(rebound(h)).toEqual([{ secrets: [{ secret_id: SHARED_ID, env: 'API_KEY' }] }]);
+        expect(
+          h.rec.calls.filter((c) => c.path === '/secrets').map((c) => c.query.workspace_id),
+        ).toEqual([undefined]);
+        const own = await h.run(rebind('--secret', 'OWN_ONLY'));
+        expect(own.code).not.toBe(0);
+        expect(own.out + own.err).toContain('no secret by that name or id in this scope');
+        expect(rebound(h)).toHaveLength(1);
+      });
     });
   });
 

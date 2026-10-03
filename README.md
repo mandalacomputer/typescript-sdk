@@ -3403,9 +3403,13 @@ list's `version` — never a value, which a binding does not hold.
 given, spelled and checked exactly as `computers create` takes them above
 (`--secret`, `--as`, `--secret-file`, `--path`, `--no-value-check`), and prints
 the new list with every typed name as `[REDACTED]`; `--clear` removes every
-binding. A binding records each secret's latest revision; `--keep-revision`
-instead keeps the revision the computer holds now for every secret it is
-already bound to (a secret new to it still gets the latest). It reads the
+binding. For a computer in a workspace, a name is looked up in that
+workspace's own secrets first and then the account-wide ones, as
+`computers create --workspace` does, and a name in either that is another
+secret's id in either is refused. A binding records each secret's latest
+revision; `--keep-revision` instead keeps the revision the computer holds now
+for every secret it is already bound to (a secret new to it still gets the
+latest). It reads the
 bindings first and sends the list's `version` with the change, so a change
 made in between is refused rather than overwritten. The platform refuses a running computer's first binding (stop it
 first), and any change while a delivery or another operation holds the
