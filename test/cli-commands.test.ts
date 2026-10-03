@@ -2647,7 +2647,9 @@ describe('one JSON casing and one error vocabulary (OPL-5048)', () => {
       [['--', `--${secret}`], '1 argument too many: mandala secrets set takes <name>'],
       [['--', secret, `--${secret}`], '2 arguments too many: mandala secrets set takes <name>'],
       [[`--${secret}`], 'unknown option, not repeated here, as under secrets it may be a secret'],
-      [[`--keep-newline=${secret}`], 'unknown option, not repeated here'],
+      // A value glued to a real flag of secrets set, which takes none.
+      [[`--keep-newline=${secret}`], '--keep-newline takes no value'],
+      [[`--no-such-flag=${secret}`], 'unknown option, not repeated here'],
       [[`--workspace=ws-1`, `--${secret}`], 'unknown option, not repeated here'],
     ];
     for (const [tail, message] of cases)

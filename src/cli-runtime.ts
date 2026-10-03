@@ -109,13 +109,16 @@ export async function documentInput(file: string, io: CliIO, signal: AbortSignal
  *
  * Piped: the whole of stdin, less ONE trailing newline (`\n` or `\r\n`), so
  * `echo "$TOKEN" | mandala secrets set NAME` stores the token rather than the
- * token and a newline; a value that must end in a newline can be piped with
- * two. A terminal: a prompt on stderr, read with echo off, ended by Enter.
+ * token and a newline. `keepNewline` (`--keep-newline`) keeps it, for a value
+ * stored byte for byte, such as a PEM or kubeconfig read from a file. A
+ * terminal: a prompt on stderr, read with echo off, ended by Enter, which is
+ * never part of the value; `keepNewline` does not apply there.
  */
 export async function readSecretValue(
   io: CliIO,
   name: string,
   signal: AbortSignal,
+  { keepNewline = false }: { keepNewline?: boolean } = {},
 ): Promise<string> {
   if (!io.stdin.isTTY) {
     // Fatal, not replacing: a malformed byte stored as U+FFFD is a credential
@@ -124,6 +127,7 @@ export async function readSecretValue(
       new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }),
       await readInputBytes(io, signal),
     );
+    if (keepNewline) return text;
     return text.endsWith('\r\n')
       ? text.slice(0, -2)
       : text.endsWith('\n')

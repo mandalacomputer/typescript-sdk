@@ -3578,6 +3578,7 @@ mandala webhooks deliveries whk-example --json
 mandala secrets list --workspace ws-example
 mandala secrets get OPENAI_API_KEY                   # metadata only, never the value
 printf %s "$OPENAI_API_KEY" | mandala secrets set OPENAI_API_KEY
+mandala secrets set KUBECONFIG --keep-newline < ~/.kube/config
 mandala secrets rm OPENAI_API_KEY
 ```
 
@@ -3612,9 +3613,10 @@ secret **once** in the result, with a reminder on stderr. Save that result: get
 and list do not return the secret. `webhooks test` queues a delivery; inspect
 `webhooks deliveries` to learn whether it was delivered.
 
-`secrets set NAME` reads the value from stdin (less one trailing newline) or,
-at a terminal, from a prompt with echo off — **never from the command line**,
-where it would sit in shell history and process listings. It creates the secret,
+`secrets set NAME` reads the value from stdin (less one trailing `\n` or
+`\r\n`, which `--keep-newline` keeps) or, at a terminal, from a prompt with
+echo off — **never from the command line**, where it would sit in shell history
+and process listings. It creates the secret,
 or replaces the one of that name (ASCII case ignored, as the platform ignores
 it) against the revision it read, re-reading a few times if another writer moved
 it first. `secrets get` and `secrets rm` take a name or an id. `secrets list`
