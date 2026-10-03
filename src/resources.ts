@@ -505,9 +505,16 @@ export class Computers {
       }
       // Just after a create every connection is closed until the host holds
       // the proxy's credentials (egress_proxy_pending), so a command run on
-      // the returned computer would fail to reach anything.
+      // the returned computer would fail to reach anything. Told they are
+      // named, as the waits above are, so a read that leaves the setting out
+      // before the computer runs is not taken for "none" and returned on.
       if (args.egressProxy?.credentialsSecretId || computer.egressProxy?.credentialsSecretId) {
-        await computer.waitForEgressProxy({ timeoutMs: remaining(), pollMs, signal });
+        await computer.waitForEgressProxy({
+          timeoutMs: remaining(),
+          pollMs,
+          signal,
+          expectCredentials: true,
+        });
       }
       // The guest agent answers, and the secrets land, seconds before the
       // desktop user is logged in, and a desktop command run in between is

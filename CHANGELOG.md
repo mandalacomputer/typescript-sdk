@@ -50,6 +50,15 @@ This is the summary you read to decide whether to upgrade.
   account), relative to the account the credential acts on and never naming
   another. `null` from a platform that does not report it.
 
+- **`computer.waitForEgressProxy({ expectCredentials: true })`**, as
+  `waitForSecrets` has `expectSecrets` and `waitForBrowserProxy` has
+  `expectBrowserProxy`, and as Python's `wait_for_egress_proxy` has
+  `expect_credentials`: for a caller that knows the egress proxy names
+  credentials, a read that leaves the setting out is not taken for "none"
+  while the computer is not running yet, so the wait goes on until it runs.
+  Without it, such a read still answers at once. `launch()` passes it when it
+  waits for the credentials.
+
 ### Fixed
 
 - **The CLI shows an SSH key's reach, and stops before `ssh` when no key you
