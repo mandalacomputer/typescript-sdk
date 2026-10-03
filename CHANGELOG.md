@@ -71,6 +71,11 @@ This is the summary you read to decide whether to upgrade.
 
 ### Changed
 
+- **`setSshAccess()` and `SshAccess.keyCount` say which keys log in.** They
+  said every registered key of every member of the account; keys bound to
+  another account and the keys of a member whose seat is suspended do not, and
+  viewers' keys never do. Documentation only.
+
 - **Deleting a workspace is documented as the platform does it: only an
   empty one.** `workspaces.delete()`, `WorkspaceDeleted`, the README and the
   CLI's `workspaces rm` help and confirmation said a deleted workspace's

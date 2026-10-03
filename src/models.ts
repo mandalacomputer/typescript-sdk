@@ -3179,7 +3179,11 @@ export type SshAccess = {
   available: boolean | null;
   /** The computer has yet to receive the current setting and key list. */
   pending: boolean;
-  /** How many keys may log in: every key of every member of the account. `0` while off. */
+  /**
+   * How many keys may log in: the keys of the account's active owners and
+   * members, less keys bound to another account and those of seat-suspended
+   * members. `0` while off.
+   */
   keyCount: number;
   /** How many of those the computer is given; lower than `keyCount` only past the per-computer cap. */
   keysPushed: number;
