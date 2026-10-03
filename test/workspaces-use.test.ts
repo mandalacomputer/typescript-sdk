@@ -29,7 +29,15 @@ import {
   workspaceDefault,
 } from '../src/defaults.js';
 import { Client } from '../src/index.js';
-import { anyRoute, BASE, type Responder, recorder, WORKSPACE } from './harness.js';
+import {
+  anyRoute,
+  BASE,
+  type Responder,
+  recorder,
+  SECRET,
+  SECRET_LIST,
+  WORKSPACE,
+} from './harness.js';
 
 const OTHER = { id: 'wsp-ba9876543210', name: 'research', created_at: WORKSPACE.created_at };
 const ACCOUNT_WIDE: CredentialProfile = {
@@ -71,8 +79,8 @@ const credentialsPath = () => join(home, '.mandala', 'credentials.json');
 const defaultsPath = () => join(home, '.mandala', 'defaults.json');
 
 /** The CLI with a saved profile in use: no MANDALA_API_KEY unless a test sets one. */
-function cli(environment: NodeJS.ProcessEnv = {}, input?: string) {
-  const rec = recorder(respond);
+function cli(environment: NodeJS.ProcessEnv = {}, input?: string, responder = respond) {
+  const rec = recorder(responder);
   const stdout: Buffer[] = [];
   const stderr: Buffer[] = [];
   const io: Partial<CliIO> = {
@@ -355,6 +363,117 @@ describe('the default applied', () => {
     expect(h.rec.last().query).toEqual({});
     await h.run(['computers', 'create', '--template', 'base', '--json']);
     expect(createSent().map((c) => sentWorkspace(c))).toEqual([undefined]);
+  });
+
+  describe("names a create's --secret in the workspace the computer is created in", () => {
+    const SHARED_ID = 'csec-00000000000000aa';
+    const OWN_ID = 'csec-00000000000000bb';
+    const row = (id: string, name: string, workspace_id: string | null) => ({
+      ...SECRET,
+      id,
+      name,
+      workspace_id,
+    });
+    // The account-wide scope holds API_KEY and SHARED_ONLY; OTHER holds its
+    // own API_KEY and OWN_ONLY. A workspace's listing never shows the
+    // account-wide secrets, nor the default listing a workspace's.
+    const scoped: Responder = (call) => {
+      if (call.method === 'GET' && call.path === '/secrets') {
+        const ws = call.query.workspace_id;
+        const secrets =
+          ws === undefined
+            ? [row(SHARED_ID, 'API_KEY', null), row('csec-00000000000000ac', 'SHARED_ONLY', null)]
+            : ws === OTHER.id
+              ? [
+                  row(OWN_ID, 'API_KEY', OTHER.id),
+                  row('csec-00000000000000bc', 'OWN_ONLY', OTHER.id),
+                ]
+              : [];
+        return new Response(JSON.stringify({ ...SECRET_LIST, secrets }), {
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      return respond(call);
+    };
+    const bound = (h: ReturnType<typeof cli>) =>
+      h.rec.calls
+        .filter((c) => c.method === 'POST' && c.path === '/computers')
+        .map((c) => (c.body as { secrets?: unknown }).secrets);
+    const create = (...more: string[]) => [
+      'computers',
+      'create',
+      '--template',
+      'base',
+      '--secret',
+      'API_KEY',
+      ...more,
+      '--json',
+    ];
+
+    it.each([
+      [
+        'the workspaces use default',
+        async () => {
+          await saveWorkspaceDefault('default', {
+            account_id: 'acc-000000000001',
+            workspace: OTHER,
+          });
+          return [] as string[];
+        },
+      ],
+      ['--workspace', async () => ['--workspace', OTHER.id]],
+    ])(
+      "through %s: the workspace's own secret, never the account-wide one by that name",
+      async (_, given) => {
+        await saveCredentials(ACCOUNT_WIDE);
+        const more = await given();
+        const h = cli({}, undefined, scoped);
+        const r = await h.run(create(...more));
+        expect(r.code).toBe(0);
+        expect(bound(h)).toEqual([[{ secret_id: OWN_ID, env: 'API_KEY' }]]);
+        // A name only the workspace holds is found; one only the account-wide
+        // scope holds still is, as the computer may be bound to either.
+        h.rec.calls.length = 0;
+        const both = await h.run([
+          'computers',
+          'create',
+          '--template',
+          'base',
+          '--secret',
+          'OWN_ONLY',
+          '--secret',
+          'SHARED_ONLY',
+          ...more,
+          '--json',
+        ]);
+        expect(both.code).toBe(0);
+        expect(bound(h)).toEqual([
+          [
+            { secret_id: 'csec-00000000000000bc', env: 'OWN_ONLY' },
+            { secret_id: 'csec-00000000000000ac', env: 'SHARED_ONLY' },
+          ],
+        ]);
+      },
+    );
+
+    it('in no workspace, the account-wide scope alone, as before', async () => {
+      await saveCredentials(ACCOUNT_WIDE);
+      const h = cli({}, undefined, scoped);
+      const r = await h.run(create());
+      expect(r.code).toBe(0);
+      expect(bound(h)).toEqual([[{ secret_id: SHARED_ID, env: 'API_KEY' }]]);
+      const own = await h.run([
+        'computers',
+        'create',
+        '--template',
+        'base',
+        '--secret',
+        'OWN_ONLY',
+        '--json',
+      ]);
+      expect(own.code).not.toBe(0);
+      expect(own.out + own.err).toContain('no secret by that name or id in this scope');
+    });
   });
 
   it('is not applied to computers create or list for a profile whose key is confined', async () => {

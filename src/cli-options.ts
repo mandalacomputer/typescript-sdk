@@ -187,7 +187,7 @@ export const COMMANDS: readonly Command[] = [
       bool('no-start', 'Create without starting'),
       flag(
         'workspace',
-        "Create it in this workspace ID (default: the saved profile's workspace from workspaces use, else the key's own scope)",
+        "Create it in this workspace ID (default: the saved profile's workspace from workspaces use, else the key's own scope); --secret and --secret-file names are then looked up in that workspace first, then account-wide",
       ),
       ...bindingFlags,
       flag(

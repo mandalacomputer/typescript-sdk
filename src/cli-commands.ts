@@ -1415,7 +1415,15 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
         // Before the secrets are looked up: an unreadable defaults.json refuses
         // the create here, with nothing sent.
         const workspaceId = scopeFlag();
-        const secrets = await secretBindings(client, bindings, signal);
+        // Named in the scope the computer is created in: the workspace's own
+        // secrets first, then the account-wide ones.
+        const secrets = await secretBindings(
+          client,
+          bindings,
+          signal,
+          'nothing was created',
+          workspaceId,
+        );
         let created: Computer;
         try {
           created = await client.computers.create(

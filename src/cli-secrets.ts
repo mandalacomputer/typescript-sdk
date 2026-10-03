@@ -602,6 +602,12 @@ export function equalsDeprecation(specs: readonly BindingSpec[]): string | undef
  * by name or id in the default scope — the account-wide one, or the workspace
  * an API key is confined to.
  *
+ * A create into a workspace (`workspaceId`, from `--workspace` or the
+ * `workspaces use` default) looks in that workspace's own secrets FIRST and
+ * then in the default scope, as such a computer may be bound to either: a
+ * name the workspace holds is that workspace's secret even where the
+ * account-wide scope holds one by the same name, never the account-wide one.
+ *
  * An id that listing does not hold is sent as it is, for a secret in a scope
  * the listing did not cover; the platform refuses one it cannot bind, and the
  * create with it. A name it does not hold is refused here, naming the binding
@@ -617,10 +623,16 @@ export async function secretBindings(
   signal: AbortSignal,
   /** What a refusal says was left undone: a create's computer, or a rebinding. */
   unchanged = 'nothing was created',
+  /** The workspace a create puts the computer in, whose own secrets are looked in first. */
+  workspaceId?: string,
 ): Promise<P.SecretBindingArgs[]> {
   if (!specs.length) return [];
+  // Listed first, so a workspace the key cannot reach is refused before
+  // anything else is read.
+  const own =
+    workspaceId === undefined ? undefined : await client.secrets.list({ workspaceId, signal });
   const list = await client.secrets.list({ signal });
-  if (!list.delivery)
+  if (!list.delivery || (own && !own.delivery))
     throw new CliError(
       'unsupported',
       `Delivery is off on this platform: secrets can be stored but not bound; ${unchanged}`,
@@ -636,7 +648,9 @@ export async function secretBindings(
     seen.set(slot, label);
   };
   return specs.map(({ flag, key, target, label: position }) => {
-    const found = byNameOrId(list.secrets, key, unchanged, position);
+    const found =
+      (own && byNameOrId(own.secrets, key, unchanged, position)) ??
+      byNameOrId(list.secrets, key, unchanged, position);
     // Named by position alone: a key that matched no stored secret and is not
     // shaped like an id may be the value typed where the name was meant.
     if (!found && !SECRET_ID.test(key))

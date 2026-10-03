@@ -3184,7 +3184,9 @@ mandala workspaces use --clear       # back to account-wide
 whenever `--workspace` is not given, and say so in one stderr line; an
 explicit `--workspace` always wins, and
 `workspaces use --clear` is the way back to account-wide (there is no
-per-command override). The workspace is resolved through the API, as `get`
+per-command override). A `computers create` in a workspace looks up each
+`--secret` and `--secret-file` name in that workspace's own secrets first and
+then in the account-wide ones, so a name both hold binds the workspace's. The workspace is resolved through the API, as `get`
 resolves it; no key is minted, and the profile's key and scope are unchanged.
 
 The default lives in `~/.mandala/defaults.json` (mode 0600, written under its
