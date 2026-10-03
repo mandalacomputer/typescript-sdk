@@ -3710,7 +3710,9 @@ acknowledged write is an error.
 The process exits zero on success and 1 on ordinary errors, invalid template
 validation, failed builds, or unfinished agent runs. Foreground exec preserves
 integer remote exit codes from 0 through 255, uses 124 for a timeout, and 1 when the
-reported code cannot be represented or is unknown. Cancellation exits 130.
+reported code cannot be represented or is unknown. `terminal` exits with the
+shell's own status, 255 when it never read one, and 1 when its output could not
+be written locally. Cancellation exits 130.
 Running `mandala` without arguments prints help and exits 2. CLI-generated output uses no
 color escapes, including with `NO_COLOR` or piped output. Guest terminal and
 foreground exec output passes through unchanged. TTY detection affects terminal
@@ -3728,6 +3730,12 @@ npx --package=mandala-computer mandala scp my-computer:/var/log/app.log ./app.lo
 `terminal` rides the platform's terminal websocket — a PTY kept alive server-side.
 Disconnecting **detaches** rather than ending it; running the same command
 reattaches and replays recent output.
+
+Where the shell's status cannot be had — the link dropped, another connection
+took the session, the server refused it, or the exit frame carried no readable
+code — `terminal` exits **255** and says why on stderr. It never exits 0 for a
+status it did not read, so `mandala terminal dev < build.sh && ./deploy.sh` will
+not deploy after a build whose end nobody saw.
 
 Output waiting for stdout is limited to 16 MiB, including writes stdout has
 accepted but has not yet finished. If a

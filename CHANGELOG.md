@@ -44,6 +44,13 @@ This is the summary you read to decide whether to upgrade.
 
 ### Fixed
 
+- **`mandala terminal` exits 255, not 0, when the session ends without the
+  shell's exit status** — a dropped link, a session another connection took,
+  or a refusal the server sent after the upgrade, whose message is now printed.
+  An exit frame with no readable code also reports 255 rather than 1. So
+  `mandala terminal dev < build.sh && ./deploy.sh` no longer deploys after a
+  build whose end nobody saw. `mandala-py terminal` already behaved this way.
+
 - **`mandala ssh --setup` no longer reports success with a key bound to another
   of your accounts.** It used to see the fingerprint in the listing, print
   "already registered" and switch SSH on, and the gateway then refused the key.
