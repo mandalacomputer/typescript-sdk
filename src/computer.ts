@@ -5631,8 +5631,10 @@ export class Computer {
 
   /**
    * Switch SSH on or off for this computer. Keys are managed on
-   * `client.sshKeys`; switching on lets every registered key of every member
-   * of the account log in as `user`.
+   * `client.sshKeys`; switching on lets the registered keys of the account's
+   * owners and members log in as `user`, except keys bound to another account
+   * and the keys of a member whose seat is suspended. Viewers' keys never log
+   * in.
    */
   async setSshAccess(enabled: boolean, opts: CallOptions = {}): Promise<SshAccess> {
     const path = P.computerAction(this.id, 'ssh');
