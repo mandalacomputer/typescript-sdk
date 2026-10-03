@@ -52,6 +52,11 @@ This is the summary you read to decide whether to upgrade.
 
 ### Fixed
 
+- **The `operations` docs no longer say dashboard calls record none.** The
+  platform records the dashboard's lifecycle calls the same way and lists them
+  in `operations.list()`, all but a move. The `Operations` doc comment and the
+  README now say so.
+
 - **An event stream refused for the open-stream cap now ends instead of
   reconnecting forever.** The platform refuses a stream past 8 open on one
   computer or 128 per account on one server with a 409 and no reason, which a

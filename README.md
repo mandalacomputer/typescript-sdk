@@ -2150,8 +2150,9 @@ is copied, and a move until it lands. Keep `waitForGuest` (or
 `client.operations.get(id)` reads one, and `client.operations.list({ computerId,
 idempotencyKey, limit, cursor })` pages through them newest first — pass
 `nextCursor` back as `cursor`. An API key confined to a workspace sees only its
-computers' operations, and anything else is a `NotFoundError`. Calls made from
-the dashboard record none. Keys are kept per credential scope, so
+computers' operations, and anything else is a `NotFoundError`. The same calls
+made from the dashboard are recorded and listed too, on the same terms, except a
+move. Keys are kept per credential scope, so
 `list({ idempotencyKey })` finds only operations reserved by a credential of the
 same scope: the same key used by another workspace's credential, or by an
 account-wide one, is a different key.
