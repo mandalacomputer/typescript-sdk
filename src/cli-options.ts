@@ -915,7 +915,7 @@ function readAhead(
       );
       if (!spec || spec.type === 'boolean') continue;
       if (seen.has(spec.name))
-        throw new CliError('invalid_arguments', `--${spec.name} may only be supplied once`);
+        throw usageError(undefined, `--${spec.name} may only be supplied once`);
       seen.add(spec.name);
       if (tail.length) continue;
       const value = argv[i + 1];
@@ -1029,10 +1029,10 @@ export function parseArgs(argv: string[]): Parsed {
           ),
         );
       if (parsed.flags[spec.name] !== undefined && !spec.repeatable)
-        throw new CliError('invalid_arguments', `--${spec.name} may only be supplied once`);
+        throw usageError(undefined, `--${spec.name} may only be supplied once`);
       let value: string | number | boolean = true;
       if (spec.type === 'boolean') {
-        if (tail.length) throw new CliError('invalid_arguments', `--${spec.name} takes no value`);
+        if (tail.length) throw usageError(undefined, `--${spec.name} takes no value`);
       } else {
         const raw = tail.length ? tail.join('=') : argv[++i];
         if (
@@ -1040,8 +1040,8 @@ export function parseArgs(argv: string[]): Parsed {
           (raw.startsWith('--') && !tail.length) ||
           (!raw.trim() && spec.name !== 'description')
         ) {
-          throw new CliError(
-            'invalid_arguments',
+          throw usageError(
+            undefined,
             `--${spec.name} needs ${spec.name === 'session' ? 'a name' : 'a value'}`,
           );
         }
@@ -1052,12 +1052,9 @@ export function parseArgs(argv: string[]): Parsed {
           spec.type === 'number' &&
           (!/^-?(?:\d+\.?\d*|\.\d+)$/.test(raw) || !Number.isFinite(value))
         )
-          throw new CliError('invalid_arguments', `--${spec.name} needs a finite number`);
+          throw usageError(undefined, `--${spec.name} needs a finite number`);
         if (spec.choices && !spec.choices.includes(raw))
-          throw new CliError(
-            'invalid_arguments',
-            `--${spec.name} must be one of: ${spec.choices.join(', ')}`,
-          );
+          throw usageError(undefined, `--${spec.name} must be one of: ${spec.choices.join(', ')}`);
       }
       if (spec.follows) {
         // Refused rather than attached to some earlier one: which binding a
@@ -1089,17 +1086,22 @@ export function parseArgs(argv: string[]): Parsed {
       continue;
     }
     if (!parsed.command) {
+      // The group the word is typed under, '' for the first word.
+      const group = parsed.path;
       parsed.path = [parsed.path, arg].filter(Boolean).join(' ');
       parsed.command = COMMANDS.find((c) => c.path === parsed.path);
       if (!parsed.command && !COMMANDS.some((c) => c.path.startsWith(`${parsed.path} `))) {
+        // The help shown is that group's — the root help for an unknown first
+        // word — which never contains the word.
         if (quotesInput(parsed.path))
-          throw new CliError('invalid_arguments', `unknown command ${parsed.path}`);
+          throw usageError(undefined, `unknown command ${parsed.path}`, help(group));
         const verbs = COMMANDS.filter((c) => c.path.startsWith('secrets ')).map((c) =>
           c.path.slice('secrets '.length),
         );
-        throw new CliError(
-          'invalid_arguments',
+        throw usageError(
+          undefined,
           `unknown command under secrets; choose one of: ${verbs.join(', ')} (the word typed is ${NOT_REPEATED})`,
+          help(group),
         );
       }
     } else parsed.args.push(arg);
@@ -1108,9 +1110,10 @@ export function parseArgs(argv: string[]): Parsed {
   if (stray) throw stray;
   const c = parsed.command;
   if (!c)
-    throw new CliError(
-      'invalid_arguments',
+    throw usageError(
+      undefined,
       `choose a command${parsed.path ? ` under ${parsed.path}` : ''}; use --help`,
+      help(parsed.path),
     );
   const required = c.args.filter((a) => !a.endsWith('?')).length;
   const named = (a: string) => (a.endsWith('?') ? `[${a.slice(0, -1)}]` : `<${a}>`);
@@ -1172,12 +1175,26 @@ function followError(spec: Flag, previous: Flag | undefined, c: Command | undefi
 }
 
 /**
- * A mistake in how a command was typed, carrying that command's full usage —
- * the usage line, what it does and every flag — rather than the one line that
- * used to be the whole message. Without a command there is nothing to show.
+ * The exit status of a command line the parser refuses, as `mandala-py` and
+ * POSIX tools use. Every other failure keeps 1: a value that parses and the
+ * SDK then refuses (`--cpu 0`, also `invalid_arguments`), and any refusal
+ * from the platform.
  */
-function usageError(c: Command | undefined, message: string): CliError {
-  return new CliError('invalid_arguments', message, undefined, undefined, c && help(c.path));
+const USAGE_EXIT = 2;
+
+/**
+ * A mistake in how a command was typed, exiting {@link USAGE_EXIT} and
+ * carrying that command's full usage — the usage line, what it does and every
+ * flag — rather than the one line that used to be the whole message. Without a
+ * command there is nothing to show unless the caller passes the help to show,
+ * a group's for a word typed under it.
+ */
+function usageError(
+  c: Command | undefined,
+  message: string,
+  shown: string | undefined = c && help(c.path),
+): CliError {
+  return new CliError('invalid_arguments', message, undefined, USAGE_EXIT, shown);
 }
 
 export function help(path = ''): string {

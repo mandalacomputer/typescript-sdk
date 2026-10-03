@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { main } from '../src/cli.js';
 import { dashboardUrl, type LegacyCommands, runCli } from '../src/cli-commands.js';
-import { COMMANDS, type Flag, GLOBAL_FLAGS, parseArgs } from '../src/cli-options.js';
+import { COMMANDS, type Flag, GLOBAL_FLAGS, help, parseArgs } from '../src/cli-options.js';
 import { type CliIO, runtime } from '../src/cli-runtime.js';
 import { looksLikeSecretValue } from '../src/cli-secrets.js';
 import { Client } from '../src/index.js';
@@ -281,33 +281,35 @@ describe('account and historical usage commands', () => {
   });
 
   it.each([
-    ['account', 'other-account'],
-    ['account', '--account', 'other-account'],
-    ['account', '--from', '2026-08-01T00:00:00Z'],
-    ['usage', 'computer'],
-    ['usage', '--computer', 'computer'],
-    ['usage', '--from'],
-    ['usage', '--to='],
-    ['usage', '--from', '2026-08-01'],
-    ['usage', '--to', '2026-08-01T00:00:00'],
-    ['usage', '--from', '2026-13-45T00:00:00Z'],
-    ['usage', '--to', '2026-08-01T25:00:00Z'],
-    ['usage', '--to', '2026-08-01T00:00:00+25:00'],
-    ['usage', '--from', '2026-09-01T00:00:00Z', '--to', '2026-08-01T00:00:00Z'],
-    ['usage', '--from', '2026-08-01T01:00:00+01:00', '--to', '2026-08-01T00:00:00Z'],
-    ['usage', '--from', '2026-08-01T00:00:00Z', '--from', '2026-08-02T00:00:00Z'],
-  ])('rejects invalid arguments before client creation: %j', async (...args) => {
+    [2, ['account', 'other-account']],
+    [2, ['account', '--account', 'other-account']],
+    [2, ['account', '--from', '2026-08-01T00:00:00Z']],
+    [2, ['usage', 'computer']],
+    [2, ['usage', '--computer', 'computer']],
+    [2, ['usage', '--from']],
+    [2, ['usage', '--to=']],
+    [1, ['usage', '--from', '2026-08-01']],
+    [1, ['usage', '--to', '2026-08-01T00:00:00']],
+    [1, ['usage', '--from', '2026-13-45T00:00:00Z']],
+    [1, ['usage', '--to', '2026-08-01T25:00:00Z']],
+    [1, ['usage', '--to', '2026-08-01T00:00:00+25:00']],
+    [1, ['usage', '--from', '2026-09-01T00:00:00Z', '--to', '2026-08-01T00:00:00Z']],
+    [1, ['usage', '--from', '2026-08-01T01:00:00+01:00', '--to', '2026-08-01T00:00:00Z']],
+    [2, ['usage', '--from', '2026-08-01T00:00:00Z', '--from', '2026-08-02T00:00:00Z']],
+  ])('rejects invalid arguments before client creation, exiting %i: %j', async (code, args) => {
     const h = harness();
     const create = vi.fn(() => {
       throw new Error('must remain offline');
     });
     h.io.createClient = create;
     const result = await h.run(args);
-    expect(result.code).toBe(1);
+    // 2 for a command line the parser refuses, 1 for a value it passed on
+    // that the SDK then refused.
+    expect(result.code).toBe(code);
     expect(result.frames[0]).toMatchObject({
       ok: false,
       error: { code: 'invalid_arguments' },
-      exit_code: 1,
+      exit_code: code,
     });
     expect(create).not.toHaveBeenCalled();
     expect(h.rec.calls).toEqual([]);
@@ -2438,48 +2440,54 @@ describe('wait options and signal cleanup', () => {
 
 describe('malformed arguments are offline failures', () => {
   it.each([
-    ['unknown'],
-    ['computers'],
-    ['computers', 'list', '--unknown'],
-    ['computers', 'list', '--state', 'running'],
-    ['computers', 'create', '--cpu', 'nan'],
-    ['computers', 'create', '--cpu', '0'],
-    ['computers', 'create', '--size', 'small', '--template', 'base'],
-    ['computers', 'create', '--template-transfer', 'token'],
-    ['computers', 'stop', 'vm', '--force=true'],
-    ['computers', 'delete', 'vm', '--delete-snapshots'],
-    ['computers', 'delete', 'vm', '--expect', 'fp'],
-    ['computers', 'screenshot', 'vm'],
-    ['computers', 'screenshot', 'vm', '-o', '/tmp/x', '--width', '-1'],
-    ['computers', 'screenshot', 'vm', '-o', '/tmp/x', '--width', '320', '--scale', '0.5'],
-    ['computers', 'screenshot', 'vm', '-o', '/tmp/x', '--scale', '2'],
-    ['computers', 'screenshot', 'vm', '-o', '/tmp/x', '--region', '0,0,10'],
-    ['computers', 'screenshot', 'vm', '-o', '/tmp/x', '--region', '0,0,-1,10'],
-    ['computers', 'screenshot', 'vm', '-o', '/tmp/x', '--format', 'webp'],
-    ['computers', 'screenshot', 'vm', '-o', '/tmp/x', '--quality', '60'],
-    ['computers', 'exec', 'vm', '-c', 'true', '--background', '--timeout', '8'],
-    ['computers', 'exec', 'vm', '-c', 'true', '--timeout', '601'],
-    ['computers', 'exec', 'vm', '-c', 'true', '--env', 'bad'],
-    ['computers', 'exec', 'vm', '-c', 'true', '--env', 'X=1', '--env', 'X=2'],
-    ['computers', 'wait', 'vm', '--until', 'ready'],
-    ['computers', 'wait', 'vm', '--poll-ms', '0'],
-    ['snapshots', 'create', 'vm', '--timeout-ms', '-2'],
-    ['snapshots', 'schedule', 'set', 'vm', '--hour', '24'],
-    ['templates', 'get', 'acme', 'demo', '--version', 'bad'],
-    ['webhooks', 'update', 'whk'],
-    ['webhooks', 'update', 'whk', '--enable', '--disable'],
-    ['webhooks', 'update', 'whk', '--event', 'x', '--all-events'],
-    ['webhooks', 'update', 'whk', '--computer', 'x', '--all-computers'],
-    ['webhooks', 'create', 'http://insecure.example.com'],
-    ['agent', 'run', 'work'],
-    ['agent', 'run', 'work', '--computer', 'vm', '--max-steps', '101'],
-    ['completion', 'unknown'],
-    ['computers', 'get', ''],
-    ['computers', 'get', 'vm', 'extra'],
-  ])('%j makes no requests', async (...argv) => {
+    [2, ['unknown']],
+    [2, ['computers']],
+    [2, ['computers', 'list', '--unknown']],
+    [2, ['computers', 'list', '--state', 'running']],
+    [2, ['computers', 'create', '--cpu', 'nan']],
+    [1, ['computers', 'create', '--cpu', '0']],
+    [2, ['computers', 'create', '--size', 'small', '--template', 'base']],
+    [1, ['computers', 'create', '--template-transfer', 'token']],
+    [2, ['computers', 'stop', 'vm', '--force=true']],
+    [1, ['computers', 'delete', 'vm', '--delete-snapshots']],
+    [1, ['computers', 'delete', 'vm', '--expect', 'fp']],
+    [2, ['computers', 'screenshot', 'vm']],
+    [1, ['computers', 'screenshot', 'vm', '-o', '/tmp/x', '--width', '-1']],
+    [2, ['computers', 'screenshot', 'vm', '-o', '/tmp/x', '--width', '320', '--scale', '0.5']],
+    [1, ['computers', 'screenshot', 'vm', '-o', '/tmp/x', '--scale', '2']],
+    [1, ['computers', 'screenshot', 'vm', '-o', '/tmp/x', '--region', '0,0,10']],
+    [1, ['computers', 'screenshot', 'vm', '-o', '/tmp/x', '--region', '0,0,-1,10']],
+    [2, ['computers', 'screenshot', 'vm', '-o', '/tmp/x', '--format', 'webp']],
+    [1, ['computers', 'screenshot', 'vm', '-o', '/tmp/x', '--quality', '60']],
+    [2, ['computers', 'exec', 'vm', '-c', 'true', '--background', '--timeout', '8']],
+    [1, ['computers', 'exec', 'vm', '-c', 'true', '--timeout', '601']],
+    [1, ['computers', 'exec', 'vm', '-c', 'true', '--env', 'bad']],
+    [1, ['computers', 'exec', 'vm', '-c', 'true', '--env', 'X=1', '--env', 'X=2']],
+    [2, ['computers', 'wait', 'vm', '--until', 'ready']],
+    [1, ['computers', 'wait', 'vm', '--poll-ms', '0']],
+    [1, ['snapshots', 'create', 'vm', '--timeout-ms', '-2']],
+    [1, ['snapshots', 'schedule', 'set', 'vm', '--hour', '24']],
+    [1, ['templates', 'get', 'acme', 'demo', '--version', 'bad']],
+    [1, ['webhooks', 'update', 'whk']],
+    [2, ['webhooks', 'update', 'whk', '--enable', '--disable']],
+    [2, ['webhooks', 'update', 'whk', '--event', 'x', '--all-events']],
+    [2, ['webhooks', 'update', 'whk', '--computer', 'x', '--all-computers']],
+    [1, ['webhooks', 'create', 'http://insecure.example.com']],
+    [2, ['agent', 'run', 'work']],
+    [1, ['agent', 'run', 'work', '--computer', 'vm', '--max-steps', '101']],
+    [2, ['completion', 'unknown']],
+    [2, ['computers', 'get', '']],
+    [2, ['computers', 'get', 'vm', 'extra']],
+    // Parser refusals the README's exit-status paragraph lists as exit 2: a
+    // repeated option, a missing required option, a stray --as / --path.
+    [2, ['computers', 'create', '--cpu', '1', '--cpu', '2']],
+    [2, ['computers', 'move', 'vm']],
+    [2, ['computers', 'create', '--as', 'VAR']],
+    [2, ['computers', 'create', '--secret', 'A', '--path', 'f']],
+  ])('exits %i for %j, making no requests', async (code, argv) => {
     const h = harness();
     const result = await h.run(argv);
-    expect(result.code).toBe(1);
+    expect(result.code).toBe(code);
     expect(h.rec.calls).toEqual([]);
   });
 });
@@ -2579,11 +2587,79 @@ describe('credential-free discovery and profile dispatch', () => {
   });
 });
 
+describe('a command line the parser refuses exits 2, with the help for it (OPL-5660)', () => {
+  it('shows the root help under an unknown first word', async () => {
+    const h = harness();
+    const result = await h.run(['bogus']);
+    expect(result.code).toBe(2);
+    expect(result.frames).toHaveLength(1);
+    expect(result.frames[0]).toMatchObject({
+      ok: false,
+      exit_code: 2,
+      error: { code: 'invalid_arguments', message: 'unknown command bogus', usage: help() },
+    });
+    expect(h.rec.calls).toEqual([]);
+  });
+
+  it("shows the group's help under an unknown word in that group", async () => {
+    const h = harness();
+    const result = await h.run(['computers', 'bogus'], false);
+    expect(result.code).toBe(2);
+    expect(result.err).toContain('mandala: unknown command computers bogus\n');
+    expect(result.err).toContain('  mandala computers list\n');
+    // The group's commands, not every command.
+    expect(result.err).not.toContain('mandala secrets set');
+    const machine = await harness().run(['computers', 'bogus']);
+    expect(machine.frames[0]).toMatchObject({ exit_code: 2, error: { usage: help('computers') } });
+  });
+
+  it('never repeats the word typed under secrets, in the message or the help', async () => {
+    const word = 'sk-live-typed-under-secrets';
+    for (const jsonMode of [true, false]) {
+      const h = harness();
+      const result = await h.run(['secrets', word], jsonMode);
+      expect(result.code).toBe(2);
+      expect(result.out + result.err).not.toContain(word);
+      expect(result.out + result.err).toContain('mandala secrets set <name>');
+      if (jsonMode) expect(result.frames[0].error.usage).toBe(help('secrets'));
+    }
+  });
+
+  it('exits 2 for a group typed without a verb, and for a missing operand', async () => {
+    const group = await harness().run(['computers']);
+    expect(group.code).toBe(2);
+    expect(group.frames[0]).toMatchObject({ exit_code: 2, error: { usage: help('computers') } });
+    const missing = await harness().run(['computers', 'get']);
+    expect(missing.code).toBe(2);
+    expect(missing.frames[0]).toMatchObject({
+      exit_code: 2,
+      error: { message: 'missing <computer>', usage: help('computers get') },
+    });
+  });
+
+  it('keeps 1 for a value the SDK refuses and for an API refusal', async () => {
+    // Only the parser's refusals are usage errors: what parses and is then
+    // refused, locally or by the platform, is an ordinary error.
+    const local = await harness().run(['computers', 'create', '--cpu', '0']);
+    expect(local.code).toBe(1);
+    expect(local.frames[0]).toMatchObject({ exit_code: 1, error: { code: 'invalid_arguments' } });
+    expect(local.frames[0].error.usage).toBeUndefined();
+    const h = harness((call) =>
+      call.method === 'PATCH'
+        ? json({ error: 'cpu is out of range' }, { status: 400 })
+        : anyRoute(call),
+    );
+    const remote = await h.run(['computers', 'resize', COMPUTER.id, '--cpu', '64']);
+    expect(remote.code).toBe(1);
+    expect(remote.frames[0]).toMatchObject({ exit_code: 1, error: { status: 400 } });
+  });
+});
+
 describe('one JSON casing and one error vocabulary (OPL-5048)', () => {
   it('prints the full usage under a mistyped command, counting the extra argument', async () => {
     const h = harness();
     const result = await h.run(['computers', 'exec', 'demo', '-c', 'echo', 'extra-arg'], false);
-    expect(result.code).toBe(1);
+    expect(result.code).toBe(2);
     expect(result.err).toContain(
       'mandala: 1 argument too many: mandala computers exec takes <computer> and ' +
         'nothing more (quote a value that has spaces in it)',
@@ -2603,7 +2679,7 @@ describe('one JSON casing and one error vocabulary (OPL-5048)', () => {
     expect(result.frames[0]).toMatchObject({
       schema_version: 2,
       ok: false,
-      exit_code: 1,
+      exit_code: 2,
       error: {
         code: 'invalid_arguments',
         message: 'missing <computer>',
@@ -2619,7 +2695,7 @@ describe('one JSON casing and one error vocabulary (OPL-5048)', () => {
     for (const jsonMode of [true, false]) {
       const h = harness();
       const result = await h.run(['secrets', 'set', 'OPENAI_API_KEY', token], jsonMode);
-      expect(result.code).toBe(1);
+      expect(result.code).toBe(2);
       expect(result.out + result.err).not.toContain(token);
       expect(result.out + result.err).toContain(
         '1 argument too many: mandala secrets set takes <name> and nothing more',
@@ -2630,7 +2706,7 @@ describe('one JSON casing and one error vocabulary (OPL-5048)', () => {
     const h = harness();
     const dashed = `-${token}`;
     const result = await h.run(['secrets', 'set', 'OPENAI_API_KEY', dashed]);
-    expect(result.code).toBe(1);
+    expect(result.code).toBe(2);
     expect(result.out + result.err).not.toContain(token);
     expect(result.frames[0].error.message).toBe(
       'unknown option, not repeated here, as under secrets it may be a secret value; secrets set ' +
@@ -2658,7 +2734,7 @@ describe('one JSON casing and one error vocabulary (OPL-5048)', () => {
         const h = harness();
         const argv = ['secrets', 'set', 'OPENAI_API_KEY', ...tail];
         const result = await h.run(jsonMode ? ['--json', ...argv] : argv, false);
-        expect(result.code).toBe(1);
+        expect(result.code).toBe(2);
         if (jsonMode) expect(JSON.parse(result.out).error.code).toBe('invalid_arguments');
         expect(result.out + result.err).not.toContain(secret);
         expect(result.out + result.err).toContain(message);
@@ -2704,7 +2780,7 @@ describe('one JSON casing and one error vocabulary (OPL-5048)', () => {
         // --json goes first: after -- it would be one more operand.
         const h = harness();
         const result = await h.run(jsonMode ? ['--json', ...argv] : argv, false);
-        expect(result.code).toBe(1);
+        expect(result.code).toBe(2);
         if (jsonMode) {
           const error = JSON.parse(result.out).error;
           expect(error.code).toBe('invalid_arguments');
@@ -2733,7 +2809,7 @@ describe('one JSON casing and one error vocabulary (OPL-5048)', () => {
     ]) {
       // --json goes first: after -- it would be one more operand.
       const result = await harness().run(['--json', ...argv], false);
-      expect(result.code).toBe(1);
+      expect(result.code).toBe(2);
       expect(result.out + result.err).not.toContain(secret);
       expect(JSON.parse(result.out).error.message).toBe(
         'unknown option, not repeated here, as under secrets it may be a secret value',
@@ -2749,7 +2825,7 @@ describe('one JSON casing and one error vocabulary (OPL-5048)', () => {
       ['--jsno', '--profile', 'a', '--profile', 'b', 'computers', 'list'],
     ]) {
       const result = await harness().run(['--json', ...argv], false);
-      expect(result.code).toBe(1);
+      expect(result.code).toBe(2);
       expect(result.out + result.err).not.toContain(secret);
       expect(JSON.parse(result.out).error.message).toBe('--profile may only be supplied once');
     }
@@ -2757,7 +2833,7 @@ describe('one JSON casing and one error vocabulary (OPL-5048)', () => {
     // likely the value as a mistyped verb.
     for (const word of [secret, 'ls']) {
       const verb = await harness().run(['secrets', word]);
-      expect(verb.code).toBe(1);
+      expect(verb.code).toBe(2);
       if (word === secret) expect(verb.out + verb.err).not.toContain(word);
       expect(verb.frames[0].error.message).toBe(
         'unknown command under secrets; choose one of: list, set, get, rm (the word typed is not ' +
@@ -2788,7 +2864,7 @@ describe('one JSON casing and one error vocabulary (OPL-5048)', () => {
     }
     // A --json past -- is an operand, so a usage error is not reported as JSON.
     const operand = await harness().run(['secrets', 'set', 'A', '--', '--json'], false);
-    expect(operand.code).toBe(1);
+    expect(operand.code).toBe(2);
     expect(operand.out).toBe('');
     expect(operand.err).toContain('1 argument too many: mandala secrets set takes <name>');
     expect(() => JSON.parse(operand.err)).toThrow();
@@ -3570,7 +3646,7 @@ describe('files, rename, resize, view, and secrets bound at create', () => {
       for (const jsonMode of [true, false]) {
         const h = harness(store());
         const result = await h.run(['computers', 'create', ...argv], jsonMode);
-        expect(result.code, argv.join(' ')).toBe(1);
+        expect(result.code, argv.join(' ')).toBe(2);
         const printed = result.out + result.err;
         expect(printed, argv.join(' ')).toContain(says);
         expect(printed, argv.join(' ')).not.toContain(stray);
@@ -4323,33 +4399,37 @@ describe('files, rename, resize, view, and secrets bound at create', () => {
   });
 
   it.each([
-    [['computers', 'resize', 'vm']],
-    [['computers', 'resize', 'vm', '--cpu', '0']],
-    [['computers', 'resize', 'vm', '--disk-gb', '1.5']],
-    [['computers', 'rename', 'vm']],
-    [['computers', 'view', 'vm', 'extra']],
-    [['files', 'list', 'vm', 'relative/path']],
-    [['files', 'list', 'vm']],
-    [['files', 'upload', 'vm', 'local.txt']],
-    [['computers', 'create', '--secret', '=X']],
-    [['computers', 'create', '--secret', 'A=1BAD']],
-    [['computers', 'create', '--secret-file', 'A=Upper']],
-    [['computers', 'create', '--secret', 'A=']],
-    [['computers', 'create', '--browser-proxy-bypass', 'a.com']],
-    [['computers', 'create', '--browser-proxy', '']],
-    [['computers', 'browser-proxy', 'set', 'vm']],
-    [['computers', 'browser-proxy', 'set', 'vm', ' ']],
-    [['computers', 'browser-proxy', 'clear']],
+    [1, ['computers', 'resize', 'vm']],
+    [1, ['computers', 'resize', 'vm', '--cpu', '0']],
+    [1, ['computers', 'resize', 'vm', '--disk-gb', '1.5']],
+    [2, ['computers', 'rename', 'vm']],
+    [2, ['computers', 'view', 'vm', 'extra']],
+    [1, ['files', 'list', 'vm', 'relative/path']],
+    [2, ['files', 'list', 'vm']],
+    [2, ['files', 'upload', 'vm', 'local.txt']],
+    [1, ['computers', 'create', '--secret', '=X']],
+    [1, ['computers', 'create', '--secret', 'A=1BAD']],
+    [1, ['computers', 'create', '--secret-file', 'A=Upper']],
+    [1, ['computers', 'create', '--secret', 'A=']],
+    [1, ['computers', 'create', '--browser-proxy-bypass', 'a.com']],
+    [2, ['computers', 'create', '--browser-proxy', '']],
+    [2, ['computers', 'browser-proxy', 'set', 'vm']],
+    [2, ['computers', 'browser-proxy', 'set', 'vm', ' ']],
+    [2, ['computers', 'browser-proxy', 'clear']],
     // A bypass of blanks is refused as the SDK refuses a blank entry, rather
     // than sent as an empty list.
-    [['computers', 'browser-proxy', 'set', 'vm', 'http://p:1', '--bypass', '']],
-    [['computers', 'browser-proxy', 'set', 'vm', 'http://p:1', '--bypass', ',']],
-    [['computers', 'browser-proxy', 'set', 'vm', 'http://p:1', '--bypass', 'a.com,']],
-    [['computers', 'create', '--browser-proxy', 'http://p:1', '--browser-proxy-bypass', ' ']],
-    [['computers', 'create', '--browser-proxy-credentials', 'csec-0123456789abcdef']],
-    [['computers', 'create', '--browser-proxy', 'http://p:1', '--browser-proxy-credentials', 'x']],
-    [['computers', 'browser-proxy', 'set', 'vm', 'http://p:1', '--credentials', 'csec-01']],
+    [2, ['computers', 'browser-proxy', 'set', 'vm', 'http://p:1', '--bypass', '']],
+    [1, ['computers', 'browser-proxy', 'set', 'vm', 'http://p:1', '--bypass', ',']],
+    [1, ['computers', 'browser-proxy', 'set', 'vm', 'http://p:1', '--bypass', 'a.com,']],
+    [2, ['computers', 'create', '--browser-proxy', 'http://p:1', '--browser-proxy-bypass', ' ']],
+    [1, ['computers', 'create', '--browser-proxy-credentials', 'csec-0123456789abcdef']],
     [
+      1,
+      ['computers', 'create', '--browser-proxy', 'http://p:1', '--browser-proxy-credentials', 'x'],
+    ],
+    [1, ['computers', 'browser-proxy', 'set', 'vm', 'http://p:1', '--credentials', 'csec-01']],
+    [
+      1,
       [
         'computers',
         'browser-proxy',
@@ -4361,10 +4441,10 @@ describe('files, rename, resize, view, and secrets bound at create', () => {
         '--no-credentials',
       ],
     ],
-  ])('%j makes no requests', async (argv) => {
+  ])('exits %i for %j, making no requests', async (code, argv) => {
     const h = harness();
     const result = await h.run(argv);
-    expect(result.code).toBe(1);
+    expect(result.code).toBe(code);
     expect(h.rec.calls).toEqual([]);
   });
 });
@@ -4801,7 +4881,7 @@ describe('computers move and moves list (OPL-5524)', () => {
   it('needs --ram-mb, and --timeout-ms only with --wait, before any request', async () => {
     const h = harness();
     const bare = await h.run(['computers', 'move', COMPUTER.id, '--cpu', '4']);
-    expect(bare.code).toBe(1);
+    expect(bare.code).toBe(2);
     expect(bare.frames[0].error.message).toContain('requires --ram-mb');
     const h2 = harness();
     const early = await h2.run([
@@ -4983,7 +5063,7 @@ describe('--idempotency-key on keyed commands (OPL-5524)', () => {
   it('refuses it on a command that sends no key, naming the ones that do', async () => {
     const h = harness();
     const result = await h.run(['computers', 'get', COMPUTER.id, '--idempotency-key', 'k']);
-    expect(result.code).toBe(1);
+    expect(result.code).toBe(2);
     expect(result.frames[0].error.message).toContain(
       'mandala computers get sends no Idempotency-Key',
     );
@@ -5043,7 +5123,7 @@ describe('exec --retain-output, files --no-wake, secrets --keep-revision, wait -
       '--background',
       '--retain-output',
     ]);
-    expect(result.code).toBe(1);
+    expect(result.code).toBe(2);
     expect(result.frames[0].error.message).toMatch(/conflicts with/);
     expect(h.rec.calls).toEqual([]);
   });
