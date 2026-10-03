@@ -4963,3 +4963,58 @@ describe('a scroll amount checked before it is sent', () => {
     expect(rec.last().body).toMatchObject({ action: 'scroll', amount: 50 });
   });
 });
+
+describe('the clipboard docs name the tool each desktop needs', () => {
+  // A Wayland image drives wl-paste/wl-copy from wl-clipboard, and the
+  // platform's refusal there names that tool. A paragraph that states the
+  // image requirement with xclip alone sends a Wayland caller to install
+  // something its compositor never uses. Checked per paragraph, so one
+  // paragraph naming both cannot cover for another naming only xclip.
+  const read = (rel: string) => readFileSync(new URL(rel, import.meta.url), 'utf8');
+  const between = (text: string, from: string, to: string) => {
+    const start = text.indexOf(from);
+    expect(start).toBeGreaterThan(-1);
+    const end = text.indexOf(to, start + from.length);
+    expect(end).toBeGreaterThan(start);
+    return text.slice(start, end);
+  };
+  const docBefore = (src: string, signature: string) => {
+    const at = src.indexOf(signature);
+    expect(at).toBeGreaterThan(-1);
+    return src.slice(src.lastIndexOf('/**', at), at);
+  };
+  const everyXclipParagraphNamesWlClipboard = (text: string) => {
+    // Paragraphs end at a blank line, or a bare `*` line inside a doc comment.
+    const naming = text.split(/\n[ \t]*\*?[ \t]*\n/).filter((p) => p.includes('xclip'));
+    expect(naming.length).toBeGreaterThan(0);
+    for (const p of naming) expect(p.replace(/\s+/g, ' ')).toContain('wl-clipboard');
+  };
+
+  it('in the README', () => {
+    const readme = read('../README.md');
+    // Up to the subsection on the exec recipe these replace, which is about
+    // that X11 recipe rather than about what the image needs.
+    everyXclipParagraphNamesWlClipboard(
+      between(readme, '### Clipboard\n', '#### Why not `exec` and `xclip` yourself'),
+    );
+    everyXclipParagraphNamesWlClipboard(
+      between(readme, '[`clipboard()` and `setClipboard()`](#clipboard) are the route', '\n\n'),
+    );
+  });
+
+  it('on clipboard() and setClipboard()', () => {
+    const src = read('../src/computer.ts');
+    everyXclipParagraphNamesWlClipboard(docBefore(src, 'async clipboard('));
+    everyXclipParagraphNamesWlClipboard(docBefore(src, 'async setClipboard('));
+  });
+
+  it('on VncConnect', () => {
+    everyXclipParagraphNamesWlClipboard(
+      between(
+        read('../src/models.ts'),
+        '`Computer.clipboard()` and `Computer.setClipboard()` are the route',
+        'offers onward',
+      ),
+    );
+  });
+});
