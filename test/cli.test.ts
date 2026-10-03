@@ -472,8 +472,79 @@ describe('terminal receive/output pipeline', () => {
       stdout.emit('drain');
       expect(stdin.setRawMode).not.toHaveBeenCalledWith(false);
       stdout.emit('drain');
-      expect(await result).toBe(0);
+      // No exit frame came, so the status is unknown: 255, never 0 (OPL-5637).
+      expect(await result).toBe(255);
       expect(stdout.write).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  // OPL-5637: each of these ends the session without the shell's status, and
+  // used to exit 0 — so `mandala terminal vm < build.sh && ./deploy.sh` deployed
+  // after a build nobody saw finish.
+  describe('a session that ends without the shell status', () => {
+    const ends = async (frames: unknown[]) => {
+      let code = -1;
+      let said = '';
+      let saidBeforeRestore = -1;
+      await session(async ({ socket, stdin, diagnostic, result }) => {
+        stdin.setRawMode.mockImplementation((on: boolean) => {
+          if (!on) saidBeforeRestore = diagnostic.length;
+        });
+        for (const f of frames) socket.send(f);
+        socket.emitClose();
+        code = await result;
+        said = diagnostic.join('');
+      });
+      // Said once the terminal is out of raw mode, where a newline still
+      // returns the carriage.
+      expect(saidBeforeRestore).toBe(0);
+      return { code, said };
+    };
+
+    it('reports 255 for a link that closed with no exit frame', async () => {
+      const { code, said } = await ends([]);
+      expect(code).toBe(255);
+      expect(said).toBe('mandala: detached — run the same command to reattach; reporting 255\n');
+    });
+
+    it('reports 255, with the reason, for a session another connection took', async () => {
+      const { code, said } = await ends([{ type: 'detached', reason: 'attached elsewhere' }]);
+      expect(code).toBe(255);
+      expect(said).toBe(
+        'mandala: detached (attached elsewhere) — run the same command to reattach; reporting 255\n',
+      );
+      expect((await ends([{ type: 'detached' }])).code).toBe(255);
+    });
+
+    it('reports 255 and prints the refusal the server sent after the upgrade', async () => {
+      const { code, said } = await ends([
+        { type: 'error', message: 'too many terminal sessions on this computer' },
+      ]);
+      expect(code).toBe(255);
+      expect(said).toBe('mandala: too many terminal sessions on this computer; reporting 255\n');
+    });
+
+    it('shows an escape in the server text rather than obeying it', async () => {
+      const { said } = await ends([{ type: 'error', message: 'no\u001b]52;c;eA==\u0007' }]);
+      expect(said).toBe('mandala: no\\u001b]52;c;eA==\\u0007; reporting 255\n');
+    });
+
+    it('reports 255 for an exit frame with no readable code', async () => {
+      const unreadable = await ends([{ type: 'exit', code: 'x' }]);
+      expect(unreadable.code).toBe(255);
+      expect(unreadable.said).toBe(
+        'mandala: the shell reported an unreadable status "x"; reporting 255\n',
+      );
+      const missing = await ends([{ type: 'exit' }]);
+      expect(missing.code).toBe(255);
+      expect(missing.said).toBe(
+        'mandala: the shell ended without reporting a status; reporting 255\n',
+      );
+    });
+
+    it('still passes on a status it did read, and says nothing extra', async () => {
+      expect(await ends([{ type: 'exit', code: 3 }])).toEqual({ code: 3, said: '' });
+      expect(await ends([{ type: 'exit', code: 0 }])).toEqual({ code: 0, said: '' });
     });
   });
 
@@ -1080,8 +1151,20 @@ describe('the exit code a session reports', () => {
     // process.exit takes the low byte, so 256 arrived at the shell as 0 — a
     // guest failure reported as the success `mandala terminal vm cmd && next` acts
     // on. -1 wrapping to 255 is at least still a failure; this one inverts.
-    expect(await terminalWith({ type: 'exit', code: 256 })).toBe(1);
-    expect(await terminalWith({ type: 'exit', code: -1 })).toBe(1);
+    // Refused as 255, the unknown-status exit, not 1 (OPL-5637).
+    expect(await terminalWith({ type: 'exit', code: 256 })).toBe(255);
+    expect(await terminalWith({ type: 'exit', code: -1 })).toBe(255);
+    expect(await terminalWith({ type: 'exit', code: 'x' })).toBe(255);
+    expect(await terminalWith({ type: 'exit', code: 1.5 })).toBe(255);
+    expect(await terminalWith({ type: 'exit', code: true })).toBe(255);
+  });
+
+  it('never reports 0 for a session that ended without the shell status (OPL-5637)', async () => {
+    expect(await terminalWith({ type: 'detached', reason: 'attached elsewhere' })).toBe(255);
+    expect(
+      await terminalWith({ type: 'error', message: 'too many terminal sessions on this computer' }),
+    ).toBe(255);
+    expect(await terminalWith({ type: 'resize', cols: 80, rows: 24 })).toBe(255);
   });
 });
 

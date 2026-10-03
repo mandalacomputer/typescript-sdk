@@ -33,7 +33,7 @@ import { isatty, WriteStream } from 'node:tty';
 import { pathToFileURL } from 'node:url';
 import { type LegacyCommands, resolveComputer, runCli } from './cli-commands.js';
 import { CliError } from './cli-options.js';
-import { redact } from './cli-output.js';
+import { redact, terminalSafe } from './cli-output.js';
 import { type CliIO, runtime } from './cli-runtime.js';
 import type { Computer } from './computer.js';
 import { CreateOnlyConflictError, FileExistsError } from './errors.js';
@@ -55,6 +55,16 @@ const MAX_QUEUED_OUTPUT = 4 * MAX_FRAME;
  * announcing the exit cannot hold the local terminal open with it.
  */
 const EXIT_DRAIN_MS = 3_000;
+
+/**
+ * What `mandala terminal` exits with when it never read the shell's status: the
+ * link dropped, another connection took the session, the server refused it,
+ * or the exit frame carried no readable code. Never 0, which would claim the
+ * command succeeded. A shell can exit 255 itself, so that collision is real,
+ * but it is one between two failures, not a failure and a success. The same
+ * value `mandala-py terminal` reports.
+ */
+const EXIT_STATUS_UNKNOWN = 255;
 
 /** A terminal websocket must either upgrade or fail within this window. */
 const CONNECT_TIMEOUT_MS = 15_000;
@@ -588,6 +598,11 @@ export async function interact(
   let raw = false;
   let winch = false;
   let exitCode: number | undefined;
+  // Why the shell's status could not be had, held until the terminal is out
+  // of raw mode: a message written now would staircase down the screen.
+  let unknownStatus: string | undefined;
+  let serverError: string | undefined;
+  let detachedReason: string | undefined;
   let pump: ReturnType<typeof setInterval> | undefined;
   let exitTimer: ReturnType<typeof setTimeout> | undefined;
   let outputFailure: Error | undefined;
@@ -723,7 +738,19 @@ export async function interact(
         if (typeof ev.data === 'string') {
           try {
             const control = JSON.parse(ev.data);
-            if (control?.type === 'exit') {
+            if (control?.type === 'error') {
+              // A refusal after the upgrade — the session cap lost in a race,
+              // say. The shell may never have run, so its status is unknown;
+              // the server's own words are the only account of why.
+              serverError =
+                typeof control.message === 'string' && control.message
+                  ? control.message
+                  : 'the terminal server refused this session';
+            } else if (control?.type === 'detached') {
+              // Another connection took this session. It is still alive, so
+              // reattaching works, but this process will never see its status.
+              if (typeof control.reason === 'string') detachedReason = control.reason;
+            } else if (control?.type === 'exit') {
               // A code the frame did not carry as an integer must not read as
               // exit 0 — that is the difference between success and a shrug.
               // An integer or the string spelling of one both count: nothing
@@ -743,8 +770,18 @@ export async function interact(
               // acts on, which is the one outcome the guard above exists to
               // stop. Out of range is refused rather than masked to 256 % 256
               // for the same reason a non-integer is: a code this process
-              // cannot faithfully pass on is not evidence of success.
-              exitCode = Number.isInteger(code) && code >= 0 && code <= 255 ? code : 1;
+              // cannot faithfully pass on is not evidence of success. Refused
+              // as 255, the status every unknown outcome of this command
+              // reports, not 1, which a shell command can really exit with.
+              if (Number.isInteger(code) && code >= 0 && code <= 255) {
+                exitCode = code;
+              } else {
+                exitCode = EXIT_STATUS_UNKNOWN;
+                unknownStatus =
+                  control.code === undefined || control.code === null
+                    ? 'the shell ended without reporting a status'
+                    : `the shell reported an unreadable status ${JSON.stringify(control.code)}`;
+              }
               // The shell has ended, but the output's tail may still be in
               // flight behind this frame. Keep receiving until the peer closes
               // or the deadline expires: calling close() now puts a native
@@ -777,11 +814,30 @@ export async function interact(
     );
     return 1;
   }
+  // Server text goes through terminalSafe: it reaches a terminal that would
+  // obey an escape sequence in it rather than show it.
+  if (serverError !== undefined) {
+    stderr.write(
+      exitCode === undefined
+        ? `mandala: ${terminalSafe(serverError)}; reporting ${EXIT_STATUS_UNKNOWN}\n`
+        : `mandala: ${terminalSafe(serverError)}\n`,
+    );
+    if (exitCode === undefined) return EXIT_STATUS_UNKNOWN;
+  }
   if (exitCode === undefined) {
-    // The link dropped without the shell ending: the session is still alive
-    // server-side, and saying so is what makes that a feature.
-    stderr.write('mandala: detached — run the same command to reattach\n');
-    return 0;
+    // The session ended without the shell's status: a dropped link, or another
+    // connection took the session. It is still alive server-side, and saying
+    // so is what makes that a feature — but 0 would claim the command
+    // succeeded, and `mandala terminal vm < build.sh && ./deploy.sh` would ship
+    // a build whose end nobody saw. A script cannot reattach (OPL-5637).
+    const why = detachedReason ? ` (${terminalSafe(detachedReason)})` : '';
+    stderr.write(
+      `mandala: detached${why} — run the same command to reattach; reporting ${EXIT_STATUS_UNKNOWN}\n`,
+    );
+    return EXIT_STATUS_UNKNOWN;
+  }
+  if (unknownStatus !== undefined) {
+    stderr.write(`mandala: ${terminalSafe(unknownStatus)}; reporting ${EXIT_STATUS_UNKNOWN}\n`);
   }
   return exitCode;
 }
