@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { main } from '../src/cli.js';
 import { dashboardUrl, type LegacyCommands, runCli } from '../src/cli-commands.js';
-import { type Flag, GLOBAL_FLAGS, parseArgs } from '../src/cli-options.js';
+import { COMMANDS, type Flag, GLOBAL_FLAGS, parseArgs } from '../src/cli-options.js';
 import { type CliIO, runtime } from '../src/cli-runtime.js';
 import { looksLikeSecretValue } from '../src/cli-secrets.js';
 import { Client } from '../src/index.js';
@@ -1802,6 +1802,18 @@ describe('snapshots', () => {
     expect(result.frames[0].error.message).toMatch(/revokes every API key confined to it/);
     expect(result.frames[0].error.message).toContain('--yes');
     expect(h.rec.calls).toHaveLength(0);
+  });
+
+  // The platform deletes only an empty workspace (409 while it holds any), so
+  // neither the confirmation nor the help may promise its computers are kept.
+  it('says a workspace that holds computers cannot be deleted, never that they are kept', async () => {
+    const result = await harness().run(['workspaces', 'rm', WORKSPACE.name]);
+    const message: string = result.frames[0].error.message;
+    expect(message).toMatch(/a workspace that still holds computers cannot be deleted/);
+    expect(message).not.toMatch(/kept|not touched/);
+    const help = COMMANDS.find((c) => c.path === 'workspaces rm')!.description;
+    expect(help).toMatch(/it must hold no computers/);
+    expect(help).not.toMatch(/kept|not touched/);
   });
 
   it('refuses to rename or delete a workspace name that fits more than one', async () => {
