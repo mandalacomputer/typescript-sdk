@@ -292,16 +292,19 @@ export class MandalaComputerToolset extends BetaAbstractComputerToolset20260801 
     // which are not the screen's when the two differ and not the picture's when
     // the picture was shrunk (found in review: a 3200x1800 capture under a
     // 3840x2160 record shrinks to the same 2576x1449 picture as a 3840x2160
-    // one). So the region goes into the capture's pixels, and the capture's
-    // size is measured: it IS the last picture when that was not shrunk, and
-    // otherwise is read off one picture taken whole.
-    let native = frame;
-    if (this.#request !== undefined) {
-      const whole = await this.#shoot(ctx, undefined);
-      const size = pngSize(whole);
-      if (!size) throw new ToolError('the screenshot came back in a format other than PNG');
-      native = size;
-    }
+    // one). So the region goes into the capture's pixels, measured off a
+    // capture taken whole, now.
+    //
+    // And the crop is cut from THAT capture (found in re-review): it is asked
+    // for without `fresh`, which the platform answers from the capture it has
+    // just taken for the measurement rather than taking another, which could
+    // be another size. What this cannot rule out is a third caller's fresh
+    // capture, at another size, landing between the two inside the platform's
+    // 1.5-second reuse window: the platform names no capture a crop could be
+    // pinned to.
+    const whole = await this.#shoot(ctx, undefined);
+    const native = pngSize(whole);
+    if (!native) throw new ToolError('the screenshot came back in a format other than PNG');
     const left = Math.floor((x0 * native.width) / frame.width);
     const top = Math.floor((y0 * native.height) / frame.height);
     const right = Math.min(native.width, Math.ceil((x1 * native.width) / frame.width));
@@ -315,7 +318,7 @@ export class MandalaComputerToolset extends BetaAbstractComputerToolset20260801 
     const fit = largestFit(region);
     const width = same(fit, region) ? undefined : fit.width;
     const bytes = await this.#call(ctx, (signal) =>
-      this.computer.screenshot(width, { fresh: true, region, format: 'png', signal }),
+      this.computer.screenshot(width, { region, format: 'png', signal }),
     );
     const size = pngSize(bytes);
     if (!size || !fits(size))

@@ -61,14 +61,24 @@ function desktop(
   } = {},
 ) {
   let capture = opts.capture ?? screen;
+  // The platform's frame cache: a request without `fresh` is answered from the
+  // last capture taken, as the platform does within its reuse window, and only
+  // a fresh one takes a new capture.
+  let held: Size | undefined;
   const rec = recorder((call: Call) => {
     if (call.path === '/computers/vm-1') {
       return json({ ...COMPUTER, resolution: `${screen.width}x${screen.height}x24` });
     }
     if (call.path === '/computers/vm-1/screenshot') {
-      let src = capture;
-      const next = opts.captures?.shift();
-      if (next) capture = next;
+      let src: Size;
+      if (call.query.fresh === '1' || !held) {
+        src = capture;
+        held = capture;
+        const next = opts.captures?.shift();
+        if (next) capture = next;
+      } else {
+        src = held;
+      }
       if (call.query.region) {
         const [x, y, w, h] = call.query.region.split(',').map(Number) as [
           number,
@@ -296,20 +306,20 @@ describe('zoom', () => {
     const shot = sizeOf(image(await t.toolResult(use('screenshot'))));
     const r = await t.toolResult(use('zoom', { region: [0, 0, shot.width, shot.height] }));
     expect(fits(sizeOf(image(r)))).toBe(true);
-    // The picture was shrunk, so the capture is measured whole first.
+    // Measured off a capture taken whole, then cut from that same capture.
     expect(d.shots()[1]).toEqual({ fresh: '1' });
     expect(d.shots()[2]).toMatchObject({ region: '0,0,3840,2160', format: 'png' });
+    expect(d.shots()[2]!.fresh).toBeUndefined();
   });
 
-  it('takes a small region whole, without measuring a capture it already saw', async () => {
+  it('takes a small region whole', async () => {
     const d = desktop({ width: 1280, height: 800 });
     const t = await toolset(d);
     await t.toolResult(use('screenshot'));
     const r = await t.toolResult(use('zoom', { region: [100, 100, 300, 200] }));
     expect(sizeOf(image(r))).toEqual({ width: 200, height: 100 });
-    expect(d.shots()).toHaveLength(2);
-    expect(d.shots()[1]).toMatchObject({ region: '100,100,200,100' });
-    expect(d.shots()[1]!.w).toBeUndefined();
+    expect(d.shots()[2]).toMatchObject({ region: '100,100,200,100' });
+    expect(d.shots()[2]!.w).toBeUndefined();
   });
 
   it('maps the region into a capture of another size than the record (found in review)', async () => {
@@ -327,12 +337,33 @@ describe('zoom', () => {
     expect(d.shots()[2]).toMatchObject({ region: '1242,621,249,249' });
   });
 
+  it('cuts the crop from the capture it measured, not a later one (found in re-review)', async () => {
+    // The display goes from 3200x1800 to 3840x2160 after the measurement. A
+    // second fresh capture would be cut with the first one's arithmetic.
+    const d = desktop(
+      { width: 3840, height: 2160 },
+      {
+        capture: { width: 3200, height: 1800 },
+        captures: [
+          { width: 3200, height: 1800 },
+          { width: 3840, height: 2160 },
+        ],
+      },
+    );
+    const t = await toolset(d);
+    await t.toolResult(use('screenshot'));
+    const r = await t.toolResult(use('zoom', { region: [1000, 500, 1200, 700] }));
+    expect(r.is_error).toBeUndefined();
+    expect(d.shots()[2]).toMatchObject({ region: '1242,621,249,249' });
+    expect(d.shots()[2]!.fresh).toBeUndefined();
+  });
+
   it('maps the region into an unshrunk capture smaller than the record', async () => {
     const d = desktop({ width: 1920, height: 1080 }, { capture: { width: 1280, height: 800 } });
     const t = await toolset(d);
     await t.toolResult(use('screenshot'));
     await t.toolResult(use('zoom', { region: [100, 100, 300, 200] }));
-    expect(d.shots()[1]).toMatchObject({ region: '100,100,200,100' });
+    expect(d.shots()[2]).toMatchObject({ region: '100,100,200,100' });
   });
 
   it('refuses a region outside the picture, and any region before a picture', async () => {
