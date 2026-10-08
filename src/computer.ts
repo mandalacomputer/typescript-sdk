@@ -3602,6 +3602,9 @@ export class Computer {
    *
    * ```ts
    * const measured = await c.screenshotWithInfo(64, { fresh: true });
+   * // Absent on a platform that does not name its captures. Without a name the
+   * // crop below would be cut from whatever capture is held, so stop here.
+   * if (!measured.capture || !measured.captureSize) throw new Error('captures are not named');
    * const crop = await c.screenshot(undefined, {
    *   capture: measured.capture,
    *   region: { x: 0, y: 0, width: 400, height: 300 },

@@ -58,6 +58,8 @@ const fits = (s: Size) =>
  * always passed, so every unpinned read takes a new capture. `intrude` is
  * another caller's fresh capture, taken after the screenshot request it is
  * given the index of. `unnamed` is a platform from before OPL-5852.
+ * `refuseCrop` answers every pinned request with that status and the word
+ * `stale_capture`, which the platform only ever sends on a 409.
  */
 function desktop(
   screen: Size,
@@ -69,6 +71,7 @@ function desktop(
     expired?: boolean;
     intrude?: (index: number) => boolean;
     unnamed?: boolean;
+    refuseCrop?: number;
   } = {},
 ) {
   let capture = opts.capture ?? screen;
@@ -93,6 +96,12 @@ function desktop(
         let from: { size: Size; name: string };
         if (call.query.capture !== undefined) {
           if (opts.unnamed) return errorJson(400, '"capture" is not a screenshot parameter');
+          if (opts.refuseCrop !== undefined) {
+            return json(
+              { error: 'refused for a reason of its own', reason: 'stale_capture' },
+              { status: opts.refuseCrop, headers: { 'content-type': 'application/json' } },
+            );
+          }
           if (!held || held.name !== call.query.capture) {
             return json(
               { error: 'the capture you named is no longer held', reason: 'stale_capture' },
@@ -123,6 +132,14 @@ function desktop(
         if (call.query.w && !opts.ignoreWidth) {
           const w = Math.min(Math.max(Number(call.query.w), 64), src.width);
           out = { width: w, height: Math.max(1, Math.floor((src.height * w) / src.width)) };
+        }
+        // The platform's `scale`: no floor, and rounded rather than floored.
+        if (call.query.scale) {
+          const k = Number(call.query.scale);
+          out = {
+            width: Math.max(1, Math.round(src.width * k)),
+            height: Math.max(1, Math.round(src.height * k)),
+          };
         }
         const headers: Record<string, string> = { 'content-type': 'image/png' };
         if (!opts.unnamed) {
@@ -381,6 +398,24 @@ describe('zoom', () => {
     expect(d.shots()[2]).toMatchObject({ region: '1242,621,249,249' });
   });
 
+  it('shrinks a strip narrower than the platform will by width, by scale instead', async () => {
+    // A portrait screen: a strip 63 pixels wide down the whole picture is a
+    // 94x3840 crop, which `w` cannot shrink below 64 wide — 64x2614, taller
+    // than the model takes. A scale has no floor.
+    const d = desktop({ width: 2160, height: 3840 });
+    const t = await toolset(d);
+    const shot = sizeOf(image(await t.toolResult(use('screenshot'))));
+    expect(shot).toEqual({ width: 1449, height: 2576 });
+    const r = await t.toolResult(use('zoom', { region: [0, 0, 63, 2576] }));
+    expect(r.is_error).toBeUndefined();
+    expect(d.shots()[2]).toMatchObject({ region: '0,0,94,3840', format: 'png' });
+    expect(d.shots()[2]!.w).toBeUndefined();
+    expect(Number(d.shots()[2]!.scale)).toBeLessThan(1);
+    const zoomed = sizeOf(image(r));
+    expect(fits(zoomed)).toBe(true);
+    expect(zoomed.height).toBe(2576);
+  });
+
   it('maps the region into an unshrunk capture smaller than the record', async () => {
     const d = desktop({ width: 1920, height: 1080 }, { capture: { width: 1280, height: 800 } });
     const t = await toolset(d);
@@ -460,6 +495,24 @@ describe('zoom', () => {
     expect(d.shots().filter((q) => q.capture !== undefined)).toHaveLength(3);
     expect(d.cuts).toEqual([]);
   });
+
+  it.each([400, 403, 500])(
+    'keeps a %i that carries the stale_capture word, rather than measuring again',
+    async (status) => {
+      // Only the platform's 409 means another capture replaced the one
+      // measured. The same word on another status is some other failure, and
+      // three retries ending in a capture-race message would hide it.
+      const d = desktop({ width: 1280, height: 800 }, { refuseCrop: status });
+      const t = await toolset(d);
+      await t.toolResult(use('screenshot'));
+      const r = await t.toolResult(use('zoom', { region: [100, 100, 300, 200] }));
+      expect(r.is_error).toBe(true);
+      expect(text(r)).toContain('refused for a reason of its own');
+      expect(text(r)).not.toContain('captured again');
+      expect(d.shots()).toHaveLength(3);
+      expect(d.cuts).toEqual([]);
+    },
+  );
 
   it('refuses to zoom on a platform that does not name its captures', async () => {
     // An unpinned crop is the guess this exists to stop making, so there is

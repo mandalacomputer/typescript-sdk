@@ -123,6 +123,30 @@ function largestFit(size: Size): Size {
   return { width, height: heightAt(width) };
 }
 
+/**
+ * How to have the platform shrink a crop of `size` to a picture the model
+ * takes: nothing when it fits already, a width when one of at least
+ * {@link MIN_WIDTH} does, and otherwise a scale.
+ *
+ * A width alone is not enough for a crop. The platform will not shrink below
+ * 64 pixels wide by `w`, so a tall, narrow region — a strip down a portrait
+ * screen — came back 64 pixels wide and still taller than the model takes. A
+ * scale has no such floor. The platform rounds `scale` to the nearest pixel
+ * where it floors `w`, so the scale is the largest whose ROUNDED size fits.
+ */
+function cropShrink(size: Size): { width?: number; scale?: number } {
+  const fit = largestFit(size);
+  if (same(fit, size)) return {};
+  if (fits(fit)) return { width: fit.width };
+  const at = (k: number) => ({
+    width: Math.max(1, Math.round(size.width * k)),
+    height: Math.max(1, Math.round(size.height * k)),
+  });
+  let scale = MAX_EDGE / Math.max(size.width, size.height);
+  while (!fits(at(scale))) scale *= 0.99;
+  return { scale };
+}
+
 const same = (a: Size, b: Size) => a.width === b.width && a.height === b.height;
 
 /**
@@ -510,18 +534,22 @@ export class MandalaComputerToolset extends BetaAbstractComputerToolset20260801 
         width: Math.max(1, right - left),
         height: Math.max(1, bottom - top),
       };
-      const fit = largestFit(region);
-      const width = same(fit, region) ? undefined : fit.width;
+      const { width, scale } = cropShrink(region);
       let bytes: Uint8Array;
       try {
         bytes = await this.computer.screenshot(width, {
           capture,
           region,
+          ...(scale === undefined ? {} : { scale }),
           format: 'png',
           signal: ctx.signal ?? undefined,
         });
       } catch (error) {
-        const replaced = error instanceof APIError && error.reason === 'stale_capture';
+        // The platform's refusal of a replaced capture, and only that: 409 and
+        // the word together. The word on another status is some other failure,
+        // and measuring again would bury it under a race that did not happen.
+        const replaced =
+          error instanceof APIError && error.status === 409 && error.reason === 'stale_capture';
         if (!replaced || ctx.signal?.aborted) throw this.#told(error, ctx);
         if (attempt < ZOOM_ATTEMPTS) continue;
         throw new ToolError(

@@ -609,7 +609,10 @@ from that capture and no other:
 ```ts
 // Measure on a thumbnail: the capture's size comes back without the whole screen.
 const measured = await c.screenshotWithInfo(64, { fresh: true });
-const { width, height } = measured.captureSize!;  // the space `region` is read in
+// Absent from a platform that does not name its captures: without a name the
+// crop would be cut from whatever capture is held, which is the guess to avoid.
+if (!measured.capture || !measured.captureSize) throw new Error('captures are not named');
+const { width, height } = measured.captureSize; // the space `region` is read in
 const rightHalf = await c.screenshot(undefined, {
   capture: measured.capture,
   region: { x: Math.floor(width / 2), y: 0, width: width - Math.floor(width / 2), height },
