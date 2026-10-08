@@ -416,6 +416,36 @@ describe('zoom', () => {
     expect(zoomed.height).toBe(2576);
   });
 
+  it.each([
+    [0.5, 1],
+    [1, 2],
+    [42, 63],
+    [42.9, 64],
+  ])('shrinks a strip down to %s of the picture (%i capture pixels) by scale', async (x1, wide) => {
+    // A crop so narrow that a width which fits is below the platform's floor
+    // of 64, which raises it back to the crop's own width (found in re-review).
+    const d = desktop({ width: 2160, height: 3840 });
+    const t = await toolset(d);
+    await t.toolResult(use('screenshot'));
+    const r = await t.toolResult(use('zoom', { region: [0, 0, x1, 2576] }));
+    expect(r.is_error).toBeUndefined();
+    expect(d.shots()[2]).toMatchObject({ region: `0,0,${wide},3840` });
+    expect(d.shots()[2]!.w).toBeUndefined();
+    const zoomed = sizeOf(image(r));
+    expect(fits(zoomed)).toBe(true);
+    expect(zoomed.height).toBe(2576);
+  });
+
+  it('shrinks a wide strip by width, which the platform takes', async () => {
+    const d = desktop({ width: 3840, height: 2160 });
+    const t = await toolset(d);
+    await t.toolResult(use('screenshot'));
+    const r = await t.toolResult(use('zoom', { region: [0, 0, 2576, 1] }));
+    expect(r.is_error).toBeUndefined();
+    expect(d.shots()[2]).toMatchObject({ region: '0,0,3840,2', w: '2576' });
+    expect(fits(sizeOf(image(r)))).toBe(true);
+  });
+
   it('maps the region into an unshrunk capture smaller than the record', async () => {
     const d = desktop({ width: 1920, height: 1080 }, { capture: { width: 1280, height: 800 } });
     const t = await toolset(d);

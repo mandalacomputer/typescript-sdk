@@ -137,7 +137,10 @@ function largestFit(size: Size): Size {
 function cropShrink(size: Size): { width?: number; scale?: number } {
   const fit = largestFit(size);
   if (same(fit, size)) return {};
-  if (fits(fit)) return { width: fit.width };
+  // At least the platform's floor as well as fitting: a crop one or two pixels
+  // wide fits at a width of 1, which the platform raises back to the crop's own
+  // width, so it would come back unshrunk (found in re-review).
+  if (fits(fit) && fit.width >= MIN_WIDTH) return { width: fit.width };
   const at = (k: number) => ({
     width: Math.max(1, Math.round(size.width * k)),
     height: Math.max(1, Math.round(size.height * k)),
