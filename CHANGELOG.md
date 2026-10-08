@@ -15,10 +15,21 @@ This is the summary you read to decide whether to upgrade.
   from `mandala-computer/anthropic`, is a driver for Anthropic's
   `computer_toolset_20260801`: pass it as a `tools` entry to
   `client.beta.messages.toolRunner()` and every action the model asks for runs
-  on the computer. Every action but `zoom` is served; `zoom` is declared off. Screens too
+  on the computer. All 17 actions are served, including `zoom`, which crops
+  the capture it measured by that capture's name and needs a platform that
+  names its captures. Screens too
   large for the model are photographed smaller and its points scaled back up.
   `@anthropic-ai/sdk` 0.132 or newer is an optional peer dependency;
   `mandala-computer` itself does not need it.
+- **Cut a second picture from the same capture.** `screenshotWithInfo()`
+  returns `capture`, the name of the capture a live picture was cut from, and
+  `captureSize`, that capture's own size, which is the space a `region` is read
+  in. `screenshot()` and `screenshotWithInfo()` take `capture` to answer from
+  that capture rather than the screen now, so a crop worked out on one picture
+  is cut from the same pixels. A capture the platform has since replaced is a
+  `ConflictError` with `reason: 'stale_capture'`, which `isTransient()` calls
+  permanent. Needs a platform that names its captures; an older one sends
+  neither field and refuses `capture` with a 400.
 
 ## [0.10.0] — 2026-10-03
 

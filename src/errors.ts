@@ -330,6 +330,12 @@ const REASON_CLEARS: ReadonlySet<string> = new Set(['contention', 'starting']);
  * send its current revision. A platform that does not send either word yet
  * leaves the status rule standing, which is what an unknown word does.
  */
+/**
+ * `stale_capture` is a screenshot asked to be cut from a capture the platform
+ * no longer holds (platform OPL-5852): only the newest capture of a computer is
+ * kept, and the next one replaced it. The same request never works again, so it
+ * is permanent; take a new screenshot and name its capture.
+ */
 const REASON_PERMANENT: ReadonlySet<string> = new Set([
   'unavailable',
   'unsupported',
@@ -338,6 +344,7 @@ const REASON_PERMANENT: ReadonlySet<string> = new Set([
   'running',
   'name_taken',
   'stale_revision',
+  'stale_capture',
 ]);
 
 /**

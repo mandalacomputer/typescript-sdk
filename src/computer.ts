@@ -407,6 +407,15 @@ const shrank = (path: string, was: number, now: number): MandalaError =>
   );
 
 /** {@link Bytes} off the files route, read as a window of a file. */
+/**
+ * `X-GC-Capture-Size` as a size, or undefined for anything but the platform's
+ * `<width>x<height>` with both whole and at least 1.
+ */
+function captureSizeOf(v: string | undefined): { width: number; height: number } | undefined {
+  const m = v === undefined ? null : /^([1-9]\d{0,8})x([1-9]\d{0,8})$/.exec(v);
+  return m ? { width: Number(m[1]), height: Number(m[2]) } : undefined;
+}
+
 function toFileChunk(res: Bytes, path: string): FileChunk {
   const partial = res.status === 206;
   const seekable = res.acceptRanges !== 'none';
@@ -3579,17 +3588,40 @@ export class Computer {
    * The bytes alone do not say which of the two they are. Call
    * {@link screenshotWithInfo} to learn whether a frame is a suspended
    * computer's saved one.
+   *
+   * **Cutting a second picture from the same capture.** `capture` names a
+   * capture an earlier screenshot was cut from — {@link ScreenshotInfo.capture}
+   * — and the answer comes from that capture, not from the screen now
+   * (platform OPL-5852). It is how to measure one picture and crop the same
+   * pixels: a crop worked out on one capture and cut from a later one of
+   * another size is the wrong part of the screen. The platform holds only the
+   * newest capture of a computer, so a name the next capture has replaced is
+   * refused with a {@link ConflictError} whose `reason` is `stale_capture` —
+   * not transient; take a new screenshot and use its name. Not with `fresh`,
+   * which asks for a capture taken after the request.
+   *
+   * ```ts
+   * const measured = await c.screenshotWithInfo(64, { fresh: true });
+   * // Absent on a platform that does not name its captures. Without a name the
+   * // crop below would be cut from whatever capture is held, so stop here.
+   * if (!measured.capture || !measured.captureSize) throw new Error('captures are not named');
+   * const crop = await c.screenshot(undefined, {
+   *   capture: measured.capture,
+   *   region: { x: 0, y: 0, width: 400, height: 300 },
+   * });
+   * ```
    */
   async screenshot(
     width?: number,
-    opts: { fresh?: boolean } & P.ScreenshotShape & CallOptions = {},
+    opts: { fresh?: boolean; capture?: string } & P.ScreenshotShape & CallOptions = {},
   ): Promise<Uint8Array> {
     return (await this.screenshotWithInfo(width, opts)).bytes;
   }
 
   /**
    * {@link screenshot}, with what the response said about the picture: its
-   * media type and whether it is a suspended computer's SAVED frame.
+   * media type, whether it is a suspended computer's SAVED frame, and the
+   * capture it was cut from with that capture's size.
    *
    * The platform marks the saved frame with `X-GC-Frame: suspended`, and
    * `suspended` is that marker. A saved frame is the desktop as it was
@@ -3603,11 +3635,11 @@ export class Computer {
    */
   async screenshotWithInfo(
     width?: number,
-    opts: { fresh?: boolean } & P.ScreenshotShape & CallOptions = {},
+    opts: { fresh?: boolean; capture?: string } & P.ScreenshotShape & CallOptions = {},
   ): Promise<ScreenshotInfo> {
-    const { fresh, signal, format, quality, region, scale } = opts;
+    const { fresh, capture, signal, format, quality, region, scale } = opts;
     const res = await this.#t.bytes('GET', P.computerAction(this.id, 'screenshot'), {
-      query: P.screenshotQuery(width, fresh, { format, quality, region, scale }),
+      query: P.screenshotQuery(width, fresh, { format, quality, region, scale }, capture),
       signal,
     });
     // A captive portal or a misconfigured proxy answers 200 with an HTML page,
@@ -3621,7 +3653,20 @@ export class Computer {
           `got ${res.contentType}`,
       );
     }
-    return { bytes: res.bytes, contentType: res.contentType, suspended: res.frame === 'suspended' };
+    const info: ScreenshotInfo = {
+      bytes: res.bytes,
+      contentType: res.contentType,
+      suspended: res.frame === 'suspended',
+    };
+    // Both or neither, and each only in the shape the platform sends. A name
+    // without the size it is measured in is no use to the caller it is for,
+    // and a malformed one is not a capture anything could be cut from.
+    const size = captureSizeOf(res.captureSize);
+    if (!info.suspended && P.isCaptureName(res.capture) && size) {
+      info.capture = res.capture;
+      info.captureSize = size;
+    }
+    return info;
   }
 
   /**

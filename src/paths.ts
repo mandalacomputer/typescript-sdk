@@ -2124,6 +2124,7 @@ export function screenshotQuery(
   width?: number,
   fresh?: boolean,
   shape: ScreenshotShape = {},
+  capture?: string,
 ): Query | undefined {
   const query: Query = {};
   if (width !== undefined) {
@@ -2148,10 +2149,44 @@ export function screenshotQuery(
   // fresh: 1 }` is honoured and not a flag taken and ignored. The width is still
   // validated above, so `screenshotQuery(0, true)` is a width error either way.
   if (flag(fresh, 'fresh')) query.fresh = 1;
+  if (capture !== undefined) query.capture = screenshotCapture(capture, query.fresh === 1);
   Object.assign(query, screenshotShape(width, shape));
   // Undefined rather than an empty object for the bare call, so the URL this
   // builds is byte-for-byte the one it built before `fresh` existed.
   return Object.keys(query).length ? query : undefined;
+}
+
+/**
+ * A capture's name as the platform spells it in `X-GC-Capture`: sixteen
+ * lowercase hex characters (platform OPL-5852).
+ */
+const CAPTURE_NAME = /^[0-9a-f]{16}$/;
+
+/** Whether `v` is a capture name the platform could have sent. */
+export const isCaptureName = (v: unknown): v is string =>
+  typeof v === 'string' && CAPTURE_NAME.test(v);
+
+/**
+ * `capture`, checked as the platform checks it, so the mistake is named here
+ * rather than a round trip later.
+ *
+ * Refused beside `fresh`, as the platform refuses the pair: a named capture is
+ * one already taken, and `fresh` asks for one taken after the request arrived,
+ * so the two cannot both be honoured.
+ */
+function screenshotCapture(capture: unknown, fresh: boolean): string {
+  if (fresh) {
+    throw new ValidationError(
+      'give fresh or capture, not both: capture answers from a screenshot already taken, ' +
+        'and fresh asks for a new one',
+    );
+  }
+  if (!isCaptureName(capture)) {
+    throw new ValidationError(
+      `capture must be the name a screenshot reported (ScreenshotInfo.capture), not ${JSON.stringify(capture)}`,
+    );
+  }
+  return capture;
 }
 
 /** The encodings a screenshot can be asked for. `jpg` is the API's other spelling of `jpeg`. */

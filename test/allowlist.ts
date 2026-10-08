@@ -291,7 +291,15 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
   // Computer use.
   [
     'GET computers/:id/screenshot',
-    ['query:w', 'query:fresh', 'query:format', 'query:quality', 'query:region', 'query:scale'],
+    [
+      'query:w',
+      'query:fresh',
+      'query:format',
+      'query:quality',
+      'query:region',
+      'query:scale',
+      'query:capture',
+    ],
   ],
   [
     'POST computers/:id/input',

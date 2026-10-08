@@ -328,6 +328,10 @@ async function exerciseEverything(client: Client): Promise<void> {
     quality: 60,
   });
   await c.screenshotWithInfo();
+  await c.screenshot(undefined, {
+    capture: '0123456789abcdef',
+    region: { x: 0, y: 0, width: 64, height: 40 },
+  });
   await c.windows();
   await c.windows({ includeAll: true });
   await c.windowAction('0x1', 'focus');

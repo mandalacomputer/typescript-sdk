@@ -60,8 +60,10 @@ import type {
   BetaComputerTripleClickInput,
   BetaComputerTypeInput,
   BetaComputerWaitInput,
+  BetaComputerZoomInput,
 } from '@anthropic-ai/sdk/resources/beta';
 import type { Computer } from './computer.js';
+import { APIError } from './errors.js';
 
 /** What {@link MandalaComputerToolset} takes beside the computer: Anthropic's own options. */
 export type MandalaComputerToolsetOptions = BetaComputerToolsetOptions;
@@ -91,6 +93,11 @@ const MAX_REPEAT = 100;
 const MAX_SCROLL = 50;
 /** The most characters one platform `type` takes; longer text is typed in pieces. */
 const TYPE_PIECE = 400;
+/**
+ * How many times a zoom measures and crops before giving up on a screen that
+ * keeps being captured again in between; see {@link MandalaComputerToolset.zoom}.
+ */
+const ZOOM_ATTEMPTS = 3;
 
 const SCROLL_DIRECTIONS = new Set(['up', 'down', 'left', 'right']);
 
@@ -114,6 +121,33 @@ function largestFit(size: Size): Size {
   let width = size.width - 1;
   while (width > MIN_WIDTH && !fits({ width, height: heightAt(width) })) width--;
   return { width, height: heightAt(width) };
+}
+
+/**
+ * How to have the platform shrink a crop of `size` to a picture the model
+ * takes: nothing when it fits already, a width when one of at least
+ * {@link MIN_WIDTH} does, and otherwise a scale.
+ *
+ * A width alone is not enough for a crop. The platform will not shrink below
+ * 64 pixels wide by `w`, so a tall, narrow region — a strip down a portrait
+ * screen — came back 64 pixels wide and still taller than the model takes. A
+ * scale has no such floor. The platform rounds `scale` to the nearest pixel
+ * where it floors `w`, so the scale is the largest whose ROUNDED size fits.
+ */
+function cropShrink(size: Size): { width?: number; scale?: number } {
+  const fit = largestFit(size);
+  if (same(fit, size)) return {};
+  // At least the platform's floor as well as fitting: a crop one or two pixels
+  // wide fits at a width of 1, which the platform raises back to the crop's own
+  // width, so it would come back unshrunk (found in re-review).
+  if (fits(fit) && fit.width >= MIN_WIDTH) return { width: fit.width };
+  const at = (k: number) => ({
+    width: Math.max(1, Math.round(size.width * k)),
+    height: Math.max(1, Math.round(size.height * k)),
+  });
+  let scale = MAX_EDGE / Math.max(size.width, size.height);
+  while (!fits(at(scale))) scale *= 0.99;
+  return { scale };
 }
 
 const same = (a: Size, b: Size) => a.width === b.width && a.height === b.height;
@@ -196,11 +230,11 @@ function pieces(text: string): string[] {
 /**
  * A Mandala computer as Claude's computer toolset, `computer_toolset_20260801`.
  *
- * Every member is served but `zoom`, which Anthropic's class therefore declares
- * off. A zoom crops a capture the platform holds, and the screenshot API names
- * no capture a crop could be pinned to, so a display that changes size while a
- * zoom is under way would be cropped in the wrong place and reported as a
- * success. It comes back when the platform can pin one. Screenshots are always fresh, because a cached frame
+ * Every member is served, `zoom` included. A zoom is cut from one capture,
+ * named: the platform names every capture it answers from, and the crop is
+ * asked for by that name, so it cannot come from a later frame of another size
+ * (platform OPL-5852, which a platform without it refuses to zoom on).
+ * Screenshots are always fresh, because a cached frame
  * can predate the action it is meant to show and the model then repeats the
  * action. Coordinates arrive in the pixels of the last screenshot the model was
  * shown and are scaled to the computer's own screen before they are sent.
@@ -434,6 +468,106 @@ export class MandalaComputerToolset extends BetaAbstractComputerToolset20260801 
     }
   }
 
+  /**
+   * A close-up of the rectangle the model drew, in the pixels of the last
+   * screenshot it was shown.
+   *
+   * The platform crops the capture it HOLDS, in that capture's own pixels,
+   * which are not the screen's when the two differ and not the picture's when
+   * the picture was shrunk: a 3200x1800 capture under a 3840x2160 record
+   * shrinks to the same 2576x1449 picture a 3840x2160 one does. So each zoom
+   * measures a capture taken now — a fresh thumbnail, whose headers carry the
+   * capture's name and size, so the whole screen is not downloaded to be
+   * measured — maps the rectangle into that capture's pixels, and asks for the
+   * crop BY THE CAPTURE'S NAME.
+   *
+   * The name is what makes it exact. Asked for without one, the crop was cut
+   * from whatever capture the platform held when the second request arrived,
+   * and a capture at another size landing in between — another caller's, or
+   * the platform's own once its 1.5-second reuse window had passed — gave the
+   * wrong part of the screen as a success. Named, the platform answers from
+   * that capture or refuses with `stale_capture` once a newer one has replaced
+   * it, and the zoom measures again: at most {@link ZOOM_ATTEMPTS} times.
+   *
+   * A platform that does not name its captures is refused here rather than
+   * cropped unpinned, which would be the guess this exists to stop making.
+   */
+  protected override async zoom(
+    ctx: Ctx,
+    input: BetaComputerZoomInput,
+  ): Promise<BetaScreenshotResult> {
+    const r = input.region;
+    if (
+      !Array.isArray(r) ||
+      r.length !== 4 ||
+      !r.every((n) => typeof n === 'number' && Number.isFinite(n))
+    ) {
+      throw new ToolError('region must be [x0, y0, x1, y1], in the pixels of the screenshot');
+    }
+    const [x0, y0, x1, y1] = r as [number, number, number, number];
+    const frame = this.#frame;
+    if (!(x0 >= 0 && y0 >= 0 && x1 > x0 && y1 > y0 && x1 <= frame.width && y1 <= frame.height)) {
+      throw new ToolError(
+        `region [${x0}, ${y0}, ${x1}, ${y1}] is not a rectangle inside the ` +
+          `${frame.width}x${frame.height} screenshot`,
+      );
+    }
+    this.#aiming();
+    if (!this.#shown)
+      throw new ToolError('take a screenshot before zooming, so the region has a picture to be in');
+    for (let attempt = 1; ; attempt++) {
+      const measured = await this.#call(ctx, (signal) =>
+        this.computer.screenshotWithInfo(MIN_WIDTH, { fresh: true, signal }),
+      );
+      const { capture, captureSize: native } = measured;
+      if (capture === undefined || native === undefined) {
+        throw new ToolError(
+          'zoom needs a platform that names the capture each screenshot is cut from, and this ' +
+            'one does not, so the crop could not be pinned to the capture it was measured on; ' +
+            'take a screenshot instead',
+        );
+      }
+      const left = Math.floor((x0 * native.width) / frame.width);
+      const top = Math.floor((y0 * native.height) / frame.height);
+      const right = Math.min(native.width, Math.ceil((x1 * native.width) / frame.width));
+      const bottom = Math.min(native.height, Math.ceil((y1 * native.height) / frame.height));
+      const region = {
+        x: left,
+        y: top,
+        width: Math.max(1, right - left),
+        height: Math.max(1, bottom - top),
+      };
+      const { width, scale } = cropShrink(region);
+      let bytes: Uint8Array;
+      try {
+        bytes = await this.computer.screenshot(width, {
+          capture,
+          region,
+          ...(scale === undefined ? {} : { scale }),
+          format: 'png',
+          signal: ctx.signal ?? undefined,
+        });
+      } catch (error) {
+        // The platform's refusal of a replaced capture, and only that: 409 and
+        // the word together. The word on another status is some other failure,
+        // and measuring again would bury it under a race that did not happen.
+        const replaced =
+          error instanceof APIError && error.status === 409 && error.reason === 'stale_capture';
+        if (!replaced || ctx.signal?.aborted) throw this.#told(error, ctx);
+        if (attempt < ZOOM_ATTEMPTS) continue;
+        throw new ToolError(
+          `the screen was captured again between measuring it and cropping it, ${ZOOM_ATTEMPTS} ` +
+            'times running, so no crop could be cut from the capture it was measured on; take a ' +
+            'screenshot and zoom again',
+        );
+      }
+      const size = pngSize(bytes);
+      if (!size || !fits(size))
+        throw new ToolError('the zoomed picture came back larger than the model can be shown');
+      return { data: base64(bytes), mediaType: 'image/png' };
+    }
+  }
+
   /** Refuses the first point after the screen changed size; see {@link #resized}. */
   #aiming(): void {
     if (!this.#resized) return;
@@ -503,8 +637,13 @@ export class MandalaComputerToolset extends BetaAbstractComputerToolset20260801 
     try {
       return await fn(ctx.signal ?? undefined);
     } catch (error) {
-      if (error instanceof ToolError || ctx.signal?.aborted) throw error;
-      throw new ToolError(error instanceof Error ? error.message : String(error));
+      throw this.#told(error, ctx);
     }
+  }
+
+  /** A failure as {@link #call} hands it on. */
+  #told(error: unknown, ctx: Ctx): unknown {
+    if (error instanceof ToolError || ctx.signal?.aborted) return error;
+    return new ToolError(error instanceof Error ? error.message : String(error));
   }
 }
