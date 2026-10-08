@@ -49,7 +49,15 @@ const fits = (s: Size) =>
 /**
  * A computer whose record says `screen` and whose display is `capture` — the
  * two differ on a desktop resumed from a capture taken at another size.
- * `captures` moves the display on, one per screenshot taken.
+ * `captures` moves the display on, one per capture taken.
+ *
+ * The screenshot route models the platform's frame cache as OPL-5852 left it:
+ * one capture held per computer, each with a name sent as `X-GC-Capture` and
+ * its own size as `X-GC-Capture-Size`; `capture=` answers from the held one or
+ * refuses with 409 `stale_capture`. `expired` is a cache whose reuse window has
+ * always passed, so every unpinned read takes a new capture. `intrude` is
+ * another caller's fresh capture, taken after the screenshot request it is
+ * given the index of. `unnamed` is a platform from before OPL-5852.
  */
 function desktop(
   screen: Size,
@@ -58,45 +66,73 @@ function desktop(
     captures?: Size[];
     input?: (body: Record<string, unknown>) => Response | undefined;
     ignoreWidth?: boolean;
+    expired?: boolean;
+    intrude?: (index: number) => boolean;
+    unnamed?: boolean;
   } = {},
 ) {
   let capture = opts.capture ?? screen;
-  // The platform's frame cache: a request without `fresh` is answered from the
-  // last capture taken, as the platform does within its reuse window, and only
-  // a fresh one takes a new capture.
-  let held: Size | undefined;
+  let held: { size: Size; name: string } | undefined;
+  let names = 0;
+  let index = 0;
+  const take = () => {
+    held = { size: capture, name: (++names).toString(16).padStart(16, '0') };
+    const next = opts.captures?.shift();
+    if (next) capture = next;
+    return held;
+  };
+  // Every crop the route cut, with the capture it was cut from: what the
+  // zoom tests assert never came from a capture other than the one named.
+  const cuts: { name: string; size: Size; region: string }[] = [];
   const rec = recorder((call: Call) => {
     if (call.path === '/computers/vm-1') {
       return json({ ...COMPUTER, resolution: `${screen.width}x${screen.height}x24` });
     }
     if (call.path === '/computers/vm-1/screenshot') {
-      let src: Size;
-      if (call.query.fresh === '1' || !held) {
-        src = capture;
-        held = capture;
-        const next = opts.captures?.shift();
-        if (next) capture = next;
-      } else {
-        src = held;
-      }
-      if (call.query.region) {
-        const [x, y, w, h] = call.query.region.split(',').map(Number) as [
-          number,
-          number,
-          number,
-          number,
-        ];
-        if (x + w > src.width || y + h > src.height) {
-          return errorJson(400, `region reaches past the ${src.width}x${src.height} screen`);
+      try {
+        let from: { size: Size; name: string };
+        if (call.query.capture !== undefined) {
+          if (opts.unnamed) return errorJson(400, '"capture" is not a screenshot parameter');
+          if (!held || held.name !== call.query.capture) {
+            return json(
+              { error: 'the capture you named is no longer held', reason: 'stale_capture' },
+              { status: 409, headers: { 'content-type': 'application/json' } },
+            );
+          }
+          from = held;
+        } else if (call.query.fresh === '1' || !held || opts.expired) {
+          from = take();
+        } else {
+          from = held;
         }
-        src = { width: w, height: h };
+        let src = from.size;
+        if (call.query.region) {
+          const [x, y, w, h] = call.query.region.split(',').map(Number) as [
+            number,
+            number,
+            number,
+            number,
+          ];
+          if (x + w > src.width || y + h > src.height) {
+            return errorJson(400, `region reaches past the ${src.width}x${src.height} screen`);
+          }
+          cuts.push({ name: from.name, size: from.size, region: call.query.region });
+          src = { width: w, height: h };
+        }
+        let out = src;
+        if (call.query.w && !opts.ignoreWidth) {
+          const w = Math.min(Math.max(Number(call.query.w), 64), src.width);
+          out = { width: w, height: Math.max(1, Math.floor((src.height * w) / src.width)) };
+        }
+        const headers: Record<string, string> = { 'content-type': 'image/png' };
+        if (!opts.unnamed) {
+          headers['x-gc-capture'] = from.name;
+          headers['x-gc-capture-size'] = `${from.size.width}x${from.size.height}`;
+        }
+        return new Response(png(out), { headers });
+      } finally {
+        if (opts.intrude?.(index++)) take();
       }
-      let out = src;
-      if (call.query.w && !opts.ignoreWidth) {
-        const w = Math.min(Math.max(Number(call.query.w), 64), src.width);
-        out = { width: w, height: Math.max(1, Math.floor((src.height * w) / src.width)) };
-      }
-      return new Response(png(out), { headers: { 'content-type': 'image/png' } });
     }
     if (call.path === '/computers/vm-1/input') {
       return opts.input?.(call.body as Record<string, unknown>) ?? json({ ok: true });
@@ -109,7 +145,7 @@ function desktop(
       .filter((c) => c.path.endsWith('/input'))
       .map((c) => c.body as Record<string, unknown>);
   const shots = () => rec.calls.filter((c) => c.path.endsWith('/screenshot')).map((c) => c.query);
-  return { client, rec, inputs, shots };
+  return { client, rec, inputs, shots, cuts };
 }
 
 async function toolset(d: ReturnType<typeof desktop>) {
@@ -150,12 +186,9 @@ describe('constructing the toolset', () => {
     expect(quiet.toJSON().configs).toMatchObject({ type: { enabled: false } });
   });
 
-  it('serves every member but zoom, so the tool entry turns that one off', async () => {
+  it('serves every member, so the tool entry turns none of them off', async () => {
     const t = await toolset(desktop({ width: 1280, height: 800 }));
-    expect(t.toJSON()).toEqual({
-      type: 'computer_toolset_20260801',
-      configs: { zoom: { enabled: false } },
-    });
+    expect(t.toJSON()).toEqual({ type: 'computer_toolset_20260801' });
   });
 
   it('leaves the computer alone when it is closed', async () => {
@@ -303,14 +336,152 @@ describe('screenshots and points', () => {
 });
 
 describe('zoom', () => {
-  it('is declared off, and a call to it is refused without touching the desktop', async () => {
-    // A zoom cannot yet be pinned to the capture it was measured on; see the
-    // class's comment. Anthropic's class answers the call itself.
+  /** The measurement a zoom takes: a fresh thumbnail, read for its headers. */
+  const MEASURE = { w: '64', fresh: '1' };
+
+  it('crops the capture’s pixels for the rectangle the model drew, shrunk to fit', async () => {
+    const d = desktop({ width: 3840, height: 2160 });
+    const t = await toolset(d);
+    const shot = sizeOf(image(await t.toolResult(use('screenshot'))));
+    const r = await t.toolResult(use('zoom', { region: [0, 0, shot.width, shot.height] }));
+    expect(r.is_error).toBeUndefined();
+    expect(fits(sizeOf(image(r)))).toBe(true);
+    // Measured on a thumbnail, not the whole screen, then cut by name from the
+    // capture that thumbnail was made from.
+    expect(d.shots()[1]).toEqual(MEASURE);
+    expect(d.shots()[2]).toMatchObject({ region: '0,0,3840,2160', format: 'png' });
+    expect(d.shots()[2]!.fresh).toBeUndefined();
+    expect(d.cuts).toEqual([
+      { name: d.shots()[2]!.capture, size: { width: 3840, height: 2160 }, region: '0,0,3840,2160' },
+    ]);
+  });
+
+  it('takes a small region whole', async () => {
     const d = desktop({ width: 1280, height: 800 });
     const t = await toolset(d);
     await t.toolResult(use('screenshot'));
-    const r = await t.toolResult(use('zoom', { region: [0, 0, 100, 100] }));
+    const r = await t.toolResult(use('zoom', { region: [100, 100, 300, 200] }));
+    expect(sizeOf(image(r))).toEqual({ width: 200, height: 100 });
+    expect(d.shots()[2]).toMatchObject({ region: '100,100,200,100' });
+    expect(d.shots()[2]!.w).toBeUndefined();
+  });
+
+  it('maps the region into a capture of another size than the record', async () => {
+    // A 3200x1800 capture under a 3840x2160 record shrinks to the same
+    // 2576x1449 picture a 3840x2160 capture does, so the picture alone cannot
+    // say which; the capture's size is read off the measurement.
+    const d = desktop({ width: 3840, height: 2160 }, { capture: { width: 3200, height: 1800 } });
+    const t = await toolset(d);
+    expect(sizeOf(image(await t.toolResult(use('screenshot'))))).toEqual({
+      width: 2576,
+      height: 1449,
+    });
+    const r = await t.toolResult(use('zoom', { region: [1000, 500, 1200, 700] }));
+    expect(r.is_error).toBeUndefined();
+    expect(d.shots()[2]).toMatchObject({ region: '1242,621,249,249' });
+  });
+
+  it('maps the region into an unshrunk capture smaller than the record', async () => {
+    const d = desktop({ width: 1920, height: 1080 }, { capture: { width: 1280, height: 800 } });
+    const t = await toolset(d);
+    await t.toolResult(use('screenshot'));
+    await t.toolResult(use('zoom', { region: [100, 100, 300, 200] }));
+    expect(d.shots()[2]).toMatchObject({ region: '100,100,200,100' });
+  });
+
+  it('cuts the crop from the capture it measured, however long ago that was', async () => {
+    // The case three review rounds could not close without a capture name: the
+    // display goes from 3200x1800 to 3840x2160 after the measurement, and the
+    // platform's reuse window has passed by the time the crop is asked for, so
+    // an unpinned crop would be cut from a new capture with the old one's
+    // arithmetic.
+    const d = desktop(
+      { width: 3840, height: 2160 },
+      {
+        capture: { width: 3200, height: 1800 },
+        captures: [
+          { width: 3200, height: 1800 },
+          { width: 3840, height: 2160 },
+        ],
+        expired: true,
+      },
+    );
+    const t = await toolset(d);
+    await t.toolResult(use('screenshot'));
+    const r = await t.toolResult(use('zoom', { region: [1000, 500, 1200, 700] }));
+    expect(r.is_error).toBeUndefined();
+    expect(d.shots()[2]).toMatchObject({ region: '1242,621,249,249' });
+    expect(d.cuts).toEqual([
+      expect.objectContaining({ size: { width: 3200, height: 1800 }, region: '1242,621,249,249' }),
+    ]);
+  });
+
+  it('measures again when another capture replaces the one it measured', async () => {
+    // Another caller's fresh capture, at the display's new size, lands between
+    // the measurement and the crop. The platform refuses the crop rather than
+    // cutting it from that capture, and the zoom measures again and cuts the
+    // crop in the new capture's pixels.
+    const d = desktop(
+      { width: 3840, height: 2160 },
+      {
+        capture: { width: 3200, height: 1800 },
+        captures: [
+          { width: 3200, height: 1800 },
+          { width: 3840, height: 2160 },
+        ],
+        intrude: (i) => i === 1,
+      },
+    );
+    const t = await toolset(d);
+    await t.toolResult(use('screenshot'));
+    const r = await t.toolResult(use('zoom', { region: [1000, 500, 1200, 700] }));
+    expect(r.is_error).toBeUndefined();
+    const shots = d.shots();
+    expect(shots[1]).toEqual(MEASURE);
+    expect(shots[2]).toMatchObject({ region: '1242,621,249,249' });
+    expect(shots[3]).toEqual(MEASURE);
+    // 1000/2576*3840 = 1490.6, and so on: the new capture's own pixels.
+    expect(shots[4]).toMatchObject({ region: '1490,745,299,299' });
+    expect(shots[4]!.capture).not.toBe(shots[2]!.capture);
+    // The refused crop was cut from nothing; the one returned, from the
+    // capture it named.
+    expect(d.cuts).toEqual([
+      { name: shots[4]!.capture, size: { width: 3840, height: 2160 }, region: '1490,745,299,299' },
+    ]);
+  });
+
+  it('gives up, saying so, on a screen captured again every time it is measured', async () => {
+    const d = desktop({ width: 1280, height: 800 }, { intrude: (i) => i > 0 && i % 2 === 1 });
+    const t = await toolset(d);
+    await t.toolResult(use('screenshot'));
+    const r = await t.toolResult(use('zoom', { region: [100, 100, 300, 200] }));
     expect(r.is_error).toBe(true);
+    expect(text(r)).toContain('captured again between measuring it and cropping it, 3 times');
+    expect(d.shots().filter((q) => q.capture !== undefined)).toHaveLength(3);
+    expect(d.cuts).toEqual([]);
+  });
+
+  it('refuses to zoom on a platform that does not name its captures', async () => {
+    // An unpinned crop is the guess this exists to stop making, so there is
+    // none: the measurement is all that is asked for.
+    const d = desktop({ width: 1280, height: 800 }, { unnamed: true });
+    const t = await toolset(d);
+    await t.toolResult(use('screenshot'));
+    const r = await t.toolResult(use('zoom', { region: [100, 100, 300, 200] }));
+    expect(r.is_error).toBe(true);
+    expect(text(r)).toContain('names the capture each screenshot is cut from');
+    expect(d.shots()).toHaveLength(2);
+    expect(d.cuts).toEqual([]);
+  });
+
+  it('refuses a region outside the picture, and any region before a picture', async () => {
+    const d = desktop({ width: 1280, height: 800 });
+    const t = await toolset(d);
+    const early = await t.toolResult(use('zoom', { region: [0, 0, 100, 100] }));
+    expect(text(early)).toContain('take a screenshot before zooming');
+    await t.toolResult(use('screenshot'));
+    expect((await t.toolResult(use('zoom', { region: [0, 0, 2000, 10] }))).is_error).toBe(true);
+    expect((await t.toolResult(use('zoom', { region: [10, 10, 5, 20] }))).is_error).toBe(true);
     expect(d.shots()).toHaveLength(1);
   });
 });
@@ -473,9 +644,7 @@ describe('under Anthropic’s tool runner', () => {
     for await (const _ of runner) {
       // drained
     }
-    expect(sent[0]!.tools).toEqual([
-      { type: 'computer_toolset_20260801', configs: { zoom: { enabled: false } } },
-    ]);
+    expect(sent[0]!.tools).toEqual([{ type: 'computer_toolset_20260801' }]);
     const answers = sent[1]!.messages.at(-1)!.content as Result[];
     expect(answers.map((r) => r.toolset_name)).toEqual(['computer', 'computer']);
     expect(sizeOf(image(answers[1]!))).toEqual({ width: 1280, height: 800 });

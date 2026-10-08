@@ -378,6 +378,14 @@ export type Bytes = {
    * capture.
    */
   frame?: string;
+  /**
+   * `X-GC-Capture` and `X-GC-Capture-Size`, as sent, when the response carried
+   * them: on a live screenshot, the name of the capture it was cut from and
+   * that capture's own size (platform OPL-5852). Read for their shape by the
+   * screenshot, not here.
+   */
+  capture?: string;
+  captureSize?: string;
 };
 
 /**
@@ -1379,6 +1387,8 @@ export class Transport {
         contentRange: parseContentRange(sent.resp.headers.get('content-range')),
         acceptRanges: acceptRanges?.trim().toLowerCase() || undefined,
         frame: sent.resp.headers.get('x-gc-frame')?.trim().toLowerCase() || undefined,
+        capture: sent.resp.headers.get('x-gc-capture') ?? undefined,
+        captureSize: sent.resp.headers.get('x-gc-capture-size') ?? undefined,
       };
     });
   }

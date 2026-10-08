@@ -598,6 +598,33 @@ scale, `format: 'png'` or a quality is a `ConflictError` whose `reason` is
 `unavailable`, which does not clear by waiting. Start the computer, or drop the
 shaping (and `fresh`) for the saved picture; a width or `format: 'jpeg'` may stay.
 
+#### Cutting a second picture from the same capture
+
+Working out a crop on one screenshot and asking for it in a second request can
+cut it from a different capture: the platform may have taken another, at
+another size, in between. Every live screenshot names the capture it was cut
+from and gives that capture's own size, and `capture` asks for a picture cut
+from that capture and no other:
+
+```ts
+// Measure on a thumbnail: the capture's size comes back without the whole screen.
+const measured = await c.screenshotWithInfo(64, { fresh: true });
+const { width, height } = measured.captureSize!;  // the space `region` is read in
+const rightHalf = await c.screenshot(undefined, {
+  capture: measured.capture,
+  region: { x: Math.floor(width / 2), y: 0, width: width - Math.floor(width / 2), height },
+});
+```
+
+`captureSize` is usually the computer's `resolution`, but not always: a desktop
+resumed from a capture taken at another size, or resized from inside the guest,
+can differ. The platform holds only the newest capture of a computer, so a
+`capture` the next one has replaced is a `ConflictError` whose `reason` is
+`stale_capture`, which does not clear by waiting: take a new screenshot and use
+its name. `capture` beside `fresh: true` is a `ValidationError`, because a
+named capture is one already taken. Both fields are absent on a saved frame,
+and from a platform that does not name its captures.
+
 ### Windows
 
 A screenshot says what the desktop *looks like*; this says what any of it **is**,
@@ -1765,7 +1792,7 @@ the stream when leaving it early.
 
 Anthropic's SDK runs the computer-use loop itself when its tool runner is
 given a toolset driver, and this package ships one for a Mandala computer.
-`MandalaComputerToolset` serves every action of `computer_toolset_20260801` but `zoom`,
+`MandalaComputerToolset` serves every action of `computer_toolset_20260801`,
 so the loop, the prompt and the model stay yours, on your own key, and the
 actions land on the computer. Use it instead of [the agent loop](#the-agent-loop)
 when you want to choose the model, add your own tools, or approve actions as
@@ -1822,10 +1849,13 @@ try {
   once per repeat, text longer than 400 characters is typed in pieces, and a
   `wait` of up to 300 seconds is waited in the platform's 30-second pieces. A
   `hold_key` is at most 30 seconds, because a hold cannot be split.
-- **`zoom` is off.** A zoom crops a capture the platform holds, and the
-  screenshot API cannot yet pin a crop to the capture it was measured on, so a
-  display that changed size mid-zoom would be cropped in the wrong place. The
-  model takes a screenshot instead.
+- **`zoom` crops the capture it measured.** Each zoom measures the screen with
+  a fresh thumbnail, maps the model's rectangle into that capture's own pixels,
+  and asks for the crop [by the capture's name](#cutting-a-second-picture-from-the-same-capture),
+  shrunk to fit the model. A capture replaced in between is measured again, up
+  to three times. It needs a screenshot first, because the region is a
+  rectangle of one, and a platform that names its captures; on one that does
+  not, a zoom is an error result and the model takes a screenshot instead.
 - **A failure is an error result**, in the platform's own words, and the run
   goes on: the model reads it and adapts.
 

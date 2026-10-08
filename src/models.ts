@@ -2243,6 +2243,22 @@ export type ScreenshotInfo = {
    * live capture, and its pixels are not screen coordinates to click on.
    */
   suspended: boolean;
+  /**
+   * The name of the capture this picture was cut from (`X-GC-Capture`, platform
+   * OPL-5852). Pass it back as `capture` to cut another picture from the same
+   * capture: measure on this one, then crop that one, and the crop cannot come
+   * from a later frame of another size. Absent on a saved frame, and from a
+   * platform that does not name its captures.
+   */
+  capture?: string;
+  /**
+   * That capture's own size in pixels (`X-GC-Capture-Size`), which is the space
+   * a `region` is read in — whatever size this picture was shrunk or cropped
+   * to. Ordinarily the computer's `resolution`, but not always: a desktop
+   * resumed from a capture taken at another size, or resized from inside the
+   * guest, can differ. Absent wherever {@link capture} is.
+   */
+  captureSize?: { width: number; height: number };
 };
 
 /**
