@@ -60,7 +60,6 @@ import type {
   BetaComputerTripleClickInput,
   BetaComputerTypeInput,
   BetaComputerWaitInput,
-  BetaComputerZoomInput,
 } from '@anthropic-ai/sdk/resources/beta';
 import type { Computer } from './computer.js';
 
@@ -197,7 +196,11 @@ function pieces(text: string): string[] {
 /**
  * A Mandala computer as Claude's computer toolset, `computer_toolset_20260801`.
  *
- * Every member is served. Screenshots are always fresh, because a cached frame
+ * Every member is served but `zoom`, which Anthropic's class therefore declares
+ * off. A zoom crops a capture the platform holds, and the screenshot API names
+ * no capture a crop could be pinned to, so a display that changes size while a
+ * zoom is under way would be cropped in the wrong place and reported as a
+ * success. It comes back when the platform can pin one. Screenshots are always fresh, because a cached frame
  * can predate the action it is meant to show and the model then repeats the
  * action. Coordinates arrive in the pixels of the last screenshot the model was
  * shown and are scaled to the computer's own screen before they are sent.
@@ -262,67 +265,6 @@ export class MandalaComputerToolset extends BetaAbstractComputerToolset20260801 
     if (this.#shown && !same(size, this.#frame)) this.#resized = true;
     this.#frame = size;
     this.#shown = true;
-    return { data: base64(bytes), mediaType: 'image/png' };
-  }
-
-  protected override async zoom(
-    ctx: Ctx,
-    input: BetaComputerZoomInput,
-  ): Promise<BetaScreenshotResult> {
-    const r = input.region;
-    if (
-      !Array.isArray(r) ||
-      r.length !== 4 ||
-      !r.every((n) => typeof n === 'number' && Number.isFinite(n))
-    ) {
-      throw new ToolError('region must be [x0, y0, x1, y1], in the pixels of the screenshot');
-    }
-    const [x0, y0, x1, y1] = r as [number, number, number, number];
-    const frame = this.#frame;
-    if (!(x0 >= 0 && y0 >= 0 && x1 > x0 && y1 > y0 && x1 <= frame.width && y1 <= frame.height)) {
-      throw new ToolError(
-        `region [${x0}, ${y0}, ${x1}, ${y1}] is not a rectangle inside the ` +
-          `${frame.width}x${frame.height} screenshot`,
-      );
-    }
-    this.#aiming();
-    if (!this.#shown)
-      throw new ToolError('take a screenshot before zooming, so the region has a picture to be in');
-    // The platform crops the capture it HOLDS, in that capture's own pixels,
-    // which are not the screen's when the two differ and not the picture's when
-    // the picture was shrunk (found in review: a 3200x1800 capture under a
-    // 3840x2160 record shrinks to the same 2576x1449 picture as a 3840x2160
-    // one). So the region goes into the capture's pixels, measured off a
-    // capture taken whole, now.
-    //
-    // And the crop is cut from THAT capture (found in re-review): it is asked
-    // for without `fresh`, which the platform answers from the capture it has
-    // just taken for the measurement rather than taking another, which could
-    // be another size. What this cannot rule out is a third caller's fresh
-    // capture, at another size, landing between the two inside the platform's
-    // 1.5-second reuse window: the platform names no capture a crop could be
-    // pinned to.
-    const whole = await this.#shoot(ctx, undefined);
-    const native = pngSize(whole);
-    if (!native) throw new ToolError('the screenshot came back in a format other than PNG');
-    const left = Math.floor((x0 * native.width) / frame.width);
-    const top = Math.floor((y0 * native.height) / frame.height);
-    const right = Math.min(native.width, Math.ceil((x1 * native.width) / frame.width));
-    const bottom = Math.min(native.height, Math.ceil((y1 * native.height) / frame.height));
-    const region = {
-      x: left,
-      y: top,
-      width: Math.max(1, right - left),
-      height: Math.max(1, bottom - top),
-    };
-    const fit = largestFit(region);
-    const width = same(fit, region) ? undefined : fit.width;
-    const bytes = await this.#call(ctx, (signal) =>
-      this.computer.screenshot(width, { region, format: 'png', signal }),
-    );
-    const size = pngSize(bytes);
-    if (!size || !fits(size))
-      throw new ToolError('the zoomed picture came back larger than the model can be shown');
     return { data: base64(bytes), mediaType: 'image/png' };
   }
 

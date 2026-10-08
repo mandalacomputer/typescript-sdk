@@ -15,7 +15,7 @@ This is the summary you read to decide whether to upgrade.
   from `mandala-computer/anthropic`, is a driver for Anthropic's
   `computer_toolset_20260801`: pass it as a `tools` entry to
   `client.beta.messages.toolRunner()` and every action the model asks for runs
-  on the computer. All 17 actions are served, including `zoom`. Screens too
+  on the computer. Every action but `zoom` is served; `zoom` is declared off. Screens too
   large for the model are photographed smaller and its points scaled back up.
   `@anthropic-ai/sdk` 0.132 or newer is an optional peer dependency;
   `mandala-computer` itself does not need it.

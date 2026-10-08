@@ -150,9 +150,12 @@ describe('constructing the toolset', () => {
     expect(quiet.toJSON().configs).toMatchObject({ type: { enabled: false } });
   });
 
-  it('serves every member, so the tool entry turns none of them off', async () => {
+  it('serves every member but zoom, so the tool entry turns that one off', async () => {
     const t = await toolset(desktop({ width: 1280, height: 800 }));
-    expect(t.toJSON()).toEqual({ type: 'computer_toolset_20260801' });
+    expect(t.toJSON()).toEqual({
+      type: 'computer_toolset_20260801',
+      configs: { zoom: { enabled: false } },
+    });
   });
 
   it('leaves the computer alone when it is closed', async () => {
@@ -300,79 +303,14 @@ describe('screenshots and points', () => {
 });
 
 describe('zoom', () => {
-  it('crops the capture’s pixels for the rectangle the model drew, shrunk to fit', async () => {
-    const d = desktop({ width: 3840, height: 2160 });
-    const t = await toolset(d);
-    const shot = sizeOf(image(await t.toolResult(use('screenshot'))));
-    const r = await t.toolResult(use('zoom', { region: [0, 0, shot.width, shot.height] }));
-    expect(fits(sizeOf(image(r)))).toBe(true);
-    // Measured off a capture taken whole, then cut from that same capture.
-    expect(d.shots()[1]).toEqual({ fresh: '1' });
-    expect(d.shots()[2]).toMatchObject({ region: '0,0,3840,2160', format: 'png' });
-    expect(d.shots()[2]!.fresh).toBeUndefined();
-  });
-
-  it('takes a small region whole', async () => {
+  it('is declared off, and a call to it is refused without touching the desktop', async () => {
+    // A zoom cannot yet be pinned to the capture it was measured on; see the
+    // class's comment. Anthropic's class answers the call itself.
     const d = desktop({ width: 1280, height: 800 });
     const t = await toolset(d);
     await t.toolResult(use('screenshot'));
-    const r = await t.toolResult(use('zoom', { region: [100, 100, 300, 200] }));
-    expect(sizeOf(image(r))).toEqual({ width: 200, height: 100 });
-    expect(d.shots()[2]).toMatchObject({ region: '100,100,200,100' });
-    expect(d.shots()[2]!.w).toBeUndefined();
-  });
-
-  it('maps the region into a capture of another size than the record (found in review)', async () => {
-    // A 3200x1800 capture under a 3840x2160 record shrinks to the same
-    // 2576x1449 picture a 3840x2160 capture does, so the picture alone cannot
-    // say which; the capture is measured.
-    const d = desktop({ width: 3840, height: 2160 }, { capture: { width: 3200, height: 1800 } });
-    const t = await toolset(d);
-    expect(sizeOf(image(await t.toolResult(use('screenshot'))))).toEqual({
-      width: 2576,
-      height: 1449,
-    });
-    const r = await t.toolResult(use('zoom', { region: [1000, 500, 1200, 700] }));
-    expect(r.is_error).toBeUndefined();
-    expect(d.shots()[2]).toMatchObject({ region: '1242,621,249,249' });
-  });
-
-  it('cuts the crop from the capture it measured, not a later one (found in re-review)', async () => {
-    // The display goes from 3200x1800 to 3840x2160 after the measurement. A
-    // second fresh capture would be cut with the first one's arithmetic.
-    const d = desktop(
-      { width: 3840, height: 2160 },
-      {
-        capture: { width: 3200, height: 1800 },
-        captures: [
-          { width: 3200, height: 1800 },
-          { width: 3840, height: 2160 },
-        ],
-      },
-    );
-    const t = await toolset(d);
-    await t.toolResult(use('screenshot'));
-    const r = await t.toolResult(use('zoom', { region: [1000, 500, 1200, 700] }));
-    expect(r.is_error).toBeUndefined();
-    expect(d.shots()[2]).toMatchObject({ region: '1242,621,249,249' });
-    expect(d.shots()[2]!.fresh).toBeUndefined();
-  });
-
-  it('maps the region into an unshrunk capture smaller than the record', async () => {
-    const d = desktop({ width: 1920, height: 1080 }, { capture: { width: 1280, height: 800 } });
-    const t = await toolset(d);
-    await t.toolResult(use('screenshot'));
-    await t.toolResult(use('zoom', { region: [100, 100, 300, 200] }));
-    expect(d.shots()[2]).toMatchObject({ region: '100,100,200,100' });
-  });
-
-  it('refuses a region outside the picture, and any region before a picture', async () => {
-    const d = desktop({ width: 1280, height: 800 });
-    const t = await toolset(d);
-    const early = await t.toolResult(use('zoom', { region: [0, 0, 100, 100] }));
-    expect(text(early)).toContain('take a screenshot before zooming');
-    await t.toolResult(use('screenshot'));
-    expect((await t.toolResult(use('zoom', { region: [0, 0, 2000, 10] }))).is_error).toBe(true);
+    const r = await t.toolResult(use('zoom', { region: [0, 0, 100, 100] }));
+    expect(r.is_error).toBe(true);
     expect(d.shots()).toHaveLength(1);
   });
 });
@@ -535,7 +473,9 @@ describe('under Anthropic’s tool runner', () => {
     for await (const _ of runner) {
       // drained
     }
-    expect(sent[0]!.tools).toEqual([{ type: 'computer_toolset_20260801' }]);
+    expect(sent[0]!.tools).toEqual([
+      { type: 'computer_toolset_20260801', configs: { zoom: { enabled: false } } },
+    ]);
     const answers = sent[1]!.messages.at(-1)!.content as Result[];
     expect(answers.map((r) => r.toolset_name)).toEqual(['computer', 'computer']);
     expect(sizeOf(image(answers[1]!))).toEqual({ width: 1280, height: 800 });
