@@ -25,6 +25,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./anthropic": {
+      "types": "./dist/anthropic.d.ts",
+      "default": "./dist/anthropic.js"
     }
   },
   "imports": {
@@ -58,7 +62,16 @@
     "smoke:events": "npm run build && node scripts/smoke-events.mjs",
     "prepublishOnly": "npm run build"
   },
+  "peerDependencies": {
+    "@anthropic-ai/sdk": ">=0.132.0"
+  },
+  "peerDependenciesMeta": {
+    "@anthropic-ai/sdk": {
+      "optional": true
+    }
+  },
   "devDependencies": {
+    "@anthropic-ai/sdk": "0.132.0",
     "@biomejs/biome": "^2.3.0",
     "@types/node": "^22.10.0",
     "openai": "7.16.0",

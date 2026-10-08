@@ -189,6 +189,21 @@ describe('the request-making rule', () => {
     expect(() => scan(`class A extends External { async go() { return super.go(); } }`)).toThrow(
       /unresolved base class External while tracing A in fake-0\.ts/,
     );
+    // Imported from this SDK is still this SDK's, and still has to resolve.
+    expect(() =>
+      scan(`import { External } from './elsewhere.js';
+            class A extends External { async go() { return super.go(); } }`),
+    ).toThrow(/unresolved base class External/);
+  });
+
+  it('ends the lineage at a base imported from another package (OPL-5851)', () => {
+    // Anthropic's toolset class cannot reach this SDK's private transport, so
+    // the subclass is what is scanned: here it reaches the wire on its own.
+    const found = scan(
+      `import { Base } from '@anthropic-ai/sdk/helpers/beta/toolsets';
+       class Driver extends Base { async go() { return super.go(); } async send() { await this.#t.json('POST', 'x'); } }`,
+    );
+    expect(sorted(found, 'Driver')).toEqual(['send']);
   });
 
   it('follows an inherited method reached through this or super', () => {
