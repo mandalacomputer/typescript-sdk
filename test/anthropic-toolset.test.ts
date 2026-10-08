@@ -290,32 +290,59 @@ describe('screenshots and points', () => {
 });
 
 describe('zoom', () => {
-  it('crops the screen’s pixels for the rectangle the model drew, shrunk to fit', async () => {
+  it('crops the capture’s pixels for the rectangle the model drew, shrunk to fit', async () => {
     const d = desktop({ width: 3840, height: 2160 });
     const t = await toolset(d);
     const shot = sizeOf(image(await t.toolResult(use('screenshot'))));
     const r = await t.toolResult(use('zoom', { region: [0, 0, shot.width, shot.height] }));
     expect(fits(sizeOf(image(r)))).toBe(true);
-    expect(d.shots()[1]).toMatchObject({ region: '0,0,3840,2160', format: 'png' });
+    // The picture was shrunk, so the capture is measured whole first.
+    expect(d.shots()[1]).toEqual({ fresh: '1' });
+    expect(d.shots()[2]).toMatchObject({ region: '0,0,3840,2160', format: 'png' });
   });
 
-  it('takes a small region whole', async () => {
+  it('takes a small region whole, without measuring a capture it already saw', async () => {
     const d = desktop({ width: 1280, height: 800 });
     const t = await toolset(d);
+    await t.toolResult(use('screenshot'));
     const r = await t.toolResult(use('zoom', { region: [100, 100, 300, 200] }));
     expect(sizeOf(image(r))).toEqual({ width: 200, height: 100 });
-    expect(d.shots()[0]).toMatchObject({ region: '100,100,200,100' });
-    expect(d.shots()[0]!.w).toBeUndefined();
+    expect(d.shots()).toHaveLength(2);
+    expect(d.shots()[1]).toMatchObject({ region: '100,100,200,100' });
+    expect(d.shots()[1]!.w).toBeUndefined();
   });
 
-  it('refuses a region outside the picture, and any region while the screen is not its record’s size', async () => {
+  it('maps the region into a capture of another size than the record (found in review)', async () => {
+    // A 3200x1800 capture under a 3840x2160 record shrinks to the same
+    // 2576x1449 picture a 3840x2160 capture does, so the picture alone cannot
+    // say which; the capture is measured.
+    const d = desktop({ width: 3840, height: 2160 }, { capture: { width: 3200, height: 1800 } });
+    const t = await toolset(d);
+    expect(sizeOf(image(await t.toolResult(use('screenshot'))))).toEqual({
+      width: 2576,
+      height: 1449,
+    });
+    const r = await t.toolResult(use('zoom', { region: [1000, 500, 1200, 700] }));
+    expect(r.is_error).toBeUndefined();
+    expect(d.shots()[2]).toMatchObject({ region: '1242,621,249,249' });
+  });
+
+  it('maps the region into an unshrunk capture smaller than the record', async () => {
     const d = desktop({ width: 1920, height: 1080 }, { capture: { width: 1280, height: 800 } });
     const t = await toolset(d);
-    expect((await t.toolResult(use('zoom', { region: [0, 0, 2000, 10] }))).is_error).toBe(true);
     await t.toolResult(use('screenshot'));
-    const r = await t.toolResult(use('zoom', { region: [0, 0, 100, 100] }));
-    expect(r.is_error).toBe(true);
-    expect(text(r)).toContain('not at the size its computer reports');
+    await t.toolResult(use('zoom', { region: [100, 100, 300, 200] }));
+    expect(d.shots()[1]).toMatchObject({ region: '100,100,200,100' });
+  });
+
+  it('refuses a region outside the picture, and any region before a picture', async () => {
+    const d = desktop({ width: 1280, height: 800 });
+    const t = await toolset(d);
+    const early = await t.toolResult(use('zoom', { region: [0, 0, 100, 100] }));
+    expect(text(early)).toContain('take a screenshot before zooming');
+    await t.toolResult(use('screenshot'));
+    expect((await t.toolResult(use('zoom', { region: [0, 0, 2000, 10] }))).is_error).toBe(true);
+    expect(d.shots()).toHaveLength(1);
   });
 });
 
@@ -504,7 +531,9 @@ describe('the optional peer', () => {
 });
 
 describe('the README example', () => {
-  it('type-checks against the installed declarations of both packages', () => {
+  // A whole program check of both packages' declarations, which takes seconds
+  // and more under a parallel suite's load: given room rather than the default.
+  it('type-checks against the installed declarations of both packages', { timeout: 60_000 }, () => {
     const readme = readFileSync(new URL('../README.md', import.meta.url), 'utf8');
     const start = '<!-- anthropic-toolset-example:start -->';
     const end = '<!-- anthropic-toolset-example:end -->';
@@ -533,5 +562,53 @@ describe('the README example', () => {
       .getPreEmitDiagnostics(program)
       .map((d) => ts.flattenDiagnosticMessageText(d.messageText, '\n'));
     expect(errors).toEqual([]);
+  });
+});
+
+describe('what the review found in the keyboard (OPL-5851)', () => {
+  it.each(['+Delete', 'ctrl++', 'ctrl+ +s'])(
+    'refuses the chord %j rather than pressing part of it',
+    async (chord) => {
+      const d = desktop({ width: 1280, height: 800 });
+      const t = await toolset(d);
+      const r = await t.toolResult(use('key', { text: chord }));
+      expect(r.is_error).toBe(true);
+      expect(text(r)).toContain('the + key itself is plus');
+      expect(d.inputs()).toHaveLength(0);
+    },
+  );
+
+  it('refuses a click whose modifiers are a bare +, and clicks with none when there are none', async () => {
+    const d = desktop({ width: 1280, height: 800 });
+    const t = await toolset(d);
+    expect(
+      (await t.toolResult(use('left_click', { coordinate: [1, 1], text: '+' }))).is_error,
+    ).toBe(true);
+    expect(d.inputs()).toHaveLength(0);
+    await t.toolResult(use('left_click', { coordinate: [1, 1], text: '' }));
+    expect(d.inputs()).toHaveLength(1);
+  });
+
+  it('never ends a piece of text between the halves of a CRLF', async () => {
+    const d = desktop({ width: 1280, height: 800 });
+    const t = await toolset(d);
+    const typed = `${'a'.repeat(399)}\r\nb`;
+    await t.toolResult(use('type', { text: typed }));
+    const sent = d.inputs().map((b) => b.text as string);
+    expect(sent).toEqual(['a'.repeat(399), '\r\nb']);
+    expect(sent.join('')).toBe(typed);
+  });
+
+  it('says how much was typed when a later piece fails', async () => {
+    let n = 0;
+    const d = desktop(
+      { width: 1280, height: 800 },
+      { input: () => (++n > 1 ? errorJson(409, 'computer vm-1 is stopped') : undefined) },
+    );
+    const t = await toolset(d);
+    const r = await t.toolResult(use('type', { text: `${'a'.repeat(400)}${'b'.repeat(450)}` }));
+    expect(r.is_error).toBe(true);
+    expect(text(r)).toMatch(/^typed 400 of 850 characters, then: .*computer vm-1 is stopped/);
+    expect(text(r)).toContain('may have been typed in part');
   });
 });

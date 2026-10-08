@@ -163,10 +163,35 @@ function seconds(v: unknown, field: string, max: number, hint: string): number {
 /** `ctrl+shift+t` as its keys. The toolset spells chords with `+`; the SDK takes a list. */
 function chord(text: unknown, field: string): string[] {
   if (typeof text !== 'string') throw new ToolError(`${field} must be a key or a key combination`);
-  return text
-    .split('+')
-    .map((k) => k.trim())
-    .filter(Boolean);
+  if (text.trim() === '') return [];
+  const keys = text.split('+').map((k) => k.trim());
+  // An empty part is refused, not dropped (found in review): `+Delete` would
+  // otherwise press Delete alone and `ctrl++` press ctrl alone — an action the
+  // model did not ask for, reported as done.
+  if (keys.some((k) => k === '')) {
+    throw new ToolError(
+      `${field} must be keys joined by +, such as ctrl+s; the + key itself is plus`,
+    );
+  }
+  return keys;
+}
+
+/**
+ * Text as the pieces the platform types, each at most {@link TYPE_PIECE}
+ * code points — counted as the platform counts, so a piece never ends half way
+ * through a character — and never ending between the two halves of a CRLF,
+ * which is one Return together and a refused bare CR apart (found in review).
+ */
+function pieces(text: string): string[] {
+  const points = [...text];
+  const out: string[] = [];
+  for (let i = 0; i < points.length; ) {
+    let end = Math.min(i + TYPE_PIECE, points.length);
+    if (end < points.length && points[end - 1] === '\r' && points[end] === '\n') end--;
+    out.push(points.slice(i, end).join(''));
+    i = end;
+  }
+  return out;
 }
 
 /**
@@ -189,8 +214,6 @@ export class MandalaComputerToolset extends BetaAbstractComputerToolset20260801 
   readonly computer: Computer;
   /** The screen the computer reports, which is the space the platform takes points in. */
   readonly #screen: Size;
-  /** The picture of that screen the platform is asked for before any has been measured. */
-  readonly #expected: Size;
   /** The size of the last screenshot the model was shown; before the first, the expected one. */
   #frame: Size;
   /** The width to have the platform shrink a screenshot to, once one needs it. */
@@ -212,9 +235,10 @@ export class MandalaComputerToolset extends BetaAbstractComputerToolset20260801 
     // Throws when the computer reports no resolution, which is a record that
     // cannot be driven yet — better here than on the model's first click.
     this.#screen = computer.screen;
-    this.#expected = largestFit(this.#screen);
-    this.#frame = this.#expected;
-    this.#request = same(this.#expected, this.#screen) ? undefined : this.#expected.width;
+    // The picture asked for before any has been measured.
+    const expected = largestFit(this.#screen);
+    this.#frame = expected;
+    this.#request = same(expected, this.#screen) ? undefined : expected.width;
   }
 
   protected override async screenshot(ctx: Ctx): Promise<BetaScreenshotResult> {
@@ -262,21 +286,26 @@ export class MandalaComputerToolset extends BetaAbstractComputerToolset20260801 
       );
     }
     this.#aiming();
-    // The platform crops the capture it holds, in the screen's pixels. That is
-    // only the picture the model saw when the screenshot was the one asked for:
-    // a screen at another size than its computer reports has no rectangle here
-    // that means what the model meant.
-    if (!same(frame, this.#expected)) {
-      throw new ToolError(
-        'zoom is unavailable while the screen is not at the size its computer reports; ' +
-          'take a screenshot instead',
-      );
+    if (!this.#shown)
+      throw new ToolError('take a screenshot before zooming, so the region has a picture to be in');
+    // The platform crops the capture it HOLDS, in that capture's own pixels,
+    // which are not the screen's when the two differ and not the picture's when
+    // the picture was shrunk (found in review: a 3200x1800 capture under a
+    // 3840x2160 record shrinks to the same 2576x1449 picture as a 3840x2160
+    // one). So the region goes into the capture's pixels, and the capture's
+    // size is measured: it IS the last picture when that was not shrunk, and
+    // otherwise is read off one picture taken whole.
+    let native = frame;
+    if (this.#request !== undefined) {
+      const whole = await this.#shoot(ctx, undefined);
+      const size = pngSize(whole);
+      if (!size) throw new ToolError('the screenshot came back in a format other than PNG');
+      native = size;
     }
-    const s = this.#screen;
-    const left = Math.floor((x0 * s.width) / frame.width);
-    const top = Math.floor((y0 * s.height) / frame.height);
-    const right = Math.min(s.width, Math.ceil((x1 * s.width) / frame.width));
-    const bottom = Math.min(s.height, Math.ceil((y1 * s.height) / frame.height));
+    const left = Math.floor((x0 * native.width) / frame.width);
+    const top = Math.floor((y0 * native.height) / frame.height);
+    const right = Math.min(native.width, Math.ceil((x1 * native.width) / frame.width));
+    const bottom = Math.min(native.height, Math.ceil((y1 * native.height) / frame.height));
     const region = {
       x: left,
       y: top,
@@ -398,13 +427,24 @@ export class MandalaComputerToolset extends BetaAbstractComputerToolset20260801 
     if (typeof input.text !== 'string' || input.text === '') {
       throw new ToolError('text must be the text to type');
     }
-    // By code point, as the platform counts, so a piece never ends half way
-    // through a character.
-    const points = [...input.text];
-    for (let i = 0; i < points.length; i += TYPE_PIECE) {
+    const all = pieces(input.text);
+    const total = [...input.text].length;
+    let typed = 0;
+    for (const piece of all) {
       ctx.signal?.throwIfAborted();
-      const piece = points.slice(i, i + TYPE_PIECE).join('');
-      await this.#call(ctx, (signal) => this.computer.type(piece, { signal }));
+      try {
+        await this.#call(ctx, (signal) => this.computer.type(piece, { signal }));
+      } catch (error) {
+        if (typed === 0 || !(error instanceof ToolError)) throw error;
+        // Said, because what is already on the screen stays there: typing the
+        // whole text again would type its start twice, and a newline in it
+        // would run a command twice (found in review).
+        throw new ToolError(
+          `typed ${typed} of ${total} characters, then: ${error.message}. ` +
+            'The piece that failed may have been typed in part.',
+        );
+      }
+      typed += [...piece].length;
     }
   }
 
