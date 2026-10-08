@@ -200,6 +200,24 @@ function bodyOf(member: ts.ClassElement): ts.Node | undefined {
 function scanFile(fileName: string, source: string): Map<string, ClassInfo> {
   const file = ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, true);
   const found = new Map<string, ClassInfo>();
+  // Names this file imports from another PACKAGE rather than from this SDK
+  // (OPL-5851: the computer toolset extends Anthropic's class). Such a base
+  // cannot reach this SDK's transport, which is a private field no code outside
+  // this source tree can name, so its lineage ends there. Only those: a base
+  // that is neither declared here nor imported from a package is still the
+  // unresolved class it always was, and still an error.
+  const packageImports = new Set<string>();
+  for (const statement of file.statements) {
+    if (!ts.isImportDeclaration(statement) || !ts.isStringLiteral(statement.moduleSpecifier))
+      continue;
+    if (statement.moduleSpecifier.text.startsWith('.')) continue;
+    const clause = statement.importClause;
+    if (clause?.name) packageImports.add(clause.name.text);
+    const bindings = clause?.namedBindings;
+    if (bindings && ts.isNamedImports(bindings)) {
+      for (const element of bindings.elements) packageImports.add(element.name.text);
+    }
+  }
 
   const walk = (node: ts.Node): void => {
     if (ts.isClassExpression(node)) {
@@ -228,7 +246,7 @@ function scanFile(fileName: string, source: string): Map<string, ClassInfo> {
           const base = heritage?.getText(file) ?? extendsClause.getText(file);
           throw new Error(`unsupported base class for ${node.name.text} in ${fileName}: ${base}`);
         }
-        info.base = heritage.text;
+        if (!packageImports.has(heritage.text)) info.base = heritage.text;
       }
 
       for (const member of node.members) {

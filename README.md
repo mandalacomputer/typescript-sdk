@@ -1761,6 +1761,74 @@ does not include the JSON response's full `agent` or usage extensions, and
 errors can arrive in error frames after HTTP 200. Handle those errors and close
 the stream when leaving it early.
 
+### Claude's computer toolset
+
+Anthropic's SDK runs the computer-use loop itself when its tool runner is
+given a toolset driver, and this package ships one for a Mandala computer.
+`MandalaComputerToolset` serves every action of `computer_toolset_20260801`,
+so the loop, the prompt and the model stay yours, on your own key, and the
+actions land on the computer. Use it instead of [the agent loop](#the-agent-loop)
+when you want to choose the model, add your own tools, or approve actions as
+they happen.
+
+`@anthropic-ai/sdk` 0.132 or newer is an optional peer. Install it yourself;
+only `mandala-computer/anthropic` imports it.
+
+<!-- anthropic-toolset-example:start -->
+```ts
+import Anthropic from '@anthropic-ai/sdk';
+import { Client } from 'mandala-computer';
+import { MandalaComputerToolset } from 'mandala-computer/anthropic';
+
+const computer = await new Client().computers.get(process.env.MANDALA_COMPUTER_ID!);
+const desktop = new MandalaComputerToolset(computer, {
+  // Asked before every action. Approving all of them is a decision for a
+  // throwaway computer only.
+  confirm: () => true,
+});
+try {
+  const runner = new Anthropic().beta.messages.toolRunner({
+    model: 'claude-opus-5-5',
+    max_tokens: 16000,
+    tools: [desktop],
+    messages: [{ role: 'user', content: 'Open a terminal and run date' }],
+  });
+  for await (const message of runner) {
+    for (const block of message.content) if (block.type === 'text') console.log(block.text);
+  }
+} finally {
+  await desktop.close(); // releases the toolset; the computer keeps running
+}
+```
+<!-- anthropic-toolset-example:end -->
+
+- **`confirm` is required** by Anthropic's class, not by this one: a toolset
+  that can type and press keys refuses to construct without a callable that
+  approves each call, unless `configs` turns `type`, `key` and `hold_key` off.
+  It receives the action's name and input, never the screen.
+- **Screenshots are always fresh**, so a picture never predates the action it
+  answers.
+- **A screen too large for the model**, past 2576 pixels on its long edge or
+  about 3.75 megapixels, is photographed smaller by the platform, and the
+  model's points are scaled back up to the computer's own pixels. Every
+  screenshot's size is read off the picture, not assumed, because a desktop
+  resumed from a capture taken at another size can answer at that size until
+  it is restarted.
+- **A point outside the screenshot is refused**, not moved to the nearest
+  edge. So is the first point after the screen changes size, with the new
+  size in the refusal, because nothing in a call says which picture it was
+  aimed at.
+- **What the platform caps, the driver spans.** A `key` with `repeat` is pressed
+  once per repeat, text longer than 400 characters is typed in pieces, and a
+  `wait` of up to 300 seconds is waited in the platform's 30-second pieces. A
+  `hold_key` is at most 30 seconds, because a hold cannot be split.
+- **`zoom`** crops the platform's capture and shrinks the crop to fit the
+  model. It is refused while the screen is not at the size its computer
+  reports, because there is then no rectangle of the capture that means what
+  the model drew.
+- **A failure is an error result**, in the platform's own words, and the run
+  goes on: the model reads it and adapts.
+
 ### Power
 
 ```ts
