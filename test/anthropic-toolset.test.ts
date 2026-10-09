@@ -742,7 +742,13 @@ describe('the optional peer', () => {
         f.endsWith('.ts') &&
         readFileSync(new URL(f, src), 'utf8').includes("from '@anthropic-ai/sdk"),
     );
-    expect(importers).toEqual(['anthropic-browser.ts', 'anthropic.ts', 'browser-cdp.ts']);
+    expect(importers).toEqual([
+      'anthropic-browser.ts',
+      'anthropic.ts',
+      'browser-cdp.ts',
+      'browser-file-session.ts',
+      'browser-files.ts',
+    ]);
     const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
     expect(pkg.peerDependenciesMeta['@anthropic-ai/sdk']).toEqual({ optional: true });
     expect(pkg.exports['./anthropic']).toEqual({

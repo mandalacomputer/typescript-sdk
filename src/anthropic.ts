@@ -649,3 +649,10 @@ export class MandalaComputerToolset extends BetaAbstractComputerToolset20260801 
 }
 
 export { MandalaBrowserToolset, type MandalaBrowserToolsetOptions } from './anthropic-browser.js';
+
+export {
+  type BrowserDownload,
+  BrowserFilePolicy,
+  type BrowserFilePolicyOptions,
+  type BrowserStagedFile,
+} from './browser-files.js';

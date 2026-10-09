@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { ToolError, ToolsetConfigError } from '@anthropic-ai/sdk/helpers/beta/toolsets';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { MandalaBrowserToolset } from '../src/anthropic.js';
+import { BrowserFilePolicy, MandalaBrowserToolset } from '../src/anthropic.js';
 import { BrowserCDP, BrowserDriverError } from '../src/browser-cdp.js';
 import { BrowserConnection, Client, type Computer } from '../src/index.js';
 import { BASE, json, recorder } from './harness.js';
@@ -156,7 +156,11 @@ describe.skipIf(!executable)('real Chromium through Anthropic toolResult', () =>
     if (profile)
       await rm(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
-  async function fixture(options: ConstructorParameters<typeof MandalaBrowserToolset>[1] = {}) {
+  async function fixture(
+    options:
+      | ConstructorParameters<typeof MandalaBrowserToolset>[1]
+      | ((c: Computer) => ConstructorParameters<typeof MandalaBrowserToolset>[1]) = {},
+  ) {
     profile = await mkdtemp(join(tmpdir(), 'mandala-browser-test-'));
     chrome = spawn(
       executable!,
@@ -197,10 +201,14 @@ describe.skipIf(!executable)('real Chromium through Anthropic toolResult', () =>
     );
     const revoke = vi.fn(async () => {});
     const computer = {
+      id: 'vm-files',
       createBrowserConnection: async () => grant,
       revokeBrowserConnection: revoke,
     } as unknown as Computer;
-    const browser = new MandalaBrowserToolset(computer, options);
+    const browser = new MandalaBrowserToolset(
+      computer,
+      typeof options === 'function' ? options(computer) : options,
+    );
     browsers.push(browser);
     const hits: string[] = [];
     server = createServer((req, res) => {
@@ -226,11 +234,88 @@ describe.skipIf(!executable)('real Chromium through Anthropic toolResult', () =>
     if (!address || typeof address === 'string') throw new Error('no address');
     return {
       browser,
+      url,
       revoke,
       hits,
       base: `http://127.0.0.1:${address.port}`,
     };
   }
+
+  it.each(['', 'replace', 'url', 'refuse'])(
+    'pins staged upload bytes and destination (%s)',
+    async (mutation) => {
+      const { chromium } = await import('playwright-core');
+      let observer: Awaited<ReturnType<typeof chromium.connectOverCDP>>;
+      const seen: any[] = [];
+      const { browser, base, url } = await fixture((c) => ({
+        remoteFilePolicy: new BrowserFilePolicy(c, { taskId: 'upload-test' }),
+        configs: { file_upload: { enabled: true }, javascript_exec: { enabled: true } },
+        confirm: async (ctx) => {
+          if (ctx.member !== 'file_upload') return true;
+          seen.push(ctx);
+          const page = observer
+            .contexts()
+            .flatMap((c) => c.pages())
+            .find((p) => p.url().startsWith(base))!;
+          if (mutation === 'replace')
+            await page.evaluate(
+              "document.querySelector('input').replaceWith(document.createElement('input'))",
+            );
+          if (mutation === 'url')
+            await page.evaluate("history.pushState({},'', '/new-destination')");
+          return mutation !== 'refuse';
+        },
+      }));
+      observer = await chromium.connectOverCDP(url);
+      try {
+        success(await browser.toolResult(use('navigate', { url: base })));
+        success(
+          await browser.toolResult(
+            use('javascript_exec', {
+              text: "document.body.innerHTML='<label>Upload <input id=upload type=file></label><p id=result></p>';document.querySelector('input').onchange=async e=>{document.querySelector('p').textContent=await e.target.files[0].text()}",
+            }),
+          ),
+        );
+        const page = success(await browser.toolResult(use('read_page', { filter: 'all' })));
+        const target = ref(page, 'button Upload');
+        const bytes = Buffer.from('approved bytes');
+        const item = await browser.stageLocalFile(bytes, { filename: '../../exact.txt' });
+        bytes.fill(65);
+        expect(
+          (await browser.toolResult(use('file_upload', { target, paths: ['/etc/passwd'] })))
+            .is_error,
+        ).toBe(true);
+        expect(
+          (
+            await browser.toolResult(
+              use('file_upload', { target, document_ids: ['file_not_staged'] }),
+            )
+          ).is_error,
+        ).toBe(true);
+        expect(seen).toHaveLength(0);
+        const result = await browser.toolResult(
+          use('file_upload', { target, document_ids: [item.id] }),
+        );
+        expect(seen).toHaveLength(1);
+        expect(seen[0].tabURL).toBe(base + '/');
+        expect(seen[0].input.document_ids).toEqual([item.id]);
+        if (mutation) expect(result.is_error, text(result)).toBe(true);
+        else {
+          success(result);
+          await new Promise((r) => setTimeout(r, 50));
+          expect(text(success(await browser.toolResult(use('get_page_text'))))).toContain(
+            'approved bytes',
+          );
+          expect(
+            (await browser.toolResult(use('file_upload', { target, document_ids: [item.id] })))
+              .is_error,
+          ).toBe(true);
+        }
+      } finally {
+        await observer.close();
+      }
+    },
+  );
 
   it('navigates, resolves DOM refs, enters forms, clicks, captures, manages tabs, and refuses redirect destinations', async () => {
     const seen: string[] = [];
