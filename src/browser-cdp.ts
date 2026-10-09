@@ -7,6 +7,8 @@ import type {
   BrowserSessionPolicy,
 } from './browser-connection.js';
 
+import type { BrowserFiles } from './browser-file-session.js';
+
 // CDP is an extensible protocol. Values stay inside this backend; the Anthropic
 // pipeline validates every member result before it reaches the model.
 type Message = Record<string, any>;
@@ -39,6 +41,30 @@ function delay(ms: number): Promise<void> {
 
 // Owned by one toolset; Anthropic CallQueue serializes all public tool calls.
 export class BrowserCDP {
+  files?: BrowserFiles;
+  #starting?: Promise<void>;
+  fileLive(): boolean {
+    return !this.#closed && !this.#failed;
+  }
+  fileActive(): string | undefined {
+    return this.#active;
+  }
+  fileFail(): void {
+    this.#fail();
+  }
+  fileChange(change: NonNullable<BetaBrowserState['state_changes']>[number]): void {
+    if (this.fileLive()) this.#change(change);
+  }
+  fileTarget(data: Message): { tab: string; session: string; node: number } {
+    const tab = data.tab_id ?? this.#active;
+    const session = this.#sessions.get(tab),
+      node = this.#refs.get(tab)?.get(data.target?.ref);
+    if (!this.#tabs.has(tab) || !session || node === undefined)
+      throw new BrowserDriverError(
+        'Remote browser file operation was refused or could not complete.',
+      );
+    return { tab, session, node };
+  }
   #ws: import('ws').default | undefined;
   #pending = new Map<
     number,
@@ -76,7 +102,18 @@ export class BrowserCDP {
     private sessionPolicy?: BrowserSessionPolicy,
   ) {}
 
-  async start(): Promise<void> {
+  start(): Promise<void> {
+    if (!this.fileLive())
+      return Promise.reject(
+        new BrowserDriverError(
+          this.#terminalError ??
+            'Browser connection ended. Create a new toolset for a fresh session.',
+        ),
+      );
+    this.#starting ??= this.#start();
+    return this.#starting;
+  }
+  async #start(): Promise<void> {
     if (this.#closed || this.#failed)
       throw new BrowserDriverError(
         this.#terminalError ??
@@ -146,6 +183,7 @@ export class BrowserCDP {
         behavior: 'deny',
         browserContextId: this.#context,
       });
+      if (this.files) await this.files.setup(this.#context!);
       await this.send('Target.setDiscoverTargets', { discover: true });
       await this.send('Target.setAutoAttach', {
         autoAttach: true,
@@ -189,6 +227,7 @@ export class BrowserCDP {
     absoluteExpiresAt: Date | undefined;
     remainingSeconds: number;
     terminalError: string | undefined;
+    fileCleanupFailed: boolean;
   } {
     return {
       state: this.#failed || this.#closed ? 'ended' : this.#ws ? 'active' : 'not_started',
@@ -199,6 +238,7 @@ export class BrowserCDP {
           ? Math.max(0, (this.#leaseDeadline - performance.now()) / 1000)
           : 0,
       terminalError: this.#terminalError,
+      fileCleanupFailed: this.files?.cleanupFailed ?? false,
     };
   }
 
@@ -255,6 +295,7 @@ export class BrowserCDP {
 
   #fail(): void {
     this.#failed = true;
+    void this.files?.close();
     clearTimeout(this.#leaseTimer);
     this.#renewController?.abort();
     for (const ready of this.#ready.values()) ready.resolve();
@@ -317,6 +358,10 @@ export class BrowserCDP {
     const { method, params: p = {}, sessionId: session } = message;
     let eventSession = session;
     try {
+      if (method === 'Browser.downloadWillBegin' || method === 'Browser.downloadProgress') {
+        await this.files?.event(method, p);
+        return;
+      }
       if (method === 'Target.attachedToTarget') {
         const info = p.targetInfo;
         const child: string = p.sessionId;
@@ -359,6 +404,10 @@ export class BrowserCDP {
           ],
         ];
         for (const [name, args] of initializers) await this.send(name, args, child);
+        if (this.files) {
+          const tree = await this.send('Page.getFrameTree', {}, child);
+          this.files.frameTree(tree.frameTree, target);
+        }
         await this.send('Runtime.runIfWaitingForDebugger', {}, child);
         this.#ready.get(target)?.resolve();
       } else if (method === 'Target.targetInfoChanged') {
@@ -396,8 +445,12 @@ export class BrowserCDP {
       } else {
         const tab = [...this.#sessions].find(([, s]) => s === session)?.[0];
         if (!tab) return;
-        if (method === 'Page.frameNavigated') this.#refs.delete(tab);
-        else if (method === 'Runtime.consoleAPICalled')
+        if (method === 'Page.frameAttached') this.files?.frame(p.frameId, tab);
+        if (method === 'Page.frameDetached') this.files?.frames.delete(p.frameId);
+        if (method === 'Page.frameNavigated') {
+          this.#refs.delete(tab);
+          this.files?.frame(p.frame.id, tab);
+        } else if (method === 'Runtime.consoleAPICalled')
           append(
             this.#console,
             tab,
@@ -420,6 +473,9 @@ export class BrowserCDP {
     }
   }
   #dropTab(target: string): void {
+    if (this.files)
+      for (const [frame, tab] of this.files.frames)
+        if (tab === target) this.files.frames.delete(frame);
     this.#ready.get(target)?.resolve();
     for (const map of [
       this.#tabs,
@@ -886,7 +942,7 @@ export class BrowserCDP {
 
   async close(): Promise<void> {
     if (this.#closing) return this.#closing;
-    if (this.#closed && !this.#grant) return;
+    if (this.#closed && !this.#grant && !this.files?.created) return;
     this.#closed = true;
     clearTimeout(this.#leaseTimer);
     this.#renewController?.abort();
@@ -898,6 +954,7 @@ export class BrowserCDP {
 
   async #cleanup(): Promise<void> {
     try {
+      await this.files?.close();
       if (this.#ws) {
         if (this.#context && !this.#failed) {
           try {

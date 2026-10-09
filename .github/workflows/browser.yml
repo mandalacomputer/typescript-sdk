@@ -17,4 +17,4 @@ jobs:
       - name: Exercise the browser toolset against Chromium
         run: |
           export MANDALA_TEST_CHROMIUM="$(node --input-type=module -e 'import {chromium} from "playwright-core"; console.log(chromium.executablePath())')"
-          npx vitest run test/browser-toolset.test.ts
+          npx vitest run test/browser-toolset.test.ts test/browser-files.test.ts

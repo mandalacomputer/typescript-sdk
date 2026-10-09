@@ -7,19 +7,38 @@ import {
 import type * as Beta from '@anthropic-ai/sdk/resources/beta';
 import { BrowserCDP, BrowserDriverError } from './browser-cdp.js';
 import { type BrowserSessionPolicy, browserSessionOptions } from './browser-connection.js';
+import { BrowserFiles } from './browser-file-session.js';
+import { type BrowserFilePolicy, type BrowserStagedFile, FILE_ERROR } from './browser-files.js';
 import type { Computer } from './computer.js';
 
-/** Browser state is owned by the driver. Remote file transfer is not supported. */
+async function interruptible<T>(work: Promise<T>, signal?: AbortSignal | null): Promise<T> {
+  let abort: (() => void) | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_, reject) => {
+        abort = () => reject(new ToolError(FILE_ERROR));
+        signal?.addEventListener('abort', abort, { once: true });
+        if (signal?.aborted) abort();
+      }),
+    ]);
+  } finally {
+    if (abort) signal?.removeEventListener('abort', abort);
+  }
+}
+
+/** Browser state and explicit remote file staging are owned by the driver. */
 export type MandalaBrowserToolsetOptions = Omit<
   BetaBrowserToolsetOptions,
   'browserState' | 'filePolicy'
-> & { sessionPolicy?: BrowserSessionPolicy };
+> & { sessionPolicy?: BrowserSessionPolicy; remoteFilePolicy?: BrowserFilePolicy };
 
 /** An isolated Chromium context; sessionPolicy opts into bounded lease renewal.
  *
  * The URL policy checks navigation and intercepted HTTP(S) requests. It is not
  * network isolation: configure guest egress controls for that. Popups, workers,
- * cross-process frames, uploads and downloads are unsupported. JavaScript
+ * cross-process frames are unsupported. Files require remoteFilePolicy; uploads
+ * also require confirm. JavaScript
  * execution is off by default and requires confirm when enabled.
  */
 export class MandalaBrowserToolset extends BetaAbstractBrowserToolset20260801 {
@@ -55,15 +74,88 @@ export class MandalaBrowserToolset extends BetaAbstractBrowserToolset20260801 {
       (id, signal) => computer.renewBrowserConnection(id, { signal }),
       sessionPolicy,
     );
+    const configs = { ...options.configs };
+    if (!options.remoteFilePolicy) {
+      if (configs.file_upload?.enabled === true)
+        throw new Error('file_upload requires remoteFilePolicy and confirm');
+      configs.file_upload = { enabled: false };
+    }
+    // Construct the inherited gate before binding a single-use policy.
+    let files: BrowserFiles | undefined;
+    const confirm = options.confirm;
     // Keep JavaScript callers within the same options surface as TypeScript.
     super({
-      configs: options.configs,
-      confirm: options.confirm,
+      configs,
+      confirm:
+        options.remoteFilePolicy && confirm
+          ? async (ctx) => {
+              if (ctx.member !== 'file_upload') return confirm(ctx);
+              try {
+                ctx.signal?.throwIfAborted();
+                const reviewed = await interruptible(files!.prepare(ctx), ctx.signal);
+                const allowed =
+                  (await interruptible(
+                    Promise.resolve().then(() => confirm(reviewed)),
+                    ctx.signal,
+                  )) === true;
+                ctx.signal?.throwIfAborted();
+                await files!.approved(allowed);
+                return allowed;
+              } catch {
+                if (ctx.signal?.aborted) await backend.close();
+                else await files!.approved(false);
+                throw new ToolError(FILE_ERROR);
+              }
+            }
+          : confirm,
       urlPolicy: options.urlPolicy,
       toolConfigs: options.toolConfigs,
       browserState: () => backend.state(),
+      filePolicy: options.remoteFilePolicy
+        ? {
+            resolveUploadPaths: () => {
+              throw new ToolError(
+                'Stage guest or local files explicitly and use their document_ids handles.',
+              );
+            },
+            resolveUploadDocuments: (ctx, ids) => files!.adapter.resolveUploadDocuments(ctx, ids),
+            isPathVisible: (path) => files!.adapter.isPathVisible(path),
+          }
+        : undefined,
     });
     this.#backend = backend;
+    if (options.remoteFilePolicy)
+      backend.files = files = new BrowserFiles(computer, options.remoteFilePolicy, backend);
+  }
+
+  #files(): BrowserFiles {
+    if (!this.#backend.files) throw new ToolError(FILE_ERROR);
+    return this.#backend.files;
+  }
+  /** Stage caller-provided bytes. Never reads a local path. */
+  async stageLocalFile(
+    content: Uint8Array,
+    options: { filename: string },
+  ): Promise<BrowserStagedFile> {
+    return this.#files().stage(content, options.filename, 'local');
+  }
+  /** Snapshot a regular single-link guest file under an allowed root. */
+  async stageGuestFile(path: string): Promise<BrowserStagedFile> {
+    return this.#files().stageGuest(path);
+  }
+  /** Stage already-authorized Files API bytes; no automatic retrieval. */
+  async stageDocument(
+    id: string,
+    content: Uint8Array,
+    options: { filename: string },
+  ): Promise<BrowserStagedFile> {
+    return this.#files().stageDocument(id, content, options.filename);
+  }
+  protected override async file_upload(
+    ctx: BetaToolsetCallContext,
+    input: Beta.BetaBrowserFileUploadInput,
+  ): Promise<void> {
+    return this.#call(ctx, 'file_upload', input);
   }
 
   /** Renewable lease deadlines, conservative time remaining and terminal failure. */
@@ -77,7 +169,9 @@ export class MandalaBrowserToolset extends BetaAbstractBrowserToolset20260801 {
     let abort: (() => void) | undefined;
     try {
       const result = await Promise.race([
-        this.#backend.perform(name, input),
+        name === 'file_upload'
+          ? this.#files().upload(ctx, input as Beta.BetaBrowserFileUploadInput)
+          : this.#backend.perform(name, input),
         new Promise<never>((_, reject) => {
           timer = setTimeout(() => reject(new Error('Browser action deadline exceeded')), 45000);
           abort = () => reject(new Error('Browser action interrupted'));
@@ -88,7 +182,13 @@ export class MandalaBrowserToolset extends BetaAbstractBrowserToolset20260801 {
       ctx.signal?.throwIfAborted();
       return result as T;
     } catch (error) {
-      if (!(error instanceof BrowserDriverError) || ctx.signal?.aborted) {
+      if (
+        !(
+          error instanceof BrowserDriverError ||
+          (name === 'file_upload' && error instanceof ToolError)
+        ) ||
+        ctx.signal?.aborted
+      ) {
         try {
           await this.#backend.close();
         } catch {
@@ -96,6 +196,7 @@ export class MandalaBrowserToolset extends BetaAbstractBrowserToolset20260801 {
         }
       }
       ctx.signal?.throwIfAborted();
+      if (name === 'file_upload' && error instanceof ToolError) throw new ToolError(FILE_ERROR);
       throw new ToolError(
         error instanceof BrowserDriverError
           ? error.message
@@ -113,6 +214,10 @@ export class MandalaBrowserToolset extends BetaAbstractBrowserToolset20260801 {
     } finally {
       await this.#closeBackend();
     }
+    if (this.#backend.files?.cleanupFailed)
+      throw new ToolError(
+        'Browser closed, but guest file cleanup could not be confirmed. Retry close; the guest guardian also enforces expiry.',
+      );
   }
 
   async #closeBackend(): Promise<void> {
