@@ -85,12 +85,27 @@ const executionRoutes = (call: Call): Response | Promise<Response> => {
         snapshot_storage_bytes: 0,
       },
     });
+  const browserLease = {
+    id: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    lifecycle_version: 2,
+    server_time: '2026-10-09T00:50:00Z',
+    attach_expires_at: '2026-10-09T01:00:00Z',
+    lease_expires_at: '2026-10-09T01:20:00Z',
+    absolute_expires_at: '2026-10-09T02:50:00Z',
+    lease_seconds: 1800,
+    idle_timeout_seconds: 0,
+  };
+  if (call.path.includes('/browser-connections/') && call.path.endsWith('/renew'))
+    return json(browserLease);
   if (call.path.endsWith('/browser-connections'))
     return json({
       id: 'a'.repeat(32),
       url: `wss://api.test/api/v1/${call.path.replace(/^\//, '')}/${'a'.repeat(32)}/cdp`,
       token: `bcdp_${'b'.repeat(64)}`,
       expires_at: '2026-10-09T01:00:00Z',
+      ...(call.body && (call.body as Record<string, unknown>).lifecycle_version === 2
+        ? browserLease
+        : {}),
     });
   const executionId = 'exec_0123456789abcdef0123456789abcdef';
   const resultId = 'res_0123456789abcdef0123456789abcdef';
@@ -522,7 +537,10 @@ async function exerciseEverything(client: Client): Promise<void> {
   await client.sshKeys.list();
   await client.sshKeys.add({ publicKey: 'ssh-ed25519 AAAAC3Nz laptop', name: 'laptop' });
   await client.sshKeys.remove('sshk-1');
-  const browserConnection = await c.createBrowserConnection();
+  const browserConnection = await c.createBrowserConnection({
+    sessionPolicy: { leaseSeconds: 1800, maxDurationSeconds: 7200 },
+  });
+  await c.renewBrowserConnection(browserConnection.id);
   await c.revokeBrowserConnection(browserConnection.id);
   await c.sshAccess();
   await c.setSshAccess(true);

@@ -1,7 +1,11 @@
 /** Private CDP backend. Browser strings and protocol errors never become tool errors. */
 
 import { type BetaBrowserState, ToolError } from '@anthropic-ai/sdk/helpers/beta/toolsets';
-import type { BrowserConnection } from './browser-connection.js';
+import type {
+  BrowserConnection,
+  BrowserSessionLease,
+  BrowserSessionPolicy,
+} from './browser-connection.js';
 
 // CDP is an extensible protocol. Values stay inside this backend; the Anthropic
 // pipeline validates every member result before it reaches the model.
@@ -43,6 +47,11 @@ export class BrowserCDP {
   #counter = 0;
   #grant: BrowserConnection | undefined;
   #context: string | undefined;
+  #lease: BrowserSessionLease | undefined;
+  #leaseDeadline = 0;
+  #leaseTimer: ReturnType<typeof setTimeout> | undefined;
+  #renewController: AbortController | undefined;
+  #terminalError: string | undefined;
   #closed = false;
   #closing: Promise<void> | undefined;
   #failed = false;
@@ -63,17 +72,22 @@ export class BrowserCDP {
     private create: () => Promise<BrowserConnection>,
     private revoke: (id: string) => Promise<void>,
     private policy: (tab: string | undefined, url: string) => Promise<void>,
+    private renew?: (id: string, signal: AbortSignal) => Promise<BrowserSessionLease>,
+    private sessionPolicy?: BrowserSessionPolicy,
   ) {}
 
   async start(): Promise<void> {
     if (this.#closed || this.#failed)
       throw new BrowserDriverError(
-        'Browser connection ended. Create a new toolset for a fresh session.',
+        this.#terminalError ??
+          'Browser connection ended. Create a new toolset for a fresh session.',
       );
     if (this.#ws) return;
     try {
       const { default: WebSocket } = await import('ws');
+      const requested = performance.now();
       this.#grant = await this.create();
+      if (this.sessionPolicy) this.#acceptLease(this.#grant.lease, performance.now() - requested);
       if (this.#closed) {
         await this.revoke(this.#grant.id);
         this.#grant = undefined;
@@ -139,14 +153,110 @@ export class BrowserCDP {
         flatten: true,
       });
       await this.#newTab();
+      this.#scheduleLease();
     } catch (error) {
       await this.close();
       throw error;
     }
   }
 
+  #acceptLease(lease: BrowserSessionLease | undefined, elapsedMs: number): void {
+    if (!lease)
+      throw new BrowserDriverError(
+        'The server did not provide the requested renewable browser session.',
+      );
+    const previous = this.#lease;
+    if (
+      previous &&
+      (lease.id !== previous.id ||
+        +lease.attachExpiresAt !== +previous.attachExpiresAt ||
+        +lease.absoluteExpiresAt !== +previous.absoluteExpiresAt ||
+        lease.leaseSeconds !== previous.leaseSeconds ||
+        +lease.serverTime < +previous.serverTime ||
+        +lease.leaseExpiresAt < +previous.leaseExpiresAt)
+    )
+      throw new BrowserDriverError('Browser renewal returned an inconsistent session lease.');
+    const remaining = +lease.leaseExpiresAt - +lease.serverTime - elapsedMs;
+    if (remaining <= 0)
+      throw new BrowserDriverError('Browser session lease expired before its response arrived.');
+    this.#lease = lease;
+    this.#leaseDeadline = performance.now() + remaining;
+  }
+
+  sessionStatus(): {
+    state: 'not_started' | 'active' | 'ended';
+    leaseExpiresAt: Date | undefined;
+    absoluteExpiresAt: Date | undefined;
+    remainingSeconds: number;
+    terminalError: string | undefined;
+  } {
+    return {
+      state: this.#failed || this.#closed ? 'ended' : this.#ws ? 'active' : 'not_started',
+      leaseExpiresAt: this.#lease?.leaseExpiresAt,
+      absoluteExpiresAt: this.#lease?.absoluteExpiresAt,
+      remainingSeconds:
+        this.#lease && !this.#failed && !this.#closed
+          ? Math.max(0, (this.#leaseDeadline - performance.now()) / 1000)
+          : 0,
+      terminalError: this.#terminalError,
+    };
+  }
+
+  #canRenew(): boolean {
+    return !!(
+      this.renew &&
+      this.sessionPolicy?.autoRenew !== false &&
+      this.#lease &&
+      +this.#lease.leaseExpiresAt < +this.#lease.absoluteExpiresAt
+    );
+  }
+  #scheduleLease(): void {
+    clearTimeout(this.#leaseTimer);
+    if (!this.#lease || this.#failed || this.#closed) return;
+    const remaining = this.#leaseDeadline - performance.now();
+    const delay = this.#canRenew() ? remaining - Math.min(60000, remaining / 3) : remaining;
+    this.#leaseTimer = setTimeout(
+      () => {
+        void this.#maintainLease();
+      },
+      Math.max(0, delay),
+    );
+    this.#leaseTimer.unref?.();
+  }
+  async #maintainLease(): Promise<void> {
+    if (this.#closed || this.#failed) return;
+    const remaining = this.#leaseDeadline - performance.now();
+    if (!this.#canRenew() || remaining <= 0) {
+      this.#terminalError =
+        'Browser session lease expired or its absolute limit was reached. Create a new toolset to continue.';
+      this.#fail();
+      return;
+    }
+    this.#renewController = new AbortController();
+    try {
+      const requested = performance.now();
+      const signal = AbortSignal.any([
+        this.#renewController.signal,
+        AbortSignal.timeout(Math.max(1, Math.floor(Math.min(10000, remaining)))),
+      ]);
+      const lease = await this.renew!(this.#grant!.id, signal);
+      if (this.#closed || this.#failed) return;
+      this.#acceptLease(lease, performance.now() - requested);
+      this.#scheduleLease();
+    } catch {
+      if (this.#closed || this.#failed) return;
+      this.#terminalError =
+        'Browser session renewal failed. The session ended; create a new toolset to continue.';
+      this.#fail();
+    } finally {
+      this.#renewController = undefined;
+    }
+  }
+
   #fail(): void {
     this.#failed = true;
+    clearTimeout(this.#leaseTimer);
+    this.#renewController?.abort();
     for (const ready of this.#ready.values()) ready.resolve();
     for (const map of [
       this.#tabs,
@@ -162,7 +272,10 @@ export class BrowserCDP {
     this.#changes = [];
     for (const pending of this.#pending.values())
       pending.reject(
-        new BrowserDriverError('Browser connection ended or its ten-minute grant expired.'),
+        new BrowserDriverError(
+          this.#terminalError ??
+            'Browser connection ended. Create a new toolset for a fresh session.',
+        ),
       );
     this.#ws?.terminate();
   }
@@ -170,7 +283,8 @@ export class BrowserCDP {
   async send(method: string, params: Message = {}, sessionId?: string): Promise<Message> {
     if (!this.#ws || this.#failed)
       throw new BrowserDriverError(
-        'Browser connection ended. Create a new toolset for a fresh session.',
+        this.#terminalError ??
+          'Browser connection ended. Create a new toolset for a fresh session.',
       );
     const id = ++this.#counter;
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -774,6 +888,8 @@ export class BrowserCDP {
     if (this.#closing) return this.#closing;
     if (this.#closed && !this.#grant) return;
     this.#closed = true;
+    clearTimeout(this.#leaseTimer);
+    this.#renewController?.abort();
     this.#closing = this.#cleanup().finally(() => {
       this.#closing = undefined;
     });
