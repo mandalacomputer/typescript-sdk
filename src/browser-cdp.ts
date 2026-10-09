@@ -1,6 +1,6 @@
 /** Private CDP backend. Browser strings and protocol errors never become tool errors. */
 
-import type { BetaBrowserState } from '@anthropic-ai/sdk/helpers/beta/toolsets';
+import { type BetaBrowserState, ToolError } from '@anthropic-ai/sdk/helpers/beta/toolsets';
 import type { BrowserConnection } from './browser-connection.js';
 
 // CDP is an extensible protocol. Values stay inside this backend; the Anthropic
@@ -33,6 +33,7 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// Owned by one toolset; Anthropic CallQueue serializes all public tool calls.
 export class BrowserCDP {
   #ws: import('ws').default | undefined;
   #pending = new Map<
@@ -43,6 +44,7 @@ export class BrowserCDP {
   #grant: BrowserConnection | undefined;
   #context: string | undefined;
   #closed = false;
+  #closing: Promise<void> | undefined;
   #failed = false;
   #tasks = new Set<Promise<void>>();
   #tabs = new Map<string, Message>();
@@ -330,7 +332,8 @@ export class BrowserCDP {
           timer = setTimeout(() => reject(new BrowserDriverError('URL policy timed out.')), 5000);
         }),
       ]);
-    } catch {
+    } catch (error) {
+      if (error instanceof ToolError) throw new BrowserDriverError(error.message);
       throw new BrowserDriverError('Navigation was refused by the URL policy or its deadline.');
     } finally {
       clearTimeout(timer);
@@ -738,8 +741,16 @@ export class BrowserCDP {
   }
 
   async close(): Promise<void> {
-    if (this.#closed) return;
+    if (this.#closing) return this.#closing;
+    if (this.#closed && !this.#grant) return;
     this.#closed = true;
+    this.#closing = this.#cleanup().finally(() => {
+      this.#closing = undefined;
+    });
+    return this.#closing;
+  }
+
+  async #cleanup(): Promise<void> {
     try {
       if (this.#ws) {
         if (this.#context && !this.#failed) {
@@ -756,7 +767,10 @@ export class BrowserCDP {
       await Promise.allSettled(this.#tasks);
     } finally {
       this.#tabs.clear();
-      if (this.#grant) await this.revoke(this.#grant.id);
+      if (this.#grant) {
+        await this.revoke(this.#grant.id);
+        this.#grant = undefined;
+      }
     }
   }
 }

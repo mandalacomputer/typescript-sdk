@@ -290,10 +290,10 @@ describe.skipIf(!executable)('real Chromium through Anthropic toolResult', () =>
   it('preserves input, tab lifecycle, policy refusal and consumed-log semantics', async () => {
     let rejectReload = false;
     let release!: () => void, entered!: () => void;
-    const pending = new Promise<void>((r) => {
+    let pending = new Promise<void>((r) => {
       entered = r;
     });
-    const gate = new Promise<void>((r) => {
+    let gate = new Promise<void>((r) => {
       release = r;
     });
     const { browser, base } = await fixture({
@@ -308,7 +308,7 @@ describe.skipIf(!executable)('real Chromium through Anthropic toolResult', () =>
           entered();
           await gate;
         }
-        if (rejectReload) throw new ToolError('refused');
+        if (rejectReload) throw new ToolError('Allowed origin only.');
       },
     });
     const call = async (name: string, data: Record<string, unknown> = {}) =>
@@ -323,6 +323,15 @@ describe.skipIf(!executable)('real Chromium through Anthropic toolResult', () =>
     expect(await js("document.getElementById('name').value")).toBe('a');
     await call('key', { text: 'b c Backspace' });
     expect(await js("document.getElementById('name').value")).toBe('ab');
+    await js(
+      "document.body.insertAdjacentHTML('beforeend','<textarea id=area></textarea><form id=form><input id=field><button>Submit</button></form>');document.getElementById('area').focus();window.keys=[];document.getElementById('area').addEventListener('keyup',e=>keys.push([e.key,e.shiftKey]));window.submitted=0;document.getElementById('form').onsubmit=e=>{e.preventDefault();submitted++}",
+    );
+    await call('key', { text: 'Shift+1 Shift+a Enter' });
+    expect(await js('JSON.stringify(document.getElementById("area").value)')).toBe('"!A\\n"');
+    expect(await js('JSON.stringify(keys.slice(0,2))')).toBe('[["!",true],["Shift",false]]');
+    await js('document.getElementById("field").focus()');
+    await call('key', { text: 'Enter' });
+    expect(await js('window.submitted')).toBe('1');
     const point = { type: 'coordinate', x: 20, y: 20 };
     await call('left_mouse_down', { target: point });
     await call('mouse_move', { target: { ...point, x: 50 } });
@@ -356,8 +365,24 @@ describe.skipIf(!executable)('real Chromium through Anthropic toolResult', () =>
     await js("fetch('/logged').then(r=>r.text())");
     expect(text(await call('read_network'))).toContain('/logged');
     expect(text(await call('read_network'))).not.toContain('/logged');
+    await js(
+      'window.fetchControl=new AbortController();void fetch("/slow",{signal:fetchControl.signal}).catch(()=>{})',
+    );
+    await pending;
+    await js('fetchControl.abort()');
+    release();
+    await new Promise((r) => setTimeout(r, 100));
+    await call('get_page_text');
+    pending = new Promise<void>((r) => {
+      entered = r;
+    });
+    gate = new Promise<void>((r) => {
+      release = r;
+    });
     rejectReload = true;
-    expect((await browser.toolResult(use('navigate', { url: 'reload' }))).is_error).toBe(true);
+    const refused = await browser.toolResult(use('navigate', { url: 'reload' }));
+    expect(refused.is_error).toBe(true);
+    expect(text(refused)).toContain('Allowed origin only.');
     rejectReload = false;
     await call('form_input', { target: name, value: 'still valid' });
     const second = tabs(await call('new_tab')).find((t) => t.tab_id !== first)!.tab_id;
@@ -371,4 +396,14 @@ describe.skipIf(!executable)('real Chromium through Anthropic toolResult', () =>
     await new Promise((r) => setTimeout(r, 100));
     await call('get_page_text', { tab_id: second });
   }, 30000);
+  it('retries revocation after a failed close without creating another session', async () => {
+    const { browser, base, revoke } = await fixture();
+    success(await browser.toolResult(use('navigate', { url: base })));
+    revoke.mockRejectedValueOnce(new Error('transient failure'));
+    await expect(browser.close()).rejects.toThrow('could not be revoked');
+    await browser.close();
+    expect(revoke).toHaveBeenCalledTimes(2);
+    await browser.close();
+    expect(revoke).toHaveBeenCalledTimes(2);
+  });
 });
