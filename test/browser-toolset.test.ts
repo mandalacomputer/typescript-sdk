@@ -8,7 +8,7 @@ import { createInterface } from 'node:readline';
 import { ToolError, ToolsetConfigError } from '@anthropic-ai/sdk/helpers/beta/toolsets';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MandalaBrowserToolset } from '../src/anthropic.js';
-import { BrowserCDP } from '../src/browser-cdp.js';
+import { BrowserCDP, BrowserDriverError } from '../src/browser-cdp.js';
 import { BrowserConnection, Client, type Computer } from '../src/index.js';
 import { BASE, json, recorder } from './harness.js';
 
@@ -152,7 +152,9 @@ describe.skipIf(!executable)('real Chromium through Anthropic toolResult', () =>
       await exit;
       chrome = undefined;
     }
-    if (profile) await rm(profile, { recursive: true, force: true });
+    // Chromium subprocesses may briefly finish profile writes after the parent exits.
+    if (profile)
+      await rm(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
   async function fixture(options: ConstructorParameters<typeof MandalaBrowserToolset>[1] = {}) {
     profile = await mkdtemp(join(tmpdir(), 'mandala-browser-test-'));
@@ -267,6 +269,9 @@ describe.skipIf(!executable)('real Chromium through Anthropic toolResult', () =>
     expect(refused.is_error).toBe(true);
     expect(hits).not.toContain('/blocked');
     expect(seen).toContain(`${base}/blocked`);
+    // A refused redirect can retain the old document. Successful navigation
+    // deterministically invalidates references from that document.
+    success(await browser.toolResult(use('navigate', { url: `${base}/after-redirect` })));
     expect((await browser.toolResult(use('left_click', { target: name }))).is_error).toBe(true);
     await browser.close();
     expect(revoke).toHaveBeenCalledExactlyOnceWith(id);
@@ -482,6 +487,49 @@ describe.skipIf(!executable)('real Chromium through Anthropic toolResult', () =>
         'paragraph Virtual accessibility row',
       );
       expect(page).toMatch(/\[e\d+\] textbox Name/);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+  it('preserves other tabs when a new tab closes during initialization', async () => {
+    const { browser, base } = await fixture();
+    const first = tabs(success(await browser.toolResult(use('navigate', { url: base }))))[0]!
+      .tab_id;
+    let finished!: () => void;
+    const initialization = new Promise<void>((resolve) => {
+      finished = resolve;
+    });
+    const original = BrowserCDP.prototype.send;
+    const spy = vi.spyOn(BrowserCDP.prototype, 'send').mockImplementation(async function (
+      this: BrowserCDP,
+      method,
+      params,
+      session,
+    ) {
+      if (method === 'Page.enable') {
+        try {
+          const { targetInfo } = await original.call(this, 'Target.getTargetInfo', {}, session);
+          await original.call(this, 'Target.closeTarget', { targetId: targetInfo.targetId });
+          await expect
+            .poll(() => this.state().tabs.some((tab) => tab.tab_id === targetInfo.targetId))
+            .toBe(false);
+          throw new BrowserDriverError('Target closed');
+        } finally {
+          finished();
+        }
+      }
+      return original.call(this, method, params, session);
+    });
+    try {
+      const started = Date.now();
+      const result = await browser.toolResult(use('new_tab'));
+      await initialization;
+      expect(result.is_error).toBe(true);
+      expect(text(result)).toContain('closed during initialization');
+      expect(Date.now() - started).toBeLessThan(2000);
+      expect(tabs(success(await browser.toolResult(use('get_page_text'))))).toEqual([
+        expect.objectContaining({ tab_id: first, active: true }),
+      ]);
     } finally {
       spy.mockRestore();
     }
