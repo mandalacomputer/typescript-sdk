@@ -10,6 +10,9 @@
  * the number is written once and the reason for it stays where it is used.
  */
 export const LIMITS = {
+  'browser.minimumLeaseSeconds': 60,
+  'browser.defaultLeaseSeconds': 1800,
+  'browser.maximumSessionSeconds': 7200,
   'agent.maxSteps': 100,
   'clipboard.writeMaxBytes': 64 * 1024,
   'exec.maxEnvEntries': 64,

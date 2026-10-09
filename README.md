@@ -1912,7 +1912,8 @@ adopts tabs from the desktop's managed profile. Keep it in a context manager
 (or call `close`) even when the runner fails. Closing disposes its context and
 revokes its capability; it does not stop Chromium or delete the computer.
 
-- The WSS grant expires **ten minutes after creation, including active sockets**.
+- Without a session policy, the WSS grant expires **ten minutes after creation,
+  including active sockets** (legacy behavior).
   Expiry, revocation, or connection loss ends this toolset's session. Create a
   new toolset for a fresh context; actions are never replayed automatically.
 - `javascript_exec` is disabled by default. Explicitly enabling it requires
@@ -1940,6 +1941,47 @@ revokes its capability; it does not stop Chromium or delete the computer.
   16,000 characters per input/JavaScript action, a 30-second wait, a ten-second
   held key and at most 100 key repeats. Coordinates outside the viewport and
   invalid crop rectangles are refused. Dialogs are dismissed and reported.
+
+**Renewable sessions (requires the OPL-5880 platform deployment).** Explicitly
+opt in to a 30-minute active lease, renewed on the same socket up to a two-hour
+absolute limit from creation. Older servers reject this mode; it never silently
+falls back to a ten-minute session. Keep using the legacy examples until the
+updated platform is deployed.
+
+```ts
+const browser = new MandalaBrowserToolset(computer, {
+  sessionPolicy: { leaseSeconds: 1800, maxDurationSeconds: 7200 },
+});
+try {
+  // Run the toolset normally. Renewal continues during actions/confirmation pauses.
+  console.log(browser.sessionStatus); // starts as not_started; refreshed on each read
+} finally {
+  await browser.close();
+}
+```
+
+Lease and maximum are integer seconds with `60 <= lease <= maximum <= 7200`.
+The attachment credential expires after the shorter of ten minutes and the
+initial lease, can attach once, and cannot renew itself. `expires_at` (TypeScript:
+`expiresAt`) denotes only that attachment deadline in this explicitly versioned
+mode. The active and absolute deadlines are separate. There is no separate idle
+timeout; a connected browser prevents automatic idle suspension and continues
+to consume computer resources. Disconnect, revocation, computer lifecycle changes,
+failed renewal or the absolute cap end the session; no action is replayed and no
+context is silently replaced. Renewal uses fresh account/member authorization,
+so revoked keys and lost membership fail on the next renewal. Keep that credential
+valid and always close the toolset.
+
+`sessionStatus` reports `state`, `remainingSeconds`, `leaseExpiresAt`,
+`absoluteExpiresAt`, and a redacted `terminalError`. Set `autoRenew: false`
+on the policy to stop at the initial lease.
+Remaining time is advisory and conservative, based on server time and monotonic
+elapsed time; client wall-clock skew does not lengthen a lease. Renewal failure
+closes the socket immediately. Status reads are local and do not call the API.
+
+`createBrowserConnection({sessionPolicy: {}})` opts a raw CDP client in; call
+`renewBrowserConnection(connection.id)` before each lease expires. Raw
+connections do not auto-renew.
 
 For other CDP integrations, the computer also exposes connection lifecycle
 methods. The returned token is a browser-control secret: keep it outside model

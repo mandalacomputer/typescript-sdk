@@ -63,6 +63,7 @@ export const ALLOWED: ReadonlySet<string> = new Set(
       ['POST', 'computers/:id/exec'],
       ['POST', 'computers/:id/browser-connections'],
       ['DELETE', 'computers/:id/browser-connections/:connection'],
+      ['POST', 'computers/:id/browser-connections/:connection/renew'],
       ['GET', 'computers/:id/exec/:pid'],
       ['DELETE', 'computers/:id/exec/:pid'],
       ['GET', 'computers/:id/executions/:executionId'],
@@ -220,7 +221,11 @@ export const UNIMPLEMENTED: ReadonlySet<string> = new Set([
  * comparison is against what the platform actually reads.
  */
 export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
-  ['POST computers/:id/browser-connections', []],
+  [
+    'POST computers/:id/browser-connections',
+    ['body:lifecycle_version', 'body:lease_seconds', 'body:max_duration_seconds'],
+  ],
+  ['POST computers/:id/browser-connections/:connection/renew', []],
   ['DELETE computers/:id/browser-connections/:connection', []],
   ['GET templates', []],
   ['GET templates/schema', []],

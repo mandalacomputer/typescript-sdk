@@ -333,7 +333,11 @@ export type {
   DownloadArtifactOptions,
   PublishArtifactOptions,
 } from './artifacts.js';
-export { BrowserConnection } from './browser-connection.js';
+export {
+  BrowserConnection,
+  BrowserSessionLease,
+  type BrowserSessionPolicy,
+} from './browser-connection.js';
 export type {
   BackgroundResult,
   ResultObservation,

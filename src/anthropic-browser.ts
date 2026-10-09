@@ -6,15 +6,16 @@ import {
 } from '@anthropic-ai/sdk/helpers/beta/toolsets';
 import type * as Beta from '@anthropic-ai/sdk/resources/beta';
 import { BrowserCDP, BrowserDriverError } from './browser-cdp.js';
+import { type BrowserSessionPolicy, browserSessionOptions } from './browser-connection.js';
 import type { Computer } from './computer.js';
 
 /** Browser state is owned by the driver. Remote file transfer is not supported. */
 export type MandalaBrowserToolsetOptions = Omit<
   BetaBrowserToolsetOptions,
   'browserState' | 'filePolicy'
->;
+> & { sessionPolicy?: BrowserSessionPolicy };
 
-/** An isolated, ten-minute Chromium context on a running Mandala computer.
+/** An isolated Chromium context; sessionPolicy opts into bounded lease renewal.
  *
  * The URL policy checks navigation and intercepted HTTP(S) requests. It is not
  * network isolation: configure guest egress controls for that. Popups, workers,
@@ -25,8 +26,22 @@ export class MandalaBrowserToolset extends BetaAbstractBrowserToolset20260801 {
   readonly #backend: BrowserCDP;
 
   constructor(computer: Computer, options: MandalaBrowserToolsetOptions = {}) {
+    let sessionPolicy: Readonly<BrowserSessionPolicy> | undefined;
+    if (options.sessionPolicy !== undefined) {
+      const wire = browserSessionOptions(options.sessionPolicy);
+      sessionPolicy = Object.freeze({
+        leaseSeconds: wire.lease_seconds,
+        maxDurationSeconds: wire.max_duration_seconds,
+        autoRenew:
+          options.sessionPolicy.autoRenew === undefined ? true : options.sessionPolicy.autoRenew,
+      });
+      browserSessionOptions(sessionPolicy);
+    }
     const backend = new BrowserCDP(
-      () => computer.createBrowserConnection(),
+      () =>
+        sessionPolicy
+          ? computer.createBrowserConnection({ sessionPolicy })
+          : computer.createBrowserConnection(),
       (id) => computer.revokeBrowserConnection(id),
       async (tabId, url) => {
         if (options.urlPolicy) {
@@ -37,6 +52,8 @@ export class MandalaBrowserToolset extends BetaAbstractBrowserToolset20260801 {
             );
         }
       },
+      (id, signal) => computer.renewBrowserConnection(id, { signal }),
+      sessionPolicy,
     );
     // Keep JavaScript callers within the same options surface as TypeScript.
     super({
@@ -47,6 +64,11 @@ export class MandalaBrowserToolset extends BetaAbstractBrowserToolset20260801 {
       browserState: () => backend.state(),
     });
     this.#backend = backend;
+  }
+
+  /** Renewable lease deadlines, conservative time remaining and terminal failure. */
+  get sessionStatus(): ReturnType<BrowserCDP['sessionStatus']> {
+    return this.#backend.sessionStatus();
   }
 
   async #call<T>(ctx: BetaToolsetCallContext, name: string, input: object): Promise<T> {
@@ -70,7 +92,7 @@ export class MandalaBrowserToolset extends BetaAbstractBrowserToolset20260801 {
         try {
           await this.#backend.close();
         } catch {
-          /* The disconnected grant expires within ten minutes. */
+          /* The disconnected grant remains subject to its server lease deadline. */
         }
       }
       ctx.signal?.throwIfAborted();
@@ -98,7 +120,7 @@ export class MandalaBrowserToolset extends BetaAbstractBrowserToolset20260801 {
       await this.#backend.close();
     } catch {
       throw new ToolError(
-        'Browser disconnected, but its grant could not be revoked; it expires within ten minutes.',
+        'Browser disconnected, but its grant could not be revoked; it remains subject to its server lease deadline.',
       );
     }
   }

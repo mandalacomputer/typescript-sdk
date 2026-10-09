@@ -18,7 +18,13 @@ import {
   toArtifact,
   verifyArtifact,
 } from './artifacts.js';
-import { BrowserConnection, connectionId } from './browser-connection.js';
+import {
+  BrowserConnection,
+  BrowserSessionLease,
+  type BrowserSessionPolicy,
+  browserSessionOptions,
+  connectionId,
+} from './browser-connection.js';
 import {
   // `GatewayTimeoutError`, `isTransient`, `ModelProviderError`,
   // `PlanLimitError` and `RateLimitError` are TYPE-ONLY,
@@ -5693,14 +5699,50 @@ export class Computer {
     return toSchedule(P.isRecord(data) ? data : {});
   }
 
-  /** Mint a ten-minute WSS capability for managed Chromium (member role).
+  /** Mint a WSS capability for managed Chromium (member role). An explicit
+   * sessionPolicy opts into renewable leases; otherwise the ten-minute legacy
+   * lifetime applies. Raw connections must renew explicitly.
    * Attach with the returned Bearer token, never the account API key.
    * Expiration closes attached sockets too.
    */
-  async createBrowserConnection(opts: CallOptions = {}): Promise<BrowserConnection> {
+  async createBrowserConnection(
+    opts: CallOptions & { sessionPolicy?: BrowserSessionPolicy } = {},
+  ): Promise<BrowserConnection> {
     const path = P.computerAction(this.id, 'browser-connections');
-    const data = await this.#t.json('POST', path, { body: {}, signal: opts.signal });
-    return BrowserConnection.fromApi(data, this.#t.baseUrl, path);
+    const requested = opts.sessionPolicy;
+    const wire = requested === undefined ? undefined : browserSessionOptions(requested);
+    // Bind validation to the policy actually sent, even if callers mutate opts
+    // while the request is in flight or use prototype-backed policy objects.
+    const sessionPolicy =
+      wire === undefined
+        ? undefined
+        : {
+            leaseSeconds: wire.lease_seconds,
+            maxDurationSeconds: wire.max_duration_seconds,
+          };
+    const data = await this.#t.json('POST', path, { body: wire ?? {}, signal: opts.signal });
+    try {
+      return BrowserConnection.fromApi(data, this.#t.baseUrl, path, sessionPolicy);
+    } catch (error) {
+      // Old servers may ignore the opt-in. Never expose a downgraded capability.
+      if (sessionPolicy !== undefined && P.isRecord(data) && typeof data.id === 'string') {
+        await this.revokeBrowserConnection(data.id, { signal: AbortSignal.timeout(10000) }).catch(
+          () => {},
+        );
+      }
+      throw error;
+    }
+  }
+
+  /** Extend the same attached version 2 session using fresh account authorization. */
+  async renewBrowserConnection(id: string, opts: CallOptions = {}): Promise<BrowserSessionLease> {
+    id = connectionId(id);
+    const data = await this.#t.json(
+      'POST',
+      `${P.computerAction(this.id, 'browser-connections')}/${id}/renew`,
+      { body: {}, signal: opts.signal },
+    );
+    return BrowserSessionLease.fromApi(data, id);
   }
 
   /** Revoke a capability and close its socket without stopping Chromium. */
