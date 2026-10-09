@@ -267,6 +267,9 @@ describe.skipIf(!executable)('real Chromium through Anthropic toolResult', () =>
     expect(refused.is_error).toBe(true);
     expect(hits).not.toContain('/blocked');
     expect(seen).toContain(`${base}/blocked`);
+    // A refused redirect can retain the old document. Successful navigation
+    // deterministically invalidates references from that document.
+    success(await browser.toolResult(use('navigate', { url: `${base}/after-redirect` })));
     expect((await browser.toolResult(use('left_click', { target: name }))).is_error).toBe(true);
     await browser.close();
     expect(revoke).toHaveBeenCalledExactlyOnceWith(id);
