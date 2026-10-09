@@ -421,31 +421,41 @@ describe.skipIf(!executable)('real Chromium through Anthropic toolResult', () =>
     await browser.close();
     expect(revoke).toHaveBeenCalledTimes(2);
   });
-  it('fails promptly if transport dies while checking navigation readiness', async () => {
-    const { browser, base } = await fixture();
-    const original = BrowserCDP.prototype.send;
-    const spy = vi.spyOn(BrowserCDP.prototype, 'send').mockImplementation(async function (
-      this: BrowserCDP,
-      method,
-      params = {},
-      session,
-    ) {
-      if (method === 'Runtime.evaluate' && params.expression === 'document.readyState') {
-        const exited = once(chrome!, 'exit');
-        chrome!.kill();
-        await exited;
-        await new Promise((r) => setTimeout(r, 20));
+  it.each(['Runtime.evaluate', 'Target.createTarget'])(
+    'fails promptly if transport dies around %s',
+    async (failurePoint) => {
+      const { browser, base } = await fixture();
+      const original = BrowserCDP.prototype.send;
+      const spy = vi.spyOn(BrowserCDP.prototype, 'send').mockImplementation(async function (
+        this: BrowserCDP,
+        method,
+        params = {},
+        session,
+      ) {
+        const reply =
+          method === failurePoint && method === 'Target.createTarget'
+            ? await original.call(this, method, params, session)
+            : undefined;
+        if (
+          method === failurePoint &&
+          (method === 'Target.createTarget' || params.expression === 'document.readyState')
+        ) {
+          const exited = once(chrome!, 'exit');
+          chrome!.kill();
+          await exited;
+          await new Promise((r) => setTimeout(r, 20));
+        }
+        return reply ?? original.call(this, method, params, session);
+      });
+      try {
+        const started = Date.now();
+        const result = await browser.toolResult(use('navigate', { url: base }));
+        expect(result.is_error).toBe(true);
+        expect(Date.now() - started).toBeLessThan(2000);
+        expect(content(result).some((b) => b.type === 'browser_state')).toBe(false);
+      } finally {
+        spy.mockRestore();
       }
-      return original.call(this, method, params, session);
-    });
-    try {
-      const started = Date.now();
-      const result = await browser.toolResult(use('navigate', { url: base }));
-      expect(result.is_error).toBe(true);
-      expect(Date.now() - started).toBeLessThan(2000);
-      expect(content(result).some((b) => b.type === 'browser_state')).toBe(false);
-    } finally {
-      spy.mockRestore();
-    }
-  });
+    },
+  );
 });

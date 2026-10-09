@@ -359,6 +359,7 @@ export class BrowserCDP {
     const creating = deferred();
     this.#creating = creating;
     let target: string;
+    const ready = deferred();
     try {
       target = (
         await this.send('Target.createTarget', {
@@ -366,12 +367,12 @@ export class BrowserCDP {
           browserContextId: this.#context,
         })
       ).targetId;
-      this.#ready.set(target, deferred());
+      if (this.#failed || this.#closed) throw new BrowserDriverError('Browser connection ended.');
+      this.#ready.set(target, ready);
     } finally {
       creating.resolve();
       this.#creating = undefined;
     }
-    const ready = this.#ready.get(target)!;
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       await Promise.race([
