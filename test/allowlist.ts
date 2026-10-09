@@ -61,6 +61,8 @@ export const ALLOWED: ReadonlySet<string> = new Set(
       ['GET', 'computers/:id/screenshot'],
       ['POST', 'computers/:id/input'],
       ['POST', 'computers/:id/exec'],
+      ['POST', 'computers/:id/browser-connections'],
+      ['DELETE', 'computers/:id/browser-connections/:connection'],
       ['GET', 'computers/:id/exec/:pid'],
       ['DELETE', 'computers/:id/exec/:pid'],
       ['GET', 'computers/:id/executions/:executionId'],
@@ -186,6 +188,10 @@ export const ALLOWED: ReadonlySet<string> = new Set(
  * design is that it is enumerable.
  */
 export const UNIMPLEMENTED: ReadonlySet<string> = new Set([
+  // GAP (OPL-5878): the platform's authenticated CDP transport ships first.
+  // Use direct HTTP until the browser driver adds connection lifecycle wrappers.
+  'POST computers/:id/browser-connections',
+  'DELETE computers/:id/browser-connections/:connection',
   // The OpenAI-shaped door onto the agent loop. Deliberately not wrapped: a
   // caller who wants it already has an OpenAI client and points its baseURL
   // here, and a second, worse OpenAI client inside this SDK would be a
@@ -216,6 +222,8 @@ export const UNIMPLEMENTED: ReadonlySet<string> = new Set([
  * comparison is against what the platform actually reads.
  */
 export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
+  ['POST computers/:id/browser-connections', []],
+  ['DELETE computers/:id/browser-connections/:connection', []],
   ['GET templates', []],
   ['GET templates/schema', []],
   ['POST templates/validate', []],
@@ -544,6 +552,8 @@ export function patternFor(path: string): string {
     else if (out.length === 3 && out[0] === 'computers' && prev === 'activities')
       out.push(':activity');
     else if (prev === 'exec') out.push(':pid');
+    else if (out.length === 3 && out[0] === 'computers' && prev === 'browser-connections')
+      out.push(':connection');
     else if (prev === 'executions') out.push(':executionId');
     else if (out.length === 3 && out[0] === 'computers' && prev === 'results')
       out.push(':resultId');
@@ -571,6 +581,7 @@ export function patternFor(path: string): string {
 
 /** The placeholders {@link patternFor} produces — path parameters, not request ones. */
 const PATH_PARAMETERS: ReadonlySet<string> = new Set([
+  ':connection',
   ':id',
   ':pid',
   ':executionId',
