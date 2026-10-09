@@ -647,3 +647,5 @@ export class MandalaComputerToolset extends BetaAbstractComputerToolset20260801 
     return new ToolError(error instanceof Error ? error.message : String(error));
   }
 }
+
+export { MandalaBrowserToolset, type MandalaBrowserToolsetOptions } from './anthropic-browser.js';

@@ -124,6 +124,10 @@ export function scanText(text, label, digests) {
     for (const [hit, why] of hits) problems.push(`${label}:${i + 1}: ${why}: ${hit}`);
     for (const token of line.match(IDENTIFIER) ?? []) {
       if (token.length < MIN_IDENTIFIER) continue;
+      // Public CDP Page.navigate response field, not a platform detail:
+      // https://chromedevtools.github.io/devtools-protocol/tot/Page/#method-navigate
+      // Limit this collision exception to its actual protocol consumer.
+      if (label === 'src/browser-cdp.ts' && token === 'errorText') continue;
       const digest = createHash('sha256').update(token).digest('hex').slice(0, 12);
       if (digests.has(digest)) {
         problems.push(`${label}:${i + 1}: names a platform identifier: ${token}`);

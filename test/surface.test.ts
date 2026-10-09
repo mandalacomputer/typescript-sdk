@@ -85,6 +85,13 @@ const executionRoutes = (call: Call): Response | Promise<Response> => {
         snapshot_storage_bytes: 0,
       },
     });
+  if (call.path.endsWith('/browser-connections'))
+    return json({
+      id: 'a'.repeat(32),
+      url: `wss://api.test/api/v1/${call.path.replace(/^\//, '')}/${'a'.repeat(32)}/cdp`,
+      token: `bcdp_${'b'.repeat(64)}`,
+      expires_at: '2026-10-09T01:00:00Z',
+    });
   const executionId = 'exec_0123456789abcdef0123456789abcdef';
   const resultId = 'res_0123456789abcdef0123456789abcdef';
   const artifactId = 'art_0123456789abcdef0123456789abcdef';
@@ -515,6 +522,8 @@ async function exerciseEverything(client: Client): Promise<void> {
   await client.sshKeys.list();
   await client.sshKeys.add({ publicKey: 'ssh-ed25519 AAAAC3Nz laptop', name: 'laptop' });
   await client.sshKeys.remove('sshk-1');
+  const browserConnection = await c.createBrowserConnection();
+  await c.revokeBrowserConnection(browserConnection.id);
   await c.sshAccess();
   await c.setSshAccess(true);
 
