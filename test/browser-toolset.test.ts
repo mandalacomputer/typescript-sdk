@@ -152,7 +152,8 @@ describe.skipIf(!executable)('real Chromium through Anthropic toolResult', () =>
       await exit;
       chrome = undefined;
     }
-    if (profile) await rm(profile, { recursive: true, force: true });
+    // Chromium subprocesses may briefly finish profile writes after the parent exits.
+    if (profile) await rm(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
   async function fixture(options: ConstructorParameters<typeof MandalaBrowserToolset>[1] = {}) {
     profile = await mkdtemp(join(tmpdir(), 'mandala-browser-test-'));
