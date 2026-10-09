@@ -201,6 +201,7 @@ export class BrowserCDP {
 
   async #event(message: Message): Promise<void> {
     const { method, params: p = {}, sessionId: session } = message;
+    let eventSession = session;
     try {
       if (method === 'Target.attachedToTarget') {
         const info = p.targetInfo;
@@ -225,6 +226,7 @@ export class BrowserCDP {
         }
         this.#sessions.set(target, child);
         this.#tabs.set(target, info);
+        eventSession = child; // Initialization can race with this target's destruction.
         const initializers: [string, Message][] = [
           ['Page.enable', {}],
           ['Runtime.enable', {}],
@@ -298,11 +300,12 @@ export class BrowserCDP {
       }
     } catch (error) {
       if (method === 'Fetch.requestPaused' && error instanceof RequestGone) return;
-      if (session && ![...this.#sessions.values()].includes(session)) return;
+      if (eventSession && ![...this.#sessions.values()].includes(eventSession)) return;
       this.#fail();
     }
   }
   #dropTab(target: string): void {
+    this.#ready.get(target)?.resolve();
     for (const map of [
       this.#tabs,
       this.#sessions,
@@ -389,6 +392,8 @@ export class BrowserCDP {
       clearTimeout(timer);
     }
     if (this.#failed || this.#closed) throw new BrowserDriverError('Browser connection ended.');
+    if (!this.#tabs.has(target))
+      throw new BrowserDriverError('Browser tab closed during initialization.');
     this.#active = target;
     return this.#tabState(target);
   }
