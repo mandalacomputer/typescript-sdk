@@ -493,7 +493,8 @@ describe.skipIf(!executable)('real Chromium through Anthropic toolResult', () =>
   });
   it('preserves other tabs when a new tab closes during initialization', async () => {
     const { browser, base } = await fixture();
-    const first = tabs(success(await browser.toolResult(use('navigate', { url: base }))))[0].tab_id;
+    const first = tabs(success(await browser.toolResult(use('navigate', { url: base }))))[0]!
+      .tab_id;
     let finished!: () => void;
     const initialization = new Promise<void>((resolve) => {
       finished = resolve;
