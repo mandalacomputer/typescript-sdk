@@ -251,6 +251,7 @@ export class BrowserCDP {
         if (this.#tabs.has(p.targetInfo.targetId))
           this.#tabs.set(p.targetInfo.targetId, p.targetInfo);
       } else if (method === 'Target.targetDestroyed') {
+        if (!this.#ready.has(p.targetId) && this.#creating) await this.#creating.promise;
         this.#dropTab(p.targetId);
       } else if (method === 'Fetch.requestPaused') {
         const tab = [...this.#sessions].find(([, s]) => s === session)?.[0];
