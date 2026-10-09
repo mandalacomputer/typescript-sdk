@@ -7,6 +7,7 @@ import type { BrowserConnection } from './browser-connection.js';
 // pipeline validates every member result before it reaches the model.
 type Message = Record<string, any>;
 export class BrowserDriverError extends Error {}
+class RequestGone extends BrowserDriverError {}
 
 function bounded(value: unknown, name: string, max: number, integer = false): number {
   if (
@@ -91,7 +92,10 @@ export class BrowserCDP {
             if (pending) {
               if (message.error)
                 pending.reject(
-                  new BrowserDriverError('Chromium could not complete the browser action.'),
+                  new (message.error.code === -32602 &&
+                  message.error.message === 'Invalid InterceptionId.'
+                    ? RequestGone
+                    : BrowserDriverError)('Chromium could not complete the browser action.'),
                 );
               else pending.resolve(message.result ?? {});
             }
@@ -278,7 +282,8 @@ export class BrowserCDP {
             `${p.response.status} ${String(p.response.url).slice(0, 2000)}`,
           );
       }
-    } catch {
+    } catch (error) {
+      if (method === 'Fetch.requestPaused' && error instanceof RequestGone) return;
       if (session && ![...this.#sessions.values()].includes(session)) return;
       this.#fail();
     }
@@ -621,10 +626,15 @@ export class BrowserCDP {
       for (let n = 0; n < repeat * sequence.length; n++) {
         const keys = sequence[n % sequence.length]!;
         const pressed: [string, number][] = [];
+        let modifiers = 0;
         try {
-          let modifiers = 0;
-          for (const [key, code] of keys) {
-            modifiers |= MODIFIERS[key] ?? 0;
+          for (const [rawKey, code] of keys) {
+            modifiers |= MODIFIERS[rawKey] ?? 0;
+            const key =
+              modifiers & 8 && rawKey.length === 1
+                ? (SHIFTED_DIGITS[rawKey] ?? rawKey.toUpperCase())
+                : rawKey;
+            const character = key === 'Enter' ? '\r' : key.length === 1 ? key : '';
             await this.send(
               'Input.dispatchKeyEvent',
               {
@@ -632,9 +642,7 @@ export class BrowserCDP {
                 key,
                 windowsVirtualKeyCode: code,
                 modifiers,
-                ...(key.length === 1 && !(modifiers & 7)
-                  ? { text: modifiers & 8 ? key.toUpperCase() : key }
-                  : {}),
+                ...(character && !(modifiers & 7) ? { text: character } : {}),
               },
               session,
             );
@@ -642,12 +650,14 @@ export class BrowserCDP {
           }
           if (duration) await delay(duration * 1000);
         } finally {
-          for (const [key, code] of pressed.reverse())
+          for (const [key, code] of pressed.reverse()) {
+            modifiers &= ~(MODIFIERS[key] ?? 0);
             await this.send(
               'Input.dispatchKeyEvent',
-              { type: 'keyUp', key, windowsVirtualKeyCode: code },
+              { type: 'keyUp', key, windowsVirtualKeyCode: code, modifiers },
               session,
             );
+          }
         }
       }
       return;
@@ -758,6 +768,9 @@ function deferred(): { promise: Promise<void>; resolve: () => void } {
   });
   return { promise, resolve };
 }
+const SHIFTED_DIGITS: Record<string, string> = Object.fromEntries(
+  [...'1234567890'].map((key, i) => [key, '!@#$%^&*()'[i]!]),
+);
 const MODIFIERS: Record<string, number> = {
   Alt: 1,
   Control: 2,
