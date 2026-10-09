@@ -111,6 +111,7 @@ export const ALLOWED: ReadonlySet<string> = new Set(
       // related reason: the figures include computers that have since been
       // deleted, which is precisely the line an unexplained invoice is about.
       ['GET', 'usage'],
+      ['GET', 'credits'],
 
       // How long the automatic snapshots a schedule takes are kept. Account
       // scoped like `usage` and `moves`, and read-only on every surface: the
@@ -189,6 +190,8 @@ export const ALLOWED: ReadonlySet<string> = new Set(
  * design is that it is enumerable.
  */
 export const UNIMPLEMENTED: ReadonlySet<string> = new Set([
+  // OPL-5864: direct HTTP is available; this contract prerequisite adds no wrapper.
+  'GET credits',
   // GAP (OPL-5878): the platform's authenticated CDP transport ships first.
   // Use direct HTTP until the browser driver adds connection lifecycle wrappers.
   // The OpenAI-shaped door onto the agent loop. Deliberately not wrapped: a
@@ -430,6 +433,7 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
   // Both bounds, and both optional: with neither, the platform answers over the
   // account's current billing period.
   ['GET usage', ['query:from', 'query:to']],
+  ['GET credits', ['query:before', 'query:limit']],
 
   ['GET retention', []],
 
