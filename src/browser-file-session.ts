@@ -269,13 +269,16 @@ export class BrowserFiles {
         { objectId: object, functionDeclaration: INPUT_CHECK, returnByValue: true },
         session,
       );
+      const destination = result.result?.value;
       if (
         result.exceptionDetails ||
         !this.live() ||
-        (selected.length > 1 && !result.result.value.multiple)
+        typeof destination?.url !== 'string' ||
+        typeof destination?.multiple !== 'boolean' ||
+        (selected.length > 1 && !destination.multiple)
       )
         throw new Error(FILE_ERROR);
-      p.url = result.result.value.url;
+      p.url = destination.url;
       return { ...context, tabId: tab, tabURL: p.url };
     } catch {
       await this.releasePrepared();
