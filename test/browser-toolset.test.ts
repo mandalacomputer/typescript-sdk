@@ -8,6 +8,7 @@ import { createInterface } from 'node:readline';
 import { ToolError, ToolsetConfigError } from '@anthropic-ai/sdk/helpers/beta/toolsets';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MandalaBrowserToolset } from '../src/anthropic.js';
+import { BrowserCDP } from '../src/browser-cdp.js';
 import { BrowserConnection, Client, type Computer } from '../src/index.js';
 import { BASE, json, recorder } from './harness.js';
 
@@ -99,9 +100,23 @@ it('disables uploads and gates JavaScript without opening a connection', async (
     createBrowserConnection: vi.fn(),
     revokeBrowserConnection: vi.fn(),
   } as unknown as Computer;
-  const browser = new MandalaBrowserToolset(computer);
+  const filePolicy = { resolvePaths: vi.fn() };
+  const browser = new MandalaBrowserToolset(computer, {
+    filePolicy,
+  } as unknown as ConstructorParameters<typeof MandalaBrowserToolset>[1]);
   try {
     expect(browser.toJSON().configs?.file_upload?.enabled).toBe(false);
+    expect(
+      (
+        await browser.toolResult(
+          use('file_upload', {
+            target: { type: 'ref', ref: 'e1' },
+            paths: ['/private/local-file'],
+          }),
+        )
+      ).is_error,
+    ).toBe(true);
+    expect(filePolicy.resolvePaths).not.toHaveBeenCalled();
     const result = await browser.toolResult(use('javascript_exec', { text: '1+1' }));
     expect(result.is_error).toBe(true);
     expect(computer.createBrowserConnection).not.toHaveBeenCalled();
@@ -405,5 +420,32 @@ describe.skipIf(!executable)('real Chromium through Anthropic toolResult', () =>
     expect(revoke).toHaveBeenCalledTimes(2);
     await browser.close();
     expect(revoke).toHaveBeenCalledTimes(2);
+  });
+  it('fails promptly if transport dies while checking navigation readiness', async () => {
+    const { browser, base } = await fixture();
+    const original = BrowserCDP.prototype.send;
+    const spy = vi.spyOn(BrowserCDP.prototype, 'send').mockImplementation(async function (
+      this: BrowserCDP,
+      method,
+      params = {},
+      session,
+    ) {
+      if (method === 'Runtime.evaluate' && params.expression === 'document.readyState') {
+        const exited = once(chrome!, 'exit');
+        chrome!.kill();
+        await exited;
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      return original.call(this, method, params, session);
+    });
+    try {
+      const started = Date.now();
+      const result = await browser.toolResult(use('navigate', { url: base }));
+      expect(result.is_error).toBe(true);
+      expect(Date.now() - started).toBeLessThan(2000);
+      expect(content(result).some((b) => b.type === 'browser_state')).toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

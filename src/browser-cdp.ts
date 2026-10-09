@@ -147,7 +147,19 @@ export class BrowserCDP {
 
   #fail(): void {
     this.#failed = true;
-    this.#tabs.clear();
+    for (const ready of this.#ready.values()) ready.resolve();
+    for (const map of [
+      this.#tabs,
+      this.#sessions,
+      this.#ready,
+      this.#refs,
+      this.#console,
+      this.#network,
+      this.#buttons,
+    ])
+      map.clear();
+    this.#active = undefined;
+    this.#changes = [];
     for (const pending of this.#pending.values())
       pending.reject(
         new BrowserDriverError('Browser connection ended or its ten-minute grant expired.'),
@@ -374,6 +386,7 @@ export class BrowserCDP {
     } finally {
       clearTimeout(timer);
     }
+    if (this.#failed || this.#closed) throw new BrowserDriverError('Browser connection ended.');
     this.#active = target;
     return this.#tabState(target);
   }
@@ -485,7 +498,7 @@ export class BrowserCDP {
           )
             break;
         } catch (error) {
-          if (!(error instanceof BrowserDriverError)) throw error;
+          if (this.#failed || this.#closed || !(error instanceof BrowserDriverError)) throw error;
         }
         await delay(100);
       }

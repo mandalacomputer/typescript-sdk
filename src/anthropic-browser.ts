@@ -38,7 +38,14 @@ export class MandalaBrowserToolset extends BetaAbstractBrowserToolset20260801 {
         }
       },
     );
-    super({ ...options, browserState: () => backend.state() });
+    // Keep JavaScript callers within the same options surface as TypeScript.
+    super({
+      configs: options.configs,
+      confirm: options.confirm,
+      urlPolicy: options.urlPolicy,
+      toolConfigs: options.toolConfigs,
+      browserState: () => backend.state(),
+    });
     this.#backend = backend;
   }
 
