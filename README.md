@@ -1862,6 +1862,105 @@ try {
 - **A failure is an error result**, in the platform's own words, and the run
   goes on: the model reads it and adapts.
 
+### Claude's browser toolset
+
+`MandalaBrowserToolset` implements Anthropic's `browser_toolset_20260801` over
+the computer's authenticated WSS CDP endpoint. No SSH tunnel, local browser
+installation or Playwright runtime is needed. Use a running Linux computer
+with Chromium and member-level API access. The Node driver uses the optional
+`ws` peer for authenticated WebSocket upgrade headers.
+
+```sh
+npm install mandala-computer @anthropic-ai/sdk ws
+```
+
+```ts
+import Anthropic from '@anthropic-ai/sdk';
+import { ToolError } from '@anthropic-ai/sdk/helpers/beta/toolsets';
+import { Client } from 'mandala-computer';
+import { MandalaBrowserToolset } from 'mandala-computer/anthropic';
+
+const computer = await new Client().computers.get('vm-...');
+const browser = new MandalaBrowserToolset(computer, {
+  urlPolicy: (_context, url) => {
+    const parsed = new URL(url.includes('://') ? url : `https://${url}`);
+    if (parsed.protocol !== 'https:' || parsed.hostname !== 'example.com') {
+      throw new ToolError('This task may only visit https://example.com.');
+    }
+  },
+});
+try {
+  const runner = new Anthropic().beta.messages.toolRunner({
+    model: process.env.ANTHROPIC_MODEL!,
+    max_tokens: 16000,
+    tools: [browser],
+    messages: [{ role: 'user', content: 'Open example.com and describe it.' }],
+  });
+  for await (const message of runner) console.log(message.content);
+} finally {
+  await browser.close();
+}
+```
+
+Both `confirm` and `urlPolicy` may be async. The driver observes the runner's
+abort signal and closes its context on cancellation. Importing the package
+root or using the computer toolset does not load `ws`.
+
+The driver creates its own **1280 × 720, nonpersistent browser context**. It
+starts on the first enabled action, has its own cookies and tabs, and never
+adopts tabs from the desktop's managed profile. Keep it in a context manager
+(or call `close`) even when the runner fails. Closing disposes its context and
+revokes its capability; it does not stop Chromium or delete the computer.
+
+- The WSS grant expires **ten minutes after creation, including active sockets**.
+  Expiry, revocation, or connection loss ends this toolset's session. Create a
+  new toolset for a fresh context; actions are never replayed automatically.
+- `javascript_exec` is disabled by default. Explicitly enabling it requires
+  `confirm`, enforced by Anthropic's base class. `confirm` can also approve or
+  refuse ordinary navigation, input, and clicks. The policy example below
+  limits destinations; it does not decide whether a form submission is safe.
+- **Uploads and downloads are unavailable.** The driver does not accept a
+  local file policy for the remote guest. It leaves `file_upload` unimplemented
+  and denies browser downloads. Do not enable it with local paths or document IDs.
+- The URL hook checks direct navigations and **intercepted HTTP(S) requests,
+  including redirects**. Background request checks have a tab ID but no tool
+  call ID. Allow by returning nothing; refuse by throwing `ToolError`.
+  Callbacks must finish promptly. This is **not network isolation**: use guest
+  egress controls for DNS/IP containment, WebSockets, WebRTC, WebTransport and
+  browser traffic outside those intercepted requests.
+- Popups, workers and cross-process frames are unsupported and are closed.
+  If an unsupported target cannot be closed, the driver closes its session.
+  Sites depending on these features may not work with this initial driver.
+- `read_page` returns accessibility roles/names and element refs; `find`
+  performs a case-insensitive substring search over that tree. Each read/find
+  replaces that tab's refs. Navigation invalidates them. Ask for a new page
+  read after a stale-ref error. Password values and page text are page data;
+  choose which pages the model is allowed to see.
+- Limits: ten tabs, 500 entries per page read, 24,000 characters per text result,
+  16,000 characters per input/JavaScript action, a 30-second wait, a ten-second
+  held key and at most 100 key repeats. Coordinates outside the viewport and
+  invalid crop rectangles are refused. Dialogs are dismissed and reported.
+
+For other CDP integrations, the computer also exposes connection lifecycle
+methods. The returned token is a browser-control secret: keep it outside model
+context and send it only in an `Authorization: Bearer` header. Never use the
+account API key as a WebSocket credential.
+
+```ts
+const connection = await computer.createBrowserConnection();
+try {
+  // Connect your CDP client to connection.url with the header:
+  // Authorization: Bearer <connection.token>
+  console.log(connection.expiresAt); // expires even while connected
+} finally {
+  await computer.revokeBrowserConnection(connection.id);
+}
+```
+
+The token is omitted from object enumeration and JSON serialization, but the
+`token` getter still returns the secret.
+
+
 ### Power
 
 ```ts

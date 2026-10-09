@@ -18,6 +18,7 @@ import {
   toArtifact,
   verifyArtifact,
 } from './artifacts.js';
+import { BrowserConnection, connectionId } from './browser-connection.js';
 import {
   // `GatewayTimeoutError`, `isTransient`, `ModelProviderError`,
   // `PlanLimitError` and `RateLimitError` are TYPE-ONLY,
@@ -5690,6 +5691,25 @@ export class Computer {
     // with `"cleared"` or `[]`, and learn nothing by it.
     delete this.#data.snapshot_schedule;
     return toSchedule(P.isRecord(data) ? data : {});
+  }
+
+  /** Mint a ten-minute WSS capability for managed Chromium (member role).
+   * Attach with the returned Bearer token, never the account API key.
+   * Expiration closes attached sockets too.
+   */
+  async createBrowserConnection(opts: CallOptions = {}): Promise<BrowserConnection> {
+    const path = P.computerAction(this.id, 'browser-connections');
+    const data = await this.#t.json('POST', path, { body: {}, signal: opts.signal });
+    return BrowserConnection.fromApi(data, this.#t.baseUrl, path);
+  }
+
+  /** Revoke a capability and close its socket without stopping Chromium. */
+  async revokeBrowserConnection(id: string, opts: CallOptions = {}): Promise<void> {
+    await this.#t.json(
+      'DELETE',
+      `${P.computerAction(this.id, 'browser-connections')}/${connectionId(id)}`,
+      { signal: opts.signal },
+    );
   }
 
   // --- SSH -------------------------------------------------------------

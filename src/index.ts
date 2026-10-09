@@ -333,7 +333,7 @@ export type {
   DownloadArtifactOptions,
   PublishArtifactOptions,
 } from './artifacts.js';
-
+export { BrowserConnection } from './browser-connection.js';
 export type {
   BackgroundResult,
   ResultObservation,

@@ -244,3 +244,10 @@ describe('check-internals', () => {
     expect(found[0]).toContain('vm.go');
   });
 });
+
+it('limits the public CDP field exception to its protocol consumer', () => {
+  const digests = digestsFor('errorText', 'privateBackendFunction');
+  expect(scanText('result.errorText', 'src/browser-cdp.ts', digests)).toEqual([]);
+  expect(scanText('result.errorText', 'src/another.ts', digests)).not.toEqual([]);
+  expect(scanText('privateBackendFunction', 'src/browser-cdp.ts', digests)).not.toEqual([]);
+});

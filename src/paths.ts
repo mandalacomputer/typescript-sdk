@@ -195,6 +195,7 @@ export const computer = (id: string): string => `computers/${pathId(id, 'compute
  * had already fallen two behind the call sites.
  */
 type ComputerAction =
+  | 'browser-connections'
   | 'start'
   | 'stop'
   | 'suspend'

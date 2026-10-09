@@ -1,0 +1,20 @@
+name: Browser integration
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  chromium:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npx playwright-core install --with-deps chromium
+      - name: Exercise the browser toolset against Chromium
+        run: |
+          export MANDALA_TEST_CHROMIUM="$(node --input-type=module -e 'import {chromium} from "playwright-core"; console.log(chromium.executablePath())')"
+          npx vitest run test/browser-toolset.test.ts

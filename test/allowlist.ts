@@ -190,8 +190,6 @@ export const ALLOWED: ReadonlySet<string> = new Set(
 export const UNIMPLEMENTED: ReadonlySet<string> = new Set([
   // GAP (OPL-5878): the platform's authenticated CDP transport ships first.
   // Use direct HTTP until the browser driver adds connection lifecycle wrappers.
-  'POST computers/:id/browser-connections',
-  'DELETE computers/:id/browser-connections/:connection',
   // The OpenAI-shaped door onto the agent loop. Deliberately not wrapped: a
   // caller who wants it already has an OpenAI client and points its baseURL
   // here, and a second, worse OpenAI client inside this SDK would be a
