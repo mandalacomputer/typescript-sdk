@@ -39,7 +39,7 @@ it('binds a policy to one exact computer and toolset and retains the inherited c
   for (const ids of [[item.id, item.id], ['file_unauthorized'], ['https://evil.test/file']])
     expect(() => files.selected(ids)).toThrow();
   expect(() => files.add('next.txt', Buffer.from('ab'), 'local')).toThrow();
-  expect(() => files.add('evil.exe', Buffer.from('MZ'), 'local')).toThrow();
+  expect(() => files.add('evil.exe', Buffer.from('M'), 'local')).toThrow();
   expect(() => files.resolveUploadPaths()).toThrow();
   files.clear();
   expect(() => files.selected([item.id])).toThrow();
