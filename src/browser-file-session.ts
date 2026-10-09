@@ -381,6 +381,7 @@ export class BrowserFiles {
         await this.cancelUntracked(guid);
         return;
       }
+      // Limit attempts, including failures, for this context's lifetime.
       if (this.downloads.size >= this.policy.maxFiles) {
         await this.cancelUntracked(guid);
         return;
