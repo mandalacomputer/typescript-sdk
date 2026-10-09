@@ -458,4 +458,32 @@ describe.skipIf(!executable)('real Chromium through Anthropic toolResult', () =>
       }
     },
   );
+  it('reports virtual accessibility rows without unusable element refs', async () => {
+    const { browser, base } = await fixture();
+    success(await browser.toolResult(use('navigate', { url: base })));
+    const original = BrowserCDP.prototype.send;
+    const spy = vi.spyOn(BrowserCDP.prototype, 'send').mockImplementation(async function (
+      this: BrowserCDP,
+      method,
+      params,
+      session,
+    ) {
+      const result = await original.call(this, method, params, session);
+      if (method === 'Accessibility.getFullAXTree')
+        result.nodes.push({
+          role: { value: 'paragraph' },
+          name: { value: 'Virtual accessibility row' },
+        });
+      return result;
+    });
+    try {
+      const page = text(success(await browser.toolResult(use('read_page'))));
+      expect(page.split('\n').find((line) => line.includes('Virtual accessibility row'))).toBe(
+        'paragraph Virtual accessibility row',
+      );
+      expect(page).toMatch(/\[e\d+\] textbox Name/);
+    } finally {
+      spy.mockRestore();
+    }
+  });
 });

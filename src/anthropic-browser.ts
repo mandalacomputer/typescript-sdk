@@ -86,7 +86,14 @@ export class MandalaBrowserToolset extends BetaAbstractBrowserToolset20260801 {
   }
 
   override async close(): Promise<void> {
-    await super.close();
+    try {
+      await super.close();
+    } finally {
+      await this.#closeBackend();
+    }
+  }
+
+  async #closeBackend(): Promise<void> {
     try {
       await this.#backend.close();
     } catch {

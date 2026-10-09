@@ -313,6 +313,7 @@ export class BrowserCDP {
       this.#buttons,
     ])
       map.delete(target);
+    if (this.#active === target) this.#active = this.#tabs.keys().next().value;
   }
   #change(change: NonNullable<BetaBrowserState['state_changes']>[number]): void {
     this.#changes.push(change);
@@ -573,9 +574,13 @@ export class BrowserCDP {
         if (node.ignored || (selected && !selected.has(node.nodeId))) continue;
         if (data.filter === 'interactive' && !interactive.has(role)) continue;
         if (query && !`${role} ${label} ${value}`.toLowerCase().includes(query)) continue;
-        const ref = `e${++this.#refCounter}`;
-        if (node.backendDOMNodeId) refs.set(ref, node.backendDOMNodeId);
-        lines.push(`[${ref}] ${role} ${label} ${value}`.trim());
+        let prefix = '';
+        if (node.backendDOMNodeId) {
+          const ref = `e${++this.#refCounter}`;
+          refs.set(ref, node.backendDOMNodeId);
+          prefix = `[${ref}] `;
+        }
+        lines.push(`${prefix}${role} ${label} ${value}`.trim());
         if (lines.length >= 500) break;
       }
       this.#refs.set(tab, refs);
@@ -628,7 +633,12 @@ export class BrowserCDP {
             'Reference is not a supported form field or its value is invalid.',
           );
       } finally {
-        await this.send('Runtime.releaseObject', { objectId }, session);
+        try {
+          await this.send('Runtime.releaseObject', { objectId }, session);
+        } catch {
+          // Best-effort cleanup; preserve the action's original result/error.
+          // Detach/navigation may have already released the object.
+        }
       }
       return;
     }
