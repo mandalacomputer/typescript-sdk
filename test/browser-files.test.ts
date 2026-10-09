@@ -54,53 +54,60 @@ it.each([
 });
 
 it.each([
-  [{ url: 42, multiple: true }, false],
-  [{ url: 'https://example.test/', multiple: 'yes' }, false],
-  [{ url: 'https://example.test/', multiple: 1 }, false],
-  [{ url: 'https://example.test/' }, false],
-  [null, false],
-  [{ url: 'https://example.test/', multiple: false }, true],
-])('requires a typed destination before upload confirmation: %j', async (destination, valid) => {
-  const { BrowserFiles } = await import('../src/browser-file-session.js');
-  const send = vi.fn(async (method: string) => {
-    const replies: Record<string, object> = {
-      'Page.getFrameTree': { frameTree: { frame: { id: 'frame' } } },
-      'Page.createIsolatedWorld': { executionContextId: 1 },
-      'DOM.resolveNode': { object: { objectId: 'input' } },
-      'Runtime.callFunctionOn': { result: { value: destination } },
+  [{ url: 42, multiple: true }, false, 1],
+  [{ url: 'https://example.test/', multiple: 'yes' }, false, 1],
+  [{ url: 'https://example.test/', multiple: 1 }, false, 1],
+  [{ url: 'https://example.test/' }, false, 1],
+  [null, false, 1],
+  [{ url: 'https://example.test/', multiple: false }, true, 1],
+  [{ url: 'https://example.test/', multiple: false }, false, 2],
+  [{ url: 'https://example.test/', multiple: true }, true, 2],
+])(
+  'requires a typed destination before upload confirmation: %j',
+  async (destination, valid, count) => {
+    const { BrowserFiles } = await import('../src/browser-file-session.js');
+    const send = vi.fn(async (method: string) => {
+      const replies: Record<string, object> = {
+        'Page.getFrameTree': { frameTree: { frame: { id: 'frame' } } },
+        'Page.createIsolatedWorld': { executionContextId: 1 },
+        'DOM.resolveNode': { object: { objectId: 'input' } },
+        'Runtime.callFunctionOn': { result: { value: destination } },
+      };
+      return replies[method] ?? {};
+    });
+    const backend = {
+      closed: false,
+      failed: false,
+      fileLive: () => true,
+      start: async () => {},
+      send,
+      fileTarget: () => ({ tab: 'tab', session: 'session', node: 1 }),
     };
-    return replies[method] ?? {};
-  });
-  const backend = {
-    closed: false,
-    failed: false,
-    fileLive: () => true,
-    start: async () => {},
-    send,
-    fileTarget: () => ({ tab: 'tab', session: 'session', node: 1 }),
-  };
-  const computer = { id: 'vm' } as Computer;
-  const files = new BrowserFiles(
-    computer,
-    new BrowserFilePolicy(computer, { taskId: 'task' }),
-    backend as any,
-  );
-  files.context = files.adapter.context = 'context';
-  const item = files.adapter.add('upload.txt', Buffer.from('approved'), 'local');
-  const context = {
-    toolUse: { id: 'call' },
-    input: { target: { ref: 'upload' }, document_ids: [item.id] },
-  } as any;
-  if (valid) {
-    const reviewed = await files.prepare(context);
-    expect(reviewed.tabURL).toBe('https://example.test/');
-    await files.approved(false);
-  } else {
-    await expect(files.prepare(context)).rejects.toThrow('Remote browser file operation');
-  }
-  expect(send.mock.calls.some(([method]) => method === 'Runtime.releaseObject')).toBe(true);
-  await files.close();
-});
+    const computer = { id: 'vm' } as Computer;
+    const files = new BrowserFiles(
+      computer,
+      new BrowserFilePolicy(computer, { taskId: 'task' }),
+      backend as any,
+    );
+    files.context = files.adapter.context = 'context';
+    const items = Array.from({ length: count }, (_, i) =>
+      files.adapter.add(`upload-${i}.txt`, Buffer.from('approved'), 'local'),
+    );
+    const context = {
+      toolUse: { id: 'call' },
+      input: { target: { ref: 'upload' }, document_ids: items.map((item) => item.id) },
+    } as any;
+    if (valid) {
+      const reviewed = await files.prepare(context);
+      expect(reviewed.tabURL).toBe('https://example.test/');
+      await files.approved(false);
+    } else {
+      await expect(files.prepare(context)).rejects.toThrow('Remote browser file operation');
+    }
+    expect(send.mock.calls.some(([method]) => method === 'Runtime.releaseObject')).toBe(true);
+    await files.close();
+  },
+);
 
 it('shares startup and revokes a grant arriving after close', async () => {
   const { BrowserCDP } = await import('../src/browser-cdp.js');
