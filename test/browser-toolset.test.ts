@@ -61,7 +61,11 @@ it('creates and revokes a capability without leaking its token in logging', asyn
           : { id: 'vm-1', status: 'running' },
     ),
   );
-  const client = new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: rec.fetch });
+  const client = new Client({
+    apiKey: 'com_test',
+    baseUrl: BASE,
+    fetch: rec.fetch,
+  });
   const c = await client.computers.get('vm-1');
   const grant = await c.createBrowserConnection();
   expect(grant.token).toBe(token);
@@ -103,7 +107,13 @@ it('disables uploads and gates JavaScript without opening a connection', async (
     expect(computer.createBrowserConnection).not.toHaveBeenCalled();
     expect(
       () =>
-        new MandalaBrowserToolset(computer, { configs: { javascript_exec: { enabled: true } } }),
+        new MandalaBrowserToolset(computer, {
+          configs: {
+            javascript_exec: { enabled: true },
+            read_console: { enabled: true },
+            read_network: { enabled: true },
+          },
+        }),
     ).toThrow(ToolsetConfigError);
   } finally {
     await browser.close();
@@ -121,7 +131,7 @@ describe.skipIf(!executable)('real Chromium through Anthropic toolResult', () =>
       await new Promise<void>((resolve) => server!.close(() => resolve()));
       server = undefined;
     }
-    if (chrome) {
+    if (chrome && chrome.exitCode === null && chrome.signalCode === null) {
       const exit = once(chrome, 'exit');
       chrome.kill();
       await exit;
@@ -144,14 +154,25 @@ describe.skipIf(!executable)('real Chromium through Anthropic toolResult', () =>
     );
     const lines = createInterface({ input: chrome.stderr! });
     const url = await new Promise<string>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('Chromium did not expose CDP')), 10000);
+      const cleanup = () => {
+        clearTimeout(timer);
+        lines.close();
+        chrome!.off('error', fail);
+        chrome!.off('exit', fail);
+      };
+      const fail = () => {
+        cleanup();
+        reject(new Error('Chromium exited before exposing CDP'));
+      };
+      const timer = setTimeout(fail, 10000);
       lines.on('line', (line) => {
         if (line.includes('DevTools listening on ')) {
-          clearTimeout(timer);
+          cleanup();
           resolve(line.trim().split(' ').at(-1)!);
         }
       });
-      chrome!.once('error', reject);
+      chrome!.once('error', fail);
+      chrome!.once('exit', fail);
     });
     const grant = Object.assign(
       BrowserConnection.fromApi(payload, BASE, 'computers/vm-1/browser-connections'),
@@ -186,7 +207,12 @@ describe.skipIf(!executable)('real Chromium through Anthropic toolResult', () =>
     await once(server, 'listening');
     const address = server.address();
     if (!address || typeof address === 'string') throw new Error('no address');
-    return { browser, revoke, hits, base: `http://127.0.0.1:${address.port}` };
+    return {
+      browser,
+      revoke,
+      hits,
+      base: `http://127.0.0.1:${address.port}`,
+    };
   }
 
   it('navigates, resolves DOM refs, enters forms, clicks, captures, manages tabs, and refuses redirect destinations', async () => {
@@ -212,7 +238,9 @@ describe.skipIf(!executable)('real Chromium through Anthropic toolResult', () =>
     expect(
       (
         await browser.toolResult(
-          use('left_click', { target: { type: 'coordinate', x: 1280, y: 0 } }),
+          use('left_click', {
+            target: { type: 'coordinate', x: 1280, y: 0 },
+          }),
         )
       ).is_error,
     ).toBe(true);
@@ -233,7 +261,11 @@ describe.skipIf(!executable)('real Chromium through Anthropic toolResult', () =>
   it('confirms enabled JavaScript, rejects invalid bounds, and aborts a pending action', async () => {
     const confirm = vi.fn((_ctx: { member: string }) => true);
     const { browser, base, revoke } = await fixture({
-      configs: { javascript_exec: { enabled: true } },
+      configs: {
+        javascript_exec: { enabled: true },
+        read_console: { enabled: true },
+        read_network: { enabled: true },
+      },
       confirm,
     });
     success(await browser.toolResult(use('navigate', { url: base })));
@@ -254,5 +286,89 @@ describe.skipIf(!executable)('real Chromium through Anthropic toolResult', () =>
     const ended = await browser.toolResult(use('screenshot'));
     expect(ended.is_error).toBe(true);
     expect(text(ended)).toContain('Browser connection ended');
+  }, 30000);
+  it('preserves input, tab lifecycle, policy refusal and consumed-log semantics', async () => {
+    let rejectReload = false;
+    let release!: () => void, entered!: () => void;
+    const pending = new Promise<void>((r) => {
+      entered = r;
+    });
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const { browser, base } = await fixture({
+      configs: {
+        javascript_exec: { enabled: true },
+        read_console: { enabled: true },
+        read_network: { enabled: true },
+      },
+      confirm: () => true,
+      urlPolicy: async (_ctx, url) => {
+        if (url.endsWith('/slow')) {
+          entered();
+          await gate;
+        }
+        if (rejectReload) throw new ToolError('refused');
+      },
+    });
+    const call = async (name: string, data: Record<string, unknown> = {}) =>
+      success(await browser.toolResult(use(name, data)));
+    const js = async (expression: string) =>
+      text(await call('javascript_exec', { text: expression }));
+    const first = tabs(await call('navigate', { url: base }))[0]!.tab_id;
+    await js(
+      "document.body.innerHTML += '<label>Choice <select id=choice><option value=one>First</option><option value=two>Second</option></select></label>'; document.addEventListener('mousemove', e=>window.buttons=e.buttons); document.getElementById('name').focus()",
+    );
+    await call('key', { text: 'a' });
+    expect(await js("document.getElementById('name').value")).toBe('a');
+    await call('key', { text: 'b c Backspace' });
+    expect(await js("document.getElementById('name').value")).toBe('ab');
+    const point = { type: 'coordinate', x: 20, y: 20 };
+    await call('left_mouse_down', { target: point });
+    await call('mouse_move', { target: { ...point, x: 50 } });
+    expect(await js('window.buttons')).toBe('1');
+    await call('left_mouse_up', { target: point });
+    const page = await call('read_page', { filter: 'interactive' });
+    const choice = ref(page, 'combobox Choice');
+    await call('form_input', { target: choice, value: 'Second' });
+    expect(await js("document.getElementById('choice').value")).toBe('two');
+    expect(
+      (await browser.toolResult(use('form_input', { target: choice, value: 'missing' }))).is_error,
+    ).toBe(true);
+    expect(await js("document.getElementById('choice').value")).toBe('two');
+    const name = ref(page, 'textbox Name');
+    expect(
+      (await browser.toolResult(use('form_input', { target: name, value: 'x'.repeat(16001) })))
+        .is_error,
+    ).toBe(true);
+    expect(await js("document.getElementById('name').value")).toBe('ab');
+    for (const [member, data] of [
+      ['scroll', { target: point, scroll_direction: 'diagonal' }],
+      ['zoom', {}],
+      ['type', {}],
+      ['left_click', {}],
+    ] as const)
+      expect((await browser.toolResult(use(member, data))).is_error).toBe(true);
+    await call('get_page_text');
+    await js("console.log('unique-console-message')");
+    expect(text(await call('read_console'))).toContain('unique-console-message');
+    expect(text(await call('read_console'))).not.toContain('unique-console-message');
+    await js("fetch('/logged').then(r=>r.text())");
+    expect(text(await call('read_network'))).toContain('/logged');
+    expect(text(await call('read_network'))).not.toContain('/logged');
+    rejectReload = true;
+    expect((await browser.toolResult(use('navigate', { url: 'reload' }))).is_error).toBe(true);
+    rejectReload = false;
+    await call('form_input', { target: name, value: 'still valid' });
+    const second = tabs(await call('new_tab')).find((t) => t.tab_id !== first)!.tab_id;
+    await call('javascript_exec', {
+      tab_id: first,
+      text: "void fetch('/slow').catch(()=>{})",
+    });
+    await pending;
+    await call('close_tab', { tab_id: first });
+    release();
+    await new Promise((r) => setTimeout(r, 100));
+    await call('get_page_text', { tab_id: second });
   }, 30000);
 });

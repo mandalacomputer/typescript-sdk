@@ -49,6 +49,7 @@ export class BrowserCDP {
   #ready = new Map<string, { promise: Promise<void>; resolve: () => void }>();
   #creating: { promise: Promise<void>; resolve: () => void } | undefined;
   #active: string | undefined;
+  #buttons = new Map<string, number>();
   #refs = new Map<string, Map<string, number>>();
   #refCounter = 0;
   #console = new Map<string, string[]>();
@@ -117,7 +118,9 @@ export class BrowserCDP {
         ws.once('close', () => reject(new BrowserDriverError('Browser connection ended.')));
       });
       this.#context = (
-        await this.send('Target.createBrowserContext', { disposeOnDetach: true })
+        await this.send('Target.createBrowserContext', {
+          disposeOnDetach: true,
+        })
       ).browserContextId;
       await this.send('Browser.setDownloadBehavior', {
         behavior: 'deny',
@@ -161,7 +164,12 @@ export class BrowserCDP {
           reject(new BrowserDriverError('Browser action timed out; its session was closed.'));
         }, 15000);
         this.#ws?.send(
-          JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }),
+          JSON.stringify({
+            id,
+            method,
+            params,
+            ...(sessionId ? { sessionId } : {}),
+          }),
           (error) => {
             if (error) this.#fail();
           },
@@ -190,7 +198,9 @@ export class BrowserCDP {
         const target: string = info.targetId;
         if (!this.#ready.has(target) && this.#creating) await this.#creating.promise;
         if (info.type !== 'page' || !this.#ready.has(target)) {
-          const result = await this.send('Target.closeTarget', { targetId: target });
+          const result = await this.send('Target.closeTarget', {
+            targetId: target,
+          });
           if (!result.success)
             throw new BrowserDriverError('Unsupported browser target could not be closed.');
           return;
@@ -221,23 +231,26 @@ export class BrowserCDP {
         if (this.#tabs.has(p.targetInfo.targetId))
           this.#tabs.set(p.targetInfo.targetId, p.targetInfo);
       } else if (method === 'Target.targetDestroyed') {
-        for (const map of [this.#tabs, this.#sessions, this.#refs, this.#console, this.#network])
-          map.delete(p.targetId);
+        this.#dropTab(p.targetId);
       } else if (method === 'Fetch.requestPaused') {
         const tab = [...this.#sessions].find(([, s]) => s === session)?.[0];
+        if (!tab) return; // Detached targets take their pending requests with them.
+        let allowed = true;
         try {
-          if (!tab) throw new BrowserDriverError('Unknown browser target');
           await this.#checkURL(p.request.url, tab);
         } catch {
-          this.#change({ type: 'navigation_refused' });
-          await this.send(
-            'Fetch.failRequest',
-            { requestId: p.requestId, errorReason: 'BlockedByClient' },
-            session,
-          );
-          return;
+          allowed = false;
         }
-        await this.send('Fetch.continueRequest', { requestId: p.requestId }, session);
+        if (this.#sessions.get(tab) !== session) return;
+        if (!allowed) this.#change({ type: 'navigation_refused' });
+        await this.send(
+          allowed ? 'Fetch.continueRequest' : 'Fetch.failRequest',
+          {
+            requestId: p.requestId,
+            ...(allowed ? {} : { errorReason: 'BlockedByClient' }),
+          },
+          session,
+        );
       } else if (method === 'Page.javascriptDialogOpening') {
         this.#change({
           type: 'dialog_dismissed',
@@ -266,8 +279,21 @@ export class BrowserCDP {
           );
       }
     } catch {
+      if (session && ![...this.#sessions.values()].includes(session)) return;
       this.#fail();
     }
+  }
+  #dropTab(target: string): void {
+    for (const map of [
+      this.#tabs,
+      this.#sessions,
+      this.#ready,
+      this.#refs,
+      this.#console,
+      this.#network,
+      this.#buttons,
+    ])
+      map.delete(target);
   }
   #change(change: NonNullable<BetaBrowserState['state_changes']>[number]): void {
     this.#changes.push(change);
@@ -299,6 +325,8 @@ export class BrowserCDP {
           timer = setTimeout(() => reject(new BrowserDriverError('URL policy timed out.')), 5000);
         }),
       ]);
+    } catch {
+      throw new BrowserDriverError('Navigation was refused by the URL policy or its deadline.');
     } finally {
       clearTimeout(timer);
     }
@@ -342,7 +370,12 @@ export class BrowserCDP {
     return this.#tabState(target);
   }
 
-  #tabState(target: string): { tab_id: string; url: string; title: string; active: boolean } {
+  #tabState(target: string): {
+    tab_id: string;
+    url: string;
+    title: string;
+    active: boolean;
+  } {
     const tab = this.#tabs.get(target) ?? {};
     return {
       tab_id: target,
@@ -395,9 +428,10 @@ export class BrowserCDP {
   }
 
   async perform(name: string, data: Message): Promise<unknown> {
+    validateInput(name, data);
     await this.start();
     if (name === 'new_tab') return this.#newTab();
-    if (name === 'list_tabs') return this.state().tabs;
+    if (name === 'list_tabs') return [...this.#tabs.keys()].map((t) => this.#tabState(t));
     const tab: string | undefined = data.tab_id ?? this.#active;
     if (!tab || !this.#tabs.has(tab))
       throw new BrowserDriverError(
@@ -411,12 +445,11 @@ export class BrowserCDP {
     }
     if (name === 'close_tab') {
       await this.send('Target.closeTarget', { targetId: tab });
-      this.#tabs.delete(tab);
+      this.#dropTab(tab);
       return;
     }
     if (name === 'navigate') {
       let url: string = data.url;
-      this.#refs.delete(tab);
       if (url === 'back' || url === 'forward') {
         const history = await this.send('Page.getNavigationHistory', {}, session);
         const index = history.currentIndex + (url === 'back' ? -1 : 1);
@@ -434,6 +467,7 @@ export class BrowserCDP {
         if (result.errorText)
           throw new BrowserDriverError('Navigation failed or was refused by the URL policy.');
       }
+      this.#refs.delete(tab);
       for (let n = 0; n < 100; n++) {
         try {
           if (
@@ -460,7 +494,14 @@ export class BrowserCDP {
           y2 = bounded(r[3], 'y2', 720, true);
         if (x2 <= x1 || y2 <= y1)
           throw new BrowserDriverError('region must have positive width and height');
-        args.clip = { x: x1, y: y1, width: x2 - x1, height: y2 - y1, scale: 1 };
+        const viewport = (await this.send('Page.getLayoutMetrics', {}, session)).cssVisualViewport;
+        args.clip = {
+          x: x1 + viewport.pageX,
+          y: y1 + viewport.pageY,
+          width: x2 - x1,
+          height: y2 - y1,
+          scale: 1,
+        };
       }
       return {
         data: (await this.send('Page.captureScreenshot', args, session)).data,
@@ -520,13 +561,12 @@ export class BrowserCDP {
     }
     if (name === 'get_page_text')
       return this.#evaluate(tab, "(document.body?.innerText || '').slice(0,24000)");
-    if (name === 'read_console' || name === 'read_network')
-      return (
-        (name === 'read_console' ? this.#console : this.#network)
-          .get(tab)
-          ?.join('\n')
-          .slice(-24000) || 'No entries recorded.'
-      );
+    if (name === 'read_console' || name === 'read_network') {
+      const source = name === 'read_console' ? this.#console : this.#network;
+      const entries = source.get(tab);
+      source.delete(tab);
+      return entries?.join('\n').slice(-24000) || 'No entries recorded.';
+    }
     if (name === 'javascript_exec') {
       if (data.text.length > 16000)
         throw new BrowserDriverError('JavaScript exceeds 16000 characters');
@@ -571,11 +611,15 @@ export class BrowserCDP {
       return;
     }
     if (name === 'key' || name === 'hold_key') {
-      const keys = keyChord(data.text),
-        repeat = bounded(data.repeat ?? 1, 'repeat', 100, true),
+      const pieces = data.text.trim().split(/\s+/);
+      if (pieces.length > (name === 'key' ? 100 : 1))
+        throw new BrowserDriverError('Use up to 100 key chords, or one chord for hold_key.');
+      const sequence = pieces.map(keyChord);
+      const repeat = bounded(data.repeat ?? 1, 'repeat', 100, true),
         duration = bounded(data.duration ?? 0, 'duration', 10);
       if (repeat < 1) throw new BrowserDriverError('repeat must be at least one');
-      for (let n = 0; n < repeat; n++) {
+      for (let n = 0; n < repeat * sequence.length; n++) {
+        const keys = sequence[n % sequence.length]!;
         const pressed: [string, number][] = [];
         try {
           let modifiers = 0;
@@ -583,7 +627,15 @@ export class BrowserCDP {
             modifiers |= MODIFIERS[key] ?? 0;
             await this.send(
               'Input.dispatchKeyEvent',
-              { type: 'keyDown', key, windowsVirtualKeyCode: code, modifiers },
+              {
+                type: 'keyDown',
+                key,
+                windowsVirtualKeyCode: code,
+                modifiers,
+                ...(key.length === 1 && !(modifiers & 7)
+                  ? { text: modifiers & 8 ? key.toUpperCase() : key }
+                  : {}),
+              },
               session,
             );
             pressed.push([key, code]);
@@ -619,7 +671,17 @@ export class BrowserCDP {
       return;
     }
     if (name === 'hover' || name === 'mouse_move') {
-      await this.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y }, session);
+      await this.send(
+        'Input.dispatchMouseEvent',
+        {
+          type: 'mouseMoved',
+          x,
+          y,
+          buttons: this.#buttons.get(tab) ?? 0,
+          button: this.#buttons.get(tab) ? 'left' : 'none',
+        },
+        session,
+      );
       return;
     }
     if (name === 'left_click_drag') {
@@ -657,8 +719,11 @@ export class BrowserCDP {
       const args = { x, y, button, clickCount, modifiers };
       if (name !== 'left_mouse_up')
         await this.send('Input.dispatchMouseEvent', { ...args, type: 'mousePressed' }, session);
-      if (name !== 'left_mouse_down')
+      if (name === 'left_mouse_down') this.#buttons.set(tab, 1);
+      if (name !== 'left_mouse_down') {
+        this.#buttons.delete(tab);
         await this.send('Input.dispatchMouseEvent', { ...args, type: 'mouseReleased' }, session);
+      }
     }
   }
 
@@ -669,7 +734,9 @@ export class BrowserCDP {
       if (this.#ws) {
         if (this.#context && !this.#failed) {
           try {
-            await this.send('Target.disposeBrowserContext', { browserContextId: this.#context });
+            await this.send('Target.disposeBrowserContext', {
+              browserContextId: this.#context,
+            });
           } catch {
             /* Detach also disposes it. */
           }
@@ -691,9 +758,14 @@ function deferred(): { promise: Promise<void>; resolve: () => void } {
   });
   return { promise, resolve };
 }
-const MODIFIERS: Record<string, number> = { Alt: 1, Control: 2, Meta: 4, Shift: 8 };
+const MODIFIERS: Record<string, number> = {
+  Alt: 1,
+  Control: 2,
+  Meta: 4,
+  Shift: 8,
+};
 const FORM_INPUT =
-  "function(v){if(!this.isConnected)throw Error(); if(this instanceof HTMLInputElement && this.type==='file')throw Error(); if(this instanceof HTMLInputElement && ['checkbox','radio'].includes(this.type)){if(typeof v!=='boolean')throw Error(); if(this.checked!==v)this.click();}else if(this instanceof HTMLInputElement || this instanceof HTMLTextAreaElement || this instanceof HTMLSelectElement){const p=this instanceof HTMLInputElement?HTMLInputElement.prototype:this instanceof HTMLTextAreaElement?HTMLTextAreaElement.prototype:HTMLSelectElement.prototype; Object.getOwnPropertyDescriptor(p,'value').set.call(this,String(v));this.dispatchEvent(new Event('input',{bubbles:true}));this.dispatchEvent(new Event('change',{bubbles:true}));}else throw Error();}";
+  "function(v){if(!this.isConnected)throw Error(); if(this instanceof HTMLInputElement && this.type==='file')throw Error(); if(this instanceof HTMLInputElement && ['checkbox','radio'].includes(this.type)){if(typeof v!=='boolean')throw Error(); if(this.checked!==v)this.click();}else if(this instanceof HTMLInputElement || this instanceof HTMLTextAreaElement || this instanceof HTMLSelectElement){if(this instanceof HTMLSelectElement){const options=Array.from(this.options);const option=options.find(o=>o.value===String(v))||options.find(o=>o.label===String(v));if(!option||option.disabled||option.parentElement instanceof HTMLOptGroupElement&&option.parentElement.disabled)throw Error();v=option.value;}const p=this instanceof HTMLInputElement?HTMLInputElement.prototype:this instanceof HTMLTextAreaElement?HTMLTextAreaElement.prototype:HTMLSelectElement.prototype; Object.getOwnPropertyDescriptor(p,'value').set.call(this,String(v));this.dispatchEvent(new Event('input',{bubbles:true}));this.dispatchEvent(new Event('change',{bubbles:true}));}else throw Error();}";
 function keyChord(text: string): [string, number][] {
   const aliases: Record<string, string> = {
     ctrl: 'Control',
@@ -751,4 +823,81 @@ function keyChord(text: string): [string, number][] {
       throw new BrowserDriverError('Unsupported browser key. Use a named key or a letter/digit.');
     return [key, code];
   });
+}
+
+// Anthropic's dispatcher casts tool input without validating its fields. Reject
+// malformed model arguments as recoverable errors before allocating a session.
+function validateInput(name: string, data: Message): void {
+  const invalid = () => {
+    throw new BrowserDriverError(
+      'Invalid browser action input. Check the required fields and their types.',
+    );
+  };
+  if (!data || typeof data !== 'object' || Array.isArray(data)) invalid();
+  const string = (key: string, required = false, max = 16000) => {
+    const value = data[key];
+    if (value == null && !required) return;
+    if (typeof value !== 'string' || value.length > max) invalid();
+  };
+  string('tab_id', name === 'close_tab' || name === 'switch_tab', 256);
+  string('modifiers', false, 100);
+  string('ref', false, 256);
+  if (name === 'navigate') string('url', true, 8192);
+  if (['type', 'key', 'hold_key', 'javascript_exec'].includes(name)) string('text', true);
+  if (name === 'find') string('query', true, 1000);
+  if (data.depth != null) bounded(data.depth, 'depth', 50, true);
+  if (data.filter != null && !['all', 'interactive'].includes(data.filter)) invalid();
+  if (name === 'wait' || name === 'hold_key')
+    bounded(data.duration, 'duration', name === 'wait' ? 30 : 10);
+  if (data.repeat != null && bounded(data.repeat, 'repeat', 100, true) < 1) invalid();
+  if (name === 'zoom') {
+    if (!Array.isArray(data.region) || data.region.length !== 4) invalid();
+    for (const value of data.region) bounded(value, 'region', 1280, true);
+  }
+  const target = (value: unknown, coordinateOnly = false, refOnly = false) => {
+    if (!value || typeof value !== 'object') return invalid();
+    const t = value as Message;
+    if (t.type === 'coordinate' && !refOnly) {
+      bounded(t.x, 'x', 1279, true);
+      bounded(t.y, 'y', 719, true);
+    } else if (
+      t.type === 'ref' &&
+      !coordinateOnly &&
+      typeof t.ref === 'string' &&
+      t.ref.length <= 256
+    ) {
+      /* valid */
+    } else invalid();
+  };
+  const coordinate = [
+    'scroll',
+    'mouse_move',
+    'left_mouse_down',
+    'left_mouse_up',
+    'left_click_drag',
+  ];
+  if (
+    [
+      ...coordinate,
+      'scroll_to',
+      'hover',
+      'form_input',
+      'left_click',
+      'right_click',
+      'middle_click',
+      'double_click',
+      'triple_click',
+    ].includes(name)
+  )
+    target(data.target, coordinate.includes(name), ['scroll_to', 'form_input'].includes(name));
+  if (name === 'left_click_drag') target(data.from, true);
+  if (name === 'scroll') {
+    if (!['up', 'down', 'left', 'right'].includes(data.scroll_direction)) invalid();
+    if (data.scroll_amount != null) bounded(data.scroll_amount, 'scroll_amount', 50, true);
+  }
+  if (name === 'form_input') {
+    if (!['string', 'number', 'boolean'].includes(typeof data.value)) invalid();
+    if (typeof data.value === 'string' && data.value.length > 16000) invalid();
+    if (typeof data.value === 'number' && !Number.isFinite(data.value)) invalid();
+  }
 }
