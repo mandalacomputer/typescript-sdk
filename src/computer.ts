@@ -208,7 +208,7 @@ export const GUEST_PROBE = 'exit 0';
 const DESKTOP_PROBE = 'true';
 
 /**
- * Trim and refuse a missing Anthropic key before it becomes an empty header.
+ * Trim and refuse a missing model-provider key before it becomes an empty header.
  *
  * A {@link ValidationError} rather than a bare {@link MandalaError}: nothing has
  * been sent, and this is the caller's argument being wrong — the same class
@@ -219,7 +219,7 @@ const requireModelKey = (key: string | undefined, what: string): string => {
   const trimmed = key?.trim() ?? '';
   if (!trimmed) {
     throw new ValidationError(
-      `${what} needs your own Anthropic API key as modelKey — the platform does not store one.`,
+      `${what} needs your own Anthropic or OpenAI API key as modelKey — the platform does not store one.`,
     );
   }
   return trimmed;
@@ -5918,7 +5918,7 @@ export class Computer {
    * Have the platform drive this computer until the task is done (OPL-3567).
    *
    * Screenshot, decide, click, type, repeat — inside the platform, on your own
-   * Anthropic key, which it never stores. Use it to delegate a long stretch of
+   * Anthropic or OpenAI key, which it never stores. Use it to delegate a long stretch of
    * pixel work: ten clicks stop being ten images in your context.
    *
    * The computer must already be running.
@@ -6090,6 +6090,7 @@ export class Computer {
         system: args.system,
         maxSteps: args.maxSteps,
         model: args.model,
+        provider: args.provider,
       }),
       headers: { [MODEL_KEY_HEADER]: modelKey },
       signal: args.signal,
@@ -6152,6 +6153,7 @@ export class Computer {
           system: args.system,
           maxSteps: args.maxSteps,
           model: args.model,
+          provider: args.provider,
         }),
         headers: { [MODEL_KEY_HEADER]: modelKey },
         signal: args.signal,

@@ -480,6 +480,7 @@ async function exerciseEverything(client: Client): Promise<void> {
     system: 'be brief',
     maxSteps: 5,
     model: 'claude-opus-5',
+    provider: 'anthropic',
     modelKey: 'sk-test',
   });
 

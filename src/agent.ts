@@ -6,7 +6,7 @@
  * with a stream of steps rather than a result, and this file is the shape of
  * that stream.
  *
- * It runs on **your** Anthropic key, which the platform never stores: pass it
+ * It runs on **your** Anthropic or OpenAI key, which the platform never stores: pass it
  * as `modelKey` and it travels on the one request as `X-Model-Key`. A step is
  * one ACTION on the desktop rather than one exchange with the model — several
  * can come out of a single reply, a paused turn costs tokens and no step, and a
@@ -114,10 +114,12 @@ export type AgentEvent =
     };
 
 export type AgentArgs = {
+  /** Inferred from model when omitted; OpenAI defaults to gpt-6.1-sol. */
+  provider?: 'anthropic' | 'openai';
   /** The task, in plain language. */
   prompt: string;
   /**
-   * Your Anthropic API key. The platform does not store one and will not run
+   * Your Anthropic or OpenAI API key. The platform does not store one and will not run
    * without it.
    */
   modelKey: string;

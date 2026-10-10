@@ -708,6 +708,7 @@ export const COMMANDS: readonly Command[] = [
     [
       flag('computer', 'Target computer name or ID', { required: true }),
       num('max-steps', 'Maximum desktop actions'),
+      flag('provider', 'Model provider: anthropic or openai'),
       flag('model', 'Model override'),
       flag('system', 'Standing instructions'),
     ],
