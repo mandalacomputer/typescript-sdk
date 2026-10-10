@@ -6,7 +6,7 @@
  * with a stream of steps rather than a result, and this file is the shape of
  * that stream.
  *
- * It runs on **your** Anthropic key, which the platform never stores: pass it
+ * It runs on **your** Anthropic or OpenAI key, which the platform never stores: pass it
  * as `modelKey` and it travels on the one request as `X-Model-Key`. A step is
  * one ACTION on the desktop rather than one exchange with the model — several
  * can come out of a single reply, a paused turn costs tokens and no step, and a
