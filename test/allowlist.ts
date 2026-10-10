@@ -318,6 +318,10 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
   [
     'POST computers/:id/input',
     [
+      'body:type',
+      'body:path',
+      'body:scroll_x',
+      'body:scroll_y',
       'body:action',
       'body:x',
       'body:y',
@@ -497,7 +501,7 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
  * Parameters the SDK deliberately omits.
  *
  * The input parameters are alternate spellings of something it does send. The
- * input route accepts Anthropic's computer-use vocabulary alongside this API's own, so a
+ * input route accepts Anthropic and OpenAI computer-use vocabularies alongside this API's own, so a
  * model's `tool_use.input` block can be forwarded without translation — which
  * leaves several fields with two names apiece. Picking one and sending it
  * consistently is the point; sending both would be two ways for the same call
@@ -508,6 +512,12 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
  * would say nothing the route's own line does not.
  */
 export const UNIMPLEMENTED_PARAMETERS: ReadonlySet<string> = new Set([
+  // OPL-4396: raw OpenAI dialect; typed helpers retain their action vocabulary.
+  'POST computers/:id/input  body:type',
+  'POST computers/:id/input  body:path',
+  'POST computers/:id/input  body:scroll_x',
+  'POST computers/:id/input  body:scroll_y',
+
   // OPL-5866 adds funded-agent options; this client currently sends its own model key.
   'POST computers/:id/agent  body:max_cost_usd',
   // `manage_keys: true` is refused from every API key (403): the permission is
