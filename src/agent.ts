@@ -114,10 +114,12 @@ export type AgentEvent =
     };
 
 export type AgentArgs = {
+  /** Inferred from model when omitted; OpenAI defaults to gpt-6.1-sol. */
+  provider?: 'anthropic' | 'openai';
   /** The task, in plain language. */
   prompt: string;
   /**
-   * Your Anthropic API key. The platform does not store one and will not run
+   * Your Anthropic or OpenAI API key. The platform does not store one and will not run
    * without it.
    */
   modelKey: string;

@@ -2546,6 +2546,7 @@ export function agentBody(args: {
   maxSteps?: number;
   system?: string;
   model?: string;
+  provider?: 'anthropic' | 'openai';
   stream: boolean;
 }): Json {
   if (!requireString(args.prompt, 'prompt').trim()) {
@@ -2557,6 +2558,8 @@ export function agentBody(args: {
   // a JSON object where a prompt was meant. A 400 naming a field the caller
   // did not knowingly send is a worse answer than a refusal naming the
   // argument they did (OPL-4215, leftover on this builder).
+  if (args.provider !== undefined && args.provider !== 'anthropic' && args.provider !== 'openai')
+    throw new ValidationError('provider must be anthropic or openai');
   if (args.system !== undefined) requireString(args.system, 'system');
   if (args.model !== undefined) requireString(args.model, 'model');
   if (args.maxSteps !== undefined && (!Number.isInteger(args.maxSteps) || args.maxSteps < 1)) {
@@ -2572,6 +2575,7 @@ export function agentBody(args: {
     max_steps: args.maxSteps,
     system: args.system,
     model: args.model,
+    provider: args.provider,
     stream: args.stream,
   });
 }

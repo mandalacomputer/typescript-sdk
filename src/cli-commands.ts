@@ -62,6 +62,7 @@ import {
 import { MandalaError, MoveRequiredError, NotFoundError, ValidationError } from './errors.js';
 import {
   type AccountQuota,
+  type AgentArgs,
   type BackgroundExec,
   type BuildProgress,
   type Client,
@@ -1209,7 +1210,11 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
       document = await documentInput(target, io, signal);
       P.templateDocument(document);
     }
-    const agent = {
+    const provider = s('provider');
+    if (provider !== undefined && provider !== 'anthropic' && provider !== 'openai')
+      throw new CliError('invalid_arguments', '--provider must be anthropic or openai');
+    const agent: AgentArgs = {
+      provider,
       prompt: target,
       modelKey: io.env.MANDALA_MODEL_KEY ?? '',
       maxSteps: n('max-steps'),

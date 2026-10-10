@@ -1598,7 +1598,7 @@ positions to name. The range is ignored and the whole thing arrives with
 ### The agent loop
 
 One call that drives the computer until the task is done — screenshot, decide,
-click, type, repeat — **inside the platform**, on your own Anthropic key, which
+click, type, repeat — **inside the platform**, on your own Anthropic or OpenAI key, which
 the platform never stores.
 
 ```ts
@@ -1611,6 +1611,18 @@ const result = await c.agent({
 if (!result.finished) console.warn(`did not finish: ${result.stop}`);
 console.log(result.text, result.usage);
 ```
+
+For OpenAI, pass `model: 'gpt-6.1-sol'` and
+`modelKey: process.env.OPENAI_API_KEY!`. `provider: 'openai'` selects that model
+when no model is supplied. Recognized model names infer the provider; custom
+names require `provider: 'openai'` or `provider: 'anthropic'`. Omitting both
+keeps the Anthropic default. The CLI accepts `--provider openai` with the
+matching key in `MANDALA_MODEL_KEY`.
+
+OpenAI uses your own key and stores Responses continuations at OpenAI; tasks,
+screenshots and tool results go to that provider. Mandala-funded OpenAI runs
+are unavailable. An action batch must fit the remaining step and API budget
+before it starts; a partial failure stops the run without replaying input.
 
 Ten clicks stop being ten images in *your* context. `maxSteps` bounds the loop,
 and bounds what your key is billed only loosely: a step is one **action on the
@@ -1718,7 +1730,7 @@ tested with `npm install openai@7.16.0`. Set these process environment variables
   to that key. This endpoint does not start it; another agent owning it can
   also cause a refusal.
 - `ANTHROPIC_API_KEY`: your separate **Anthropic** key, sent in `X-Model-Key`.
-  An OpenAI provider key cannot replace it.
+  Use the matching OpenAI key when selecting a GPT model.
 - `ANTHROPIC_MODEL`: an Anthropic model identifier available to your key and
   appropriate for computer use. The string is passed through unchanged, with
   no translation from OpenAI model names. The OpenAI client requires it;
@@ -1729,6 +1741,11 @@ This external client does not read `~/.mandala/credentials.json`, so
 not your Anthropic key. Existing computer charges and API rate budgets apply;
 Anthropic bills model usage to your key. This endpoint provides no hosted
 inference, included model credits, or saved dashboard conversation.
+
+The example below uses Anthropic. To select OpenAI inference, use
+`model: 'gpt-6.1-sol'` and `OPENAI_API_KEY` in `X-Model-Key`. Custom model names
+also need `provider` at the top level of the request body. The matching
+provider bills model usage.
 
 <!-- byok-openai-example:start -->
 ```ts

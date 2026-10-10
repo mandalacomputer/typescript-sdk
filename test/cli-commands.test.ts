@@ -2069,6 +2069,21 @@ describe('webhooks', () => {
 });
 
 describe('agent streams and cancellation', () => {
+  it('forwards --provider and refuses unknown providers before touching the computer', async () => {
+    const h = harness();
+    expect(
+      (await h.run(['agent', 'run', 'work', '--computer', COMPUTER.id, '--provider', 'openai']))
+        .code,
+    ).toBe(0);
+    expect(h.rec.last().body).toMatchObject({ provider: 'openai' });
+    const invalid = harness();
+    expect(
+      (await invalid.run(['agent', 'run', 'work', '--computer', COMPUTER.id, '--provider', 'typo']))
+        .code,
+    ).not.toBe(0);
+    expect(invalid.rec.calls).toHaveLength(0);
+  });
+
   it('uses the explicit target, prompt, options and model key with timestamped frames', async () => {
     const h = harness();
     const result = await h.run([
