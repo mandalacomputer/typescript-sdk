@@ -501,7 +501,7 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
  * Parameters the SDK deliberately omits.
  *
  * The input parameters are alternate spellings of something it does send. The
- * input route accepts Anthropic's computer-use vocabulary alongside this API's own, so a
+ * input route accepts Anthropic and OpenAI computer-use vocabularies alongside this API's own, so a
  * model's `tool_use.input` block can be forwarded without translation — which
  * leaves several fields with two names apiece. Picking one and sending it
  * consistently is the point; sending both would be two ways for the same call
