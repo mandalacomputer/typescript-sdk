@@ -1819,7 +1819,11 @@ when you want to choose the model, add your own tools, or approve actions as
 they happen.
 
 `@anthropic-ai/sdk` 0.132 or newer is an optional peer. Install it yourself;
-only `mandala-computer/anthropic` imports it.
+only `mandala-computer/anthropic` imports it. The peer is declared without a
+version range, so an older Anthropic SDK in your project does not stop
+`mandala-computer` from installing; importing `mandala-computer/anthropic`
+beside one fails with `Cannot find module` naming
+`@anthropic-ai/sdk/helpers/beta/toolsets`, and upgrading to 0.132 fixes it.
 
 <!-- anthropic-toolset-example:start -->
 ```ts
@@ -1885,7 +1889,9 @@ try {
 the computer's authenticated WSS CDP endpoint. No SSH tunnel, local browser
 installation or Playwright runtime is needed. Use a running Linux computer
 with Chromium and member-level API access. The Node driver uses the optional
-`ws` peer for authenticated WebSocket upgrade headers.
+`ws` peer, 8.18 or newer, for authenticated WebSocket upgrade headers. Like
+the Anthropic peer it is declared without a version range, so an older `ws`
+in your project does not stop `mandala-computer` from installing.
 
 ```sh
 npm install mandala-computer @anthropic-ai/sdk ws
