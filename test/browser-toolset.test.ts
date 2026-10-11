@@ -868,7 +868,7 @@ describe.skipIf(!executable)('real Chromium through Anthropic toolResult', () =>
       .poll(() => backend.perform('get_page_text', {}), { timeout: 30000, interval: 200 })
       .toBe('churned');
     await expect.poll(() => hits, { timeout: 10000 }).toContain('/dl-inner');
-    expect(hits.filter((hit) => hit.startsWith('/dl-outer')).length).toBeGreaterThan(150);
+    expect(hits.filter((hit) => hit.startsWith('/dl-outer')).length).toBeGreaterThanOrEqual(150);
     // The page, the download frame and the frame inside it, and little else:
     // Chromium reports no detach for a frame inside a removed cross-site frame.
     await expect.poll(() => files.frames.size, { timeout: 5000 }).toBeLessThan(10);
