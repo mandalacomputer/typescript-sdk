@@ -1865,6 +1865,13 @@ export function inputBatchBody(actions: readonly OpenAIComputerAction[]): Json[]
       }
       body.path = path.map((p: unknown, j) => {
         if (!isRecord(p)) throw new ValidationError(`${at}.path[${j}] must be an {x, y} point`);
+        // Refused, not dropped, as the platform refuses it: a point's other
+        // field would otherwise vanish from what the model asked for.
+        for (const key of Object.keys(p)) {
+          if (key !== 'x' && key !== 'y' && p[key] !== undefined) {
+            throw new ValidationError(`${at}.path[${j}] takes only x and y, not ${key}`);
+          }
+        }
         return {
           x: finite(p.x as number, `${at}.path[${j}].x`),
           y: finite(p.y as number, `${at}.path[${j}].y`),

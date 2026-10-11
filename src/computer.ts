@@ -50,6 +50,7 @@ import {
   type isTransient,
   MandalaError,
   type ModelProviderError,
+  markReplayUnsafe,
   NotFoundError,
   type PlanLimitError,
   RangeNotSatisfiableError,
@@ -791,6 +792,15 @@ const INPUT_BATCH_TIMEOUT_MS = 93_000 + 15_000;
  */
 const batchAnswer = (body: unknown): boolean =>
   P.isRecord(body) && Object.hasOwn(body, 'completed');
+
+/**
+ * Whether a refusal's body is the ordinary error envelope — `{error: "..."}`
+ * and no `completed` — which is the platform's answer for a batch refused
+ * before any action reached the computer. Anything else (an empty body, one
+ * cut off, a proxy's page) cannot show that nothing ran.
+ */
+const refusedBeforeDispatch = (body: unknown): boolean =>
+  P.isRecord(body) && typeof body.error === 'string' && !batchAnswer(body);
 
 /**
  * A create-only upload's 409, never left looking like a passing conflict.
@@ -4356,7 +4366,9 @@ export class Computer {
    *
    * A batch REFUSED before any action ran — a malformed one, a computer that is
    * not running, the input lane busy — throws the ordinary error for its status,
-   * and nothing happened. A batch that STOPPED PART-WAY throws
+   * and nothing happened. An error whose answer cannot be read as that refusal
+   * (an empty or cut-off body, a proxy's page) cannot show that nothing ran,
+   * and {@link isTransient} answers false for it whatever its class. A batch that STOPPED PART-WAY throws
    * {@link InputBatchError}: `result.completed` actions ran, and the one at
    * `result.failedIndex` may have partly applied. **Never send the same batch
    * again automatically** — that repeats what already ran. Look at a fresh
@@ -4390,7 +4402,15 @@ export class Computer {
         signal: opts.signal,
       });
     } catch (err) {
-      if (!(err instanceof APIError) || !batchAnswer(err.body)) throw err;
+      if (!(err instanceof APIError)) throw err;
+      if (!batchAnswer(err.body)) {
+        // A refusal the platform answered in its ordinary shape ran nothing,
+        // and keeps everything the status table gives it. One whose body is
+        // missing, cut off or not the platform's cannot show that, and a
+        // batch may have run part of the way behind it: never worth sending
+        // again blind, whatever its class would otherwise say.
+        throw refusedBeforeDispatch(err.body) ? err : markReplayUnsafe(err);
+      }
       // Execution began: the answer is the batch as far as it went, under the
       // status of what stopped it. Not the status's own class, which for a 409
       // or a 503 would call sending it again worth trying.

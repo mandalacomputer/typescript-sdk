@@ -72,7 +72,8 @@ This is the summary you read to decide whether to upgrade.
   the batch. A batch refused before any action ran throws the ordinary error.
   One that stopped part-way throws the new `InputBatchError`, whose `result`
   carries `completed`, `failedIndex` and the results so far, and which
-  `isTransient()` never calls worth sending again.
+  `isTransient()` never calls worth sending again. Neither does it call an
+  error whose answer cannot be read as a refusal before dispatch.
 
 ### Changed
 

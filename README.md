@@ -562,7 +562,9 @@ after the batch, as `type` does.
 
 A batch the platform **refuses before any action runs** (a computer that is
 not running, the input lane busy) throws the ordinary error for its status, and
-nothing happened. A batch that **stops part-way** throws `InputBatchError`.
+nothing happened. If the error's answer can't be read (an empty or cut-off
+body, or a proxy's page), the error can't show that nothing ran, so
+`isTransient` answers false for it too. A batch that **stops part-way** throws `InputBatchError`.
 Its `result` says how far the batch got: `completed` actions ran, and the one
 at `failedIndex` may have partly applied. `isTransient` answers false for it.
 **Never send the same batch again automatically**, because that repeats what

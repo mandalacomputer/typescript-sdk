@@ -139,6 +139,18 @@ describe('computer.inputBatch()', () => {
     ['a click with an unknown button', [{ type: 'click', x: 1, y: 2, button: 'middle' }]],
     ['a one-point drag', [{ type: 'drag', path: [{ x: 1, y: 2 }] }]],
     ['a drag point without y', [{ type: 'drag', path: [{ x: 1, y: 2 }, { x: 3 }] }]],
+    [
+      'a drag point with a field of its own',
+      [
+        {
+          type: 'drag',
+          path: [
+            { x: 1, y: 2 },
+            { x: 3, y: 4, keys: ['ctrl'] },
+          ],
+        },
+      ],
+    ],
     ['a scroll with no scroll_y', [{ type: 'scroll', x: 1, y: 2, scroll_x: 0 }]],
     ['a keypress with no keys', [{ type: 'keypress', keys: [] }]],
     ['keys that are not names', [{ type: 'move', x: 1, y: 2, keys: [1] }]],
@@ -185,6 +197,50 @@ describe('computer.inputBatch()', () => {
       expect(rec.calls).toHaveLength(before + 1);
     },
   );
+
+  it.each([
+    ['cut off', () => new Response('{"ok":false,"completed":2,', { status: 409 })],
+    ['empty', () => new Response('', { status: 409 })],
+    [
+      'a proxy page',
+      () =>
+        new Response('<html>bad gateway</html>', {
+          status: 502,
+          headers: { 'content-type': 'text/html' },
+        }),
+    ],
+    [
+      'broken off mid-stream',
+      () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode('{"ok":false,'));
+              controller.error(new Error('connection reset'));
+            },
+          }),
+          { status: 409, headers: { 'content-type': 'application/json' } },
+        ),
+    ],
+  ])('never calls a failure whose answer is %s worth sending again', async (_, answer) => {
+    const { rec, computer } = setup(onInput(() => answer()));
+    const c = await computer();
+    const before = rec.calls.length;
+    const err = await c.inputBatch([{ type: 'wait' }, { type: 'wait' }]).catch((e) => e);
+    expect(err).toBeInstanceOf(MandalaError);
+    expect(isTransient(err)).toBe(false);
+    expect(rec.calls).toHaveLength(before + 1);
+  });
+
+  it('keeps a refusal in the ordinary shape as transient as its status says', async () => {
+    // The input lane busy: nothing ran, and the platform's word says it clears.
+    const { computer } = setup(
+      onInput(() => json({ error: 'input is busy', reason: 'contention' }, { status: 409 })),
+    );
+    const err = await (await computer()).inputBatch([{ type: 'wait' }]).catch((e) => e);
+    expect(err).toBeInstanceOf(ConflictError);
+    expect(isTransient(err)).toBe(true);
+  });
 
   it('raises a success status carrying a stopped batch the same way', async () => {
     const { computer } = setup(

@@ -525,6 +525,21 @@ function reportsSteps(body: unknown): boolean {
 const afterAgentSteps = new WeakSet<APIError>();
 
 /**
+ * Refusals of a request that may have partly run, so {@link isTransient}
+ * answers false whatever their class: an OpenAI input batch whose answer could
+ * not be read as a refusal before dispatch (see
+ * {@link Computer.inputBatch}). A mark rather than a class, so the error keeps
+ * the status table's class and everything a caller already branches on.
+ */
+const replayUnsafe = new WeakSet<APIError>();
+
+/** @internal Mark `err` as a request that may have partly run. */
+export function markReplayUnsafe<T extends APIError>(err: T): T {
+  replayUnsafe.add(err);
+  return err;
+}
+
+/**
  * The sentence the platform reports a funded run's provider failure with: its
  * own fixed words in place of the provider's, which never leave the platform,
  * over the provider's status. The funded counterpart of `model API: `, and
@@ -1615,7 +1630,7 @@ export function isTransient(err: unknown): boolean {
   if (err instanceof InputBatchError) return false;
   // A relayed model 429 on an agent run that had already acted: the wait is the
   // model provider's, but replaying the prompt repeats the steps it took.
-  if (err instanceof APIError && afterAgentSteps.has(err)) return false;
+  if (err instanceof APIError && (afterAgentSteps.has(err) || replayUnsafe.has(err))) return false;
   // The platform's own word, ahead of the types below, because it is the more
   // specific answer and it is the one that tells the 409 that never clears from
   // the two that do (platform OPL-3898). Only an APIError carries a
