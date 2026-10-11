@@ -36,12 +36,25 @@ const EVENTS = new Set([
   'Runtime.consoleAPICalled',
   'Network.responseReceived',
 ]);
-// Events are handled concurrently up to this many at once and the rest wait
-// their turn in arrival order. A heavy page pauses hundreds of requests at once,
-// and each one waits for the URL policy and a reply from Chromium. Chromium
-// holds a paused request until it is answered, so one waiting its turn is not
-// lost. Command replies never wait here.
+// Events are handled concurrently up to this many at once in each of two lanes,
+// and the rest wait their turn in arrival order within their lane. A heavy page
+// pauses hundreds of requests at once, and each one waits for the URL policy
+// and a reply from Chromium. Chromium holds a paused request until it is
+// answered, so one waiting its turn is not lost. Command replies never wait.
 const EVENT_CONCURRENCY = 256;
+// Events whose handlers wait on caller code (the URL policy, download approval)
+// have their own lane, so a slow policy cannot hold back the rest: a new tab's
+// attach, a dialog to dismiss, a target's end. Nothing in the other lane waits
+// for these: a session's own events can only follow its attach.
+const SLOW_EVENTS = new Set([
+  'Fetch.requestPaused',
+  'Browser.downloadWillBegin',
+  'Browser.downloadProgress',
+]);
+type Lane = {
+  running: number;
+  queue: { message: Message; size: number }[];
+};
 // Only a page flooding the session faster than any policy could answer reaches
 // these, and they end the session rather than let the queue grow without
 // bound, in events or in the bytes they hold.
@@ -195,7 +208,8 @@ export class BrowserCDP {
   #closing: Promise<void> | undefined;
   #failed = false;
   #tasks = new Set<Promise<void>>();
-  #queue: { message: Message; size: number }[] = [];
+  #slow: Lane = { running: 0, queue: [] };
+  #fast: Lane = { running: 0, queue: [] };
   #queuedBytes = 0;
   // Session -> the session it was attached under, as attaches arrive.
   #parents = new Map<string, string>();
@@ -454,7 +468,8 @@ export class BrowserCDP {
       this.#buttons,
     ])
       map.clear();
-    this.#queue = [];
+    this.#slow.queue = [];
+    this.#fast.queue = [];
     this.#queuedBytes = 0;
     this.#parents.clear();
     this.#detached.clear();
@@ -529,29 +544,35 @@ export class BrowserCDP {
     // the detach that would free it stuck in the queue behind it.
     if (message.method === 'Target.detachedFromTarget' && typeof child === 'string')
       this.#gone.set(message, this.#detach(child));
-    // Arrival order is kept: nothing overtakes an event already waiting.
-    if (this.#queue.length || this.#tasks.size >= EVENT_CONCURRENCY) {
-      if (this.#queue.length >= EVENT_QUEUE_LIMIT || this.#queuedBytes + size > EVENT_QUEUE_BYTES) {
+    const lane = SLOW_EVENTS.has(message.method) ? this.#slow : this.#fast;
+    // Arrival order is kept within a lane: nothing overtakes an event waiting there.
+    if (lane.queue.length || lane.running >= EVENT_CONCURRENCY) {
+      if (
+        this.#slow.queue.length + this.#fast.queue.length >= EVENT_QUEUE_LIMIT ||
+        this.#queuedBytes + size > EVENT_QUEUE_BYTES
+      ) {
         this.#terminalError =
           'The page produced browser events faster than the session could handle them. The session ended; create a new toolset to continue.';
         this.#fail();
         return;
       }
-      this.#queue.push({ message, size });
+      lane.queue.push({ message, size });
       this.#queuedBytes += size;
       return;
     }
-    this.#run(message);
+    this.#run(message, lane);
   }
-  #run(message: Message): void {
+  #run(message: Message, lane: Lane): void {
     const task = this.#event(message);
+    lane.running++;
     this.#tasks.add(task);
     void task.finally(() => {
+      lane.running--;
       this.#tasks.delete(task);
-      while (!this.#failed && this.#queue.length && this.#tasks.size < EVENT_CONCURRENCY) {
-        const next = this.#queue.shift()!;
+      while (!this.#failed && lane.queue.length && lane.running < EVENT_CONCURRENCY) {
+        const next = lane.queue.shift()!;
         this.#queuedBytes -= next.size;
-        this.#run(next.message);
+        this.#run(next.message, lane);
       }
     });
   }

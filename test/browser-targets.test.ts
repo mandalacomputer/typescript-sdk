@@ -24,6 +24,7 @@ const sockets = vi.hoisted(() => [] as Socket[]);
 vi.mock('ws', () => ({
   default: class extends EventEmitter {
     sent: Command[] = [];
+    tabs = 0;
     gone = new Set<string>();
     silent = new Set<string>();
     ended = false;
@@ -50,13 +51,15 @@ vi.mock('ws', () => ({
           return;
         }
         const { method } = command;
+        const n = method === 'Target.createTarget' ? ++this.tabs : 0;
+        const tab = n > 1 ? `tab-${n}` : 'tab';
         this.message({
           id: command.id,
           result:
             method === 'Target.createBrowserContext'
               ? { browserContextId: 'context' }
               : method === 'Target.createTarget'
-                ? { targetId: 'tab' }
+                ? { targetId: tab }
                 : method === 'Target.closeTarget'
                   ? { success: true }
                   : {},
@@ -65,8 +68,8 @@ vi.mock('ws', () => ({
           this.message({
             method: 'Target.attachedToTarget',
             params: {
-              sessionId: 'session',
-              targetInfo: { targetId: 'tab', type: 'page', browserContextId: 'context' },
+              sessionId: n > 1 ? `session-${n}` : 'session',
+              targetInfo: { targetId: tab, type: 'page', browserContextId: 'context' },
             },
           });
       });
@@ -114,6 +117,17 @@ const paused = (ws: Socket, session: string, requestId: string, url: string) =>
     sessionId: session,
     params: { requestId, request: { url } },
   });
+// Fill every slot of the lane that does not wait on caller code: frames whose
+// setup Chromium never answers.
+async function holdTargets(ws: Socket) {
+  for (let n = 0; n < 256; n++) {
+    ws.silent.add(`hold-${n}`);
+    attach(ws, 'session', `hold-${n}`, 'iframe');
+  }
+  await vi.waitFor(() =>
+    expect(ws.sent.filter((c) => c.sessionId?.startsWith('hold-'))).toHaveLength(256),
+  );
+}
 const on = (ws: Socket, session: string) =>
   ws.sent.filter((c) => c.sessionId === session).map((c) => c.method);
 const named = (ws: Socket, method: string) => ws.sent.filter((c) => c.method === method);
@@ -384,7 +398,7 @@ it('bounds the bytes waiting events hold, keeping only what it uses of page payl
   });
   const { backend, ws } = await started(() => gate);
   try {
-    for (let n = 0; n < 256; n++) paused(ws, 'session', `r${n}`, 'https://example.test/');
+    await holdTargets(ws);
     const huge = 'x'.repeat(1024 * 1024);
     // 40 MiB of console output waits as the 40 KiB read_console would keep.
     for (let n = 0; n < 40; n++)
@@ -428,8 +442,8 @@ it('keeps no page payload alive behind what it cut from it', async () => {
   });
   const { backend, ws } = await started(() => gate);
   try {
-    // Every handler busy, so everything below waits in the queue.
-    for (let n = 0; n < 256; n++) paused(ws, 'session', `r${n}`, 'https://example.test/');
+    // Every slot busy, so everything below waits in the queue.
+    await holdTargets(ws);
     const huge = 'x'.repeat(1024 * 1024);
     const before = heap();
     for (let n = 0; n < 40; n++) {
@@ -453,6 +467,32 @@ it('keeps no page payload alive behind what it cut from it', async () => {
     expect(backend.sessionStatus().state).toBe('active');
     // 120 MiB of payloads arrived; what waits is a few hundred KiB of text.
     expect(grown).toBeLessThan(16 * 1024 * 1024);
+  } finally {
+    release();
+    await backend.close();
+  }
+});
+
+it('a slow URL policy holds back neither a new tab nor a dialog', async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((r) => {
+    release = r;
+  });
+  const { backend, ws } = await started(() => gate);
+  try {
+    // 256 requests wait on the policy and 768 more wait their turn.
+    for (let n = 0; n < 1024; n++) paused(ws, 'session', `r${n}`, 'https://example.test/');
+    const opened = backend.perform('new_tab', {});
+    const stuck = new Promise((r) => setTimeout(() => r('stuck'), 2000));
+    expect(await Promise.race([opened, stuck])).toMatchObject({ tab_id: 'tab-2' });
+    ws.message({
+      method: 'Page.javascriptDialogOpening',
+      sessionId: 'session',
+      params: { type: 'alert', message: 'hello' },
+    });
+    await vi.waitFor(() => expect(named(ws, 'Page.handleJavaScriptDialog')).toHaveLength(1));
+    expect(named(ws, 'Fetch.continueRequest')).toHaveLength(0);
+    expect(backend.sessionStatus().state).toBe('active');
   } finally {
     release();
     await backend.close();
