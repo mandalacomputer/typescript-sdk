@@ -219,6 +219,15 @@ const pages = (port: number): Record<string, [string, string | Buffer]> => ({
     'text/html',
     `<title>Popup</title><img src="/popup-image"><script>fetch('/popup-fetch')</script>`,
   ],
+  // A cacheable document that, if it ever runs as a popup, marks its opener.
+  '/cached-popup': [
+    'text/html',
+    `<script>try{opener.document.title='popup ran';localStorage.setItem('popup','ran')}catch{}</script>`,
+  ],
+  '/cache-host': [
+    'text/html',
+    `<title>cache host</title><button onclick="window.open('/cached-popup')" style="display:block;width:300px;height:100px">open cached</button>`,
+  ],
   '/heavy': [
     'text/html',
     `<title>Heavy</title><p>heavy page</p>${Array.from({ length: 400 }, (_, n) => `<img src="/img/${n}">`).join('')}`,
@@ -324,7 +333,10 @@ describe.skipIf(!executable)('real Chromium through Anthropic toolResult', () =>
           .replace(/^\/(escape-frame|escape-worker\.js|popup-target)\?.*$/, '/$1')
       ];
       if (page) {
-        res.writeHead(200, { 'Content-Type': page[0] });
+        res.writeHead(200, {
+          'Content-Type': page[0],
+          ...(req.url === '/cached-popup' ? { 'Cache-Control': 'public, max-age=3600' } : {}),
+        });
         res.end(page[1]);
         return;
       }
@@ -997,6 +1009,38 @@ describe.skipIf(!executable)('real Chromium through Anthropic toolResult', () =>
     },
     60000,
   );
+  it('a popup of a document the opener has cached never runs', async () => {
+    const { browser, base, hits } = await fixture({
+      configs: { javascript_exec: { enabled: true } },
+      confirm: () => true,
+    });
+    success(await browser.toolResult(use('navigate', { url: `${base}/cache-host` })));
+    // The opener caches the document, as any page may.
+    success(
+      await browser.toolResult(
+        use('javascript_exec', {
+          text: "fetch('/cached-popup').then(r=>r.text()).then(()=>'cached')",
+        }),
+      ),
+    );
+    expect(hits.filter((hit) => hit === '/cached-popup')).toHaveLength(1);
+    success(
+      await browser.toolResult(use('left_click', { target: { type: 'coordinate', x: 50, y: 50 } })),
+    );
+    await new Promise((r) => setTimeout(r, 1000));
+    const state = text(
+      success(
+        await browser.toolResult(
+          use('javascript_exec', {
+            text: "document.title+' '+String(localStorage.getItem('popup'))",
+          }),
+        ),
+      ),
+    );
+    expect(state).toContain('cache host null');
+    expect(hits.filter((hit) => hit === '/cached-popup')).toHaveLength(1);
+    expect(tabs(success(await browser.toolResult(use('list_tabs'))))).toHaveLength(1);
+  }, 30000);
   it('loads a page that pauses hundreds of requests at once', async () => {
     const { browser, base, hits } = await fixture({ urlPolicy: async () => {} });
     success(await browser.toolResult(use('navigate', { url: `${base}/heavy` })));

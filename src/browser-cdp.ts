@@ -837,6 +837,7 @@ export class BrowserCDP {
    * URLs do not stop a navigation.)
    */
   async #refusePage(session: string, target: string): Promise<void> {
+    if (this.#detached.has(session)) return; // Gone before its turn came.
     this.#refusing.add(session);
     let failed: unknown;
     try {
@@ -845,6 +846,9 @@ export class BrowserCDP {
         // and its dialogs are reported to be dismissed.
         ['Page.enable', {}],
         ['Network.enable', {}],
+        // Offline emulation sits below the HTTP cache: a document the opener
+        // has cached would load, and run, without this.
+        ['Network.setCacheDisabled', { cacheDisabled: true }],
         ['Network.setBypassServiceWorker', { bypass: true }],
         ['Page.addScriptToEvaluateOnNewDocument', NO_WORKERS],
         // A frame or worker started in it is held too, and closed as unowned.
