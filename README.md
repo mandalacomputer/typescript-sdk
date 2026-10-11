@@ -2057,8 +2057,8 @@ revokes its capability; it does not stop Chromium or delete the computer.
   driver closes its session.
 - Popups and other new top-level pages the driver did not open (`window.open`,
   `target=_blank` links) are refused without holding up the page that opened
-  them. The driver lets each go offline, with dedicated workers disabled in
-  every frame of it, and closes it before it can load; the opener carries on,
+  them. The driver lets each go offline, uncached, with script execution and
+  dedicated workers disabled in it, and closes it before it can load; the opener carries on,
   its `window.open` returning a window that is about to close. On a Chromium
   too old for per-rule network emulation, the opener's page also sees itself
   offline for that moment. Requests the

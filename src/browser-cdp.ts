@@ -851,6 +851,9 @@ export class BrowserCDP {
         ['Network.setCacheDisabled', { cacheDisabled: true }],
         ['Network.setBypassServiceWorker', { bypass: true }],
         ['Page.addScriptToEvaluateOnNewDocument', NO_WORKERS],
+        // Nor does any script run in it: a document the opener writes into it,
+        // or a blob: one, needs no network to load.
+        ['Emulation.setScriptExecutionDisabled', { value: true }],
         // A frame or worker started in it is held too, and closed as unowned.
         ['Target.setAutoAttach', AUTO_ATTACH],
       ] as [string, Message][]) {

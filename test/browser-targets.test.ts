@@ -1213,6 +1213,7 @@ it('releases a page it did not open before closing it, offline and unable to sta
       'Network.setBypassServiceWorker',
       'Network.emulateNetworkConditionsByRule',
       'Page.addScriptToEvaluateOnNewDocument',
+      'Emulation.setScriptExecutionDisabled',
       'Target.setAutoAttach',
       'Runtime.runIfWaitingForDebugger',
     ]);

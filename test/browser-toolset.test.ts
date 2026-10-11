@@ -226,7 +226,7 @@ const pages = (port: number): Record<string, [string, string | Buffer]> => ({
   ],
   '/cache-host': [
     'text/html',
-    `<title>cache host</title><button onclick="window.open('/cached-popup')" style="display:block;width:300px;height:100px">open cached</button>`,
+    `<title>cache host</title><button onclick="window.open('/cached-popup')" style="display:block;width:300px;height:100px">open cached</button><button onclick="const w=window.open('');w.document.write('<script>opener.document.title=&quot;popup ran&quot;;localStorage.setItem(&quot;popup&quot;,&quot;ran&quot;)<\\/script>');w.document.close()" style="display:block;width:300px;height:100px">write a popup</button><button onclick="window.open(window.URL.createObjectURL(new Blob(['<script>opener.document.title=&quot;popup ran&quot;;localStorage.setItem(&quot;popup&quot;,&quot;ran&quot;)<\\/script>'],{type:'text/html'})))" style="display:block;width:300px;height:100px">open a blob popup</button>`,
   ],
   '/heavy': [
     'text/html',
@@ -1009,38 +1009,46 @@ describe.skipIf(!executable)('real Chromium through Anthropic toolResult', () =>
     },
     60000,
   );
-  it('a popup of a document the opener has cached never runs', async () => {
-    const { browser, base, hits } = await fixture({
-      configs: { javascript_exec: { enabled: true } },
-      confirm: () => true,
-    });
-    success(await browser.toolResult(use('navigate', { url: `${base}/cache-host` })));
-    // The opener caches the document, as any page may.
-    success(
-      await browser.toolResult(
-        use('javascript_exec', {
-          text: "fetch('/cached-popup').then(r=>r.text()).then(()=>'cached')",
-        }),
-      ),
-    );
-    expect(hits.filter((hit) => hit === '/cached-popup')).toHaveLength(1);
-    success(
-      await browser.toolResult(use('left_click', { target: { type: 'coordinate', x: 50, y: 50 } })),
-    );
-    await new Promise((r) => setTimeout(r, 1000));
-    const state = text(
+  it.each([
+    ['a document the opener has cached', 50],
+    ['a document the opener writes', 150],
+    ['a blob: document', 250],
+  ])(
+    'a popup of %s never runs',
+    async (_what, y) => {
+      const { browser, base, hits } = await fixture({
+        configs: { javascript_exec: { enabled: true } },
+        confirm: () => true,
+      });
+      success(await browser.toolResult(use('navigate', { url: `${base}/cache-host` })));
+      // The opener caches the document, as any page may.
       success(
         await browser.toolResult(
           use('javascript_exec', {
-            text: "document.title+' '+String(localStorage.getItem('popup'))",
+            text: "fetch('/cached-popup').then(r=>r.text()).then(()=>'cached')",
           }),
         ),
-      ),
-    );
-    expect(state).toContain('cache host null');
-    expect(hits.filter((hit) => hit === '/cached-popup')).toHaveLength(1);
-    expect(tabs(success(await browser.toolResult(use('list_tabs'))))).toHaveLength(1);
-  }, 30000);
+      );
+      expect(hits.filter((hit) => hit === '/cached-popup')).toHaveLength(1);
+      success(
+        await browser.toolResult(use('left_click', { target: { type: 'coordinate', x: 50, y } })),
+      );
+      await new Promise((r) => setTimeout(r, 1000));
+      const state = text(
+        success(
+          await browser.toolResult(
+            use('javascript_exec', {
+              text: "document.title+' '+String(localStorage.getItem('popup'))",
+            }),
+          ),
+        ),
+      );
+      expect(state).toContain('cache host null');
+      expect(hits.filter((hit) => hit === '/cached-popup')).toHaveLength(1);
+      expect(tabs(success(await browser.toolResult(use('list_tabs'))))).toHaveLength(1);
+    },
+    30000,
+  );
   it('loads a page that pauses hundreds of requests at once', async () => {
     const { browser, base, hits } = await fixture({ urlPolicy: async () => {} });
     success(await browser.toolResult(use('navigate', { url: `${base}/heavy` })));
