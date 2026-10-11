@@ -116,8 +116,9 @@ const AUTO_ATTACH = { autoAttach: true, waitForDebuggerOnStart: true, flatten: t
 // scripts, and in the documents that already exist; the binding cannot be
 // reassigned or deleted. A cross-process frame that Chromium starts without
 // waiting for the driver (a sandboxed srcdoc frame) runs its first scripts
-// before its session can register this, as it makes its first requests before
-// its interception is on. Shared and service workers are closed as targets.
+// before its session can register this, so it can keep the original
+// constructor for later, as it makes its first requests before its
+// interception is on. Shared and service workers are closed as targets.
 const NO_WORKERS = {
   source:
     "(()=>{const Worker=function Worker(){throw new DOMException('Dedicated workers are disabled in this browser session.','SecurityError')};Object.defineProperty(globalThis,'Worker',{value:Worker,writable:false,configurable:false,enumerable:false})})()",

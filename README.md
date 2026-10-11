@@ -2034,8 +2034,10 @@ revokes its capability; it does not stop Chromium or delete the computer.
   browser traffic outside those intercepted requests. That includes a
   sandboxed or other out-of-process frame that starts running before the
   driver can attach to it (Chromium starts a sandboxed `srcdoc` frame this
-  way): until the driver has attached, it can make requests, and create
-  workers, that the hook does not see.
+  way). Its first requests go out before the hook can see them, and its
+  scripts can keep the browser's own `Worker` constructor and start workers
+  with it at any time, whose requests can escape the hook, notably when their
+  page closes or navigates.
 - Cross-site frames (which Chromium runs in their own process) run as part of
   their tab. Chromium holds one that loads a URL until the driver has attached
   to it, so its HTTP(S) requests go through the same URL hook with that tab's
@@ -2046,8 +2048,8 @@ revokes its capability; it does not stop Chromium or delete the computer.
   `about:blank`, `srcdoc` and `javascript:` frames) `new Worker(...)` throws a
   `SecurityError` before the page's own scripts run, whatever the script URL
   (`blob:` and `data:` included), and the binding cannot be replaced. A frame
-  that starts running before the driver can attach can create workers until
-  it has (see the URL hook above). A worker cannot run under the URL hook: Chromium fetches the
+  that starts running before the driver can attach is not covered (see the
+  URL hook above). A worker cannot run under the URL hook: Chromium fetches the
   script of a worker started by another worker without any interception the
   driver could apply, and a worker held paused is released, unpoliced, when
   its page closes or navigates. The page itself carries on. Shared workers,
