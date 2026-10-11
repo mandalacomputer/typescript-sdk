@@ -68,12 +68,34 @@ export type AgentUsage = {
  * which is why {@link AgentResult.finished} exists rather than leaving everyone
  * to compare this string themselves.
  *
- * `max_steps`, `rate_limited` and `refusal` are not failures and are
- * deliberately not raised as one: the steps already taken are real, and what
- * they did to the desktop stands. They say the run did not finish, which is a
- * different thing from the run having gone wrong.
+ * The others the platform documents:
+ *
+ * - `max_steps` — the run reached `maxSteps`.
+ * - `rate_limited` — the account's API rate budget ran out mid-run.
+ * - `refusal` — the model declined.
+ * - `pause_turn` — the model kept pausing its turn.
+ * - `credits_exhausted` — a funded run's AI credits became unavailable.
+ * - `max_cost` — a funded run's next model call would pass `maxCostUsd`.
+ * - `incomplete` — OpenAI left its response unfinished.
+ * - `safety_check` — OpenAI wants an action approved before it goes on.
+ *
+ * Or another stop reason the model itself gave, such as `max_tokens`, which is
+ * why the type stays open. None of them is a failure, and none is raised as
+ * one: the steps already taken are real, and what they did to the desktop
+ * stands. They say the run did not finish, which is a different thing from the
+ * run having gone wrong.
  */
-export type AgentStop = 'end_turn' | 'max_steps' | 'rate_limited' | 'refusal' | (string & {});
+export type AgentStop =
+  | 'end_turn'
+  | 'max_steps'
+  | 'rate_limited'
+  | 'refusal'
+  | 'pause_turn'
+  | 'credits_exhausted'
+  | 'max_cost'
+  | 'incomplete'
+  | 'safety_check'
+  | (string & {});
 
 export type AgentResult = {
   /** How many steps it took. */

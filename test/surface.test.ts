@@ -382,6 +382,25 @@ async function exerciseEverything(client: Client): Promise<void> {
   await c.paste('Café — 東京');
   await c.paste('ls', { shortcut: 'ctrl+shift+v' });
   await c.key('ctrl', 'c');
+  // Every OpenAI action in one batch, and a second asking for the context.
+  await c.inputBatch([
+    { type: 'click', x: 10, y: 20, button: 'left', keys: ['shift'] },
+    { type: 'double_click', x: 10, y: 20, keys: null },
+    { type: 'move', x: 0, y: 0 },
+    {
+      type: 'drag',
+      path: [
+        { x: 1, y: 1 },
+        { x: 5, y: 5 },
+      ],
+    },
+    { type: 'scroll', x: 10, y: 20, scroll_x: 0, scroll_y: 300 },
+    { type: 'keypress', keys: ['ctrl', 'l'] },
+    { type: 'type', text: 'hi' },
+    { type: 'wait' },
+    { type: 'screenshot' },
+  ]);
+  await c.inputBatch([{ type: 'wait' }], { context: true });
   await c.holdKey(['shift'], 1);
   await c.wait(1);
   await c.cursorPosition();
@@ -651,6 +670,12 @@ function parametersOf(call: Call): string[] {
   // Only an object body has named fields. A file upload's body is the file.
   if (call.body && typeof call.body === 'object' && !Array.isArray(call.body)) {
     sent.push(...Object.keys(call.body).map((k) => `body:${k}`));
+  }
+  // An OpenAI input batch is an array of objects, and each one's fields are
+  // the route's documented body fields, sent.
+  if (Array.isArray(call.body)) {
+    for (const item of call.body)
+      if (item && typeof item === 'object') sent.push(...Object.keys(item).map((k) => `body:${k}`));
   }
   return sent;
 }

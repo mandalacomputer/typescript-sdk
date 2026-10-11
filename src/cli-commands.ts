@@ -1267,9 +1267,8 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
       document = await documentInput(target, io, signal);
       P.templateDocument(document);
     }
-    const provider = s('provider');
-    if (provider !== undefined && provider !== 'anthropic' && provider !== 'openai')
-      throw new CliError('invalid_arguments', '--provider must be anthropic or openai');
+    // The parser has already refused anything but the flag's choices.
+    const provider = s('provider') as AgentArgs['provider'];
     // MANDALA_MODEL_KEY unset is a run on the account's AI credits. Set but
     // blank is refused, as the SDK refuses a blank modelKey: a secret that
     // failed to load must not quietly start a run billed to the account.
@@ -2104,6 +2103,9 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
         throw new CliError('invalid_arguments', `unknown command ${path}`);
     }
   } catch (error) {
+    // A refused command line: the envelope names the command it was read as.
+    if (!parsed && error instanceof CliError && error.command !== undefined)
+      output = new Output(io, error.command, options.includes('--json'));
     if (error instanceof CredentialSaveError && error.committed) return output.error(error);
     if (controller.signal.aborted)
       return output.error(new CliError('cancelled', 'Cancelled'), 130, watching);

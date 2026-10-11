@@ -540,6 +540,36 @@ Chromium to get one:
 A password field's value is never read, and a computer made from an image built
 before page context answers `error` saying so.
 
+#### OpenAI action batches
+
+An OpenAI computer-use model answers with a list of actions. `inputBatch` sends
+1 to 32 of them as one request, in OpenAI's own spelling (`click`,
+`double_click`, `move`, `drag`, `scroll` with `scroll_x`/`scroll_y`,
+`keypress`, `type`, `wait`, `screenshot`), so a Responses API `computer_call`'s
+`actions` can be passed as they came:
+
+```ts
+const done = await c.inputBatch(call.actions);       // { ok, completed, results }
+const shot = await c.screenshot();                   // `screenshot` is a marker: read the picture after
+```
+
+The batch is checked before anything is sent: an unknown type, a missing or
+extra field, or more than 32 actions is a `ValidationError`. The platform then
+checks it again, and its combined limits (typed characters, wheel notches, drag
+points and waits) before it wakes a suspended computer. It runs on one input
+lane, so no other API input interleaves. `{ context: true }` adds the desktop
+after the batch, as `type` does.
+
+A batch the platform **refuses before any action runs** (a computer that is
+not running, the input lane busy) throws the ordinary error for its status, and
+nothing happened. If the error's answer can't be read (an empty or cut-off
+body, or a proxy's page), the error can't show that nothing ran, so
+`isTransient` answers false for it too. A batch that **stops part-way** throws `InputBatchError`.
+Its `result` says how far the batch got: `completed` actions ran, and the one
+at `failedIndex` may have partly applied. `isTransient` answers false for it.
+**Never send the same batch again automatically**, because that repeats what
+already ran. Take a screenshot and decide what is left.
+
 ### Screenshots, and the one flag a drive loop needs
 
 ```ts
@@ -1695,10 +1725,14 @@ the model request nobody is waiting for still completes on your key, and the
 desktop action it asks for is still performed.
 
 `finished` is true only for `stop === 'end_turn'`. A run that hit `max_steps`,
-ran out of API budget (`rate_limited`), or was declined (`refusal`) is **not**
-raised as an error — the steps already taken are real and what they did to the
-desktop stands. They say the run did not finish, which is a different thing from
-the run having gone wrong.
+ran out of API budget (`rate_limited`), was declined (`refusal`), kept pausing
+its turn (`pause_turn`), ran out of AI credits (`credits_exhausted`) or reached
+its cost cap (`max_cost`), or that OpenAI left unfinished (`incomplete`) or
+stopped for an action approval (`safety_check`), is **not** raised as an error.
+The same goes for a stop reason the model itself gave, such as `max_tokens`.
+The steps already taken are real and what they did to the desktop stands. They
+say the run did not finish, which is a different thing from the run having gone
+wrong.
 
 **A run can be refused part-way through, after billed steps.** Authorization is
 not settled once at the start of a call this long: the API rechecks the
@@ -2108,11 +2142,10 @@ Approval gives the selected page access to the uploaded bytes; it cannot control
 what that page does with them afterward. Apply account permissions and network
 policy separately.
 
-**Renewable sessions (requires the OPL-5880 platform deployment).** Explicitly
+**Renewable sessions.** Explicitly
 opt in to a 30-minute active lease, renewed on the same socket up to a two-hour
-absolute limit from creation. Older servers reject this mode; it never silently
-falls back to a ten-minute session. Keep using the legacy examples until the
-updated platform is deployed.
+absolute limit from creation. A server without renewable sessions rejects this
+mode; it never silently falls back to a ten-minute session.
 
 ```ts
 const browser = new MandalaBrowserToolset(computer, {
@@ -3291,6 +3324,8 @@ import {
   OriginUnreachableError,//   521-523 — a proxy could not reach it. NOT in
                        //     `isTransient`: the outcome is unknown, not "nothing happened"
   OriginTLSError,      //     525/526 — a certificate they cannot agree on
+  InputBatchError,     //     any status — an OpenAI input batch that stopped part-way;
+                       //           err.result says how far it got. Never replayed.
   ConnectionError,     //   the request never left: DNS, a refused socket, a
                        //     failed handshake. Retryable, `create` included.
   ConnectionInterruptedError,// a subclass, and the opposite answer: the request
@@ -4110,8 +4145,9 @@ and `cost_usd` and `credits_remaining_usd` to each step. A run the credits
 cannot start fails with `insufficient_credits`, whose message and
 `details.top_up_url` name the billing page.
 
-Only `finished: true` (`stop: "end_turn"`) exits zero. A step limit, refusal, rate
-limit, error frame, or stream ending without a final result exits nonzero. An
+Only `finished: true` (`stop: "end_turn"`) exits zero. Any other stop (a step
+limit, refusal, rate limit, credits running out, the cost cap), an error frame,
+or a stream ending without a final result exits nonzero. An
 agent error frame preserves the server's reported completed steps and token
 usage under `data.error.details`; those actions may already have happened.
 

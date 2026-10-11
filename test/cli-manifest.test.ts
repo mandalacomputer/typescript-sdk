@@ -343,6 +343,16 @@ describe('offline discovery', () => {
     },
   );
 
+  it('offers the agent providers in the manifest and every completion', () => {
+    const run = manifest().commands.find((c) => c.path.join(' ') === 'agent run')!;
+    expect(run.flags.find((f) => f.name === 'provider')?.choices).toEqual(['anthropic', 'openai']);
+    for (const shell of ['bash', 'zsh'] as const)
+      expect(completion(shell)).toContain(
+        "'agent run|--provider') candidates='anthropic openai' ;;",
+      );
+    expect(completion('fish')).toMatch(/'agent run'\\?"? -l provider -r -a 'anthropic openai'/);
+  });
+
   it('completes --as and --path after computers create', () => {
     for (const shell of ['bash', 'zsh'] as const)
       expect(completion(shell)).toMatch(/'computers create'\) candidates='[^']*--as [^']*--path /);

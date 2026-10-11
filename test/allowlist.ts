@@ -190,8 +190,6 @@ export const ALLOWED: ReadonlySet<string> = new Set(
  * design is that it is enumerable.
  */
 export const UNIMPLEMENTED: ReadonlySet<string> = new Set([
-  // GAP (OPL-5878): the platform's authenticated CDP transport ships first.
-  // Use direct HTTP until the browser driver adds connection lifecycle wrappers.
   // The OpenAI-shaped door onto the agent loop. Deliberately not wrapped: a
   // caller who wants it already has an OpenAI client and points its baseURL
   // here, and a second, worse OpenAI client inside this SDK would be a
@@ -505,19 +503,15 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
  * model's `tool_use.input` block can be forwarded without translation — which
  * leaves several fields with two names apiece. Picking one and sending it
  * consistently is the point; sending both would be two ways for the same call
- * to mean different things.
+ * to mean different things. The OpenAI dialect's own fields (`type`, `path`,
+ * `scroll_x`, `scroll_y`, `button`) are sent by `inputBatch()`, which speaks it
+ * whole; the single-action helpers keep this API's own vocabulary.
  *
  * Parameters of a route in UNIMPLEMENTED are not listed here — a route nobody
  * calls sends none of its parameters, and repeating all six of chat/completions'
  * would say nothing the route's own line does not.
  */
 export const UNIMPLEMENTED_PARAMETERS: ReadonlySet<string> = new Set([
-  // OPL-4396: raw OpenAI dialect; typed helpers retain their action vocabulary.
-  'POST computers/:id/input  body:type',
-  'POST computers/:id/input  body:path',
-  'POST computers/:id/input  body:scroll_x',
-  'POST computers/:id/input  body:scroll_y',
-
   // `manage_keys: true` is refused from every API key (403): the permission is
   // granted only from a dashboard session, and false is the default. There is
   // nothing for this SDK to send.
@@ -525,10 +519,6 @@ export const UNIMPLEMENTED_PARAMETERS: ReadonlySet<string> = new Set([
   // `keys: ['ctrl', 'c']` is sent instead. The chord-as-one-string form cannot
   // express a key whose own name contains the separator.
   'POST computers/:id/input  body:key',
-  // `scroll_direction` is sent instead — `button` is the flat vocabulary's name
-  // for it, and on a route that also accepts a real mouse button that is a word
-  // worth not overloading.
-  'POST computers/:id/input  body:button',
   // `amount` is sent instead. Same value, two names.
   'POST computers/:id/input  body:scroll_amount',
 ]);
