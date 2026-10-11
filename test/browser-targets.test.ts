@@ -2,8 +2,12 @@ import { EventEmitter } from 'node:events';
 import v8 from 'node:v8';
 import vm from 'node:vm';
 import { afterEach, expect, it, vi } from 'vitest';
+import { BrowserFilePolicy } from '../src/anthropic.js';
 import { BrowserCDP } from '../src/browser-cdp.js';
 import type { BrowserConnection } from '../src/browser-connection.js';
+import { BrowserFiles } from '../src/browser-file-session.js';
+import { digest } from '../src/browser-files.js';
+import type { Computer } from '../src/index.js';
 
 type Command = {
   id: number;
@@ -1027,6 +1031,117 @@ it('frames reported under a restored frame are tracked once the restore lands', 
     download(ws, 'two', 'd');
     await vi.waitFor(() => expect(event).toHaveBeenCalledTimes(2));
     expect(event.mock.calls.map((c) => c[2])).toEqual([true, false]);
+  } finally {
+    await backend.close();
+  }
+});
+
+it.each(['completed', 'canceled'])(
+  'a download %s while its start waits on a cache restore is still seen through',
+  async (state) => {
+    const { backend, ws } = await started();
+    const computer = { id: 'vm-restore' } as unknown as Computer;
+    const approved: unknown[] = [];
+    const files = new BrowserFiles(
+      computer,
+      new BrowserFilePolicy(computer, {
+        taskId: 'restore',
+        downloads: true,
+        approveDownload: async (file) => {
+          approved.push(file);
+          return true;
+        },
+      }),
+      backend,
+    );
+    files.context = files.adapter.context = 'context';
+    const guid = '00000000-0000-0000-0000-000000000001';
+    const data = Buffer.from('hello');
+    const operations: string[] = [];
+    files.remote = async (op) => {
+      operations.push(op);
+      if (op === 'seal')
+        return { data: data.toString('base64'), size: data.length, sha256: digest(data) };
+      if (op === 'publish') return { path: `${files.root}/approved/${guid}-notes.txt` };
+      return {};
+    };
+    backend.files = files;
+    try {
+      const id = await restoring(ws);
+      ws.message({
+        method: 'Browser.downloadWillBegin',
+        params: {
+          guid,
+          frameId: 'r',
+          url: 'https://example.test/notes.txt',
+          suggestedFilename: 'notes.txt',
+        },
+      });
+      ws.message({
+        method: 'Browser.downloadProgress',
+        params: { guid, state, receivedBytes: data.length, totalBytes: data.length },
+      });
+      await new Promise((r) => setTimeout(r, 20));
+      ws.message({
+        id,
+        result: { frameTree: { frame: { id: 'tab' }, childFrames: [{ frame: { id: 'r' } }] } },
+      });
+      await vi.waitFor(() =>
+        expect(files.downloads.get(guid)?.state).toBe(
+          state === 'completed' ? 'complete' : 'failed',
+        ),
+      );
+      expect(approved).toHaveLength(state === 'completed' ? 1 : 0);
+      expect(operations).toContain(state === 'completed' ? 'publish' : 'discard');
+    } finally {
+      await backend.close();
+    }
+  },
+);
+
+it('a snapshot that events outrun is dropped rather than remembering them all', async () => {
+  const { backend, ws } = await started();
+  const { event, frames } = stubFiles(backend);
+  try {
+    const id = await restoring(ws);
+    for (let n = 0; n < 300; n++)
+      ws.message({
+        method: 'Page.frameDetached',
+        sessionId: 'session',
+        params: { frameId: `gone-${n}`, reason: 'remove' },
+      });
+    ws.message({
+      id,
+      result: { frameTree: { frame: { id: 'tab' }, childFrames: [{ frame: { id: 'r' } }] } },
+    });
+    download(ws, 'one', 'r');
+    await vi.waitFor(() => expect(event).toHaveBeenCalledTimes(1));
+    expect(event.mock.calls[0]![2]).toBe(false);
+    expect(frames.has('r')).toBe(false);
+  } finally {
+    await backend.close();
+  }
+});
+
+it('re-reads at most 16 cache restores at once', async () => {
+  const { backend, ws } = await started();
+  stubFiles(backend);
+  ws.held.add('Page.getFrameTree');
+  try {
+    ws.message({
+      method: 'Page.frameNavigated',
+      sessionId: 'session',
+      params: { frame: { id: 'tab' } },
+    });
+    for (let n = 0; n < 20; n++)
+      ws.message({
+        method: 'Page.frameNavigated',
+        sessionId: 'session',
+        params: { frame: { id: 'tab' }, type: 'BackForwardCacheRestore' },
+      });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(named(ws, 'Page.getFrameTree')).toHaveLength(16);
+    expect(backend.sessionStatus().state).toBe('active');
   } finally {
     await backend.close();
   }

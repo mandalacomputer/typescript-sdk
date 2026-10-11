@@ -126,6 +126,13 @@ const FRAME_INIT: [string, Message][] = [
 const RENEW_MARGIN_MS = 2000;
 const RESTORE_WAIT_MS = 5000;
 const RESTORE_ORPHANS = 256;
+// At most this many back/forward cache restores re-read at once; past it a
+// restore is not re-read, and its frames' downloads are refused.
+const RESTORES = 16;
+// At most this many frames a snapshot remembers events for while on its way;
+// past it the snapshot is dropped unused, and what it would have tracked stays
+// untracked.
+const SNAPSHOT_TOUCHED = 256;
 const RENEW_ATTEMPT_MS = 10000;
 
 /** Whether a failed renewal attempt is worth another try before the deadline. */
@@ -249,13 +256,15 @@ export class BrowserCDP {
   // Tracked frame id -> its parent frame's id, where known.
   #frameParent = new Map<string, string>();
   // For each frame-tree request on its way: the frames events have reported since.
-  #snapshots = new Set<Set<string>>();
+  #snapshots = new Set<{ touched: Set<string>; overflow: boolean }>();
   // Back/forward cache restores whose frame tree is on its way. Until it
   // lands, a restored frame is not tracked yet, so a frame reported beneath
   // one is held here (at most RESTORE_ORPHANS of them) and a download from a
   // frame not tracked yet waits for the tree (at most RESTORE_WAIT_MS).
   #restoring = new Set<Promise<void>>();
   #orphans = new Map<string, { tab: string; session: string; parent: string }>();
+  // Download guid -> the start decision it waits on, until the start is handled.
+  #deciding = new Map<string, boolean | Promise<boolean>>();
   #ready = new Map<string, { promise: Promise<void>; resolve: () => void }>();
   #creating: { promise: Promise<void>; resolve: () => void } | undefined;
   #active: string | undefined;
@@ -509,6 +518,7 @@ export class BrowserCDP {
     this.#frameSource.clear();
     this.#frameParent.clear();
     this.#orphans.clear();
+    this.#deciding.clear();
     this.#detached.clear();
     this.#active = undefined;
     this.#changes = [];
@@ -581,12 +591,15 @@ export class BrowserCDP {
     // the detach that would free it stuck in the queue behind it.
     if (message.method === 'Target.detachedFromTarget' && typeof child === 'string')
       this.#gone.set(message, this.#detach(child));
-    if (message.method === 'Browser.downloadWillBegin')
-      this.#tracked.set(
-        message,
+    if (message.method === 'Browser.downloadWillBegin') {
+      const decision =
         this.files?.frames.has(message.params?.frameId) === true ||
-          (this.#restoring.size ? this.#decide(message.params?.frameId) : false),
-      );
+        (this.#restoring.size ? this.#decide(message.params?.frameId) : false);
+      this.#tracked.set(message, decision);
+      // Its progress must not overtake a start still waiting on its decision.
+      if (decision instanceof Promise && typeof message.params?.guid === 'string')
+        this.#deciding.set(message.params.guid, decision);
+    }
     if (AT_ONCE.has(message.method)) {
       this.#run(message);
       return;
@@ -738,6 +751,7 @@ export class BrowserCDP {
   }
   /** Re-read a session's frames after a back/forward cache restore. */
   #restore(session: string, tab: string): void {
+    if (this.#restoring.size >= RESTORES) return;
     const restore = this.#snapshot(session, tab)
       .then(() => this.#adopt())
       .catch(() => {})
@@ -767,14 +781,14 @@ export class BrowserCDP {
    */
   async #snapshot(session: string, tab: string): Promise<void> {
     if (!this.files) return;
-    const touched = new Set<string>();
-    this.#snapshots.add(touched);
+    const pending = { touched: new Set<string>(), overflow: false };
+    this.#snapshots.add(pending);
     try {
       const { frameTree } = await this.send('Page.getFrameTree', {}, session);
-      if (this.#owner(session) === tab && !this.#detached.has(session))
-        this.#trackTree(frameTree, tab, session, touched);
+      if (!pending.overflow && this.#owner(session) === tab && !this.#detached.has(session))
+        this.#trackTree(frameTree, tab, session, pending.touched);
     } finally {
-      this.#snapshots.delete(touched);
+      this.#snapshots.delete(pending);
     }
   }
   #untrack(frame: string): void {
@@ -809,7 +823,17 @@ export class BrowserCDP {
     let eventSession = session;
     try {
       if (method === 'Browser.downloadWillBegin' || method === 'Browser.downloadProgress') {
-        await this.files?.event(method, p, await this.#tracked.get(message));
+        const guid = p.guid;
+        if (method === 'Browser.downloadProgress') {
+          // Settles after the start's own wait, so the start is handled first.
+          await this.#deciding.get(guid);
+          await this.files?.event(method, p);
+          return;
+        }
+        const tracked = await this.#tracked.get(message);
+        const handled = this.files?.event(method, p, tracked);
+        if (this.#deciding.get(guid) === this.#tracked.get(message)) this.#deciding.delete(guid);
+        await handled;
         return;
       }
       if (method === 'Target.attachedToTarget') {
@@ -912,7 +936,14 @@ export class BrowserCDP {
         const tab = this.#owner(session);
         if (!tab) return;
         const frame = method.startsWith('Page.frame') ? (p.frameId ?? p.frame?.id) : undefined;
-        if (typeof frame === 'string') for (const touched of this.#snapshots) touched.add(frame);
+        if (typeof frame === 'string')
+          for (const pending of this.#snapshots)
+            if (pending.overflow) continue;
+            else if (pending.touched.size < SNAPSHOT_TOUCHED) pending.touched.add(frame);
+            else {
+              pending.overflow = true;
+              pending.touched.clear();
+            }
         if (method === 'Page.frameAttached') this.#track(p.frameId, tab, session, p.parentFrameId);
         // A swap is the frame moving to another process, where it lives on.
         if (method === 'Page.frameDetached' && p.reason !== 'swap') {
