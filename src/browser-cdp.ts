@@ -54,7 +54,8 @@ const AT_ONCE = new Set([
 // it is answered, so one waiting its turn is not lost. Command replies never
 // wait. The lanes keep a slow URL policy from holding back what must not wait:
 // - policy: subresource requests and downloads, which wait on caller code;
-// - navigation: document requests, which a navigate command waits on;
+// - navigation: a tab's own top-level document requests, which a navigate
+//   command waits on (a frame's documents go with the subresources);
 // - target: attaches, detaches, target ends and dialogs, which wait only on
 //   Chromium. A session's own events can only follow its attach.
 const EVENT_CONCURRENCY = 256;
@@ -101,6 +102,7 @@ const COMPACT: Record<string, (p: Message) => Message> = {
   'Fetch.requestPaused': (p) => ({
     requestId: owned(p.requestId),
     resourceType: owned(p.resourceType),
+    frameId: owned(p.frameId),
     request: { url: owned(p.request.url) },
   }),
 };
@@ -565,7 +567,10 @@ export class BrowserCDP {
     }
     const lane =
       message.method === 'Fetch.requestPaused'
-        ? message.params?.resourceType === 'Document'
+        ? message.params?.resourceType === 'Document' &&
+          // A tab's main frame has the tab's own target id.
+          typeof message.params.frameId === 'string' &&
+          message.params.frameId === this.#owner(message.sessionId)
           ? this.#lanes.navigation
           : this.#lanes.policy
         : message.method.startsWith('Browser.download')
@@ -648,6 +653,8 @@ export class BrowserCDP {
   async #frame(child: string, info: Message, tab: string): Promise<void> {
     try {
       this.#frames.set(child, { tab, target: info.targetId });
+      // Its root frame has the frame target's id: downloads from it belong to the tab.
+      this.files?.frame(info.targetId, tab);
       for (const [name, args] of FRAME_INIT) await this.send(name, args, child);
       await this.send('Runtime.runIfWaitingForDebugger', {}, child);
     } catch {
@@ -763,7 +770,9 @@ export class BrowserCDP {
         const tab = this.#owner(session);
         if (!tab) return;
         if (method === 'Page.frameAttached') this.files?.frame(p.frameId, tab);
-        if (method === 'Page.frameDetached') this.files?.frames.delete(p.frameId);
+        // A swap is the frame moving to another process, where it lives on.
+        if (method === 'Page.frameDetached' && p.reason !== 'swap')
+          this.files?.frames.delete(p.frameId);
         if (method === 'Page.frameNavigated') {
           this.#refs.delete(tab);
           this.files?.frame(p.frame.id, tab);

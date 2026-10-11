@@ -117,11 +117,12 @@ const paused = (
   requestId: string,
   url: string,
   resourceType = 'Fetch',
+  frameId = 'tab',
 ) =>
   ws.message({
     method: 'Fetch.requestPaused',
     sessionId: session,
-    params: { requestId, resourceType, request: { url } },
+    params: { requestId, resourceType, frameId, request: { url } },
   });
 // Fill every slot of the lane that does not wait on caller code: frames whose
 // setup Chromium never answers.
@@ -507,7 +508,7 @@ it('a slow URL policy holds back neither a new tab nor a dialog', async () => {
   }
 });
 
-it('a backlog of subresource requests holds back no navigation', async () => {
+it('a backlog of subresource and frame requests holds back no top-level navigation', async () => {
   let release!: () => void;
   const gate = new Promise<void>((r) => {
     release = r;
@@ -517,8 +518,11 @@ it('a backlog of subresource requests holds back no navigation', async () => {
   });
   const { backend, ws } = await started(policy);
   try {
-    for (let n = 0; n < 1024; n++) paused(ws, 'session', `r${n}`, `https://example.test/sub/${n}`);
-    paused(ws, 'session', 'page', 'https://example.test/next', 'Document');
+    for (let n = 0; n < 512; n++) paused(ws, 'session', `r${n}`, `https://example.test/sub/${n}`);
+    // Frame documents are documents too, but nothing waits on them.
+    for (let n = 0; n < 512; n++)
+      paused(ws, 'session', `f${n}`, `https://example.test/sub/frame-${n}`, 'Document', `f-${n}`);
+    paused(ws, 'session', 'page', 'https://example.test/next', 'Document', 'tab');
     await vi.waitFor(() =>
       expect(named(ws, 'Fetch.continueRequest')).toEqual([
         expect.objectContaining({ params: { requestId: 'page' } }),
@@ -582,6 +586,47 @@ it('decides a download’s frame as it arrives, however long the download waits'
     expect(event.mock.calls.slice(1).map((c) => c[2])).toEqual([true, false]);
   } finally {
     release();
+    await backend.close();
+  }
+});
+
+it('keeps a frame’s downloads tracked across a process swap, not past its removal', async () => {
+  const { backend, ws } = await started();
+  const event = vi.fn(async (_method: string, _p: unknown, _tracked?: boolean) => {});
+  const frames = new Map<string, string>();
+  backend.files = {
+    frames,
+    frame(id: string, tab: string) {
+      frames.set(id, tab);
+      return true;
+    },
+    event,
+    close: async () => {},
+    created: false,
+    cleanupFailed: false,
+  } as unknown as NonNullable<BrowserCDP['files']>;
+  const download = (guid: string, frameId: string) =>
+    ws.message({ method: 'Browser.downloadWillBegin', params: { guid, frameId } });
+  const detached = (frameId: string, reason: string) =>
+    ws.message({
+      method: 'Page.frameDetached',
+      sessionId: 'session',
+      params: { frameId, reason },
+    });
+  try {
+    ws.message({ method: 'Page.frameAttached', sessionId: 'session', params: { frameId: 'f' } });
+    // The frame navigates cross-site: its old process lets it go as a swap,
+    // and it returns as a frame target of its own.
+    detached('f', 'swap');
+    attach(ws, 'session', 'f', 'iframe');
+    await vi.waitFor(() => expect(on(ws, 'f')).toContain('Runtime.runIfWaitingForDebugger'));
+    download('one', 'f');
+    download('two', 'f-target');
+    detached('f', 'remove');
+    download('three', 'f');
+    await vi.waitFor(() => expect(event).toHaveBeenCalledTimes(3));
+    expect(event.mock.calls.map((c) => c[2])).toEqual([true, true, false]);
+  } finally {
     await backend.close();
   }
 });
