@@ -37,8 +37,11 @@ export type MandalaBrowserToolsetOptions = Omit<
  *
  * The URL policy checks navigation and intercepted HTTP(S) requests, including
  * those of cross-site frames, which run under it. It is not network isolation:
- * configure guest egress controls for that. Dedicated workers are held paused
- * and never run; popups are unsupported. Files require remoteFilePolicy;
+ * configure guest egress controls for that. Like WebSockets, a sandboxed or
+ * other out-of-process frame that starts running before the driver can attach
+ * can make requests, and create workers, that the policy does not see. Other
+ * pages cannot start dedicated workers (constructing one throws a
+ * SecurityError); shared and service workers and popups are unsupported. Files require remoteFilePolicy;
  * uploads also require confirm. JavaScript execution is off by default and
  * requires confirm when enabled.
  */

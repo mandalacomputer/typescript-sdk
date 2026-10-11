@@ -80,10 +80,23 @@ This is the summary you read to decide whether to upgrade.
   ID. It is never closed, since closing a frame closes its whole tab. Its
   contents are not in `read_page`, `find` or `get_page_text`; screenshots and
   coordinate input reach it, and a download from it, or from a frame inside
-  it, is handled as one from the tab. A page's dedicated workers are held paused and
-  never run, rather than ending the session: a worker can start another whose
-  script Chromium fetches outside any interception the URL policy could
-  apply. Popups and other new top-level targets are still closed.
+  it, is handled as one from the tab. Popups and other new top-level targets
+  are still closed. As with WebSockets, `urlPolicy` is not network isolation:
+  a sandboxed or other out-of-process frame that starts running before the
+  driver can attach to it (Chromium starts a sandboxed `srcdoc` frame this
+  way) makes its first requests before `urlPolicy` can see them, and can keep
+  the browser's own `Worker` constructor and start workers whose requests it
+  may not see.
+- **Pages in the browser toolset cannot start dedicated workers.** In every
+  frame the driver attaches to before it runs, cross-site and `about:blank`
+  frames included, constructing a `Worker` throws a `SecurityError` before the
+  page's own scripts run, for script, `blob:` and `data:` URLs alike, and the
+  page carries on without it. A frame that starts running before the driver
+  can attach (above) is not covered.
+  A worker could not be run under `urlPolicy`: Chromium fetches the script of a
+  worker started by another worker outside any interception, and a worker held
+  paused is released, unpoliced, when its page closes or navigates. Shared and
+  service workers are still closed, as before.
 - **A renewable browser session rides out a failed renewal.** A renewal that
   fails in passing (a connection error, a timeout, a 408, a 429 or a 5xx) is
   retried with backoff, honouring `Retry-After`, until shortly before the lease
