@@ -11,11 +11,13 @@ import { toAgentEvent } from '../src/agent.js';
 import {
   type AgentEvent,
   APIError,
+  AuthenticationError,
   Client,
   InsufficientCreditsError,
   isTransient,
   MandalaError,
   ModelProviderError,
+  NotFoundError,
   PermissionDeniedError,
   PlanLimitError,
   ValidationError,
@@ -494,4 +496,49 @@ it('leaves an unprefixed 429 after a step on your own key as OPL-5446 left it', 
     .agent({ prompt: 'go', modelKey: 'sk' })
     .catch((e) => e);
   expect(isTransient(err)).toBe(true);
+});
+
+describe('a funded run whose provider failed, in the platform’s words', () => {
+  const UNAVAILABLE = 'Mandala AI is unavailable';
+
+  it.each([401, 403, 404, 413])(
+    '%i is a plain APIError from agent() and agentOnce(), not the table class',
+    async (status) => {
+      const frame = { error: UNAVAILABLE, status, usage: USAGE, steps: [] };
+      const { client } = setup(onAgent(() => sse(['error', frame])));
+      const streamed = await (await client.computers.get('vm-1'))
+        .agent({ prompt: 'go' })
+        .catch((e) => e);
+      expect(streamed.constructor).toBe(APIError);
+      expect(streamed.status).toBe(status);
+      const { client: once } = setup(
+        onAgent(() => json({ error: UNAVAILABLE, usage: USAGE, steps_taken: [] }, { status })),
+      );
+      const answered = await (await once.computers.get('vm-1'))
+        .agentOnce({ prompt: 'go' })
+        .catch((e) => e);
+      expect(answered.constructor).toBe(APIError);
+      expect(answered.status).toBe(status);
+    },
+  );
+
+  it('leaves the platform’s own refusals on a funded run in their classes', async () => {
+    const frame = { error: 'no such computer', status: 404, usage: USAGE, steps: [] };
+    const { client } = setup(onAgent(() => sse(['error', frame])));
+    const err = await (await client.computers.get('vm-1')).agent({ prompt: 'go' }).catch((e) => e);
+    expect(err).toBeInstanceOf(NotFoundError);
+    const revoked = { error: 'revoked', status: 401, reason: 'revoked', usage: USAGE, steps: [] };
+    const { client: other } = setup(onAgent(() => sse(['error', revoked])));
+    const auth = await (await other.computers.get('vm-1')).agent({ prompt: 'go' }).catch((e) => e);
+    expect(auth).toBeInstanceOf(AuthenticationError);
+  });
+
+  it('leaves the same sentence on your own key to the status table', async () => {
+    const frame = { error: UNAVAILABLE, status: 404, usage: USAGE, steps: [] };
+    const { client } = setup(onAgent(() => sse(['error', frame])));
+    const err = await (await client.computers.get('vm-1'))
+      .agent({ prompt: 'go', modelKey: 'sk' })
+      .catch((e) => e);
+    expect(err).toBeInstanceOf(NotFoundError);
+  });
 });

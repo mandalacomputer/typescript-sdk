@@ -43,7 +43,11 @@ This is the summary you read to decide whether to upgrade.
   variable that is set but empty does not quietly become a funded run. A 402
   carrying `top_up_url` on the agent routes is `InsufficientCreditsError`; every
   other 402 there is still `ModelProviderError` on your own key, and a plain
-  `APIError` on a funded run, which sent no key to blame.
+  `APIError` on a funded run, which sent no key to blame. So is a funded run's
+  401, 403, 404 or 413 reported as `Mandala AI is unavailable`, the platform's
+  AI service failing, rather than the class that would blame your API key, the
+  computer or the request. A funded run's 429 after it took a step is not
+  transient, as a relayed model 429 after a step already was not.
 
 ### Fixed
 

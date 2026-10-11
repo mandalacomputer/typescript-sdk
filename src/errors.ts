@@ -525,6 +525,19 @@ function reportsSteps(body: unknown): boolean {
 const afterAgentSteps = new WeakSet<APIError>();
 
 /**
+ * The sentence the platform reports a funded run's provider failure with: its
+ * own fixed words in place of the provider's, which never leave the platform,
+ * over the provider's status. The funded counterpart of `model API: `, and
+ * read the same way — a match is a failure of the platform's AI service
+ * rather than of the computer, the request or the caller's credential, and no
+ * match leaves the status table's answer standing.
+ */
+const FUNDED_UNAVAILABLE = 'Mandala AI is unavailable';
+
+/** Statuses whose table class would blame the caller, the computer or the plan. */
+const FUNDED_MISLEADING: ReadonlySet<number> = new Set([401, 402, 403, 404, 413]);
+
+/**
  * What {@link agentRouteError} needs to know about the run, beyond its error.
  */
 export type AgentRunContext = {
@@ -545,6 +558,10 @@ export type AgentRunContext = {
  *   account behind `X-Model-Key`. On a FUNDED run there is no such key and no
  *   account of the caller's behind one, so the same 402 stays a plain
  *   {@link APIError} with the platform's own sentence.
+ * - On a funded run, a 401, 403, 404 or 413 reported as
+ *   `Mandala AI is unavailable` — the platform's AI service failing over its
+ *   provider's status — is a plain {@link APIError} too, not the class that
+ *   would blame the caller's credential, the computer or the request.
  * - A 404 or 413 the model API answered (see {@link relayedFromModel}) becomes
  *   a {@link ModelProviderError} rather than a {@link NotFoundError} or
  *   {@link TooLargeError}. An unprefixed one is the platform's own and is
@@ -595,8 +612,17 @@ export function agentRouteError(err: APIError, stepsSeen = 0, run: AgentRunConte
       metadata,
       link,
     );
-  } else if (err.status === 402 && run.funded) {
-    // Not the table's PlanLimitError either: no plan limit refuses inside a run.
+  } else if (
+    run.funded &&
+    (err.status === 402 ||
+      (FUNDED_MISLEADING.has(err.status) && errorRecord(err.body)?.error === FUNDED_UNAVAILABLE))
+  ) {
+    // The platform's AI service failing a funded run, over its provider's
+    // status. Not the table's class: an AuthenticationError would blame the
+    // caller's API key, a NotFoundError the computer, a TooLargeError the
+    // request and a PlanLimitError the plan, and none of them is the cause.
+    // A funded 402 without `top_up_url` is this whatever it says: no plan
+    // limit refuses inside a run, and there is no key of the caller's to bill.
     rebuilt = new APIError(err.message, err.status, err.body, err.retryAfterMs, metadata);
   } else if (err.status === 402) {
     rebuilt = new ModelProviderError(
