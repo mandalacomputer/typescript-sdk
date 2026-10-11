@@ -9,6 +9,8 @@ This is the summary you read to decide whether to upgrade.
 
 ## [Unreleased]
 
+## [0.12.0] — 2026-10-11
+
 ### Added
 
 - **Run the agent on the account's AI credits.** `agent()`, `agentOnce()` and
@@ -69,7 +71,10 @@ This is the summary you read to decide whether to upgrade.
 - **Send a batch of OpenAI computer actions.** `computer.inputBatch(actions)`
   sends 1 to 32 OpenAI actions, in OpenAI's own spelling, as one request. It
   answers an `InputBatchResult`, and with `{ context: true }` the desktop after
-  the batch. A batch refused before any action ran throws the ordinary error.
+  the batch. A batch refused before any action ran throws the ordinary error,
+  except that a 503 may mean the batch ran: the platform answers 503 in the
+  same shape when the batch was sent and its answer was lost, so never send it
+  again blindly.
   One that stopped part-way throws the new `InputBatchError`, whose `result`
   carries `completed`, `failedIndex` and the results so far, and which
   `isTransient()` never calls worth sending again. Neither does it call an
@@ -135,7 +140,6 @@ This is the summary you read to decide whether to upgrade.
   `finished`, as before.
 - **A webhook URL longer than 2048 characters is refused before the call**,
   as `WEBHOOK_URL_MAX`, the platform's own ceiling.
-
 - **An omitted `modelKey` is no longer refused.** It used to be a
   `ValidationError` before the call; it is now a run on AI credits. An empty
   or blank `modelKey` is still refused, so a key read from an environment
@@ -1394,6 +1398,7 @@ No effect on the published surface, listed because it is most of the window.
 - Several parser fixes landed before that scanner was retired, each ported
   to and from the MCP server's byte-identical copy.
 
+[0.12.0]: https://github.com/mandalacomputer/typescript-sdk/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/mandalacomputer/typescript-sdk/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/mandalacomputer/typescript-sdk/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/mandalacomputer/typescript-sdk/compare/v0.8.0...v0.9.0
