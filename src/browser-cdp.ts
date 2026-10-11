@@ -124,6 +124,8 @@ const FRAME_INIT: [string, Message][] = [
 // Renewal keeps trying until this long before the lease deadline, so that the
 // last attempt can still arrive while the lease is active.
 const RENEW_MARGIN_MS = 2000;
+const RESTORE_WAIT_MS = 5000;
+const RESTORE_ORPHANS = 256;
 const RENEW_ATTEMPT_MS = 10000;
 
 /** Whether a failed renewal attempt is worth another try before the deadline. */
@@ -235,7 +237,7 @@ export class BrowserCDP {
   #gone = new WeakMap<Message, string[]>();
   // Whether a download's frame was tracked when the download began, decided in
   // arrival order: frame events are not queued, and a download may be.
-  #tracked = new WeakMap<Message, boolean>();
+  #tracked = new WeakMap<Message, boolean | Promise<boolean>>();
   #tabs = new Map<string, Message>();
   #sessions = new Map<string, string>();
   // Cross-process frame session -> the owned tab it renders in, and its target.
@@ -248,6 +250,12 @@ export class BrowserCDP {
   #frameParent = new Map<string, string>();
   // For each frame-tree request on its way: the frames events have reported since.
   #snapshots = new Set<Set<string>>();
+  // Back/forward cache restores whose frame tree is on its way. Until it
+  // lands, a restored frame is not tracked yet, so a frame reported beneath
+  // one is held here (at most RESTORE_ORPHANS of them) and a download from a
+  // frame not tracked yet waits for the tree (at most RESTORE_WAIT_MS).
+  #restoring = new Set<Promise<void>>();
+  #orphans = new Map<string, { tab: string; session: string; parent: string }>();
   #ready = new Map<string, { promise: Promise<void>; resolve: () => void }>();
   #creating: { promise: Promise<void>; resolve: () => void } | undefined;
   #active: string | undefined;
@@ -500,6 +508,7 @@ export class BrowserCDP {
     this.#parents.clear();
     this.#frameSource.clear();
     this.#frameParent.clear();
+    this.#orphans.clear();
     this.#detached.clear();
     this.#active = undefined;
     this.#changes = [];
@@ -573,7 +582,11 @@ export class BrowserCDP {
     if (message.method === 'Target.detachedFromTarget' && typeof child === 'string')
       this.#gone.set(message, this.#detach(child));
     if (message.method === 'Browser.downloadWillBegin')
-      this.#tracked.set(message, this.files?.frames.has(message.params?.frameId) === true);
+      this.#tracked.set(
+        message,
+        this.files?.frames.has(message.params?.frameId) === true ||
+          (this.#restoring.size ? this.#decide(message.params?.frameId) : false),
+      );
     if (AT_ONCE.has(message.method)) {
       this.#run(message);
       return;
@@ -667,7 +680,15 @@ export class BrowserCDP {
   #track(frame: unknown, tab: string, session: string, parent?: unknown): boolean {
     // Only below a tracked frame, so that every tracked frame stays reachable
     // from the frames above it when they change documents.
-    if (typeof parent === 'string' && !this.files?.frames.has(parent)) return false;
+    if (typeof parent === 'string' && !this.files?.frames.has(parent)) {
+      if (
+        typeof frame === 'string' &&
+        this.#restoring.size &&
+        (this.#orphans.has(frame) || this.#orphans.size < RESTORE_ORPHANS)
+      )
+        this.#orphans.set(frame, { tab, session, parent });
+      return false;
+    }
     if (typeof frame !== 'string' || !this.files?.frame(frame, tab)) return false;
     this.#frameSource.set(frame, session);
     if (typeof parent === 'string') this.#frameParent.set(frame, parent);
@@ -691,7 +712,10 @@ export class BrowserCDP {
     const below = new Set([frame]);
     for (let grew = true; grew; ) {
       grew = false;
-      for (const [child, parent] of this.#frameParent)
+      for (const [child, parent] of [
+        ...this.#frameParent,
+        ...[...this.#orphans].map(([orphan, o]) => [orphan, o.parent] as const),
+      ])
         if (below.has(parent) && !below.has(child)) {
           below.add(child);
           grew = true;
@@ -699,6 +723,42 @@ export class BrowserCDP {
     }
     below.delete(frame);
     for (const child of below) this.#untrack(child);
+  }
+  /** Track held frames whose parent is now tracked, and theirs in turn. */
+  #adopt(): void {
+    for (let grew = true; grew; ) {
+      grew = false;
+      for (const [frame, o] of this.#orphans)
+        if (this.files?.frames.has(o.parent)) {
+          this.#orphans.delete(frame);
+          if (this.#owner(o.session) === o.tab && this.#track(frame, o.tab, o.session, o.parent))
+            grew = true;
+        }
+    }
+  }
+  /** Re-read a session's frames after a back/forward cache restore. */
+  #restore(session: string, tab: string): void {
+    const restore = this.#snapshot(session, tab)
+      .then(() => this.#adopt())
+      .catch(() => {})
+      .finally(() => {
+        this.#restoring.delete(restore);
+        if (!this.#restoring.size) this.#orphans.clear();
+      });
+    this.#restoring.add(restore);
+  }
+  /** Whether a download's frame is tracked once pending restores land. */
+  async #decide(frame: unknown): Promise<boolean> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      Promise.allSettled([...this.#restoring]),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, RESTORE_WAIT_MS);
+        timer.unref?.();
+      }),
+    ]);
+    clearTimeout(timer);
+    return typeof frame === 'string' && this.files?.frames.has(frame) === true;
   }
   /**
    * Track the frames a session holds now. The reply is a snapshot: a frame
@@ -721,9 +781,11 @@ export class BrowserCDP {
     this.files?.frames.delete(frame);
     this.#frameSource.delete(frame);
     this.#frameParent.delete(frame);
+    this.#orphans.delete(frame);
   }
   #forgetFrames(session: string): void {
     for (const [frame, source] of this.#frameSource) if (source === session) this.#untrack(frame);
+    for (const [frame, o] of this.#orphans) if (o.session === session) this.#orphans.delete(frame);
   }
   /** A cross-process frame of an owned tab. It runs; closing it would close its tab. */
   async #frame(child: string, info: Message, tab: string): Promise<void> {
@@ -747,7 +809,7 @@ export class BrowserCDP {
     let eventSession = session;
     try {
       if (method === 'Browser.downloadWillBegin' || method === 'Browser.downloadProgress') {
-        await this.files?.event(method, p, this.#tracked.get(message));
+        await this.files?.event(method, p, await this.#tracked.get(message));
         return;
       }
       if (method === 'Target.attachedToTarget') {
@@ -868,8 +930,7 @@ export class BrowserCDP {
           this.#track(p.frame.id, tab, session, p.frame.parentId);
           // A document back from the back/forward cache brings its frames
           // with it, and Chromium reports none of them as attached.
-          if (p.type === 'BackForwardCacheRestore')
-            void this.#snapshot(session, tab).catch(() => {});
+          if (p.type === 'BackForwardCacheRestore') this.#restore(session, tab);
         } else if (method === 'Runtime.consoleAPICalled') append(this.#console, tab, p.text);
         else if (method === 'Network.responseReceived') append(this.#network, tab, p.text);
       }
@@ -884,6 +945,7 @@ export class BrowserCDP {
   #dropTab(target: string): void {
     if (this.files)
       for (const [frame, tab] of this.files.frames) if (tab === target) this.#untrack(frame);
+    for (const [frame, o] of this.#orphans) if (o.tab === target) this.#orphans.delete(frame);
     for (const [session, frame] of this.#frames) if (frame.tab === target) this.#dropFrame(session);
     this.#ready.get(target)?.resolve();
     for (const map of [

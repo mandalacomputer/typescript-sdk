@@ -929,3 +929,105 @@ it('a document back from the back/forward cache has its frames tracked again', a
     await backend.close();
   }
 });
+
+// A back/forward cache restore of the tab's document whose frame tree the
+// test answers itself; resolves to that request's id.
+async function restoring(ws: Socket): Promise<number> {
+  ws.held.add('Page.getFrameTree');
+  ws.message({
+    method: 'Page.frameNavigated',
+    sessionId: 'session',
+    params: { frame: { id: 'tab' } },
+  });
+  ws.message({
+    method: 'Page.frameNavigated',
+    sessionId: 'session',
+    params: { frame: { id: 'tab' }, type: 'BackForwardCacheRestore' },
+  });
+  await vi.waitFor(() =>
+    expect(ws.sent.some((c) => c.method === 'Page.getFrameTree' && c.sessionId === 'session')).toBe(
+      true,
+    ),
+  );
+  return ws.sent.find((c) => c.method === 'Page.getFrameTree' && c.sessionId === 'session')!.id;
+}
+
+it('a download during a cache restore waits for the restored frames', async () => {
+  const { backend, ws } = await started();
+  const { event } = stubFiles(backend);
+  try {
+    const id = await restoring(ws);
+    download(ws, 'restored', 'r');
+    download(ws, 'stranger', 's');
+    await new Promise((r) => setTimeout(r, 20));
+    expect(event).not.toHaveBeenCalled();
+    ws.message({
+      id,
+      result: { frameTree: { frame: { id: 'tab' }, childFrames: [{ frame: { id: 'r' } }] } },
+    });
+    await vi.waitFor(() => expect(event).toHaveBeenCalledTimes(2));
+    expect(event.mock.calls.map((c) => [c[1], c[2]])).toEqual([
+      [expect.objectContaining({ guid: 'restored' }), true],
+      [expect.objectContaining({ guid: 'stranger' }), false],
+    ]);
+  } finally {
+    await backend.close();
+  }
+});
+
+it('a download during a cache restore that never answers is refused in time', async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  const { backend, ws } = await started();
+  const { event } = stubFiles(backend);
+  try {
+    await restoring(ws);
+    download(ws, 'restored', 'r');
+    await vi.advanceTimersByTimeAsync(4999);
+    expect(event).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    await vi.waitFor(() => expect(event).toHaveBeenCalledTimes(1));
+    expect(event.mock.calls[0]![2]).toBe(false);
+    expect(backend.sessionStatus().state).toBe('active');
+  } finally {
+    await backend.close();
+  }
+});
+
+it('frames reported under a restored frame are tracked once the restore lands', async () => {
+  const { backend, ws } = await started();
+  const { event, frames } = stubFiles(backend);
+  const frame = (method: string, params: Record<string, unknown>) =>
+    ws.message({ method, sessionId: 'session', params });
+  try {
+    const id = await restoring(ws);
+    // The restored frame 'a' is not tracked yet; its new child 'b' is
+    // reported beneath it, and so is 'c', which goes again at once.
+    frame('Page.frameAttached', { frameId: 'b', parentFrameId: 'a' });
+    frame('Page.frameAttached', { frameId: 'c', parentFrameId: 'a' });
+    frame('Page.frameAttached', { frameId: 'd', parentFrameId: 'c' });
+    frame('Page.frameDetached', { frameId: 'c', reason: 'remove' });
+    // The tree was read before 'c' went.
+    ws.message({
+      id,
+      result: {
+        frameTree: {
+          frame: { id: 'tab' },
+          childFrames: [
+            {
+              frame: { id: 'a' },
+              childFrames: [{ frame: { id: 'b' } }, { frame: { id: 'c' } }],
+            },
+          ],
+        },
+      },
+    });
+    await vi.waitFor(() => expect(frames.has('b')).toBe(true));
+    expect([...frames.keys()].sort()).toEqual(['a', 'b', 'tab']);
+    download(ws, 'one', 'b');
+    download(ws, 'two', 'd');
+    await vi.waitFor(() => expect(event).toHaveBeenCalledTimes(2));
+    expect(event.mock.calls.map((c) => c[2])).toEqual([true, false]);
+  } finally {
+    await backend.close();
+  }
+});
