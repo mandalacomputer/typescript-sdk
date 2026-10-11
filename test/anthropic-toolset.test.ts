@@ -757,6 +757,17 @@ describe('the optional peer', () => {
     });
     expect(pkg.dependencies?.['@anthropic-ai/sdk']).toBeUndefined();
   });
+
+  it('declares no range, and the floor the README names is the version tested (OPL-5855)', () => {
+    // npm refuses to install a package beside an optional peer outside its
+    // range, even in a project that never imports this module.
+    const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+    expect(pkg.peerDependencies['@anthropic-ai/sdk']).toBe('*');
+    const readme = readFileSync(new URL('../README.md', import.meta.url), 'utf8');
+    const floor = /`@anthropic-ai\/sdk` (\d+\.\d+) or newer is an optional peer/.exec(readme)?.[1];
+    expect(floor).toBeTruthy();
+    expect(pkg.devDependencies['@anthropic-ai/sdk']).toBe(`${floor}.0`);
+  });
 });
 
 describe('the README example', () => {

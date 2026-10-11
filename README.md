@@ -1819,7 +1819,11 @@ when you want to choose the model, add your own tools, or approve actions as
 they happen.
 
 `@anthropic-ai/sdk` 0.132 or newer is an optional peer. Install it yourself;
-only `mandala-computer/anthropic` imports it.
+only `mandala-computer/anthropic` imports it. The peer is declared without a
+version range, so an older Anthropic SDK in your project does not stop
+`mandala-computer` from installing; importing `mandala-computer/anthropic`
+beside one fails with `Cannot find module` naming
+`@anthropic-ai/sdk/helpers/beta/toolsets`, and upgrading to 0.132 fixes it.
 
 <!-- anthropic-toolset-example:start -->
 ```ts

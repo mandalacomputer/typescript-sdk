@@ -63,7 +63,7 @@
     "prepublishOnly": "npm run build"
   },
   "peerDependencies": {
-    "@anthropic-ai/sdk": ">=0.132.0",
+    "@anthropic-ai/sdk": "*",
     "ws": ">=8.18.0"
   },
   "peerDependenciesMeta": {

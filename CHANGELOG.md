@@ -9,6 +9,16 @@ This is the summary you read to decide whether to upgrade.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Install beside an older `@anthropic-ai/sdk`.** 0.11.0 declared its optional
+  peer as `>=0.132.0`, and npm refuses to install a package beside an optional
+  peer outside its range, so a project on an older Anthropic SDK could not
+  install `mandala-computer` at all, even one that never imports the driver.
+  The peer now has no range. `mandala-computer/anthropic` still needs 0.132 or
+  newer: importing it beside an older one fails with `Cannot find module`
+  naming `@anthropic-ai/sdk/helpers/beta/toolsets`.
+
 ## [0.11.0] — 2026-10-08
 
 ### Added
