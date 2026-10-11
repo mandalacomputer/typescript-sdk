@@ -41,8 +41,9 @@ export type MandalaBrowserToolsetOptions = Omit<
  * other out-of-process frame that starts running before the driver can attach
  * can make requests, and create workers, that the policy does not see. Other
  * pages cannot start dedicated workers (constructing one throws a
- * SecurityError); shared and service workers and popups are unsupported. Files require remoteFilePolicy;
- * uploads also require confirm. JavaScript execution is off by default and
+ * SecurityError); shared and service workers are unsupported, and popups are
+ * closed before they load, without holding up their opener. Files require
+ * remoteFilePolicy; uploads also require confirm. JavaScript execution is off by default and
  * requires confirm when enabled.
  */
 export class MandalaBrowserToolset extends BetaAbstractBrowserToolset20260801 {

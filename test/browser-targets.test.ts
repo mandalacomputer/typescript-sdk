@@ -23,6 +23,8 @@ type Socket = EventEmitter & {
   silent: Set<string>;
   /** Methods whose replies the test sends itself. */
   held: Set<string>;
+  /** Targets that close themselves first: closing them is a protocol error. */
+  closeFails: Set<string>;
   ended: boolean;
   message(value: unknown): void;
 };
@@ -34,6 +36,7 @@ vi.mock('ws', () => ({
     gone = new Set<string>();
     silent = new Set<string>();
     held = new Set<string>();
+    closeFails = new Set<string>();
     ended = false;
     constructor() {
       super();
@@ -66,6 +69,18 @@ vi.mock('ws', () => ({
           return;
         }
         const { method } = command;
+        const closing = command.params.targetId as string | undefined;
+        if (method === 'Target.closeTarget' && closing && this.closeFails.has(closing)) {
+          this.message({
+            method: 'Target.detachedFromTarget',
+            params: { sessionId: closing.replace(/-target$/, '') },
+          });
+          this.message({
+            id: command.id,
+            error: { code: -32602, message: 'No target with given id found' },
+          });
+          return;
+        }
         const n = method === 'Target.createTarget' ? ++this.tabs : 0;
         const tab = n > 1 ? `tab-${n}` : 'tab';
         this.message({
@@ -257,10 +272,11 @@ it('holds dedicated workers paused and still closes targets no owned page holds'
     attach(ws, undefined, 'popup', 'page');
     attach(ws, 'stranger', 'orphan', 'iframe');
     await vi.waitFor(() => expect(named(ws, 'Target.closeTarget')).toHaveLength(2));
-    expect(named(ws, 'Target.closeTarget').map((c) => c.params.targetId)).toEqual([
-      'popup-target',
-      'orphan-target',
-    ]);
+    expect(
+      named(ws, 'Target.closeTarget')
+        .map((c) => c.params.targetId)
+        .sort(),
+    ).toEqual(['orphan-target', 'popup-target']);
     // Never released, never detached (which would release it), never closed.
     expect(on(ws, 'worker')).toEqual([]);
     expect(on(ws, 'frame-worker')).toEqual([]);
@@ -1170,6 +1186,72 @@ it('makes Worker construction throw in every document of a tab and its frames, b
         'Dedicated workers are disabled',
       );
     }
+  } finally {
+    await backend.close();
+  }
+});
+
+it('releases a page it did not open before closing it, offline and unable to start workers', async () => {
+  const { backend, ws } = await started();
+  try {
+    attach(ws, undefined, 'popup', 'page');
+    await vi.waitFor(() => expect(named(ws, 'Target.closeTarget')).toHaveLength(1));
+    expect(on(ws, 'popup')).toEqual([
+      'Page.enable',
+      'Network.enable',
+      'Network.setBypassServiceWorker',
+      'Network.emulateNetworkConditions',
+      'Page.addScriptToEvaluateOnNewDocument',
+      'Target.setAutoAttach',
+      'Runtime.runIfWaitingForDebugger',
+    ]);
+    expect(
+      ws.sent.find((c) => c.method === 'Network.emulateNetworkConditions')!.params.offline,
+    ).toBe(true);
+    // Released before it is closed: closing a held popup wedges its opener.
+    const release = ws.sent.findIndex(
+      (c) => c.sessionId === 'popup' && c.method === 'Runtime.runIfWaitingForDebugger',
+    );
+    const close = ws.sent.findIndex((c) => c.method === 'Target.closeTarget');
+    expect(release).toBeLessThan(close);
+    expect(named(ws, 'Target.closeTarget')[0]!.params).toEqual({ targetId: 'popup-target' });
+    expect(named(ws, 'Fetch.enable').map((c) => c.sessionId)).toEqual(['session']);
+    // Its dialog is dismissed, and not reported as the tab's.
+    ws.message({
+      method: 'Page.javascriptDialogOpening',
+      sessionId: 'popup',
+      params: { type: 'alert', message: 'popup' },
+    });
+    await vi.waitFor(() =>
+      expect(named(ws, 'Page.handleJavaScriptDialog').map((c) => c.sessionId)).toEqual(['popup']),
+    );
+    expect(backend.state().state_changes).toEqual([]);
+    expect(backend.sessionStatus().state).toBe('active');
+  } finally {
+    await backend.close();
+  }
+});
+
+it('a popup that goes during its fence does not end the session', async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  const { backend, ws } = await started();
+  try {
+    // One never answers and then detaches; one is gone by the time it is closed.
+    ws.silent.add('gone-early');
+    attach(ws, undefined, 'gone-early', 'page');
+    await vi.waitFor(() => expect(on(ws, 'gone-early')).toEqual(['Page.enable']));
+    ws.message({ method: 'Target.detachedFromTarget', params: { sessionId: 'gone-early' } });
+    ws.closeFails.add('gone-late-target');
+    attach(ws, undefined, 'gone-late', 'page');
+    await vi.waitFor(() =>
+      expect(on(ws, 'gone-late')).toContain('Runtime.runIfWaitingForDebugger'),
+    );
+    await vi.advanceTimersByTimeAsync(20000);
+    expect(named(ws, 'Target.closeTarget').map((c) => c.params.targetId)).toEqual([
+      'gone-late-target',
+    ]);
+    expect(backend.sessionStatus().state).toBe('active');
+    expect(ws.ended).toBe(false);
   } finally {
     await backend.close();
   }

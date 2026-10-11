@@ -269,6 +269,8 @@ export class BrowserCDP {
   #sessions = new Map<string, string>();
   // Cross-process frame session -> the owned tab it renders in, and its target.
   #frames = new Map<string, { tab: string; target: string }>();
+  // Sessions of refused pages (popups), until they detach.
+  #refusing = new Set<string>();
   // Tracked frame id -> the session that last reported it. A session that goes
   // away takes the frames only it could see with it (Chromium reports no
   // detach for them), but not one its parent has reported since.
@@ -536,6 +538,7 @@ export class BrowserCDP {
     this.#queuedBytes = 0;
     this.#parents.clear();
     this.#frameSource.clear();
+    this.#refusing.clear();
     this.#frameParent.clear();
     this.#orphans.clear();
     this.#deciding.clear();
@@ -696,6 +699,7 @@ export class BrowserCDP {
       // for one of these sessions still waiting in the queue is not acted on.
       this.#detached.add(s);
       this.#parents.delete(s);
+      this.#refusing.delete(s);
       this.#abandon(s);
       this.#forgetFrames(s);
     }
@@ -821,6 +825,54 @@ export class BrowserCDP {
     for (const [frame, source] of this.#frameSource) if (source === session) this.#untrack(frame);
     for (const [frame, o] of this.#orphans) if (o.session === session) this.#orphans.delete(frame);
   }
+  /**
+   * A page this driver did not open: a popup (window.open, a target=_blank
+   * link) or any other new top-level page in its context. Chromium holds it
+   * for the debugger, and a popup in its opener's process holds the opener
+   * with it, so closing it while held wedges the opener's tab. It is released
+   * first, offline and with no way to start a worker, and then closed: it
+   * never loads. Offline rather than intercepted: Chromium lets an
+   * intercepted request go on when its session detaches, which closing does,
+   * while an offline request fails at once in the network stack.
+   */
+  async #refusePage(session: string, target: string): Promise<void> {
+    this.#refusing.add(session);
+    let failed: unknown;
+    try {
+      for (const [name, args] of [
+        // First, so the no-worker script reaches every new document in it,
+        // and its dialogs are reported to be dismissed.
+        ['Page.enable', {}],
+        ['Network.enable', {}],
+        ['Network.setBypassServiceWorker', { bypass: true }],
+        [
+          'Network.emulateNetworkConditions',
+          { offline: true, latency: 0, downloadThroughput: -1, uploadThroughput: -1 },
+        ],
+        ['Page.addScriptToEvaluateOnNewDocument', NO_WORKERS],
+        // A frame or worker started in it is held too, and closed as unowned.
+        ['Target.setAutoAttach', AUTO_ATTACH],
+      ] as [string, Message][]) {
+        if (!this.#refusing.has(session)) return; // It went first.
+        await this.send(name, args, session);
+      }
+      if (!this.#refusing.has(session)) return;
+      await this.send('Runtime.runIfWaitingForDebugger', {}, session);
+    } catch (error) {
+      if (error instanceof SessionGone || !this.#refusing.has(session)) return;
+      failed = error; // Not released: closing it is all that is left.
+    }
+    let closed: boolean;
+    try {
+      closed = (await this.send('Target.closeTarget', { targetId: target })).success === true;
+    } catch (error) {
+      // A popup that closes itself as it is released is refused all the same.
+      if (!this.#refusing.has(session)) return;
+      throw error;
+    }
+    if ((!closed && this.#refusing.has(session)) || failed)
+      throw new BrowserDriverError('Unsupported browser target could not be closed.');
+  }
   /** A cross-process frame of an owned tab. It runs; closing it would close its tab. */
   async #frame(child: string, info: Message, tab: string): Promise<void> {
     try {
@@ -877,7 +929,11 @@ export class BrowserCDP {
         if (parent !== undefined && info.type === 'worker') return;
         const target: string = info.targetId;
         if (!this.#ready.has(target) && this.#creating) await this.#creating.promise;
-        if (info.type !== 'page' || !this.#ready.has(target)) {
+        if (info.type === 'page' && !this.#ready.has(target)) {
+          await this.#refusePage(child, target);
+          return;
+        }
+        if (info.type !== 'page') {
           const result = await this.send('Target.closeTarget', {
             targetId: target,
           });
@@ -940,17 +996,19 @@ export class BrowserCDP {
           session,
         );
       } else if (method === 'Page.javascriptDialogOpening') {
-        this.#change({
-          type: 'dialog_dismissed',
-          kind: p.type,
-          message: String(p.message ?? '').slice(0, 1000),
-        });
+        // A refused popup's dialog is dismissed too, unreported.
+        if (!this.#refusing.has(session))
+          this.#change({
+            type: 'dialog_dismissed',
+            kind: p.type,
+            message: String(p.message ?? '').slice(0, 1000),
+          });
         try {
           await this.send('Page.handleJavaScriptDialog', { accept: false }, session);
         } catch (error) {
           // Chromium reports a cross-site frame's dialog on its tab's session;
           // should a frame session report it too, one dismissal is enough.
-          if (!this.#frames.has(session)) throw error;
+          if (!this.#frames.has(session) && !this.#refusing.has(session)) throw error;
         }
       } else {
         const tab = this.#owner(session);

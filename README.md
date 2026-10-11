@@ -2052,10 +2052,17 @@ revokes its capability; it does not stop Chromium or delete the computer.
   URL hook above). A worker cannot run under the URL hook: Chromium fetches the
   script of a worker started by another worker without any interception the
   driver could apply, and a worker held paused is released, unpoliced, when
-  its page closes or navigates. The page itself carries on. Shared workers,
-  service workers, popups and other new top-level targets are unsupported and
-  are closed; if one cannot be closed, the driver closes its session. Sites
-  that depend on these may not work with this driver.
+  its page closes or navigates. The page itself carries on. Shared workers and
+  service workers are unsupported and are closed; if one cannot be closed, the
+  driver closes its session.
+- Popups and other new top-level pages the driver did not open (`window.open`,
+  `target=_blank` links) are refused without holding up the page that opened
+  them. The driver lets each go offline, with dedicated workers disabled in
+  every frame of it, and closes it before it can load; the opener carries on,
+  its `window.open` returning a window that is about to close. Requests the
+  opener makes through such a window's `about:blank` document are the
+  opener's own, under the URL hook with the opener's tab ID. Sites that depend
+  on popups or workers may not work with this driver.
 - `read_page` returns accessibility roles/names and element refs; `find`
   performs a case-insensitive substring search over that tree. Each read/find
   replaces that tab's refs. Navigation invalidates them. Ask for a new page
