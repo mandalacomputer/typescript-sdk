@@ -143,6 +143,11 @@ const workerAttempts = (port: number, where: string) =>
   `const results=[];for(const [kind,make] of [['url',()=>new Worker('/escape-worker.js?${where}-url')],['blob',()=>new Worker(URL.createObjectURL(new Blob(["fetch('http://127.0.0.1:${port}/worker-escape?${where}-blob')"],{type:'text/javascript'})))],['data',()=>new Worker("data:text/javascript,fetch('http://127.0.0.1:${port}/worker-escape?${where}-data')")],['again',()=>{try{delete window.Worker}catch{}try{window.Worker=function(){}}catch{}return new Worker('/escape-worker.js?${where}-again')}]]){let r;try{make();r='created'}catch(e){r=e.name}results.push(kind+':'+r)}`;
 const downloadFrame = (port: number) =>
   `<iframe src="http://localhost:${port}/dl-outer" style="position:absolute;left:0;top:0;border:0;width:600px;height:400px"></iframe>`;
+// Opens a popup and then tries to use it from its own realm: a request, workers
+// (one from an about:blank frame inside it), a navigation and a dialog. Inside
+// an inline handler URL is document.URL, so window.URL.
+const popupScript = (how: string) =>
+  `const w=window.open('${how === 'blank' ? '' : `/popup-target?${how}`}');const blob=()=>window.URL.createObjectURL(new Blob(["fetch('/popup-worker?blob')"]));const made=[];try{w.fetch('/popup-fetch?from-opener').catch(()=>{})}catch{}try{new w.Worker(blob());made.push('worker')}catch{}try{new w.Worker('/popup-worker.js');made.push('script-worker')}catch{}try{const f=w.document.createElement('iframe');w.document.body.appendChild(f);new f.contentWindow.Worker(blob());made.push('frame-worker')}catch{}${how === 'blank' ? "try{w.alert('from the popup')}catch{}" : ''}try{w.location='/popup-target?moved'}catch{}document.getElementById('opened').textContent='opened:'+!!w+' made:'+made.join(',')`;
 const pages = (port: number): Record<string, [string, string | Buffer]> => ({
   '/frame-host': [
     'text/html',
@@ -204,6 +209,16 @@ const pages = (port: number): Record<string, [string, string | Buffer]> => ({
     'text/javascript',
     `fetch('http://127.0.0.1:${port}/worker-escape?'+location.search.slice(1))`,
   ],
+  // A page that opens a popup each way a page can: a target=_blank link, a
+  // click handler and a script.
+  '/popup-host': [
+    'text/html',
+    `<body style="margin:0"><a href="/popup-target?link" target="_blank" style="display:block;width:300px;height:100px">open link</a><button onclick="${popupScript('click').replaceAll('"', '&quot;')}" style="display:block;width:300px;height:100px">open window</button><button onclick="${popupScript('blank').replaceAll('"', '&quot;')}" style="display:block;width:300px;height:100px">open blank window</button><a href="/popup-target?opener-link" target="_blank" rel="opener" style="display:block;width:300px;height:100px">open link with opener</a><p>opener ready</p><p id="opened"></p><p id="network">no network change</p><script>addEventListener('offline',()=>{document.getElementById('network').textContent='went offline'})</script></body>`,
+  ],
+  '/popup-target': [
+    'text/html',
+    `<title>Popup</title><img src="/popup-image"><script>fetch('/popup-fetch')</script>`,
+  ],
   '/heavy': [
     'text/html',
     `<title>Heavy</title><p>heavy page</p>${Array.from({ length: 400 }, (_, n) => `<img src="/img/${n}">`).join('')}`,
@@ -218,7 +233,8 @@ describe.skipIf(!executable)('real Chromium through Anthropic toolResult', () =>
   afterEach(async () => {
     for (const browser of browsers.splice(0)) await browser.close();
     for (const driver of drivers.splice(0)) await driver.close();
-    if (profileDownloads) await rm(profileDownloads, { recursive: true, force: true });
+    if (profileDownloads)
+      await rm(profileDownloads, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     profileDownloads = undefined;
     if (server) {
       server.closeAllConnections();
@@ -305,7 +321,7 @@ describe.skipIf(!executable)('real Chromium through Anthropic toolResult', () =>
         req
           .url!.replace(/^\/img\/\d+$/, '/img')
           .replace(/^\/dl-outer\?\d+$/, '/dl-outer')
-          .replace(/^\/(escape-frame|escape-worker\.js)\?.*$/, '/$1')
+          .replace(/^\/(escape-frame|escape-worker\.js|popup-target)\?.*$/, '/$1')
       ];
       if (page) {
         res.writeHead(200, { 'Content-Type': page[0] });
@@ -926,6 +942,60 @@ describe.skipIf(!executable)('real Chromium through Anthropic toolResult', () =>
       expect(browser.sessionStatus.state).toBe('active');
     },
     30000,
+  );
+  it.each(['link', 'opener link', 'click', 'blank click', 'script'])(
+    'a popup opened by a %s is refused without wedging its opener',
+    async (how) => {
+      const seen: string[] = [];
+      const { browser, base, hits, url } = await fixture({
+        // Whatever a popup asks for, the policy would refuse: a request that
+        // reaches the server got past it.
+        urlPolicy: (_ctx, target) => {
+          seen.push(target);
+          if (/\/popup-(target|image|fetch|worker)/.test(target)) throw new ToolError('no popups');
+        },
+        configs: { javascript_exec: { enabled: true } },
+        confirm: () => true,
+      });
+      success(await browser.toolResult(use('navigate', { url: `${base}/popup-host` })));
+      if (how === 'script')
+        success(await browser.toolResult(use('javascript_exec', { text: popupScript('script') })));
+      else
+        success(
+          await browser.toolResult(
+            use('left_click', {
+              target: {
+                type: 'coordinate',
+                x: 50,
+                y: { link: 50, click: 150, 'blank click': 250, 'opener link': 350 }[how]!,
+              },
+            }),
+          ),
+        );
+      // The opener answers its next action at once.
+      const started = Date.now();
+      success(await browser.toolResult(use('javascript_exec', { text: 'navigator.onLine' })));
+      expect(Date.now() - started).toBeLessThan(3000);
+      // A Chromium with per-rule network emulation takes only the popup offline;
+      // an older one takes its renderer offline while the popup is refused.
+      const protocol = await (await fetch(`http://${new URL(url).host}/json/protocol`)).json();
+      const perRule = JSON.stringify(protocol).includes('emulateNetworkConditionsByRule');
+      await new Promise((r) => setTimeout(r, 1000));
+      const page = text(success(await browser.toolResult(use('get_page_text'))));
+      expect(page).toContain('opener ready');
+      if (perRule) expect(page).toContain('no network change');
+      // The popup was refused: it never loaded and none of its requests went out.
+      expect(hits.filter((hit) => /^\/popup-(target|image|fetch|worker)/.test(hit))).toEqual([]);
+      // A click opens one; a script without a gesture may be refused by Chromium itself.
+      if (how.includes('click'))
+        // It opened, and no worker could be made in it.
+        expect(text(success(await browser.toolResult(use('get_page_text'))))).toMatch(
+          /opened:true made:$/m,
+        );
+      expect(tabs(success(await browser.toolResult(use('list_tabs'))))).toHaveLength(1);
+      expect(browser.sessionStatus.state).toBe('active');
+    },
+    60000,
   );
   it('loads a page that pauses hundreds of requests at once', async () => {
     const { browser, base, hits } = await fixture({ urlPolicy: async () => {} });

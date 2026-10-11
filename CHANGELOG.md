@@ -80,8 +80,10 @@ This is the summary you read to decide whether to upgrade.
   ID. It is never closed, since closing a frame closes its whole tab. Its
   contents are not in `read_page`, `find` or `get_page_text`; screenshots and
   coordinate input reach it, and a download from it, or from a frame inside
-  it, is handled as one from the tab. Popups and other new top-level targets
-  are still closed. As with WebSockets, `urlPolicy` is not network isolation:
+  it, is handled as one from the tab. Popups (`window.open`, `target=_blank`
+  links) are refused without wedging the tab that opened them: each is let go
+  offline, unable to start workers, and closed before it can load, and the
+  opener's next action answers as usual. As with WebSockets, `urlPolicy` is not network isolation:
   a sandboxed or other out-of-process frame that starts running before the
   driver can attach to it (Chromium starts a sandboxed `srcdoc` frame this
   way) makes its first requests before `urlPolicy` can see them, and can keep
