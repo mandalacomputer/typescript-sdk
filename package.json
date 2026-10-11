@@ -64,7 +64,7 @@
   },
   "peerDependencies": {
     "@anthropic-ai/sdk": "*",
-    "ws": ">=8.18.0"
+    "ws": "*"
   },
   "peerDependenciesMeta": {
     "@anthropic-ai/sdk": {

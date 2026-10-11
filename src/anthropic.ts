@@ -34,7 +34,8 @@
  * a package beside an optional peer outside its declared range, even in a
  * project that never imports this module, so a floor there would bar everyone
  * on an older Anthropic SDK from `mandala-computer` itself. The floor is the
- * pinned devDependency the tests run against, and the README names it.
+ * pinned devDependency the tests run against, and the README names it. `ws`,
+ * which the browser toolset imports, is declared the same way.
  *
  * `confirm` IS REQUIRED, by Anthropic's class rather than by this one: a toolset
  * that can type and press keys refuses to construct without a callable that

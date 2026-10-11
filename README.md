@@ -1889,7 +1889,9 @@ try {
 the computer's authenticated WSS CDP endpoint. No SSH tunnel, local browser
 installation or Playwright runtime is needed. Use a running Linux computer
 with Chromium and member-level API access. The Node driver uses the optional
-`ws` peer for authenticated WebSocket upgrade headers.
+`ws` peer, 8.18 or newer, for authenticated WebSocket upgrade headers. Like
+the Anthropic peer it is declared without a version range, so an older `ws`
+in your project does not stop `mandala-computer` from installing.
 
 ```sh
 npm install mandala-computer @anthropic-ai/sdk ws

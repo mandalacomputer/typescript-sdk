@@ -17,7 +17,9 @@ This is the summary you read to decide whether to upgrade.
   install `mandala-computer` at all, even one that never imports the driver.
   The peer now has no range. `mandala-computer/anthropic` still needs 0.132 or
   newer: importing it beside an older one fails with `Cannot find module`
-  naming `@anthropic-ai/sdk/helpers/beta/toolsets`.
+  naming `@anthropic-ai/sdk/helpers/beta/toolsets`. The `ws` peer, new since
+  0.11.0 for the browser toolset, is declared the same way and still needs
+  8.18 or newer.
 
 ## [0.11.0] — 2026-10-08
 
