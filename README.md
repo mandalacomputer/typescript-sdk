@@ -4097,9 +4097,10 @@ mandala agent run 'Open the browser and find the documentation' --computer workb
 mandala agent run 'Summarize the visible page' --computer workbench --json
 ```
 
-Set `MANDALA_MODEL_KEY` to run on your own model-provider key. Unset, or set
-to nothing, the run spends the account's AI credits instead, and
-`--max-cost-usd` (0.25 to 20, default 2) caps what it may charge. `--computer`
+Set `MANDALA_MODEL_KEY` to run on your own model-provider key. Unset, the run
+spends the account's AI credits instead, and `--max-cost-usd` (0.25 to 20,
+default 2) caps what it may charge. Set but empty is refused before any
+request, so a secret that failed to load does not quietly spend credits. `--computer`
 is required; the CLI never guesses which desktop to use. `--max-steps` bounds
 desktop actions from 1 through 100; `--model` selects a model and `--system`
 supplies standing instructions (your own key only). Human output includes

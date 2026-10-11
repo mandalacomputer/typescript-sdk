@@ -1270,10 +1270,15 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
     const provider = s('provider');
     if (provider !== undefined && provider !== 'anthropic' && provider !== 'openai')
       throw new CliError('invalid_arguments', '--provider must be anthropic or openai');
-    // MANDALA_MODEL_KEY unset, or set to nothing, is a run on the account's AI
-    // credits: an environment variable cleared with `MANDALA_MODEL_KEY=` reads
-    // as unset everywhere else in a shell, and here it means "no key of mine".
-    const modelKey = io.env.MANDALA_MODEL_KEY?.trim() ? io.env.MANDALA_MODEL_KEY : undefined;
+    // MANDALA_MODEL_KEY unset is a run on the account's AI credits. Set but
+    // blank is refused, as the SDK refuses a blank modelKey: a secret that
+    // failed to load must not quietly start a run billed to the account.
+    const modelKey = io.env.MANDALA_MODEL_KEY;
+    if (path === 'agent run' && modelKey !== undefined && !modelKey.trim())
+      throw new CliError(
+        'invalid_arguments',
+        "MANDALA_MODEL_KEY is set but empty: set it to your model key, or unset it to run on the account's AI credits",
+      );
     const agent: AgentArgs = {
       provider,
       prompt: target,

@@ -29,10 +29,11 @@ This is the summary you read to decide whether to upgrade.
   the journal, newest first, with `nextBefore` for the next page. Amounts are
   integer USD micros, and the report is decoded strictly. `mandala credits`
   prints it, in dollars, or in micros with `--json`.
-- **`mandala agent run` on credits.** Without `MANDALA_MODEL_KEY` (unset or
-  empty) the run spends the account's AI credits, and `--max-cost-usd` caps it.
-  A run the credits cannot start fails with the error code
-  `insufficient_credits` and the billing link.
+- **`mandala agent run` on credits.** With `MANDALA_MODEL_KEY` unset the run
+  spends the account's AI credits, and `--max-cost-usd` caps it; set but empty
+  is refused before any request. A run the credits cannot start fails with the
+  error code `insufficient_credits` and the billing link in
+  `details.top_up_url`.
 
 ### Changed
 

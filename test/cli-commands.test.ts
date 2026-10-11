@@ -2266,25 +2266,37 @@ describe('AI credits and funded agent runs', () => {
     expect(usdMicros(-Number.MAX_SAFE_INTEGER)).toBe('-$9007199254.740991');
   });
 
-  it('runs an agent on credits when MANDALA_MODEL_KEY is unset or empty, with --max-cost-usd', async () => {
-    for (const environment of [{ MANDALA_MODEL_KEY: undefined }, { MANDALA_MODEL_KEY: '  ' }]) {
-      const h = harness(anyRoute, undefined, environment);
-      const result = await h.run([
-        'agent',
-        'run',
-        'work',
-        '--computer',
-        COMPUTER.id,
-        '--max-cost-usd',
-        '1.5',
-      ]);
-      expect(result.code).toBe(0);
-      expect(h.rec.last().body).toMatchObject({ prompt: 'work', max_cost_usd: 1.5 });
-      expect(Object.keys(h.rec.last().headers).map((k) => k.toLowerCase())).not.toContain(
-        'x-model-key',
-      );
-    }
+  it('runs an agent on credits when MANDALA_MODEL_KEY is unset, with --max-cost-usd', async () => {
+    const h = harness(anyRoute, undefined, { MANDALA_MODEL_KEY: undefined });
+    const result = await h.run([
+      'agent',
+      'run',
+      'work',
+      '--computer',
+      COMPUTER.id,
+      '--max-cost-usd',
+      '1.5',
+    ]);
+    expect(result.code).toBe(0);
+    expect(h.rec.last().body).toMatchObject({ prompt: 'work', max_cost_usd: 1.5 });
+    expect(Object.keys(h.rec.last().headers).map((k) => k.toLowerCase())).not.toContain(
+      'x-model-key',
+    );
   });
+
+  it.each(['', '  '])(
+    'refuses a MANDALA_MODEL_KEY set to %j rather than spend credits',
+    async (key) => {
+      const h = harness(anyRoute, undefined, { MANDALA_MODEL_KEY: key });
+      const result = await h.run(['agent', 'run', 'work', '--computer', COMPUTER.id]);
+      expect(result.code).toBe(1);
+      expect(result.frames.at(-1).data.error).toMatchObject({ code: 'invalid_arguments' });
+      expect(result.frames.at(-1).data.error.message).toContain(
+        'MANDALA_MODEL_KEY is set but empty',
+      );
+      expect(h.rec.calls).toEqual([]);
+    },
+  );
 
   it.each(['0.1', '21'])('refuses --max-cost-usd %s before any request', async (cap) => {
     const h = harness();
@@ -2306,7 +2318,7 @@ describe('AI credits and funded agent runs', () => {
       (call) => (call.path.endsWith('/agent') ? sse('error', frame) : anyRoute(call)),
       undefined,
       {
-        MANDALA_MODEL_KEY: '',
+        MANDALA_MODEL_KEY: undefined,
       },
     );
     const result = await h.run(['agent', 'run', 'work', '--computer', COMPUTER.id]);
@@ -2325,13 +2337,14 @@ describe('AI credits and funded agent runs', () => {
           ? json({ error: 'Insufficient AI credits', top_up_url: '/billing' }, { status: 402 })
           : anyRoute(call),
       undefined,
-      { MANDALA_MODEL_KEY: '' },
+      { MANDALA_MODEL_KEY: undefined },
     );
     const result = await h.run(['agent', 'run', 'work', '--computer', COMPUTER.id]);
     expect(result.code).toBe(1);
     expect(result.frames.at(-1).data.error).toMatchObject({
       code: 'insufficient_credits',
       status: 402,
+      details: { top_up_url: 'https://api.test/billing' },
     });
     expect(result.frames.at(-1).data.error.message).toContain('https://api.test/billing');
   });
