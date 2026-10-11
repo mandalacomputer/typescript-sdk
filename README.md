@@ -2059,7 +2059,9 @@ revokes its capability; it does not stop Chromium or delete the computer.
   `target=_blank` links) are refused without holding up the page that opened
   them. The driver lets each go offline, with dedicated workers disabled in
   every frame of it, and closes it before it can load; the opener carries on,
-  its `window.open` returning a window that is about to close. Requests the
+  its `window.open` returning a window that is about to close. On a Chromium
+  too old for per-rule network emulation, the opener's page also sees itself
+  offline for that moment. Requests the
   opener makes through such a window's `about:blank` document are the
   opener's own, under the URL hook with the opener's tab ID. Sites that depend
   on popups or workers may not work with this driver.

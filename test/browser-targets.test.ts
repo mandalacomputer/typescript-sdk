@@ -25,6 +25,8 @@ type Socket = EventEmitter & {
   held: Set<string>;
   /** Targets that close themselves first: closing them is a protocol error. */
   closeFails: Set<string>;
+  /** Methods this Chromium does not have. */
+  unknown: Set<string>;
   ended: boolean;
   message(value: unknown): void;
 };
@@ -37,6 +39,7 @@ vi.mock('ws', () => ({
     silent = new Set<string>();
     held = new Set<string>();
     closeFails = new Set<string>();
+    unknown = new Set<string>();
     ended = false;
     constructor() {
       super();
@@ -69,6 +72,13 @@ vi.mock('ws', () => ({
           return;
         }
         const { method } = command;
+        if (this.unknown.has(method)) {
+          this.message({
+            id: command.id,
+            error: { code: -32601, message: `'${method}' wasn't found` },
+          });
+          return;
+        }
         const closing = command.params.targetId as string | undefined;
         if (method === 'Target.closeTarget' && closing && this.closeFails.has(closing)) {
           this.message({
@@ -1200,14 +1210,15 @@ it('releases a page it did not open before closing it, offline and unable to sta
       'Page.enable',
       'Network.enable',
       'Network.setBypassServiceWorker',
-      'Network.emulateNetworkConditions',
+      'Network.emulateNetworkConditionsByRule',
       'Page.addScriptToEvaluateOnNewDocument',
       'Target.setAutoAttach',
       'Runtime.runIfWaitingForDebugger',
     ]);
+    // Offline for every request, without touching navigator.onLine.
     expect(
-      ws.sent.find((c) => c.method === 'Network.emulateNetworkConditions')!.params.offline,
-    ).toBe(true);
+      ws.sent.find((c) => c.method === 'Network.emulateNetworkConditionsByRule')!.params,
+    ).toMatchObject({ matchedNetworkConditions: [{ urlPattern: '', offline: true }] });
     // Released before it is closed: closing a held popup wedges its opener.
     const release = ws.sent.findIndex(
       (c) => c.sessionId === 'popup' && c.method === 'Runtime.runIfWaitingForDebugger',
@@ -1252,6 +1263,24 @@ it('a popup that goes during its fence does not end the session', async () => {
     ]);
     expect(backend.sessionStatus().state).toBe('active');
     expect(ws.ended).toBe(false);
+  } finally {
+    await backend.close();
+  }
+});
+
+it('takes a popup offline the older way on a Chromium without per-rule emulation', async () => {
+  const { backend, ws } = await started();
+  try {
+    ws.unknown.add('Network.emulateNetworkConditionsByRule');
+    attach(ws, undefined, 'popup', 'page');
+    await vi.waitFor(() => expect(named(ws, 'Target.closeTarget')).toHaveLength(1));
+    expect(on(ws, 'popup')).toContain('Runtime.runIfWaitingForDebugger');
+    expect(
+      ws.sent.find((c) => c.method === 'Network.emulateNetworkConditions')!.params,
+    ).toMatchObject({
+      offline: true,
+    });
+    expect(backend.sessionStatus().state).toBe('active');
   } finally {
     await backend.close();
   }

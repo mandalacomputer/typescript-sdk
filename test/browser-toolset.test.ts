@@ -213,7 +213,7 @@ const pages = (port: number): Record<string, [string, string | Buffer]> => ({
   // click handler and a script.
   '/popup-host': [
     'text/html',
-    `<body style="margin:0"><a href="/popup-target?link" target="_blank" style="display:block;width:300px;height:100px">open link</a><button onclick="${popupScript('click').replaceAll('"', '&quot;')}" style="display:block;width:300px;height:100px">open window</button><button onclick="${popupScript('blank').replaceAll('"', '&quot;')}" style="display:block;width:300px;height:100px">open blank window</button><a href="/popup-target?opener-link" target="_blank" rel="opener" style="display:block;width:300px;height:100px">open link with opener</a><p>opener ready</p><p id="opened"></p></body>`,
+    `<body style="margin:0"><a href="/popup-target?link" target="_blank" style="display:block;width:300px;height:100px">open link</a><button onclick="${popupScript('click').replaceAll('"', '&quot;')}" style="display:block;width:300px;height:100px">open window</button><button onclick="${popupScript('blank').replaceAll('"', '&quot;')}" style="display:block;width:300px;height:100px">open blank window</button><a href="/popup-target?opener-link" target="_blank" rel="opener" style="display:block;width:300px;height:100px">open link with opener</a><p>opener ready</p><p id="opened"></p><p id="network">no network change</p><script>addEventListener('offline',()=>{document.getElementById('network').textContent='went offline'})</script></body>`,
   ],
   '/popup-target': [
     'text/html',
@@ -946,7 +946,7 @@ describe.skipIf(!executable)('real Chromium through Anthropic toolResult', () =>
     'a popup opened by a %s is refused without wedging its opener',
     async (how) => {
       const seen: string[] = [];
-      const { browser, base, hits } = await fixture({
+      const { browser, base, hits, url } = await fixture({
         // Whatever a popup asks for, the policy would refuse: a request that
         // reaches the server got past it.
         urlPolicy: (_ctx, target) => {
@@ -973,11 +973,16 @@ describe.skipIf(!executable)('real Chromium through Anthropic toolResult', () =>
         );
       // The opener answers its next action at once.
       const started = Date.now();
-      expect(text(success(await browser.toolResult(use('get_page_text'))))).toContain(
-        'opener ready',
-      );
+      success(await browser.toolResult(use('javascript_exec', { text: 'navigator.onLine' })));
       expect(Date.now() - started).toBeLessThan(3000);
+      // A Chromium with per-rule network emulation takes only the popup offline;
+      // an older one takes its renderer offline while the popup is refused.
+      const protocol = await (await fetch(`http://${new URL(url).host}/json/protocol`)).json();
+      const perRule = JSON.stringify(protocol).includes('emulateNetworkConditionsByRule');
       await new Promise((r) => setTimeout(r, 1000));
+      const page = text(success(await browser.toolResult(use('get_page_text'))));
+      expect(page).toContain('opener ready');
+      if (perRule) expect(page).toContain('no network change');
       // The popup was refused: it never loaded and none of its requests went out.
       expect(hits.filter((hit) => /^\/popup-(target|image|fetch|worker)/.test(hit))).toEqual([]);
       // A click opens one; a script without a gesture may be refused by Chromium itself.

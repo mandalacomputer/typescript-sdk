@@ -830,10 +830,11 @@ export class BrowserCDP {
    * link) or any other new top-level page in its context. Chromium holds it
    * for the debugger, and a popup in its opener's process holds the opener
    * with it, so closing it while held wedges the opener's tab. It is released
-   * first, offline and with no way to start a worker, and then closed: it
-   * never loads. Offline rather than intercepted: Chromium lets an
+   * first, offline (see #offline) and with no way to start a worker, and then
+   * closed: it never loads. Offline rather than intercepted: Chromium lets an
    * intercepted request go on when its session detaches, which closing does,
-   * while an offline request fails at once in the network stack.
+   * while an offline request fails at once in the network stack. (Blocked
+   * URLs do not stop a navigation.)
    */
   async #refusePage(session: string, target: string): Promise<void> {
     this.#refusing.add(session);
@@ -845,16 +846,13 @@ export class BrowserCDP {
         ['Page.enable', {}],
         ['Network.enable', {}],
         ['Network.setBypassServiceWorker', { bypass: true }],
-        [
-          'Network.emulateNetworkConditions',
-          { offline: true, latency: 0, downloadThroughput: -1, uploadThroughput: -1 },
-        ],
         ['Page.addScriptToEvaluateOnNewDocument', NO_WORKERS],
         // A frame or worker started in it is held too, and closed as unowned.
         ['Target.setAutoAttach', AUTO_ATTACH],
       ] as [string, Message][]) {
         if (!this.#refusing.has(session)) return; // It went first.
         await this.send(name, args, session);
+        if (name === 'Network.setBypassServiceWorker') await this.#offline(session);
       }
       if (!this.#refusing.has(session)) return;
       await this.send('Runtime.runIfWaitingForDebugger', {}, session);
@@ -872,6 +870,28 @@ export class BrowserCDP {
     }
     if ((!closed && this.#refusing.has(session)) || failed)
       throw new BrowserDriverError('Unsupported browser target could not be closed.');
+  }
+  /**
+   * Every request from a refused page fails at once in the network stack.
+   * Per-rule emulation leaves `navigator.onLine` alone, which matters because
+   * a popup in its opener's process shares that state with the opener;
+   * Chromium without it gets the older command, which takes the opener's
+   * renderer offline too while the popup lives.
+   */
+  async #offline(session: string): Promise<void> {
+    const offline = { offline: true, latency: 0, downloadThroughput: -1, uploadThroughput: -1 };
+    try {
+      // Offline per rule where Chromium has it (153 on), and for the whole
+      // target where it has only the earlier form (145).
+      await this.send(
+        'Network.emulateNetworkConditionsByRule',
+        { offline: true, matchedNetworkConditions: [{ urlPattern: '', ...offline }] },
+        session,
+      );
+    } catch (error) {
+      if (error instanceof SessionGone) throw error;
+      await this.send('Network.emulateNetworkConditions', offline, session);
+    }
   }
   /** A cross-process frame of an owned tab. It runs; closing it would close its tab. */
   async #frame(child: string, info: Message, tab: string): Promise<void> {
