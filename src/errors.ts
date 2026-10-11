@@ -559,7 +559,10 @@ export type AgentRunContext = {
  *   before the failure — the rebuilt error is also marked so that
  *   {@link isTransient} answers false for it: the steps are on the desktop and
  *   sending the same prompt again would repeat them. Before any step it stays
- *   transient. This is the one place the mark is set (OPL-5446).
+ *   transient. This is the one place the mark is set (OPL-5446). On a FUNDED
+ *   run, whose provider failures are reported in the platform's own words
+ *   without the prefix, an unprefixed 429 after steps is returned unchanged
+ *   but marked the same way, for the same reason.
  * - A 504 {@link GatewayTimeoutError} whose JSON body carries `steps_taken` or
  *   `usage` becomes a plain {@link APIError}. That is the platform relaying the
  *   model API's `timeout_error` on a failed `agentOnce()` run, not a hop that
@@ -610,6 +613,15 @@ export function agentRouteError(err: APIError, stepsSeen = 0, run: AgentRunConte
     // left undefined.
     rebuilt = new RateLimitError(err.message, err.status, err.body, err.retryAfterMs, metadata);
     if (stepsSeen > 0 || reportsSteps(err.body)) afterAgentSteps.add(rebuilt);
+  } else if (err.status === 429 && run.funded && (stepsSeen > 0 || reportsSteps(err.body))) {
+    // A funded run reports its provider's failures in the platform's own
+    // words, without the prefix, so the branch above cannot see this one. It
+    // is the same 429 all the same — the platform's own budget ends a run that
+    // has started with `stop: 'rate_limited'`, not with an error — and a run
+    // that has acted repeats those actions if it is replayed. The class and
+    // its fields are left as they came.
+    afterAgentSteps.add(err);
+    return err;
   } else if (
     err.status === 504 &&
     err instanceof GatewayTimeoutError &&
@@ -1474,9 +1486,10 @@ function withoutRefusalReason(body: unknown): unknown {
  * {@link InsufficientCreditsError}, which is not transient either. So is a 404, 413 or 429 whose `error` starts
  * `model API: `: the 404 and 413 are {@link ModelProviderError}s (not
  * transient), and the 429 a {@link RateLimitError} with no budget fields. That
- * 429 is transient only while the run has taken no step: once it has, the steps
- * are on the desktop and replaying the prompt would repeat them, so this answers
- * false (OPL-5446). Read the error's body before running again. The platform's
+ * 429 — and on a funded run, whose provider failures carry no prefix, any 429 —
+ * is transient only while the run has taken no step: once it has, the steps
+ * are on the desktop and replaying the prompt would repeat them, so this
+ * answers false (OPL-5446). Read the error's body before running again. The platform's
  * own unprefixed 429 there is unchanged.
  * A 403 there without `reason: "revoked"` may likewise be the model key's own
  * `permission_error`. A 403 that arrives as the run's `error` event — a

@@ -5973,7 +5973,8 @@ export class Computer {
    * {@link TooLargeError}, and a 429 it answered as a {@link RateLimitError}
    * whose `limit`, `remaining` and `resetSeconds` are `undefined`, because the
    * Mandala budget did not refuse it. Once the run has taken a step,
-   * {@link isTransient} answers false for that 429: running the prompt again
+   * {@link isTransient} answers false for that 429, and on a funded run for
+   * any 429 (its provider failures carry no prefix): running the prompt again
    * would repeat the steps already on the desktop. The platform's own 404, 413
    * and 429 carry no prefix and keep their classes.
    *

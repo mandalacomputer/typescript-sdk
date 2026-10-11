@@ -434,3 +434,64 @@ describe('client.credits.read()', () => {
     await expect(client.credits.read()).rejects.toBeInstanceOf(PermissionDeniedError);
   });
 });
+
+describe('a funded run throttled by its provider after it acted', () => {
+  // A funded run reports its provider's failures in the platform's own words,
+  // without the `model API: ` prefix, so the relayed-429 rule cannot see it.
+  // Replaying a run that has already acted repeats those actions all the same.
+  const UNAVAILABLE = 'Mandala AI is unavailable';
+  const STEP = { n: 1, tool: 'computer', action: 'left_click', cost_usd: 0.3 };
+
+  it('is not transient from agent() once a step was streamed', async () => {
+    const { client } = setup(
+      onAgent(() =>
+        sse(
+          ['step', STEP],
+          ['error', { error: UNAVAILABLE, status: 429, usage: USAGE, steps: [] }],
+        ),
+      ),
+    );
+    const err = await (await client.computers.get('vm-1')).agent({ prompt: 'go' }).catch((e) => e);
+    expect(err.status).toBe(429);
+    expect(isTransient(err)).toBe(false);
+  });
+
+  it('is not transient from agentOnce() when the body lists a step', async () => {
+    const { client } = setup(
+      onAgent(() =>
+        json({ error: UNAVAILABLE, usage: USAGE, steps_taken: [STEP] }, { status: 429 }),
+      ),
+    );
+    const err = await (await client.computers.get('vm-1'))
+      .agentOnce({ prompt: 'go' })
+      .catch((e) => e);
+    expect(err.status).toBe(429);
+    expect(isTransient(err)).toBe(false);
+  });
+
+  it('stays transient before any step, as the platform’s own 429 always was', async () => {
+    const { client } = setup(onAgent(() => json({ error: 'rate limited' }, { status: 429 })));
+    const err = await (await client.computers.get('vm-1'))
+      .agentOnce({ prompt: 'go' })
+      .catch((e) => e);
+    expect(isTransient(err)).toBe(true);
+    const frame = { error: UNAVAILABLE, status: 429, usage: USAGE, steps: [] };
+    const { client: streaming } = setup(onAgent(() => sse(['error', frame])));
+    const early = await (await streaming.computers.get('vm-1'))
+      .agent({ prompt: 'go' })
+      .catch((e) => e);
+    expect(isTransient(early)).toBe(true);
+  });
+});
+
+it('leaves an unprefixed 429 after a step on your own key as OPL-5446 left it', async () => {
+  const frames = sse(
+    ['step', { n: 1, tool: 'computer' }],
+    ['error', { error: 'slow down', status: 429 }],
+  );
+  const { client } = setup(onAgent(() => frames));
+  const err = await (await client.computers.get('vm-1'))
+    .agent({ prompt: 'go', modelKey: 'sk' })
+    .catch((e) => e);
+  expect(isTransient(err)).toBe(true);
+});
