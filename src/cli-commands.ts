@@ -567,6 +567,45 @@ const publicWebhook = (value: { raw: Record<string, unknown> }, secret?: string)
   return secret === undefined ? data : { ...data, secret };
 };
 
+/** Human list cells: redact and escape before measuring, with no guessed missing values. */
+function listTable(
+  io: CliIO,
+  headers: readonly string[],
+  rows: readonly (readonly unknown[])[],
+  empty: string,
+): void {
+  if (!rows.length) {
+    io.stdout.write(`${empty}\n`);
+    return;
+  }
+  const all = [
+    headers,
+    ...rows.map((row) =>
+      row.map((value) => {
+        const cell =
+          (typeof value === 'string' && value !== '') ||
+          (typeof value === 'number' && Number.isFinite(value))
+            ? String(value)
+            : '-';
+        return terminalSafe(redact(cell, io.env, io.secrets) as string);
+      }),
+    ),
+  ];
+  const widths = headers.map((_, i) =>
+    all.reduce((width, row) => Math.max(width, row[i]!.length), 0),
+  );
+  io.stdout.write(
+    `${all
+      .map((row) =>
+        row
+          .map((cell, i) => (i < headers.length - 1 ? cell.padEnd(widths[i]!) : cell))
+          .join('  ')
+          .trimEnd(),
+      )
+      .join('\n')}\n`,
+  );
+}
+
 function accountText(q: AccountQuota): string {
   const amount = (value: number | null) => (value === null ? 'unknown' : String(value));
   const pool = (label: string, used: number | null, limit: number, remaining: number | null) =>
@@ -1370,10 +1409,33 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
             ? undefined
             : await operationsComputer(client, operationPage.computerId, output, signal);
         const page = await client.operations.list({ ...operationPage, computerId }, call);
-        return output.result({
-          operations: page.operations.map(raw),
-          next_cursor: page.nextCursor,
-        });
+        if (json)
+          return output.result({
+            operations: page.operations.map(raw),
+            next_cursor: page.nextCursor,
+          });
+        listTable(
+          io,
+          ['ID', 'KIND', 'STATE', 'COMPUTER', 'CREATED', 'ERROR'],
+          page.operations.map((op) => [
+            op.id,
+            op.kind,
+            op.state,
+            op.computerId,
+            op.createdAt,
+            op.error ? `${op.error.code}: ${op.error.message}` : null,
+          ]),
+          'No operations on this page.',
+        );
+        if (page.nextCursor !== null) {
+          output.diagnostic(`More operations are available. Next cursor: ${page.nextCursor}`, {
+            keepNewlines: false,
+          });
+          output.diagnostic(
+            'Repeat this command with --cursor and that cursor, keeping the same filters and page size.',
+          );
+        }
+        return 0;
       }
       case 'operations get':
         return output.result(raw(await client.operations.get(target, call)));
@@ -1389,8 +1451,17 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
           moves: moves.filter((m) => only === undefined || m.computerId === only).map(moveData),
         });
       }
-      case 'workspaces list':
-        return output.result((await client.workspaces.list(call)).map(raw));
+      case 'workspaces list': {
+        if (json) return output.result((await client.workspaces.list(call)).map(raw));
+        const workspaces = await client.workspaces.list(call);
+        listTable(
+          io,
+          ['ID', 'NAME', 'CREATED'],
+          workspaces.map((workspace) => [workspace.id, workspace.name, workspace.createdAt]),
+          'No workspaces in this scope.',
+        );
+        return 0;
+      }
       case 'workspaces get':
         return output.result(
           raw(await readWorkspace(client, target, signal, (id) => client.workspaces.get(id, call))),
@@ -1485,10 +1556,38 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
           workspaceId: scopeFlag(false),
           signal,
         });
-        return output.result({
-          items: listing.items.map(computerData),
-          incomplete: listing.incomplete,
-        });
+        if (json)
+          return output.result({
+            items: listing.items.map(computerData),
+            incomplete: listing.incomplete,
+          });
+        listTable(
+          io,
+          ['ID', 'NAME', 'STATUS', 'STATE', 'CPU', 'RAM (MiB)', 'DISK (GiB)', 'WORKSPACE'],
+          listing.items.map((computer) => {
+            // An unreachable or deleted row may omit resources. The getters
+            // default absent numbers to zero; keep absence visible here.
+            const data = computerData(computer);
+            return [
+              data.id,
+              data.name,
+              data.status,
+              data.state,
+              data.cpu,
+              data.ram_mb,
+              data.disk_gb,
+              data.workspace_id,
+            ];
+          }),
+          listing.incomplete === null
+            ? 'No computers match this scope and filters.'
+            : 'No computers returned in this partial listing.',
+        );
+        if (listing.incomplete !== null)
+          output.diagnostic(
+            `mandala: computer inventory is incomplete (reported shortfall: ${listing.incomplete === 0 ? 'unknown' : listing.incomplete}); this is a partial listing.`,
+          );
+        return 0;
       }
       case 'computers create': {
         // Before the secrets are looked up: an unreadable defaults.json refuses

@@ -26,6 +26,7 @@ import {
   json,
   MOVE_DONE,
   MOVE_STARTED,
+  OPERATION,
   type Responder,
   recorder,
   SECRET,
@@ -809,6 +810,242 @@ function accountReport() {
     },
   };
 }
+
+describe('human list output', () => {
+  it('lists computer identity, host status, lifecycle state and reported resources', async () => {
+    const h = harness(() =>
+      json([
+        { ...COMPUTER, state: 'live', workspace_id: WORKSPACE.id },
+        { id: 'vm-lost', name: 'lost desktop', state: 'lost' },
+      ]),
+    );
+    const result = await h.run(['computers', 'list'], false);
+    expect(result.code).toBe(0);
+    expect(result.err).toBe('');
+    expect(h.rec.routes()).toEqual([['GET', 'computers']]);
+    expect(
+      result.out
+        .trimEnd()
+        .split('\n')
+        .map((line) => line.split(/ {2,}/)),
+    ).toEqual([
+      ['ID', 'NAME', 'STATUS', 'STATE', 'CPU', 'RAM (MiB)', 'DISK (GiB)', 'WORKSPACE'],
+      ['vm-1', 'demo', 'running', 'live', '2', '4096', '40', WORKSPACE.id],
+      ['vm-lost', 'lost desktop', '-', 'lost', '-', '-', '-', '-'],
+    ]);
+    expect(result.out).not.toContain('vnc');
+    expect(result.out.endsWith('\n')).toBe(true);
+  });
+
+  it('keeps workspace order and shows ids, names and creation times', async () => {
+    const later = { ...WORKSPACE, id: 'wsp-000000000000', name: 'later', created_at: '2026-10-01' };
+    const h = harness(() => json([WORKSPACE, later]));
+    const result = await h.run(['workspaces', 'list'], false);
+    expect(result.code).toBe(0);
+    expect(result.err).toBe('');
+    expect(h.rec.routes()).toEqual([['GET', 'workspaces']]);
+    expect(
+      result.out
+        .trimEnd()
+        .split('\n')
+        .map((line) => line.split(/ {2,}/)),
+    ).toEqual([
+      ['ID', 'NAME', 'CREATED'],
+      [WORKSPACE.id, WORKSPACE.name, WORKSPACE.created_at],
+      [later.id, later.name, later.created_at],
+    ]);
+  });
+
+  it('shows operation failures, preserves page order and explains how to continue with the same filters', async () => {
+    const h = harness(() =>
+      json({
+        operations: [
+          {
+            ...OPERATION,
+            state: 'failed',
+            error: { code: 'computer_gone', message: 'The computer is gone.' },
+          },
+          {
+            ...OPERATION,
+            id: 'op_aaaaaaaaaaaaaaaaaaaaaaaa',
+            state: 'running',
+            computer_id: null,
+            finished_at: null,
+          },
+        ],
+        next_cursor: 'next-page',
+      }),
+    );
+    const result = await h.run(
+      ['operations', 'list', '--limit', '2', '--cursor', 'this-page', '--idempotency-key', 'k-1'],
+      false,
+    );
+    expect(result.code).toBe(0);
+    expect(h.rec.routes()).toEqual([['GET', 'operations']]);
+    expect(h.rec.last().query).toEqual({ limit: '2', cursor: 'this-page', idempotency_key: 'k-1' });
+    expect(
+      result.out
+        .trimEnd()
+        .split('\n')
+        .map((line) => line.split(/ {2,}/)),
+    ).toEqual([
+      ['ID', 'KIND', 'STATE', 'COMPUTER', 'CREATED', 'ERROR'],
+      [
+        OPERATION.id,
+        'clone',
+        'failed',
+        'vm-2',
+        OPERATION.created_at,
+        'computer_gone: The computer is gone.',
+      ],
+      ['op_aaaaaaaaaaaaaaaaaaaaaaaa', 'clone', 'running', '-', OPERATION.created_at, '-'],
+    ]);
+    expect(result.err).toBe(
+      'More operations are available. Next cursor: next-page\n' +
+        'Repeat this command with --cursor and that cursor, keeping the same filters and page size.\n',
+    );
+  });
+
+  it.each([
+    ['computers', [], 'No computers match this scope and filters.\n'],
+    ['workspaces', [], 'No workspaces in this scope.\n'],
+    ['operations', { operations: [], next_cursor: null }, 'No operations on this page.\n'],
+  ])('explains an empty %s list', async (command, payload, expected) => {
+    const h = harness(() => json(payload));
+    const result = await h.run([command as string, 'list'], false);
+    expect(result).toMatchObject({ code: 0, out: expected, err: '' });
+    expect(h.rec.calls).toHaveLength(1);
+  });
+
+  it.each([0, 2])(
+    'warns that a computer shortfall of %s is incomplete even when no rows were returned',
+    async (shortfall) => {
+      for (const rows of [[], [COMPUTER]]) {
+        const h = harness(() => json(rows, { headers: { 'X-GC-Incomplete': String(shortfall) } }));
+        const result = await h.run(
+          ['computers', 'list', '--allow-partial', '--state', 'lost', '--workspace', 'unassigned'],
+          false,
+        );
+        expect(result.code).toBe(0);
+        expect(h.rec.last().query).toEqual({
+          allow_partial: '1',
+          state: 'lost',
+          workspace_id: 'unassigned',
+        });
+        expect(result.err).toBe(
+          `mandala: computer inventory is incomplete (reported shortfall: ${shortfall === 0 ? 'unknown' : shortfall}); this is a partial listing.\n`,
+        );
+        if (!rows.length)
+          expect(result.out).toBe('No computers returned in this partial listing.\n');
+      }
+    },
+  );
+
+  it('reports a cursor on an empty operation page and stays quiet on the final populated page', async () => {
+    const more = await harness(() => json({ operations: [], next_cursor: 'older' })).run(
+      ['operations', 'list'],
+      false,
+    );
+    expect(more.out).toBe('No operations on this page.\n');
+    expect(more.err).toContain('Next cursor: older\n');
+    const last = await harness(() => json({ operations: [OPERATION], next_cursor: null })).run(
+      ['operations', 'list'],
+      false,
+    );
+    expect(last.code).toBe(0);
+    expect(last.out).toContain(OPERATION.id);
+    expect(last.err).toBe('');
+  });
+
+  it.each(['computers', 'workspaces', 'operations'])(
+    'preserves the exact %s JSON envelope, raw fields and escaping',
+    async (command) => {
+      const extra = { futureField: { chosenName: 'retained' }, name: 'raw\n\u202evalue' };
+      const computer = { ...COMPUTER, ...extra };
+      const { vnc: _vnc, ...listedComputer } = computer;
+      const workspace = { ...WORKSPACE, ...extra };
+      const operation = { ...OPERATION, ...extra };
+      const payload =
+        command === 'computers'
+          ? [computer]
+          : command === 'workspaces'
+            ? [workspace]
+            : { operations: [operation], next_cursor: 'older' };
+      const data =
+        command === 'computers'
+          ? { items: [listedComputer], incomplete: 0 }
+          : command === 'workspaces'
+            ? [workspace]
+            : payload;
+      const h = harness(() =>
+        json(payload, { headers: command === 'computers' ? { 'X-GC-Incomplete': '0' } : {} }),
+      );
+      const result = await h.run([command, 'list']);
+      expect(result).toMatchObject({
+        code: 0,
+        out: `${JSON.stringify({ schema_version: 2, command: `${command} list`, ok: true, data, exit_code: 0 })}\n`,
+        err: '',
+      });
+      expect(h.rec.calls).toHaveLength(1);
+    },
+  );
+
+  it.each(['computers', 'workspaces', 'operations'])(
+    'escapes and redacts %s cells before padding, in both pipes and terminals',
+    async (command) => {
+      const secret = 'BEGIN\nprivate\nEND';
+      const name = `long ${'x'.repeat(80)} café 中文 🚀\t\u001b[2K\u009d\u202e\n${secret}`;
+      const shown = `long ${'x'.repeat(80)} café 中文 🚀\\u0009\\u001b[2K\\u009d\\u202e\\u000a[REDACTED]`;
+      const payload =
+        command === 'computers'
+          ? [
+              { ...COMPUTER, name },
+              { ...COMPUTER, id: 'vm-2', name: 'short' },
+            ]
+          : command === 'workspaces'
+            ? [
+                { ...WORKSPACE, name },
+                { ...WORKSPACE, id: 'wsp-000000000000', name: 'short' },
+              ]
+            : {
+                operations: [
+                  { ...OPERATION, kind: name, error: { code: 'failed', message: name } },
+                  { ...OPERATION, id: 'op_aaaaaaaaaaaaaaaaaaaaaaaa', kind: 'short' },
+                ],
+                next_cursor: name,
+              };
+      const outputs = [];
+      for (const isTTY of [false, true]) {
+        const h = harness(() => json(payload), undefined, { NO_COLOR: '1' });
+        h.io.stdout!.isTTY = isTTY;
+        h.io.secrets = new Set([secret]);
+        const result = await h.run([command, 'list'], false);
+        expect(result.code).toBe(0);
+        expect(result.out).toContain(shown);
+        for (const control of ['\t', '\u001b', '\u009d', '\u202e']) {
+          expect(result.out).not.toContain(control);
+          expect(result.err).not.toContain(control);
+        }
+        expect(result.out + result.err).not.toContain('private');
+        const lines = result.out.trimEnd().split('\n');
+        expect(lines).toHaveLength(3);
+        const afterName =
+          command === 'computers'
+            ? 'running'
+            : command === 'workspaces'
+              ? WORKSPACE.created_at
+              : 'succeeded';
+        expect(lines[1]!.indexOf(afterName)).toBe(lines[2]!.indexOf(afterName));
+        if (command === 'operations') {
+          expect(result.err).toContain(`Next cursor: ${shown}\n`);
+          expect(result.err.split('\n')).toHaveLength(3);
+        }
+        outputs.push(result.out);
+      }
+      expect(outputs[0]).toBe(outputs[1]);
+    },
+  );
+});
 
 describe('computer commands use distinct SDK requests', () => {
   it('lists selected state and preserves an incomplete inventory', async () => {

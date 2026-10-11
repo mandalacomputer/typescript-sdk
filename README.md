@@ -3705,6 +3705,12 @@ mandala operations get op_...
 mandala operations wait op_...              # exit 0 on succeeded
 ```
 
+`operations list` shows one page as a table of ids, kinds, states, computer ids,
+creation times and failure details. When older operations remain, stderr shows
+the next cursor; repeat the command with `--cursor` and that cursor, keeping the
+same filters and page size. `--json` keeps the existing `operations` and
+`next_cursor` object under `data`.
+
 `wait` exits non-zero with `error.code` `operation_failed` when the operation
 failed; the operation itself, with the platform's `error.code`, is under
 `error.details.operation`. `succeeded` means the platform's step finished, not
@@ -3740,6 +3746,10 @@ mandala workspaces create customer-acme    # needs an owner's account-wide key
 mandala workspaces rename customer-acme customer-acme-prod
 mandala workspaces rm customer-acme-prod --yes  # revokes the keys confined to it
 ```
+
+`workspaces list` shows ids, names and creation times in a table, preserving the
+platform's order. `--json` returns the full workspace objects as an array under
+`data`.
 
 `rename` and `rm` take a name or an id, as `get` does. `rm` does nothing
 without `--yes` (`confirmation_required`), because deleting a workspace revokes
@@ -3873,8 +3883,16 @@ lookup failures stop the command. Ambiguous names fail with the matching IDs so
 you can select one explicitly.
 Listing filters and webhook filters that say `--computer` take IDs.
 
+`computers list` shows ids, names, host status, lifecycle state, configured CPU,
+RAM (MiB), disk (GiB), and workspace ids in a table. Missing values appear as
+`-`; status and lifecycle state are separate because a live computer can be
+stopped. A partial inventory has a warning on stderr, even when no computers
+were returned or the shortfall is unknown. `--json` retains the full public
+computer objects under `data.items` and the `data.incomplete` marker. Scripts
+should use `--json` for machine-readable output.
+
 ```sh
-mandala computers list --json
+mandala computers list                         # readable table; --json for full objects
 mandala computers create --name workbench --template base --cpu 2 --ram-mb 4096 --disk-gb 40
 mandala computers create --name agent --secret OPENAI_API_KEY --secret-file GH_TOKEN --path gh
 mandala computers create --name ci-runner --workspace wsp-0123456789ab   # into a workspace
