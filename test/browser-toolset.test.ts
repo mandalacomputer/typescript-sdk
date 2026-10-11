@@ -183,6 +183,13 @@ const pages = (port: number): Record<string, [string, string | Buffer]> => ({
     'text/html',
     `<body style="margin:0"><p id="state" style="position:absolute;top:500px">churning</p><script>(async()=>{for(let n=0;n<150;n++){const f=document.createElement('iframe');f.src='http://localhost:${port}/dl-outer?'+n;const loaded=new Promise(r=>{f.onload=r});document.body.append(f);await loaded;await new Promise(r=>setTimeout(r,5));f.remove()}document.body.insertAdjacentHTML('beforeend',${JSON.stringify(downloadFrame(port))});document.getElementById('state').textContent='churned'})()</script></body>`,
   ],
+  // One cross-site frame sent back and forth between two other sites, which
+  // keeps its target and session, each document holding a same-process frame;
+  // then the download frame.
+  '/nav-churn': [
+    'text/html',
+    `<body style="margin:0"><p id="state" style="position:absolute;top:500px">churning</p><iframe id="f" src="http://a.test:${port}/dl-outer" style="position:absolute;left:0;top:0;border:0;width:600px;height:400px"></iframe><script>(async()=>{const f=document.getElementById('f');await new Promise(r=>{f.onload=r});for(let n=0;n<40;n++){const loaded=new Promise(r=>{f.onload=r});f.src='http://'+(n%2?'a':'b')+'.test:${port}/dl-outer?'+n;await loaded}const loaded=new Promise(r=>{f.onload=r});f.src='http://a.test:${port}/dl-outer';await loaded;document.getElementById('state').textContent='churned'})()</script></body>`,
+  ],
   '/heavy': [
     'text/html',
     `<title>Heavy</title><p>heavy page</p>${Array.from({ length: 400 }, (_, n) => `<img src="/img/${n}">`).join('')}`,
@@ -228,6 +235,8 @@ describe.skipIf(!executable)('real Chromium through Anthropic toolResult', () =>
         '--no-first-run',
         // As the platform runs it: a cross-site frame is its own process and target.
         '--site-per-process',
+        // More sites on this one server: a.test and b.test.
+        '--host-resolver-rules=MAP *.test 127.0.0.1',
         '--remote-debugging-port=0',
         `--user-data-dir=${profile}`,
       ],
@@ -854,6 +863,21 @@ describe.skipIf(!executable)('real Chromium through Anthropic toolResult', () =>
     // The page, the download frame and the frame inside it, and little else:
     // Chromium reports no detach for a frame inside a removed cross-site frame.
     await expect.poll(() => files.frames.size, { timeout: 5000 }).toBeLessThan(10);
+    await new Promise((r) => setTimeout(r, 200));
+    await backend.perform('left_click', { target: { type: 'coordinate', x: 50, y: 50 } });
+    await expect.poll(() => began().length, { timeout: 10000 }).toBe(1);
+    expect(began()[0]![2]).toBe(true);
+  }, 60000);
+  it('a cross-site frame sent between sites leaves frame tracking room', async () => {
+    const { url, base, hits } = await fixture();
+    const { backend, files, began } = await fileDriver(url);
+    await backend.perform('navigate', { url: `${base}/nav-churn` });
+    await expect
+      .poll(() => backend.perform('get_page_text', {}), { timeout: 30000, interval: 200 })
+      .toBe('churned');
+    expect(hits.filter((hit) => hit.startsWith('/dl-outer')).length).toBeGreaterThan(40);
+    // The page, the frame and the frame inside its current document.
+    await expect.poll(() => files.frames.size, { timeout: 5000 }).toBeLessThan(6);
     await new Promise((r) => setTimeout(r, 200));
     await backend.perform('left_click', { target: { type: 'coordinate', x: 50, y: 50 } });
     await expect.poll(() => began().length, { timeout: 10000 }).toBe(1);

@@ -794,3 +794,74 @@ it('a frame-tree reply that arrives with newer frame events does not undo them',
     await backend.close();
   }
 });
+
+it('a cross-site frame changing documents leaves its old frames behind', async () => {
+  const { backend, ws } = await started();
+  const { event, frames } = stubFiles(backend);
+  try {
+    ws.message({
+      method: 'Page.frameAttached',
+      sessionId: 'session',
+      params: { frameId: 'x-target', parentFrameId: 'tab' },
+    });
+    attach(ws, 'session', 'x', 'iframe');
+    await vi.waitFor(() => expect(on(ws, 'x')).toContain('Runtime.runIfWaitingForDebugger'));
+    // Across sites the frame keeps its session; Chromium reports the new
+    // document and its children, and nothing about the old children.
+    for (let n = 0; n < 300; n++) {
+      ws.message({
+        method: 'Page.frameNavigated',
+        sessionId: 'x',
+        params: { frame: { id: 'x-target', parentId: 'tab' } },
+      });
+      ws.message({
+        method: 'Page.frameAttached',
+        sessionId: 'x',
+        params: { frameId: `child-${n}`, parentFrameId: 'x-target' },
+      });
+      ws.message({
+        method: 'Page.frameAttached',
+        sessionId: 'x',
+        params: { frameId: `grandchild-${n}`, parentFrameId: `child-${n}` },
+      });
+    }
+    expect([...frames.keys()].sort()).toEqual(['child-299', 'grandchild-299', 'x-target']);
+    download(ws, 'one', 'grandchild-299');
+    download(ws, 'two', 'child-298');
+    await vi.waitFor(() => expect(event).toHaveBeenCalledTimes(2));
+    expect(event.mock.calls.map((c) => c[2])).toEqual([true, false]);
+  } finally {
+    await backend.close();
+  }
+});
+
+it('a frame-tree reply does not restore the children of a frame that changed documents', async () => {
+  const { backend, ws } = await started();
+  const { frames } = stubFiles(backend);
+  ws.held.add('Page.getFrameTree');
+  try {
+    attach(ws, 'session', 'x', 'iframe');
+    await vi.waitFor(() => expect(on(ws, 'x')).toContain('Page.getFrameTree'));
+    const id = ws.sent.find((c) => c.method === 'Page.getFrameTree' && c.sessionId === 'x')!.id;
+    ws.message({
+      id,
+      result: {
+        frameTree: {
+          frame: { id: 'x-target' },
+          childFrames: [
+            { frame: { id: 'old-child' }, childFrames: [{ frame: { id: 'old-grandchild' } }] },
+          ],
+        },
+      },
+    });
+    ws.message({
+      method: 'Page.frameNavigated',
+      sessionId: 'x',
+      params: { frame: { id: 'x-target', parentId: 'tab' } },
+    });
+    await vi.waitFor(() => expect(on(ws, 'x')).toContain('Runtime.runIfWaitingForDebugger'));
+    expect([...frames.keys()]).toEqual(['x-target']);
+  } finally {
+    await backend.close();
+  }
+});

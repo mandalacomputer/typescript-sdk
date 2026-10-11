@@ -244,6 +244,8 @@ export class BrowserCDP {
   // away takes the frames only it could see with it (Chromium reports no
   // detach for them), but not one its parent has reported since.
   #frameSource = new Map<string, string>();
+  // Tracked frame id -> its parent frame's id, where known.
+  #frameParent = new Map<string, string>();
   // For each frame-tree request on its way: the frames events have reported since.
   #snapshots = new Set<Set<string>>();
   #ready = new Map<string, { promise: Promise<void>; resolve: () => void }>();
@@ -497,6 +499,7 @@ export class BrowserCDP {
     this.#queuedBytes = 0;
     this.#parents.clear();
     this.#frameSource.clear();
+    this.#frameParent.clear();
     this.#detached.clear();
     this.#active = undefined;
     this.#changes = [];
@@ -661,14 +664,38 @@ export class BrowserCDP {
     this.#forgetFrames(session);
     if (this.#frames.delete(session)) this.#abandon(session);
   }
-  #track(frame: unknown, tab: string, session: string): boolean {
+  #track(frame: unknown, tab: string, session: string, parent?: unknown): boolean {
     if (typeof frame !== 'string' || !this.files?.frame(frame, tab)) return false;
     this.#frameSource.set(frame, session);
+    if (typeof parent === 'string') this.#frameParent.set(frame, parent);
     return true;
   }
-  #trackTree(tree: Message, tab: string, session: string, skip: Set<string>): void {
-    if (skip.has(tree.frame.id) || this.#track(tree.frame.id, tab, session))
-      for (const child of tree.childFrames ?? []) this.#trackTree(child, tab, session, skip);
+  #trackTree(
+    tree: Message,
+    tab: string,
+    session: string,
+    skip: Set<string>,
+    parent?: string,
+  ): void {
+    // A frame an event has spoken for since is newer than this snapshot, and
+    // so is everything below it: a navigation replaced its children.
+    const id = tree.frame.id;
+    if (skip.has(id) || !this.#track(id, tab, session, parent)) return;
+    for (const child of tree.childFrames ?? []) this.#trackTree(child, tab, session, skip, id);
+  }
+  /** Forget every tracked frame below `frame`. */
+  #pruneBelow(frame: string): void {
+    const below = new Set([frame]);
+    for (let grew = true; grew; ) {
+      grew = false;
+      for (const [child, parent] of this.#frameParent)
+        if (below.has(parent) && !below.has(child)) {
+          below.add(child);
+          grew = true;
+        }
+    }
+    below.delete(frame);
+    for (const child of below) this.#untrack(child);
   }
   /**
    * Track the frames a session holds now. The reply is a snapshot: a frame
@@ -690,6 +717,7 @@ export class BrowserCDP {
   #untrack(frame: string): void {
     this.files?.frames.delete(frame);
     this.#frameSource.delete(frame);
+    this.#frameParent.delete(frame);
   }
   #forgetFrames(session: string): void {
     for (const [frame, source] of this.#frameSource) if (source === session) this.#untrack(frame);
@@ -820,14 +848,21 @@ export class BrowserCDP {
         if (!tab) return;
         const frame = method.startsWith('Page.frame') ? (p.frameId ?? p.frame?.id) : undefined;
         if (typeof frame === 'string') for (const touched of this.#snapshots) touched.add(frame);
-        if (method === 'Page.frameAttached') this.#track(p.frameId, tab, session);
+        if (method === 'Page.frameAttached') this.#track(p.frameId, tab, session, p.parentFrameId);
         // A swap is the frame moving to another process, where it lives on.
-        if (method === 'Page.frameDetached' && p.reason !== 'swap') this.#untrack(p.frameId);
+        if (method === 'Page.frameDetached' && p.reason !== 'swap') {
+          this.#pruneBelow(p.frameId);
+          this.#untrack(p.frameId);
+        }
         if (method === 'Page.frameNavigated') {
           // Element references are the tab's own document's; a cross-site
           // frame navigating leaves them standing.
           if (this.#sessions.get(tab) === session) this.#refs.delete(tab);
-          this.#track(p.frame.id, tab, session);
+          // A new document: the frames of the old one are gone, and Chromium
+          // need not report each of them (a cross-site frame keeps its
+          // session across sites but not its children).
+          this.#pruneBelow(p.frame.id);
+          this.#track(p.frame.id, tab, session, p.frame.parentId);
         } else if (method === 'Runtime.consoleAPICalled') append(this.#console, tab, p.text);
         else if (method === 'Network.responseReceived') append(this.#network, tab, p.text);
       }
