@@ -665,6 +665,9 @@ export class BrowserCDP {
     if (this.#frames.delete(session)) this.#abandon(session);
   }
   #track(frame: unknown, tab: string, session: string, parent?: unknown): boolean {
+    // Only below a tracked frame, so that every tracked frame stays reachable
+    // from the frames above it when they change documents.
+    if (typeof parent === 'string' && !this.files?.frames.has(parent)) return false;
     if (typeof frame !== 'string' || !this.files?.frame(frame, tab)) return false;
     this.#frameSource.set(frame, session);
     if (typeof parent === 'string') this.#frameParent.set(frame, parent);
@@ -863,6 +866,10 @@ export class BrowserCDP {
           // session across sites but not its children).
           this.#pruneBelow(p.frame.id);
           this.#track(p.frame.id, tab, session, p.frame.parentId);
+          // A document back from the back/forward cache brings its frames
+          // with it, and Chromium reports none of them as attached.
+          if (p.type === 'BackForwardCacheRestore')
+            void this.#snapshot(session, tab).catch(() => {});
         } else if (method === 'Runtime.consoleAPICalled') append(this.#console, tab, p.text);
         else if (method === 'Network.responseReceived') append(this.#network, tab, p.text);
       }

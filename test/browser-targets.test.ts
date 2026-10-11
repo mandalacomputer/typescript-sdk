@@ -865,3 +865,67 @@ it('a frame-tree reply does not restore the children of a frame that changed doc
     await backend.close();
   }
 });
+
+it('a frame below one it could not track is not tracked either', async () => {
+  const { backend, ws } = await started();
+  const { event, frames } = stubFiles(backend);
+  const frame = (method: string, params: Record<string, unknown>) =>
+    ws.message({ method, sessionId: 'session', params });
+  try {
+    frame('Page.frameNavigated', { frame: { id: 'tab' } });
+    for (let n = 0; n < 254; n++)
+      frame('Page.frameAttached', { frameId: `f${n}`, parentFrameId: 'tab' });
+    frame('Page.frameAttached', { frameId: 'kept', parentFrameId: 'tab' });
+    // Tracking is full: this frame is not tracked.
+    frame('Page.frameAttached', { frameId: 'refused', parentFrameId: 'tab' });
+    expect(frames.has('refused')).toBe(false);
+    // Room again, but a frame below the untracked one could never be reached
+    // when the frames above it change documents.
+    frame('Page.frameDetached', { frameId: 'f0', reason: 'remove' });
+    frame('Page.frameAttached', { frameId: 'orphan', parentFrameId: 'refused' });
+    expect(frames.has('orphan')).toBe(false);
+    frame('Page.frameNavigated', { frame: { id: 'tab' } });
+    expect([...frames.keys()]).toEqual(['tab']);
+    download(ws, 'one', 'orphan');
+    await vi.waitFor(() => expect(event).toHaveBeenCalledTimes(1));
+    expect(event.mock.calls[0]![2]).toBe(false);
+  } finally {
+    await backend.close();
+  }
+});
+
+it('a document back from the back/forward cache has its frames tracked again', async () => {
+  const { backend, ws } = await started();
+  const { event, frames } = stubFiles(backend);
+  ws.held.add('Page.getFrameTree');
+  try {
+    ws.message({
+      method: 'Page.frameNavigated',
+      sessionId: 'session',
+      params: { frame: { id: 'tab' } },
+    });
+    ws.message({
+      method: 'Page.frameNavigated',
+      sessionId: 'session',
+      params: { frame: { id: 'tab' }, type: 'BackForwardCacheRestore' },
+    });
+    await vi.waitFor(() =>
+      expect(
+        ws.sent.filter((c) => c.method === 'Page.getFrameTree' && c.sessionId === 'session'),
+      ).toHaveLength(1),
+    );
+    const id = ws.sent.find(
+      (c) => c.method === 'Page.getFrameTree' && c.sessionId === 'session',
+    )!.id;
+    ws.message({
+      id,
+      result: { frameTree: { frame: { id: 'tab' }, childFrames: [{ frame: { id: 'restored' } }] } },
+    });
+    await vi.waitFor(() => expect(frames.has('restored')).toBe(true));
+    download(ws, 'one', 'restored');
+    await vi.waitFor(() => expect(event).toHaveBeenCalledTimes(1));
+    expect(event.mock.calls[0]![2]).toBe(true);
+  } finally {
+    await backend.close();
+  }
+});
