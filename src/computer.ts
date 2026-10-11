@@ -4366,7 +4366,11 @@ export class Computer {
    *
    * A batch REFUSED before any action ran — a malformed one, a computer that is
    * not running, the input lane busy — throws the ordinary error for its status,
-   * and nothing happened. An error whose answer cannot be read as that refusal
+   * and nothing happened. The exception is a 503 (`UnavailableError`): the
+   * platform also answers 503, in that same ordinary shape, when the batch was
+   * sent and its answer was lost, so a 503 may mean the batch ran, in whole or
+   * in part. Never resend it blindly; look at a fresh screenshot first.
+   * {@link isTransient} answers false for it. An error whose answer cannot be read as that refusal
    * (an empty or cut-off body, a proxy's page) cannot show that nothing ran,
    * and {@link isTransient} answers false for it whatever its class. A batch that STOPPED PART-WAY throws
    * {@link InputBatchError}: `result.completed` actions ran, and the one at
