@@ -2058,13 +2058,16 @@ revokes its capability; it does not stop Chromium or delete the computer.
 - Popups and other new top-level pages the driver did not open (`window.open`,
   `target=_blank` links) are refused without holding up the page that opened
   them. The driver lets each go offline, uncached, with script execution and
-  dedicated workers disabled in it, and closes it before it can load; the opener carries on,
-  its `window.open` returning a window that is about to close. On a Chromium
-  too old for per-rule network emulation, the opener's page also sees itself
-  offline for that moment. Requests the
-  opener makes through such a window's `about:blank` document are the
-  opener's own, under the URL hook with the opener's tab ID. Sites that depend
-  on popups or workers may not work with this driver.
+  dedicated workers disabled in its own process, and closes it before it can
+  load; the opener carries on, its `window.open` returning a window that is
+  about to close. On a Chromium too old for per-rule network emulation, the
+  opener's page also sees itself offline for that moment. Requests the opener
+  makes through such a window's `about:blank` document are the opener's own,
+  under the URL hook with the opener's tab ID. The out-of-process frame limit
+  of the URL hook (above) applies inside a popup too: a sandboxed `srcdoc`
+  frame the opener writes into one runs in a process of its own, until the
+  popup closes. Sites that depend on popups or workers may not work with this
+  driver.
 - `read_page` returns accessibility roles/names and element refs; `find`
   performs a case-insensitive substring search over that tree. Each read/find
   replaces that tab's refs. Navigation invalidates them. Ask for a new page
