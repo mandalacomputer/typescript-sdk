@@ -80,10 +80,6 @@ export class BrowserFiles {
     this.frames.set(id, tab);
     return true;
   }
-  frameTree(tree: Message, tab: string): void {
-    if (!this.frame(tree.frame.id, tab)) return;
-    for (const child of tree.childFrames ?? []) this.frameTree(child, tab);
-  }
   async execute(command: string, desktop = false): Promise<Buffer> {
     this.policy.check(this.computer);
     if (Buffer.byteLength(command) > 120000) throw new Error(FILE_ERROR);
@@ -371,13 +367,14 @@ export class BrowserFiles {
       /* Quota and guardian bound leftovers. */
     }
   }
-  async event(method: string, p: Message): Promise<void> {
+  /** `tracked`: whether the download's frame was tracked when it began. */
+  async event(method: string, p: Message, tracked?: boolean): Promise<void> {
     if (!this.policy.downloads || !this.live() || typeof p.guid !== 'string' || !GUID.test(p.guid))
       return;
     const guid = p.guid;
     if (method === 'Browser.downloadWillBegin') {
       if (this.downloads.has(guid)) return;
-      if (!this.frames.has(p.frameId)) {
+      if (!(tracked ?? this.frames.has(p.frameId))) {
         await this.cancelUntracked(guid);
         return;
       }

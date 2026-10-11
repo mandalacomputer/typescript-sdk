@@ -74,6 +74,37 @@ This is the summary you read to decide whether to upgrade.
   carries `completed`, `failedIndex` and the results so far, and which
   `isTransient()` never calls worth sending again. Neither does it call an
   error whose answer cannot be read as a refusal before dispatch.
+- **The browser toolset runs cross-site frames.** `MandalaBrowserToolset`
+  treats a site-isolated cross-site frame (its own Chromium target) as part of
+  its tab: it runs, and its HTTP(S) requests reach `urlPolicy` with that tab's
+  ID. It is never closed, since closing a frame closes its whole tab. Its
+  contents are not in `read_page`, `find` or `get_page_text`; screenshots and
+  coordinate input reach it, and a download from it, or from a frame inside
+  it, is handled as one from the tab. A page's dedicated workers are held paused and
+  never run, rather than ending the session: a worker can start another whose
+  script Chromium fetches outside any interception the URL policy could
+  apply. Popups and other new top-level targets are still closed.
+- **A renewable browser session rides out a failed renewal.** A renewal that
+  fails in passing (a connection error, a timeout, a 408, a 429 or a 5xx) is
+  retried with backoff, honouring `Retry-After`, until shortly before the lease
+  deadline. A refusal (any other 4xx, including a 409 whatever its `reason`)
+  still ends the session at once.
+- **A heavy page keeps its browser session.** Browser events past 256 in
+  flight wait their turn in arrival order rather than ending the session, so a
+  page that pauses hundreds of requests at once loads. Subresource requests
+  waiting on `urlPolicy`, and downloads waiting on approval, queue apart from
+  navigations and everything else, so a slow policy does not hold back a
+  navigation, a new tab or a dialog. Only a page producing more than 8,192
+  waiting events, or more than 32 MiB of them, ends the session, and
+  `sessionStatus.terminalError` says why. Console, network-log, dialog and
+  paused-request events keep only what the toolset reports or checks.
+- **A missing `ws` is named.** Without the optional `ws` peer, the browser
+  toolset's tool error says to install `ws` 8.18 or newer, instead of a generic
+  browser failure. It is checked before a browser connection is created.
+- **`createBrowserConnection()` revokes a grant it cannot hand out.** When the
+  platform's response fails validation but carries a well-formed connection
+  id, the grant is revoked before the error is thrown, with or without a
+  `sessionPolicy`.
 
 ### Changed
 

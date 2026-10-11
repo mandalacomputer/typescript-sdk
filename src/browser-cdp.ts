@@ -8,12 +8,160 @@ import type {
 } from './browser-connection.js';
 
 import type { BrowserFiles } from './browser-file-session.js';
+import { APIError, ConnectionError } from './errors.js';
 
 // CDP is an extensible protocol. Values stay inside this backend; the Anthropic
 // pipeline validates every member result before it reaches the model.
 type Message = Record<string, any>;
 export class BrowserDriverError extends Error {}
 class RequestGone extends BrowserDriverError {}
+// The command's target session was already detached: its target is gone.
+class SessionGone extends BrowserDriverError {}
+
+// The events this driver acts on. Everything else Chromium sends (most of the
+// Network domain, lifecycle and execution-context events) is dropped on
+// arrival instead of occupying a slot in the event queue below.
+const EVENTS = new Set([
+  'Browser.downloadWillBegin',
+  'Browser.downloadProgress',
+  'Target.attachedToTarget',
+  'Target.detachedFromTarget',
+  'Target.targetInfoChanged',
+  'Target.targetDestroyed',
+  'Fetch.requestPaused',
+  'Page.javascriptDialogOpening',
+  'Page.frameAttached',
+  'Page.frameDetached',
+  'Page.frameNavigated',
+  'Runtime.consoleAPICalled',
+  'Network.responseReceived',
+]);
+// Bookkeeping that awaits nothing (frame tracking, tab titles, console and
+// network lines) is done the moment it arrives, in arrival order, and never
+// waits behind anything.
+const AT_ONCE = new Set([
+  'Target.targetInfoChanged',
+  'Page.frameAttached',
+  'Page.frameDetached',
+  'Page.frameNavigated',
+  'Runtime.consoleAPICalled',
+  'Network.responseReceived',
+]);
+// Every other event is handled in one of three lanes, up to this many at once
+// in each, with the rest waiting their turn in arrival order within their lane.
+// A heavy page pauses hundreds of requests at once, and each one waits for the
+// URL policy and a reply from Chromium. Chromium holds a paused request until
+// it is answered, so one waiting its turn is not lost. Command replies never
+// wait. The lanes keep a slow URL policy from holding back what must not wait:
+// - policy: subresource requests and downloads, which wait on caller code;
+// - navigation: a tab's own top-level document requests, which a navigate
+//   command waits on (a frame's documents go with the subresources);
+// - target: attaches, detaches, target ends and dialogs, which wait only on
+//   Chromium. A session's own events can only follow its attach.
+const EVENT_CONCURRENCY = 256;
+type Lane = {
+  running: number;
+  queue: { message: Message; size: number }[];
+};
+// Only a page flooding the session faster than any policy could answer reaches
+// these, and they end the session rather than let the queue grow without
+// bound, in events or in the bytes they hold.
+const EVENT_QUEUE_LIMIT = 8192;
+const EVENT_QUEUE_BYTES = 32 * 1024 * 1024;
+// A copy with storage of its own. V8 can answer slice(), join() and template
+// literals with a view of the original string, so an excerpt kept as it is
+// would hold the page's whole payload alive. Exact either way: UTF-8 cannot
+// carry a lone surrogate, and a string with any surrogate is stored two bytes
+// a character already.
+function own(value: string): string {
+  return /[\uD800-\uDFFF]/.test(value)
+    ? Buffer.from(value, 'utf16le').toString('utf16le')
+    : Buffer.from(value, 'utf8').toString('utf8');
+}
+const owned = (value: unknown): unknown => (typeof value === 'string' ? own(value) : value);
+// Page-controlled payloads, cut to what the driver keeps as they arrive and
+// copied out of them, so that neither a waiting event nor a running handler
+// holds more of them.
+const COMPACT: Record<string, (p: Message) => Message> = {
+  'Runtime.consoleAPICalled': (p) => ({
+    text: own(
+      (p.args as Message[])
+        .slice(0, 20)
+        .map((a) => String(a.value ?? a.description ?? '').slice(0, 1000))
+        .join(' '),
+    ),
+  }),
+  'Network.responseReceived': (p) => ({
+    text: own(`${p.response.status} ${String(p.response.url).slice(0, 2000)}`),
+  }),
+  'Page.javascriptDialogOpening': (p) => ({
+    type: owned(p.type),
+    message: own(String(p.message ?? '').slice(0, 1000)),
+  }),
+  // Headers and request bodies stay behind; the URL is kept whole for the policy.
+  'Fetch.requestPaused': (p) => ({
+    requestId: owned(p.requestId),
+    resourceType: owned(p.resourceType),
+    frameId: owned(p.frameId),
+    request: { url: owned(p.request.url) },
+  }),
+};
+const AUTO_ATTACH = { autoAttach: true, waitForDebuggerOnStart: true, flatten: true };
+const INTERCEPT = { patterns: [{ urlPattern: '*', requestStage: 'Request' }] };
+// A site-isolated cross-site frame is its own target, attached under its page
+// and paused until released. Chromium intercepts its subresource requests on
+// the frame's own session, so it gets the page's interception before it runs.
+// Its Page events report the same-process frames inside it, which only that
+// session sees, so downloads from them can be told apart from strangers'.
+const FRAME_INIT: [string, Message][] = [
+  ['Network.enable', {}],
+  ['Network.setBypassServiceWorker', { bypass: true }],
+  ['Fetch.enable', INTERCEPT],
+  ['Runtime.enable', {}],
+  ['Page.enable', {}],
+  ['Target.setAutoAttach', AUTO_ATTACH],
+];
+// Renewal keeps trying until this long before the lease deadline, so that the
+// last attempt can still arrive while the lease is active.
+const RENEW_MARGIN_MS = 2000;
+const RESTORE_WAIT_MS = 5000;
+const RESTORE_ORPHANS = 256;
+// At most this many back/forward cache restores re-read at once; past it a
+// restore is not re-read, and its frames' downloads are refused.
+const RESTORES = 16;
+// At most this many frames a snapshot remembers events for while on its way;
+// past it the snapshot is dropped unused, and what it would have tracked stays
+// untracked.
+const SNAPSHOT_TOUCHED = 256;
+const RENEW_ATTEMPT_MS = 10000;
+
+/** Whether a failed renewal attempt is worth another try before the deadline. */
+function renewable(error: unknown): boolean {
+  // A refusal is an answer about this session: 401/403 is the credential, 404
+  // the connection, and 409 a session that is no longer active (expired,
+  // revoked, disconnected). None of them changes by asking again, whatever
+  // reason the body gives.
+  if (error instanceof APIError)
+    return error.status === 408 || error.status === 429 || error.status >= 500;
+  // Renewal changes nothing but the deadline, so a lost answer is safe to ask
+  // again; so is an attempt that hit its own timeout.
+  return (
+    error instanceof ConnectionError || (error instanceof Error && error.name === 'TimeoutError')
+  );
+}
+function sleep(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    const done = () => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    timer.unref?.();
+    signal.addEventListener('abort', done, { once: true });
+    if (signal.aborted) done();
+  });
+}
 
 function bounded(value: unknown, name: string, max: number, integer = false): number {
   if (
@@ -68,7 +216,7 @@ export class BrowserCDP {
   #ws: import('ws').default | undefined;
   #pending = new Map<
     number,
-    { resolve: (value: Message) => void; reject: (error: Error) => void }
+    { resolve: (value: Message) => void; reject: (error: Error) => void; session?: string }
   >();
   #counter = 0;
   #grant: BrowserConnection | undefined;
@@ -82,8 +230,41 @@ export class BrowserCDP {
   #closing: Promise<void> | undefined;
   #failed = false;
   #tasks = new Set<Promise<void>>();
+  #lanes: Record<'policy' | 'navigation' | 'target', Lane> = {
+    policy: { running: 0, queue: [] },
+    navigation: { running: 0, queue: [] },
+    target: { running: 0, queue: [] },
+  };
+  #queuedBytes = 0;
+  // Session -> the session it was attached under, as attaches arrive.
+  #parents = new Map<string, string>();
+  // Sessions known gone whose detach has not been handled in order yet, and
+  // for each detach event, every session it took with it.
+  #detached = new Set<string>();
+  #gone = new WeakMap<Message, string[]>();
+  // Whether a download's frame was tracked when the download began, decided in
+  // arrival order: frame events are not queued, and a download may be.
+  #tracked = new WeakMap<Message, boolean | Promise<boolean>>();
   #tabs = new Map<string, Message>();
   #sessions = new Map<string, string>();
+  // Cross-process frame session -> the owned tab it renders in, and its target.
+  #frames = new Map<string, { tab: string; target: string }>();
+  // Tracked frame id -> the session that last reported it. A session that goes
+  // away takes the frames only it could see with it (Chromium reports no
+  // detach for them), but not one its parent has reported since.
+  #frameSource = new Map<string, string>();
+  // Tracked frame id -> its parent frame's id, where known.
+  #frameParent = new Map<string, string>();
+  // For each frame-tree request on its way: the frames events have reported since.
+  #snapshots = new Set<{ touched: Set<string>; overflow: boolean }>();
+  // Back/forward cache restores whose frame tree is on its way. Until it
+  // lands, a restored frame is not tracked yet, so a frame reported beneath
+  // one is held here (at most RESTORE_ORPHANS of them) and a download from a
+  // frame not tracked yet waits for the tree (at most RESTORE_WAIT_MS).
+  #restoring = new Set<Promise<void>>();
+  #orphans = new Map<string, { tab: string; session: string; parent: string }>();
+  // Download guid -> the start decision it waits on, until the start is handled.
+  #deciding = new Map<string, boolean | Promise<boolean>>();
   #ready = new Map<string, { promise: Promise<void>; resolve: () => void }>();
   #creating: { promise: Promise<void>; resolve: () => void } | undefined;
   #active: string | undefined;
@@ -121,7 +302,15 @@ export class BrowserCDP {
       );
     if (this.#ws) return;
     try {
-      const { default: WebSocket } = await import('ws');
+      let WebSocket: typeof import('ws').default;
+      try {
+        ({ default: WebSocket } = await import('ws'));
+      } catch {
+        // Loaded before a grant is created, so a missing peer mints nothing.
+        this.#terminalError =
+          "The browser toolset needs the optional 'ws' package (8.18 or newer). Install it with `npm install ws`, then create a new toolset.";
+        throw new BrowserDriverError(this.#terminalError);
+      }
       const requested = performance.now();
       this.#grant = await this.create();
       if (this.sessionPolicy) this.#acceptLease(this.#grant.lease, performance.now() - requested);
@@ -139,7 +328,8 @@ export class BrowserCDP {
       this.#ws = ws;
       ws.on('message', (raw) => {
         try {
-          const message = JSON.parse(raw.toString()) as Message;
+          const text = raw.toString();
+          const message = JSON.parse(text) as Message;
           if ('id' in message) {
             const pending = this.#pending.get(message.id);
             if (pending) {
@@ -148,19 +338,13 @@ export class BrowserCDP {
                   new (message.error.code === -32602 &&
                   message.error.message === 'Invalid InterceptionId.'
                     ? RequestGone
-                    : BrowserDriverError)('Chromium could not complete the browser action.'),
+                    : message.error.code === -32001 && pending.session !== undefined
+                      ? SessionGone
+                      : BrowserDriverError)('Chromium could not complete the browser action.'),
                 );
               else pending.resolve(message.result ?? {});
             }
-          } else {
-            if (this.#tasks.size >= 256) {
-              this.#fail();
-              return;
-            }
-            const task = this.#event(message);
-            this.#tasks.add(task);
-            void task.finally(() => this.#tasks.delete(task));
-          }
+          } else this.#dispatch(message, text.length * 2);
         } catch {
           this.#fail();
         }
@@ -185,11 +369,7 @@ export class BrowserCDP {
       });
       if (this.files) await this.files.setup(this.#context!);
       await this.send('Target.setDiscoverTargets', { discover: true });
-      await this.send('Target.setAutoAttach', {
-        autoAttach: true,
-        waitForDebuggerOnStart: true,
-        flatten: true,
-      });
+      await this.send('Target.setAutoAttach', AUTO_ATTACH);
       await this.#newTab();
       this.#scheduleLease();
     } catch (error) {
@@ -272,24 +452,46 @@ export class BrowserCDP {
       this.#fail();
       return;
     }
-    this.#renewController = new AbortController();
+    const controller = new AbortController();
+    this.#renewController = controller;
     try {
-      const requested = performance.now();
-      const signal = AbortSignal.any([
-        this.#renewController.signal,
-        AbortSignal.timeout(Math.max(1, Math.floor(Math.min(10000, remaining)))),
-      ]);
-      const lease = await this.renew!(this.#grant!.id, signal);
-      if (this.#closed || this.#failed) return;
-      this.#acceptLease(lease, performance.now() - requested);
-      this.#scheduleLease();
+      // One failed attempt is not a failed renewal: retry passing failures with
+      // backoff until shortly before the deadline, honouring Retry-After, and
+      // stop at once on a refusal (see renewable).
+      for (let attempt = 0; ; attempt++) {
+        const requested = performance.now();
+        const left = this.#leaseDeadline - requested;
+        let lease: BrowserSessionLease;
+        try {
+          lease = await this.renew!(
+            this.#grant!.id,
+            AbortSignal.any([
+              controller.signal,
+              AbortSignal.timeout(Math.max(1, Math.floor(Math.min(RENEW_ATTEMPT_MS, left)))),
+            ]),
+          );
+        } catch (error) {
+          if (this.#closed || this.#failed || !renewable(error)) throw error;
+          const hinted = error instanceof APIError ? (error.retryAfterMs ?? 0) : 0;
+          const wait = Math.max(hinted, Math.min(500 * 2 ** attempt, 8000));
+          // The next attempt has to start with time left to reach the server.
+          if (performance.now() + wait + RENEW_MARGIN_MS >= this.#leaseDeadline) throw error;
+          await sleep(wait, controller.signal);
+          if (this.#closed || this.#failed) return;
+          continue;
+        }
+        if (this.#closed || this.#failed) return;
+        this.#acceptLease(lease, performance.now() - requested);
+        this.#scheduleLease();
+        return;
+      }
     } catch {
       if (this.#closed || this.#failed) return;
       this.#terminalError =
         'Browser session renewal failed. The session ended; create a new toolset to continue.';
       this.#fail();
     } finally {
-      this.#renewController = undefined;
+      if (this.#renewController === controller) this.#renewController = undefined;
     }
   }
 
@@ -302,6 +504,7 @@ export class BrowserCDP {
     for (const map of [
       this.#tabs,
       this.#sessions,
+      this.#frames,
       this.#ready,
       this.#refs,
       this.#console,
@@ -309,6 +512,14 @@ export class BrowserCDP {
       this.#buttons,
     ])
       map.clear();
+    for (const lane of Object.values(this.#lanes)) lane.queue = [];
+    this.#queuedBytes = 0;
+    this.#parents.clear();
+    this.#frameSource.clear();
+    this.#frameParent.clear();
+    this.#orphans.clear();
+    this.#deciding.clear();
+    this.#detached.clear();
     this.#active = undefined;
     this.#changes = [];
     for (const pending of this.#pending.values())
@@ -331,7 +542,7 @@ export class BrowserCDP {
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       return await new Promise<Message>((resolve, reject) => {
-        this.#pending.set(id, { resolve, reject });
+        this.#pending.set(id, { resolve, reject, session: sessionId });
         timer = setTimeout(() => {
           this.#fail();
           reject(new BrowserDriverError('Browser action timed out; its session was closed.'));
@@ -354,25 +565,297 @@ export class BrowserCDP {
     }
   }
 
+  /** `bytes` is the event's size as UTF-16, the most V8 stores per character. */
+  #dispatch(message: Message, bytes: number): void {
+    if (!EVENTS.has(message.method)) return;
+    const cut = COMPACT[message.method];
+    let size = bytes;
+    if (cut) {
+      try {
+        message.params = cut(message.params);
+        size = JSON.stringify(message.params).length * 2;
+      } catch {
+        /* Malformed: left whole, for the handler to refuse as before. */
+      }
+    }
+    const child = message.params?.sessionId;
+    if (
+      message.method === 'Target.attachedToTarget' &&
+      typeof child === 'string' &&
+      typeof message.sessionId === 'string'
+    )
+      this.#parents.set(child, message.sessionId);
+    // A detach takes effect on arrival. Chromium need not answer a command on
+    // a session that has gone, and a handler waiting on one would otherwise
+    // hold its slot until the command deadline ended the whole session, with
+    // the detach that would free it stuck in the queue behind it.
+    if (message.method === 'Target.detachedFromTarget' && typeof child === 'string')
+      this.#gone.set(message, this.#detach(child));
+    if (message.method === 'Browser.downloadWillBegin') {
+      const decision =
+        this.files?.frames.has(message.params?.frameId) === true ||
+        (this.#restoring.size ? this.#decide(message.params?.frameId) : false);
+      this.#tracked.set(message, decision);
+      // Its progress must not overtake a start still waiting on its decision.
+      if (decision instanceof Promise && typeof message.params?.guid === 'string')
+        this.#deciding.set(message.params.guid, decision);
+    }
+    if (AT_ONCE.has(message.method)) {
+      this.#run(message);
+      return;
+    }
+    const lane =
+      message.method === 'Fetch.requestPaused'
+        ? message.params?.resourceType === 'Document' &&
+          // A tab's main frame has the tab's own target id.
+          typeof message.params.frameId === 'string' &&
+          message.params.frameId === this.#owner(message.sessionId)
+          ? this.#lanes.navigation
+          : this.#lanes.policy
+        : message.method.startsWith('Browser.download')
+          ? this.#lanes.policy
+          : this.#lanes.target;
+    // Arrival order is kept within a lane: nothing overtakes an event waiting there.
+    if (lane.queue.length || lane.running >= EVENT_CONCURRENCY) {
+      if (
+        Object.values(this.#lanes).reduce((n, l) => n + l.queue.length, 0) >= EVENT_QUEUE_LIMIT ||
+        this.#queuedBytes + size > EVENT_QUEUE_BYTES
+      ) {
+        this.#terminalError =
+          'The page produced browser events faster than the session could handle them. The session ended; create a new toolset to continue.';
+        this.#fail();
+        return;
+      }
+      lane.queue.push({ message, size });
+      this.#queuedBytes += size;
+      return;
+    }
+    this.#run(message, lane);
+  }
+  #run(message: Message, lane?: Lane): void {
+    const task = this.#event(message);
+    this.#tasks.add(task);
+    if (!lane) {
+      void task.finally(() => this.#tasks.delete(task));
+      return;
+    }
+    lane.running++;
+    void task.finally(() => {
+      lane.running--;
+      this.#tasks.delete(task);
+      while (!this.#failed && lane.queue.length && lane.running < EVENT_CONCURRENCY) {
+        const next = lane.queue.shift()!;
+        this.#queuedBytes -= next.size;
+        this.#run(next.message, lane);
+      }
+    });
+  }
+  /** The owned tab a session belongs to: the tab's own, or a frame inside it. */
+  #owner(session: string | undefined): string | undefined {
+    if (session === undefined) return undefined;
+    const frame = this.#frames.get(session);
+    if (frame) return this.#sessions.has(frame.tab) ? frame.tab : undefined;
+    for (const [tab, s] of this.#sessions) if (s === session) return tab;
+    return undefined;
+  }
+  /** The session and every session attached beneath it, all gone now. */
+  #detach(session: string): string[] {
+    // Chromium need not report the detach of a session whose parent session
+    // has already gone, so the whole subtree goes with it.
+    const gone = new Set([session]);
+    for (let grew = true; grew; ) {
+      grew = false;
+      for (const [child, parent] of this.#parents)
+        if (gone.has(parent) && !gone.has(child)) {
+          gone.add(child);
+          grew = true;
+        }
+    }
+    for (const s of gone) {
+      // Remembered until this detach is handled in order, so that an attach
+      // for one of these sessions still waiting in the queue is not acted on.
+      this.#detached.add(s);
+      this.#parents.delete(s);
+      this.#abandon(s);
+      this.#forgetFrames(s);
+    }
+    return [...gone];
+  }
+  #abandon(session: string): void {
+    for (const pending of this.#pending.values())
+      if (pending.session === session)
+        pending.reject(new SessionGone('Chromium could not complete the browser action.'));
+  }
+  #dropFrame(session: string): void {
+    this.#forgetFrames(session);
+    if (this.#frames.delete(session)) this.#abandon(session);
+  }
+  #track(frame: unknown, tab: string, session: string, parent?: unknown): boolean {
+    // Only below a tracked frame, so that every tracked frame stays reachable
+    // from the frames above it when they change documents.
+    if (typeof parent === 'string' && !this.files?.frames.has(parent)) {
+      if (
+        typeof frame === 'string' &&
+        this.#restoring.size &&
+        (this.#orphans.has(frame) || this.#orphans.size < RESTORE_ORPHANS)
+      )
+        this.#orphans.set(frame, { tab, session, parent });
+      return false;
+    }
+    if (typeof frame !== 'string' || !this.files?.frame(frame, tab)) return false;
+    this.#frameSource.set(frame, session);
+    if (typeof parent === 'string') this.#frameParent.set(frame, parent);
+    return true;
+  }
+  #trackTree(
+    tree: Message,
+    tab: string,
+    session: string,
+    skip: Set<string>,
+    parent?: string,
+  ): void {
+    // A frame an event has spoken for since is newer than this snapshot, and
+    // so is everything below it: a navigation replaced its children.
+    const id = tree.frame.id;
+    if (skip.has(id) || !this.#track(id, tab, session, parent)) return;
+    for (const child of tree.childFrames ?? []) this.#trackTree(child, tab, session, skip, id);
+  }
+  /** Forget every tracked frame below `frame`. */
+  #pruneBelow(frame: string): void {
+    const below = new Set([frame]);
+    for (let grew = true; grew; ) {
+      grew = false;
+      for (const [child, parent] of [
+        ...this.#frameParent,
+        ...[...this.#orphans].map(([orphan, o]) => [orphan, o.parent] as const),
+      ])
+        if (below.has(parent) && !below.has(child)) {
+          below.add(child);
+          grew = true;
+        }
+    }
+    below.delete(frame);
+    for (const child of below) this.#untrack(child);
+  }
+  /** Track held frames whose parent is now tracked, and theirs in turn. */
+  #adopt(): void {
+    for (let grew = true; grew; ) {
+      grew = false;
+      for (const [frame, o] of this.#orphans)
+        if (this.files?.frames.has(o.parent)) {
+          this.#orphans.delete(frame);
+          if (this.#owner(o.session) === o.tab && this.#track(frame, o.tab, o.session, o.parent))
+            grew = true;
+        }
+    }
+  }
+  /** Re-read a session's frames after a back/forward cache restore. */
+  #restore(session: string, tab: string): void {
+    if (this.#restoring.size >= RESTORES) return;
+    const restore = this.#snapshot(session, tab)
+      .then(() => this.#adopt())
+      .catch(() => {})
+      .finally(() => {
+        this.#restoring.delete(restore);
+        if (!this.#restoring.size) this.#orphans.clear();
+      });
+    this.#restoring.add(restore);
+  }
+  /** Whether a download's frame is tracked once pending restores land. */
+  async #decide(frame: unknown): Promise<boolean> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      Promise.allSettled([...this.#restoring]),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, RESTORE_WAIT_MS);
+        timer.unref?.();
+      }),
+    ]);
+    clearTimeout(timer);
+    return typeof frame === 'string' && this.files?.frames.has(frame) === true;
+  }
+  /**
+   * Track the frames a session holds now. The reply is a snapshot: a frame
+   * event that arrived while it was on its way is newer and stands, and a
+   * session that went meanwhile has nothing left to track.
+   */
+  async #snapshot(session: string, tab: string): Promise<void> {
+    if (!this.files) return;
+    const pending = { touched: new Set<string>(), overflow: false };
+    this.#snapshots.add(pending);
+    try {
+      const { frameTree } = await this.send('Page.getFrameTree', {}, session);
+      if (!pending.overflow && this.#owner(session) === tab && !this.#detached.has(session))
+        this.#trackTree(frameTree, tab, session, pending.touched);
+    } finally {
+      this.#snapshots.delete(pending);
+    }
+  }
+  #untrack(frame: string): void {
+    this.files?.frames.delete(frame);
+    this.#frameSource.delete(frame);
+    this.#frameParent.delete(frame);
+    this.#orphans.delete(frame);
+  }
+  #forgetFrames(session: string): void {
+    for (const [frame, source] of this.#frameSource) if (source === session) this.#untrack(frame);
+    for (const [frame, o] of this.#orphans) if (o.session === session) this.#orphans.delete(frame);
+  }
+  /** A cross-process frame of an owned tab. It runs; closing it would close its tab. */
+  async #frame(child: string, info: Message, tab: string): Promise<void> {
+    try {
+      this.#frames.set(child, { tab, target: info.targetId });
+      // Its root frame has the frame target's id: downloads from it belong to the tab.
+      this.#track(info.targetId, tab, child);
+      for (const [name, args] of FRAME_INIT) await this.send(name, args, child);
+      await this.#snapshot(child, tab);
+      await this.send('Runtime.runIfWaitingForDebugger', {}, child);
+    } catch {
+      // Usually the frame went away first. If not, it stays paused: a frame
+      // that could not be given the request policy never runs, and its tab
+      // carries on without it.
+      this.#dropFrame(child);
+    }
+  }
+
   async #event(message: Message): Promise<void> {
     const { method, params: p = {}, sessionId: session } = message;
     let eventSession = session;
     try {
       if (method === 'Browser.downloadWillBegin' || method === 'Browser.downloadProgress') {
-        await this.files?.event(method, p);
+        const guid = p.guid;
+        if (method === 'Browser.downloadProgress') {
+          // Settles after the start's own wait, so the start is handled first.
+          await this.#deciding.get(guid);
+          await this.files?.event(method, p);
+          return;
+        }
+        const tracked = await this.#tracked.get(message);
+        const handled = this.files?.event(method, p, tracked);
+        if (this.#deciding.get(guid) === this.#tracked.get(message)) this.#deciding.delete(guid);
+        await handled;
         return;
       }
       if (method === 'Target.attachedToTarget') {
         const info = p.targetInfo;
         const child: string = p.sessionId;
-        if (
-          info.browserContextId !== this.#context &&
-          ![...this.#sessions.values()].includes(session)
-        ) {
+        if (this.#detached.has(child)) return; // Gone before its turn came.
+        const parent = this.#owner(session);
+        if (info.browserContextId !== this.#context && parent === undefined) {
           await this.send('Runtime.runIfWaitingForDebugger', {}, child);
           await this.send('Target.detachFromTarget', { sessionId: child });
           return;
         }
+        if (parent !== undefined && info.type === 'iframe') {
+          await this.#frame(child, info, parent);
+          return;
+        }
+        // A dedicated worker of an owned tab is held where it is: attached and
+        // paused, never released. It cannot be closed (Chromium refuses), and
+        // it cannot be run under the URL policy: a worker can start a nested
+        // worker, whose script Chromium fetches with no session's interception
+        // applied. Its tab carries on without it.
+        if (parent !== undefined && info.type === 'worker') return;
         const target: string = info.targetId;
         if (!this.#ready.has(target) && this.#creating) await this.#creating.promise;
         if (info.type !== 'page' || !this.#ready.has(target)) {
@@ -397,27 +880,28 @@ export class BrowserCDP {
             'Emulation.setDeviceMetricsOverride',
             { width: 1280, height: 720, deviceScaleFactor: 1, mobile: false },
           ],
-          ['Fetch.enable', { patterns: [{ urlPattern: '*', requestStage: 'Request' }] }],
-          [
-            'Target.setAutoAttach',
-            { autoAttach: true, waitForDebuggerOnStart: true, flatten: true },
-          ],
+          ['Fetch.enable', INTERCEPT],
+          ['Target.setAutoAttach', AUTO_ATTACH],
         ];
         for (const [name, args] of initializers) await this.send(name, args, child);
-        if (this.files) {
-          const tree = await this.send('Page.getFrameTree', {}, child);
-          this.files.frameTree(tree.frameTree, target);
-        }
+        await this.#snapshot(child, target);
         await this.send('Runtime.runIfWaitingForDebugger', {}, child);
         this.#ready.get(target)?.resolve();
       } else if (method === 'Target.targetInfoChanged') {
         if (this.#tabs.has(p.targetInfo.targetId))
           this.#tabs.set(p.targetInfo.targetId, p.targetInfo);
+      } else if (method === 'Target.detachedFromTarget') {
+        for (const gone of this.#gone.get(message) ?? []) {
+          this.#detached.delete(gone);
+          this.#dropFrame(gone);
+        }
       } else if (method === 'Target.targetDestroyed') {
+        for (const [frame, { target }] of this.#frames)
+          if (target === p.targetId) this.#dropFrame(frame);
         if (!this.#ready.has(p.targetId) && this.#creating) await this.#creating.promise;
         this.#dropTab(p.targetId);
       } else if (method === 'Fetch.requestPaused') {
-        const tab = [...this.#sessions].find(([, s]) => s === session)?.[0];
+        const tab = this.#owner(session);
         if (!tab) return; // Detached targets take their pending requests with them.
         let allowed = true;
         try {
@@ -425,7 +909,7 @@ export class BrowserCDP {
         } catch {
           allowed = false;
         }
-        if (this.#sessions.get(tab) !== session) return;
+        if (this.#owner(session) !== tab) return;
         if (!allowed) this.#change({ type: 'navigation_refused' });
         await this.send(
           allowed ? 'Fetch.continueRequest' : 'Fetch.failRequest',
@@ -441,41 +925,59 @@ export class BrowserCDP {
           kind: p.type,
           message: String(p.message ?? '').slice(0, 1000),
         });
-        await this.send('Page.handleJavaScriptDialog', { accept: false }, session);
+        try {
+          await this.send('Page.handleJavaScriptDialog', { accept: false }, session);
+        } catch (error) {
+          // Chromium reports a cross-site frame's dialog on its tab's session;
+          // should a frame session report it too, one dismissal is enough.
+          if (!this.#frames.has(session)) throw error;
+        }
       } else {
-        const tab = [...this.#sessions].find(([, s]) => s === session)?.[0];
+        const tab = this.#owner(session);
         if (!tab) return;
-        if (method === 'Page.frameAttached') this.files?.frame(p.frameId, tab);
-        if (method === 'Page.frameDetached') this.files?.frames.delete(p.frameId);
+        const frame = method.startsWith('Page.frame') ? (p.frameId ?? p.frame?.id) : undefined;
+        if (typeof frame === 'string')
+          for (const pending of this.#snapshots)
+            if (pending.overflow) continue;
+            else if (pending.touched.size < SNAPSHOT_TOUCHED) pending.touched.add(frame);
+            else {
+              pending.overflow = true;
+              pending.touched.clear();
+            }
+        if (method === 'Page.frameAttached') this.#track(p.frameId, tab, session, p.parentFrameId);
+        // A swap is the frame moving to another process, where it lives on.
+        if (method === 'Page.frameDetached' && p.reason !== 'swap') {
+          this.#pruneBelow(p.frameId);
+          this.#untrack(p.frameId);
+        }
         if (method === 'Page.frameNavigated') {
-          this.#refs.delete(tab);
-          this.files?.frame(p.frame.id, tab);
-        } else if (method === 'Runtime.consoleAPICalled')
-          append(
-            this.#console,
-            tab,
-            (p.args as Message[])
-              .slice(0, 20)
-              .map((a) => String(a.value ?? a.description ?? '').slice(0, 1000))
-              .join(' '),
-          );
-        else if (method === 'Network.responseReceived')
-          append(
-            this.#network,
-            tab,
-            `${p.response.status} ${String(p.response.url).slice(0, 2000)}`,
-          );
+          // Element references are the tab's own document's; a cross-site
+          // frame navigating leaves them standing.
+          if (this.#sessions.get(tab) === session) this.#refs.delete(tab);
+          // A new document: the frames of the old one are gone, and Chromium
+          // need not report each of them (a cross-site frame keeps its
+          // session across sites but not its children).
+          this.#pruneBelow(p.frame.id);
+          this.#track(p.frame.id, tab, session, p.frame.parentId);
+          // A document back from the back/forward cache brings its frames
+          // with it, and Chromium reports none of them as attached.
+          if (p.type === 'BackForwardCacheRestore') this.#restore(session, tab);
+        } else if (method === 'Runtime.consoleAPICalled') append(this.#console, tab, p.text);
+        else if (method === 'Network.responseReceived') append(this.#network, tab, p.text);
       }
     } catch (error) {
       if (method === 'Fetch.requestPaused' && error instanceof RequestGone) return;
-      if (eventSession && ![...this.#sessions.values()].includes(eventSession)) return;
+      // Its target went away; the detach that says so may still be queued.
+      if (error instanceof SessionGone) return;
+      if (eventSession && this.#owner(eventSession) === undefined) return;
       this.#fail();
     }
   }
   #dropTab(target: string): void {
     if (this.files)
-      for (const [frame, tab] of this.files.frames)
-        if (tab === target) this.files.frames.delete(frame);
+      for (const [frame, tab] of this.files.frames) if (tab === target) this.#untrack(frame);
+    for (const [frame, o] of this.#orphans) if (o.tab === target) this.#orphans.delete(frame);
+    for (const [session, frame] of this.#frames) if (frame.tab === target) this.#dropFrame(session);
     this.#ready.get(target)?.resolve();
     for (const map of [
       this.#tabs,

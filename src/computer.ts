@@ -5856,8 +5856,10 @@ export class Computer {
     try {
       return BrowserConnection.fromApi(data, this.#t.baseUrl, path, sessionPolicy);
     } catch (error) {
-      // Old servers may ignore the opt-in. Never expose a downgraded capability.
-      if (sessionPolicy !== undefined && P.isRecord(data) && typeof data.id === 'string') {
+      // The platform minted a grant this client cannot hand out, whether a
+      // downgraded one (an old server ignoring the opt-in) or one that fails
+      // validation. Revoke it rather than leave a capability nobody holds.
+      if (P.isRecord(data) && typeof data.id === 'string' && /^[0-9a-f]{32}$/.test(data.id)) {
         await this.revokeBrowserConnection(data.id, { signal: AbortSignal.timeout(10000) }).catch(
           () => {},
         );

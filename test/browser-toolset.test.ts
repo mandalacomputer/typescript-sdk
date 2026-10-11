@@ -9,6 +9,7 @@ import { ToolError, ToolsetConfigError } from '@anthropic-ai/sdk/helpers/beta/to
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { BrowserFilePolicy, MandalaBrowserToolset } from '../src/anthropic.js';
 import { BrowserCDP, BrowserDriverError } from '../src/browser-cdp.js';
+import { BrowserFiles } from '../src/browser-file-session.js';
 import { BrowserConnection, Client, type Computer } from '../src/index.js';
 import { BASE, json, recorder } from './harness.js';
 
@@ -136,11 +137,75 @@ it('disables uploads and gates JavaScript without opening a connection', async (
 });
 
 const executable = process.env.MANDALA_TEST_CHROMIUM;
+// 127.0.0.1 and localhost are different sites, so each frame below is cross-site
+// from its parent and runs as its own target.
+const downloadFrame = (port: number) =>
+  `<iframe src="http://localhost:${port}/dl-outer" style="position:absolute;left:0;top:0;border:0;width:600px;height:400px"></iframe>`;
+const pages = (port: number): Record<string, [string, string | Buffer]> => ({
+  '/frame-host': [
+    'text/html',
+    `<title>Frame host</title><p>host page</p><iframe src="http://localhost:${port}/frame-child" style="position:absolute;left:0;top:100px;width:400px;height:300px;border:0"></iframe>`,
+  ],
+  '/frame-child': [
+    'text/html',
+    `<body style="margin:0"><button style="width:400px;height:100px" onclick="fetch('/frame-clicked')">child button</button><script>fetch('/frame-blocked').catch(()=>{});fetch('/frame-allowed')</script><iframe src="http://127.0.0.1:${port}/frame-nested"></iframe></body>`,
+  ],
+  '/frame-nested': ['text/html', `<p>nested</p><script>fetch('/nested-allowed')</script>`],
+  // Cross-site frames added and removed faster than they can be set up.
+  '/frame-churn': [
+    'text/html',
+    `<title>Churn</title><p id="state">churning</p><script>(async()=>{for(let n=0;n<40;n++){const f=document.createElement('iframe');f.src='http://localhost:${port}/churn-child';document.body.append(f);await new Promise(r=>setTimeout(r,(n%4)*5));f.remove()}const last=document.createElement('iframe');last.src='http://localhost:${port}/churn-last';document.body.append(last);document.getElementById('state').textContent='churned'})()</script>`,
+  ],
+  '/churn-child': ['text/html', `<p>child</p><script>fetch('/churn-fetch').catch(()=>{})</script>`],
+  '/churn-last': ['text/html', `<p>last</p><script>fetch('/churn-final')</script>`],
+  '/worker-host': [
+    'text/html',
+    `<title>Worker host</title><p>worker page</p><script>new Worker('/worker.js')</script>`,
+  ],
+  // Chromium fetches the script of a worker started by a worker without any
+  // interception, so this page's URL policy would never see nested-worker.js.
+  '/worker.js': ['text/javascript', `fetch('/worker-fetch');new Worker('/nested-worker.js')`],
+  '/nested-worker.js': ['text/javascript', `fetch('/nested-worker-fetch')`],
+  // A download from a same-process frame inside a cross-site frame.
+  '/dl-host': ['text/html', downloadFrame(port)],
+  '/dl-outer': [
+    'text/html',
+    `<body style="margin:0"><iframe src="/dl-inner" style="border:0;width:400px;height:200px"></iframe></body>`,
+  ],
+  '/dl-inner': [
+    'text/html',
+    `<body style="margin:0"><a href="/dl.txt" download="notes.txt" style="display:block;width:400px;height:200px">download</a></body>`,
+  ],
+  '/dl.txt': ['text/plain', 'downloaded bytes'],
+  // Cross-site frames, each holding a same-process frame, added and removed;
+  // then the download frame.
+  '/dl-churn': [
+    'text/html',
+    `<body style="margin:0"><p id="state" style="position:absolute;top:500px">churning</p><script>(async()=>{for(let n=0;n<150;n++){const f=document.createElement('iframe');f.src='http://localhost:${port}/dl-outer?'+n;const loaded=new Promise(r=>{f.onload=r});document.body.append(f);await loaded;await new Promise(r=>setTimeout(r,5));f.remove()}document.body.insertAdjacentHTML('beforeend',${JSON.stringify(downloadFrame(port))});document.getElementById('state').textContent='churned'})()</script></body>`,
+  ],
+  // One cross-site frame sent back and forth between two other sites, which
+  // keeps its target and session, each document holding a same-process frame;
+  // then the download frame.
+  '/nav-churn': [
+    'text/html',
+    `<body style="margin:0"><p id="state" style="position:absolute;top:500px">churning</p><iframe id="f" src="http://a.test:${port}/dl-outer" style="position:absolute;left:0;top:0;border:0;width:600px;height:400px"></iframe><script>(async()=>{const f=document.getElementById('f');await new Promise(r=>{f.onload=r});for(let n=0;n<40;n++){const loaded=new Promise(r=>{f.onload=r});f.src='http://'+(n%2?'a':'b')+'.test:${port}/dl-outer?'+n;await loaded}const loaded=new Promise(r=>{f.onload=r});f.src='http://a.test:${port}/dl-outer';await loaded;document.getElementById('state').textContent='churned'})()</script></body>`,
+  ],
+  '/heavy': [
+    'text/html',
+    `<title>Heavy</title><p>heavy page</p>${Array.from({ length: 400 }, (_, n) => `<img src="/img/${n}">`).join('')}`,
+  ],
+  '/img': ['image/gif', Buffer.from('R0lGODlhAQABAAAAACw=', 'base64')],
+});
 describe.skipIf(!executable)('real Chromium through Anthropic toolResult', () => {
   let chrome: ChildProcess | undefined, server: Server | undefined, profile: string | undefined;
   const browsers: MandalaBrowserToolset[] = [];
+  const drivers: BrowserCDP[] = [];
+  let profileDownloads: string | undefined;
   afterEach(async () => {
     for (const browser of browsers.splice(0)) await browser.close();
+    for (const driver of drivers.splice(0)) await driver.close();
+    if (profileDownloads) await rm(profileDownloads, { recursive: true, force: true });
+    profileDownloads = undefined;
     if (server) {
       server.closeAllConnections();
       await new Promise<void>((resolve) => server!.close(() => resolve()));
@@ -168,6 +233,10 @@ describe.skipIf(!executable)('real Chromium through Anthropic toolResult', () =>
         '--headless',
         '--no-sandbox',
         '--no-first-run',
+        // As the platform runs it: a cross-site frame is its own process and target.
+        '--site-per-process',
+        // More sites on this one server: a.test and b.test.
+        '--host-resolver-rules=MAP *.test 127.0.0.1',
         '--remote-debugging-port=0',
         `--user-data-dir=${profile}`,
       ],
@@ -216,6 +285,14 @@ describe.skipIf(!executable)('real Chromium through Anthropic toolResult', () =>
       if (req.url === '/redirect') {
         res.writeHead(302, { Location: '/blocked' });
         res.end();
+        return;
+      }
+      const page = pages(req.socket.localPort!)[
+        req.url!.replace(/^\/img\/\d+$/, '/img').replace(/^\/dl-outer\?\d+$/, '/dl-outer')
+      ];
+      if (page) {
+        res.writeHead(200, { 'Content-Type': page[0] });
+        res.end(page[1]);
         return;
       }
       res.writeHead(200, {
@@ -619,4 +696,200 @@ describe.skipIf(!executable)('real Chromium through Anthropic toolResult', () =>
       spy.mockRestore();
     }
   });
+  // What Chromium itself says the targets are, from a second client that only lists.
+  async function targets(url: string): Promise<string[]> {
+    const { default: WebSocket } = await import('ws');
+    const ws = new WebSocket(url);
+    await once(ws, 'open');
+    try {
+      ws.send(JSON.stringify({ id: 1, method: 'Target.getTargets' }));
+      const [raw] = await once(ws, 'message');
+      return (JSON.parse(String(raw)).result.targetInfos as { type: string; url: string }[]).map(
+        (t) => `${t.type} ${t.url}`,
+      );
+    } finally {
+      ws.close();
+    }
+  }
+  it('runs cross-site frames under the URL policy instead of closing their tab', async () => {
+    const seen: [string | undefined, string][] = [];
+    const { browser, base, hits, url } = await fixture({
+      urlPolicy: (ctx, target) => {
+        seen.push([ctx.tabId, target]);
+        if (target.endsWith('/frame-blocked')) throw new ToolError('not permitted');
+      },
+    });
+    const port = new URL(base).port;
+    const tab = tabs(
+      success(await browser.toolResult(use('navigate', { url: `${base}/frame-host` }))),
+    )[0]!.tab_id;
+    // The nested frame loads only once the frame holding it was released.
+    await expect.poll(() => hits, { timeout: 10000 }).toContain('/nested-allowed');
+    expect(await targets(url)).toEqual(
+      expect.arrayContaining([
+        `iframe http://localhost:${port}/frame-child`,
+        `iframe http://127.0.0.1:${port}/frame-nested`,
+      ]),
+    );
+    const page = success(await browser.toolResult(use('get_page_text')));
+    expect(text(page)).toContain('host page');
+    expect(tabs(page)).toEqual([expect.objectContaining({ tab_id: tab })]);
+    // The frame's own requests met the policy, under its tab's ID.
+    expect(hits).toContain('/frame-allowed');
+    expect(hits).not.toContain('/frame-blocked');
+    expect(seen).toContainEqual([tab, `http://localhost:${port}/frame-blocked`]);
+    expect(seen).toContainEqual([tab, `http://127.0.0.1:${port}/nested-allowed`]);
+    // Coordinate input reaches into the frame.
+    success(
+      await browser.toolResult(
+        use('left_click', { target: { type: 'coordinate', x: 200, y: 150 } }),
+      ),
+    );
+    await expect.poll(() => hits).toContain('/frame-clicked');
+    expect(tabs(success(await browser.toolResult(use('list_tabs'))))).toHaveLength(1);
+  }, 30000);
+  it('survives cross-site frames that come and go faster than they are set up', async () => {
+    const { browser, base, hits } = await fixture({
+      urlPolicy: () => new Promise((r) => setTimeout(r, 5)),
+    });
+    success(await browser.toolResult(use('navigate', { url: `${base}/frame-churn` })));
+    await expect.poll(() => hits, { timeout: 15000 }).toContain('/churn-final');
+    expect(browser.sessionStatus.state).toBe('active');
+    expect(text(success(await browser.toolResult(use('get_page_text'))))).toContain('churned');
+  }, 30000);
+  it('holds dedicated workers paused, so a nested worker cannot escape the URL policy', async () => {
+    const seen: string[] = [];
+    const { browser, base, hits, url } = await fixture({
+      urlPolicy: (_ctx, target) => {
+        seen.push(target);
+        if (target.endsWith('/nested-worker.js')) throw new ToolError('not permitted');
+      },
+    });
+    const port = new URL(base).port;
+    success(await browser.toolResult(use('navigate', { url: `${base}/worker-host` })));
+    // The worker's own script is fetched under the page's policy, then it waits.
+    await expect.poll(() => hits, { timeout: 10000 }).toContain('/worker.js');
+    expect(seen).toContain(`${base}/worker.js`);
+    await expect
+      .poll(() => targets(url), { timeout: 10000 })
+      .toContain(`worker http://127.0.0.1:${port}/worker.js`);
+    await new Promise((r) => setTimeout(r, 1000));
+    expect(hits).not.toContain('/worker-fetch');
+    expect(hits).not.toContain('/nested-worker.js');
+    expect(hits).not.toContain('/nested-worker-fetch');
+    expect(text(success(await browser.toolResult(use('get_page_text'))))).toContain('worker page');
+    expect(browser.sessionStatus.state).toBe('active');
+  }, 30000);
+  it('opens and navigates another tab while the URL policy holds a page’s subresources', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const { browser, base, hits } = await fixture({
+      urlPolicy: async (_ctx, target) => {
+        if (target.includes('/img/')) await gate;
+      },
+    });
+    try {
+      success(await browser.toolResult(use('navigate', { url: `${base}/heavy` })));
+      const started = Date.now();
+      success(await browser.toolResult(use('new_tab')));
+      const page = success(await browser.toolResult(use('navigate', { url: `${base}/second` })));
+      expect(text(page)).toContain('Driver test');
+      expect(Date.now() - started).toBeLessThan(4000);
+      expect(hits.filter((hit) => hit.startsWith('/img/'))).toHaveLength(0);
+    } finally {
+      release();
+    }
+    await expect
+      .poll(() => hits.filter((hit) => hit.startsWith('/img/')).length, { timeout: 10000 })
+      .toBe(400);
+    expect(browser.sessionStatus.state).toBe('active');
+  }, 30000);
+  // The driver with a real file session (downloads left to the test) on the
+  // fixture's Chromium, and a spy on how each download's frame was judged.
+  async function fileDriver(url: string) {
+    const grant = Object.assign(
+      BrowserConnection.fromApi(payload, BASE, 'computers/vm-1/browser-connections'),
+      { url },
+    );
+    const computer = { id: 'vm-frames' } as unknown as Computer;
+    const backend = new BrowserCDP(
+      async () => grant,
+      async () => {},
+      async () => {},
+    );
+    const files = new BrowserFiles(
+      computer,
+      new BrowserFilePolicy(computer, { taskId: 'frames' }),
+      backend,
+    );
+    backend.files = files;
+    drivers.push(backend);
+    await backend.start();
+    profileDownloads = await mkdtemp(join(tmpdir(), 'mandala-downloads-'));
+    await backend.send('Browser.setDownloadBehavior', {
+      behavior: 'allowAndName',
+      browserContextId: files.context,
+      downloadPath: profileDownloads,
+      eventsEnabled: true,
+    });
+    const event = vi.spyOn(files, 'event');
+    const began = () =>
+      event.mock.calls.filter(([method]) => method === 'Browser.downloadWillBegin');
+    return { backend, files, began };
+  }
+  it('tracks a download from a same-process frame inside a cross-site frame', async () => {
+    const { url, base, hits } = await fixture();
+    const { backend, files, began } = await fileDriver(url);
+    await backend.perform('navigate', { url: `${base}/dl-host` });
+    await expect.poll(() => hits, { timeout: 10000 }).toContain('/dl-inner');
+    await new Promise((r) => setTimeout(r, 200));
+    await backend.perform('left_click', { target: { type: 'coordinate', x: 50, y: 50 } });
+    await expect.poll(() => began().length, { timeout: 10000 }).toBe(1);
+    const [, params, tracked] = began()[0]!;
+    expect(tracked).toBe(true);
+    expect(files.frames.has((params as { frameId: string }).frameId)).toBe(true);
+  }, 30000);
+  it('cross-site frames that come and go leave frame tracking room', async () => {
+    const { url, base, hits } = await fixture();
+    const { backend, files, began } = await fileDriver(url);
+    await backend.perform('navigate', { url: `${base}/dl-churn` });
+    await expect
+      .poll(() => backend.perform('get_page_text', {}), { timeout: 30000, interval: 200 })
+      .toBe('churned');
+    await expect.poll(() => hits, { timeout: 10000 }).toContain('/dl-inner');
+    expect(hits.filter((hit) => hit.startsWith('/dl-outer')).length).toBeGreaterThan(150);
+    // The page, the download frame and the frame inside it, and little else:
+    // Chromium reports no detach for a frame inside a removed cross-site frame.
+    await expect.poll(() => files.frames.size, { timeout: 5000 }).toBeLessThan(10);
+    await new Promise((r) => setTimeout(r, 200));
+    await backend.perform('left_click', { target: { type: 'coordinate', x: 50, y: 50 } });
+    await expect.poll(() => began().length, { timeout: 10000 }).toBe(1);
+    expect(began()[0]![2]).toBe(true);
+  }, 60000);
+  it('a cross-site frame sent between sites leaves frame tracking room', async () => {
+    const { url, base, hits } = await fixture();
+    const { backend, files, began } = await fileDriver(url);
+    await backend.perform('navigate', { url: `${base}/nav-churn` });
+    await expect
+      .poll(() => backend.perform('get_page_text', {}), { timeout: 30000, interval: 200 })
+      .toBe('churned');
+    expect(hits.filter((hit) => hit.startsWith('/dl-outer')).length).toBeGreaterThan(40);
+    // The page, the frame and the frame inside its current document.
+    await expect.poll(() => files.frames.size, { timeout: 5000 }).toBeLessThan(6);
+    await new Promise((r) => setTimeout(r, 200));
+    await backend.perform('left_click', { target: { type: 'coordinate', x: 50, y: 50 } });
+    await expect.poll(() => began().length, { timeout: 10000 }).toBe(1);
+    expect(began()[0]![2]).toBe(true);
+  }, 60000);
+  it('loads a page that pauses hundreds of requests at once', async () => {
+    const { browser, base, hits } = await fixture({ urlPolicy: async () => {} });
+    success(await browser.toolResult(use('navigate', { url: `${base}/heavy` })));
+    await expect
+      .poll(() => hits.filter((hit) => hit.startsWith('/img/')).length, { timeout: 10000 })
+      .toBe(400);
+    expect(text(success(await browser.toolResult(use('get_page_text'))))).toContain('heavy page');
+    expect(browser.sessionStatus.state).toBe('active');
+  }, 30000);
 });
