@@ -2032,9 +2032,12 @@ revokes its capability; it does not stop Chromium or delete the computer.
   Callbacks must finish promptly. This is **not network isolation**: use guest
   egress controls for DNS/IP containment, WebSockets, WebRTC, WebTransport and
   browser traffic outside those intercepted requests.
-- Popups, workers and cross-process frames are unsupported and are closed.
-  If an unsupported target cannot be closed, the driver closes its session.
-  Sites depending on these features may not work with this initial driver.
+- Cross-site frames (which Chromium runs in their own process) and dedicated
+  workers run as part of their tab, and their HTTP(S) requests go through the
+  same URL hook with that tab's ID. A cross-site frame's contents are not part
+  of `read_page`, `find` or `get_page_text`; screenshots and coordinate input
+  reach it. Popups and other new top-level targets are unsupported and are
+  closed; if one cannot be closed, the driver closes its session.
 - `read_page` returns accessibility roles/names and element refs; `find`
   performs a case-insensitive substring search over that tree. Each read/find
   replaces that tab's refs. Navigation invalidates them. Ask for a new page
@@ -2175,8 +2178,12 @@ valid and always close the toolset.
 `absoluteExpiresAt`, and a redacted `terminalError`. Set `autoRenew: false`
 on the policy to stop at the initial lease.
 Remaining time is advisory and conservative, based on server time and monotonic
-elapsed time; client wall-clock skew does not lengthen a lease. Renewal failure
-closes the socket immediately. Status reads are local and do not call the API.
+elapsed time; client wall-clock skew does not lengthen a lease. A renewal that
+fails in passing (a connection error, a timeout, a 408, a 429 or a 5xx) is
+retried with backoff, honouring `Retry-After`, until shortly before the lease
+deadline. A refusal (any other 4xx, such as a 401, 403, 404, or a 409 whatever
+its `reason`) or running out of time ends the session and closes the socket at
+once; renewal never creates a new session. Status reads are local and do not call the API.
 
 `createBrowserConnection({sessionPolicy: {}})` opts a raw CDP client in; call
 `renewBrowserConnection(connection.id)` before each lease expires. Raw

@@ -136,6 +136,32 @@ it('disables uploads and gates JavaScript without opening a connection', async (
 });
 
 const executable = process.env.MANDALA_TEST_CHROMIUM;
+// 127.0.0.1 and localhost are different sites, so each frame below is cross-site
+// from its parent and runs as its own target.
+const pages = (port: number): Record<string, [string, string | Buffer]> => ({
+  '/frame-host': [
+    'text/html',
+    `<title>Frame host</title><p>host page</p><iframe src="http://localhost:${port}/frame-child" style="position:absolute;left:0;top:100px;width:400px;height:300px;border:0"></iframe>`,
+  ],
+  '/frame-child': [
+    'text/html',
+    `<body style="margin:0"><button style="width:400px;height:100px" onclick="fetch('/frame-clicked')">child button</button><script>fetch('/frame-blocked').catch(()=>{});fetch('/frame-allowed')</script><iframe src="http://127.0.0.1:${port}/frame-nested"></iframe></body>`,
+  ],
+  '/frame-nested': ['text/html', `<p>nested</p><script>fetch('/nested-allowed')</script>`],
+  '/worker-host': [
+    'text/html',
+    `<title>Worker host</title><script>const w=new Worker('/worker.js');w.onmessage=e=>{document.title=e.data}</script>`,
+  ],
+  '/worker.js': [
+    'text/javascript',
+    `fetch('/worker-blocked').then(()=>'leaked',()=>'refused').then(r=>fetch('/worker-allowed').then(()=>postMessage('worker '+r)))`,
+  ],
+  '/heavy': [
+    'text/html',
+    `<title>Heavy</title><p>heavy page</p>${Array.from({ length: 400 }, (_, n) => `<img src="/img/${n}">`).join('')}`,
+  ],
+  '/img': ['image/gif', Buffer.from('R0lGODlhAQABAAAAACw=', 'base64')],
+});
 describe.skipIf(!executable)('real Chromium through Anthropic toolResult', () => {
   let chrome: ChildProcess | undefined, server: Server | undefined, profile: string | undefined;
   const browsers: MandalaBrowserToolset[] = [];
@@ -168,6 +194,8 @@ describe.skipIf(!executable)('real Chromium through Anthropic toolResult', () =>
         '--headless',
         '--no-sandbox',
         '--no-first-run',
+        // As the platform runs it: a cross-site frame is its own process and target.
+        '--site-per-process',
         '--remote-debugging-port=0',
         `--user-data-dir=${profile}`,
       ],
@@ -216,6 +244,12 @@ describe.skipIf(!executable)('real Chromium through Anthropic toolResult', () =>
       if (req.url === '/redirect') {
         res.writeHead(302, { Location: '/blocked' });
         res.end();
+        return;
+      }
+      const page = pages(req.socket.localPort!)[req.url!.replace(/^\/img\/\d+$/, '/img')];
+      if (page) {
+        res.writeHead(200, { 'Content-Type': page[0] });
+        res.end(page[1]);
         return;
       }
       res.writeHead(200, {
@@ -619,4 +653,82 @@ describe.skipIf(!executable)('real Chromium through Anthropic toolResult', () =>
       spy.mockRestore();
     }
   });
+  // What Chromium itself says the targets are, from a second client that only lists.
+  async function targets(url: string): Promise<string[]> {
+    const { default: WebSocket } = await import('ws');
+    const ws = new WebSocket(url);
+    await once(ws, 'open');
+    try {
+      ws.send(JSON.stringify({ id: 1, method: 'Target.getTargets' }));
+      const [raw] = await once(ws, 'message');
+      return (JSON.parse(String(raw)).result.targetInfos as { type: string; url: string }[]).map(
+        (t) => `${t.type} ${t.url}`,
+      );
+    } finally {
+      ws.close();
+    }
+  }
+  it('runs cross-site frames under the URL policy instead of closing their tab', async () => {
+    const seen: [string | undefined, string][] = [];
+    const { browser, base, hits, url } = await fixture({
+      urlPolicy: (ctx, target) => {
+        seen.push([ctx.tabId, target]);
+        if (target.endsWith('/frame-blocked')) throw new ToolError('not permitted');
+      },
+    });
+    const port = new URL(base).port;
+    const tab = tabs(
+      success(await browser.toolResult(use('navigate', { url: `${base}/frame-host` }))),
+    )[0]!.tab_id;
+    // The nested frame loads only once the frame holding it was released.
+    await expect.poll(() => hits, { timeout: 10000 }).toContain('/nested-allowed');
+    expect(await targets(url)).toEqual(
+      expect.arrayContaining([
+        `iframe http://localhost:${port}/frame-child`,
+        `iframe http://127.0.0.1:${port}/frame-nested`,
+      ]),
+    );
+    const page = success(await browser.toolResult(use('get_page_text')));
+    expect(text(page)).toContain('host page');
+    expect(tabs(page)).toEqual([expect.objectContaining({ tab_id: tab })]);
+    // The frame's own requests met the policy, under its tab's ID.
+    expect(hits).toContain('/frame-allowed');
+    expect(hits).not.toContain('/frame-blocked');
+    expect(seen).toContainEqual([tab, `http://localhost:${port}/frame-blocked`]);
+    expect(seen).toContainEqual([tab, `http://127.0.0.1:${port}/nested-allowed`]);
+    // Coordinate input reaches into the frame.
+    success(
+      await browser.toolResult(
+        use('left_click', { target: { type: 'coordinate', x: 200, y: 150 } }),
+      ),
+    );
+    await expect.poll(() => hits).toContain('/frame-clicked');
+    expect(tabs(success(await browser.toolResult(use('list_tabs'))))).toHaveLength(1);
+  }, 30000);
+  it('runs dedicated workers under their page’s URL policy', async () => {
+    const { browser, base, hits } = await fixture({
+      urlPolicy: (_ctx, target) => {
+        if (target.endsWith('/worker-blocked')) throw new ToolError('not permitted');
+      },
+      configs: { javascript_exec: { enabled: true } },
+      confirm: () => true,
+    });
+    success(await browser.toolResult(use('navigate', { url: `${base}/worker-host` })));
+    await expect.poll(() => hits, { timeout: 10000 }).toContain('/worker-allowed');
+    expect(hits).not.toContain('/worker-blocked');
+    await expect
+      .poll(async () =>
+        text(success(await browser.toolResult(use('javascript_exec', { text: 'document.title' })))),
+      )
+      .toContain('worker refused');
+  }, 30000);
+  it('loads a page that pauses hundreds of requests at once', async () => {
+    const { browser, base, hits } = await fixture({ urlPolicy: async () => {} });
+    success(await browser.toolResult(use('navigate', { url: `${base}/heavy` })));
+    await expect
+      .poll(() => hits.filter((hit) => hit.startsWith('/img/')).length, { timeout: 10000 })
+      .toBe(400);
+    expect(text(success(await browser.toolResult(use('get_page_text'))))).toContain('heavy page');
+    expect(browser.sessionStatus.state).toBe('active');
+  }, 30000);
 });

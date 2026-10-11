@@ -74,6 +74,31 @@ This is the summary you read to decide whether to upgrade.
   carries `completed`, `failedIndex` and the results so far, and which
   `isTransient()` never calls worth sending again. Neither does it call an
   error whose answer cannot be read as a refusal before dispatch.
+- **The browser toolset runs cross-site frames and dedicated workers.**
+  `MandalaBrowserToolset` treats a site-isolated cross-site frame (its own
+  Chromium target) and a page's dedicated workers as part of their tab: they
+  run, and their HTTP(S) requests reach `urlPolicy` with that tab's ID. It
+  never closes them, since closing a frame closes its whole tab. A cross-site
+  frame's contents are not in `read_page`, `find` or `get_page_text`;
+  screenshots and coordinate input reach it. Popups and other new top-level
+  targets are still closed.
+- **A renewable browser session rides out a failed renewal.** A renewal that
+  fails in passing (a connection error, a timeout, a 408, a 429 or a 5xx) is
+  retried with backoff, honouring `Retry-After`, until shortly before the lease
+  deadline. A refusal (any other 4xx, including a 409 whatever its `reason`)
+  still ends the session at once.
+- **A heavy page keeps its browser session.** Browser events past 256 in
+  flight wait their turn in arrival order rather than ending the session, so a
+  page that pauses hundreds of requests at once loads. Only a page producing
+  more than 8,192 waiting events ends it, and `sessionStatus.terminalError`
+  says why.
+- **A missing `ws` is named.** Without the optional `ws` peer, the browser
+  toolset's tool error says to install `ws` 8.18 or newer, instead of a generic
+  browser failure. It is checked before a browser connection is created.
+- **`createBrowserConnection()` revokes a grant it cannot hand out.** When the
+  platform's response fails validation but carries a well-formed connection
+  id, the grant is revoked before the error is thrown, with or without a
+  `sessionPolicy`.
 
 ### Changed
 

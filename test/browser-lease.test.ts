@@ -9,6 +9,14 @@ import {
   browserSessionOptions,
 } from '../src/browser-connection.js';
 import type { Computer } from '../src/computer.js';
+import {
+  APIError,
+  ConflictError,
+  ConnectionError,
+  isTransient,
+  RateLimitError,
+  UnavailableError,
+} from '../src/errors.js';
 
 const sockets = vi.hoisted(
   () =>
@@ -370,4 +378,223 @@ it('renews with account authorization and an empty body', async () => {
   expect(renewed.id).toBe(ID);
   expect(rec.last().body).toEqual({});
   expect(new Headers(rec.last().headers).get('authorization')).toBe('Bearer com_test');
+});
+
+// A refusal as the real client raises it from a browser-connection route.
+async function refusal(
+  status: number,
+  body: Record<string, unknown>,
+  route: 'create' | 'renew' = 'renew',
+): Promise<APIError> {
+  const { Client } = await import('../src/index.js');
+  const { recorder, json } = await import('./harness.js');
+  const rec = recorder((call) =>
+    call.method === 'GET' ? json({ id: 'vm', status: 'running' }) : json(body, { status }),
+  );
+  const c = await new Client({
+    apiKey: 'com_test',
+    baseUrl: 'https://api.test/api/v1',
+    fetch: rec.fetch,
+  }).computers.get('vm');
+  const error = await (route === 'renew'
+    ? c.renewBrowserConnection(ID)
+    : c.createBrowserConnection({ sessionPolicy: policy })
+  ).then(
+    () => undefined,
+    (e: unknown) => e,
+  );
+  if (!(error instanceof APIError)) throw new Error('expected an API error');
+  return error;
+}
+
+it('retries a renewal that fails in passing, with backoff, on the same session', async () => {
+  const renew = vi.fn(async () => snapshot(40, 100));
+  renew.mockRejectedValueOnce(
+    new UnavailableError('unavailable', 503, {}, undefined, { method: 'POST' }),
+  );
+  renew.mockRejectedValueOnce(new ConnectionError('connection reset'));
+  const { backend, create } = setup(renew);
+  try {
+    await backend.start();
+    // Renewal starts at 40 s; the backoff is 500 ms, then a second.
+    await vi.advanceTimersByTimeAsync(40000);
+    expect(renew).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(499);
+    expect(renew).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(renew).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(999);
+    expect(renew).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(renew).toHaveBeenCalledTimes(3);
+    expect(backend.sessionStatus().state).toBe('active');
+    expect(backend.sessionStatus().remainingSeconds).toBeGreaterThan(59);
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(sockets).toHaveLength(1);
+    expect(sockets[0]!.ended).toBe(false);
+  } finally {
+    await backend.close();
+  }
+});
+
+it('waits at least as long as Retry-After before renewing again', async () => {
+  const renew = vi.fn(async () => snapshot(40, 100));
+  renew.mockRejectedValueOnce(await refusal(429, { error: 'rate limited' }));
+  renew.mockRejectedValueOnce(new RateLimitError('slow down', 429, {}, 5000));
+  const { backend } = setup(renew);
+  try {
+    await backend.start();
+    await vi.advanceTimersByTimeAsync(40500);
+    expect(renew).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(4999);
+    expect(renew).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(renew).toHaveBeenCalledTimes(3);
+    expect(backend.sessionStatus().state).toBe('active');
+  } finally {
+    await backend.close();
+  }
+});
+
+it.each([
+  [401, {}],
+  [403, { reason: 'revoked' }],
+  [404, {}],
+  [409, {}],
+  [409, { reason: 'unavailable' }],
+  // Whatever word a 409 carries, renewal will not make the session active again.
+  [409, { reason: 'contention' }],
+  [400, {}],
+])('ends the session at once when renewal is refused with %i %j', async (status, extra) => {
+  const error = await refusal(status, {
+    error: 'browser connection is not an active renewable session',
+    ...extra,
+  });
+  const renew = vi.fn(async (): Promise<BrowserSessionLease> => {
+    throw error;
+  });
+  const { backend } = setup(renew);
+  try {
+    await backend.start();
+    await vi.advanceTimersByTimeAsync(40001);
+    expect(backend.sessionStatus()).toMatchObject({
+      state: 'ended',
+      terminalError: expect.stringContaining('renewal failed'),
+    });
+    expect(sockets[0]!.ended).toBe(true);
+    await vi.advanceTimersByTimeAsync(20000);
+    expect(renew).toHaveBeenCalledTimes(1);
+  } finally {
+    await backend.close();
+  }
+});
+
+it('stops retrying renewal shortly before the lease deadline', async () => {
+  const renew = vi.fn(async (): Promise<BrowserSessionLease> => {
+    throw new ConnectionError('connection refused');
+  });
+  const { backend } = setup(renew);
+  try {
+    await backend.start();
+    // The lease has 20 seconds left when renewal starts.
+    await vi.advanceTimersByTimeAsync(40001);
+    await vi.advanceTimersByTimeAsync(17000);
+    expect(backend.sessionStatus()).toMatchObject({
+      state: 'ended',
+      terminalError: expect.stringContaining('renewal failed'),
+    });
+    const attempts = renew.mock.calls.length;
+    expect(attempts).toBeGreaterThan(3);
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(renew).toHaveBeenCalledTimes(attempts);
+  } finally {
+    await backend.close();
+  }
+});
+
+it('close during a renewal backoff stops it and revokes once', async () => {
+  const renew = vi.fn(async (): Promise<BrowserSessionLease> => {
+    throw new ConnectionError('connection refused');
+  });
+  const { backend, revoke } = setup(renew);
+  await backend.start();
+  await vi.advanceTimersByTimeAsync(40001);
+  expect(renew).toHaveBeenCalledTimes(1);
+  await backend.close();
+  await vi.advanceTimersByTimeAsync(60000);
+  expect(renew).toHaveBeenCalledTimes(1);
+  expect(revoke).toHaveBeenCalledTimes(1);
+  expect(backend.sessionStatus().state).toBe('ended');
+});
+
+it.each([
+  ['create', 'unsupported', false],
+  ['create', 'unavailable', false],
+  ['create', 'contention', true],
+  ['renew', 'unavailable', false],
+  ['renew', 'revoked', false],
+  ['renew', 'unsupported', false],
+  ['renew', 'contention', true],
+] as const)(
+  'classifies a browser-connection %s 409 by its reason %s',
+  async (route, reason, transient) => {
+    const error = await refusal(409, { error: 'refused', reason }, route);
+    expect(error).toBeInstanceOf(ConflictError);
+    expect(error.reason).toBe(reason);
+    expect(isTransient(error)).toBe(transient);
+  },
+);
+
+it.each([
+  ['legacy', undefined],
+  ['renewable', policy],
+])('revokes a %s grant whose create response fails validation', async (_name, sessionPolicy) => {
+  const { Client } = await import('../src/index.js');
+  const { recorder, json } = await import('./harness.js');
+  const rec = recorder((call) =>
+    json(
+      call.method === 'POST'
+        ? {
+            id: ID,
+            url: 'wss://elsewhere.test/cdp',
+            token: TOKEN,
+            expires_at: iso(60),
+            ...(sessionPolicy ? leaseData() : {}),
+          }
+        : call.method === 'DELETE'
+          ? { ok: true }
+          : { id: 'vm', status: 'running' },
+    ),
+  );
+  const c = await new Client({
+    apiKey: 'com_test',
+    baseUrl: 'https://api.test/api/v1',
+    fetch: rec.fetch,
+  }).computers.get('vm');
+  await expect(c.createBrowserConnection(sessionPolicy ? { sessionPolicy } : {})).rejects.toThrow(
+    'invalid browser connection response',
+  );
+  expect(rec.last()).toMatchObject({
+    method: 'DELETE',
+    path: `/computers/vm/browser-connections/${ID}`,
+  });
+});
+
+it('sends no revoke for a create response whose id it cannot trust', async () => {
+  const { Client } = await import('../src/index.js');
+  const { recorder, json } = await import('./harness.js');
+  const rec = recorder((call) =>
+    json(
+      call.method === 'POST'
+        ? { id: '../escape', url: 'wss://elsewhere.test/cdp', token: TOKEN, expires_at: iso(60) }
+        : { id: 'vm', status: 'running' },
+    ),
+  );
+  const c = await new Client({
+    apiKey: 'com_test',
+    baseUrl: 'https://api.test/api/v1',
+    fetch: rec.fetch,
+  }).computers.get('vm');
+  await expect(c.createBrowserConnection()).rejects.toThrow('invalid browser connection response');
+  expect(rec.calls.map((call) => call.method)).toEqual(['GET', 'POST']);
 });
