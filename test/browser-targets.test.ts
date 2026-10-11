@@ -111,11 +111,17 @@ function attach(ws: Socket, parent: string | undefined, session: string, type: s
     },
   });
 }
-const paused = (ws: Socket, session: string, requestId: string, url: string) =>
+const paused = (
+  ws: Socket,
+  session: string,
+  requestId: string,
+  url: string,
+  resourceType = 'Fetch',
+) =>
   ws.message({
     method: 'Fetch.requestPaused',
     sessionId: session,
-    params: { requestId, request: { url } },
+    params: { requestId, resourceType, request: { url } },
   });
 // Fill every slot of the lane that does not wait on caller code: frames whose
 // setup Chromium never answers.
@@ -399,23 +405,25 @@ it('bounds the bytes waiting events hold, keeping only what it uses of page payl
   const { backend, ws } = await started(() => gate);
   try {
     await holdTargets(ws);
+    for (let n = 0; n < 256; n++) paused(ws, 'session', `r${n}`, 'https://example.test/');
     const huge = 'x'.repeat(1024 * 1024);
-    // 40 MiB of console output waits as the 40 KiB read_console would keep.
-    for (let n = 0; n < 40; n++)
+    // 40 MiB of console output and dialogs keep only what is reported.
+    for (let n = 0; n < 40; n++) {
       ws.message({
         method: 'Runtime.consoleAPICalled',
         sessionId: 'session',
         params: { type: 'log', args: [{ type: 'string', value: huge }] },
       });
-    expect(backend.sessionStatus().state).toBe('active');
-    // A payload the driver keeps whole counts whole.
-    for (let n = 0; n < 40 && backend.sessionStatus().state === 'active'; n++)
       ws.message({
-        method: 'Target.targetInfoChanged',
-        params: {
-          targetInfo: { targetId: 'other', type: 'page', url: `https://example.test/${huge}` },
-        },
+        method: 'Page.javascriptDialogOpening',
+        sessionId: 'session',
+        params: { type: 'alert', message: huge },
       });
+    }
+    expect(backend.sessionStatus().state).toBe('active');
+    // A paused request's URL is kept whole for the policy, and counts whole.
+    for (let n = 0; n < 40 && backend.sessionStatus().state === 'active'; n++)
+      paused(ws, 'session', `big-${n}`, `https://example.test/${huge}`);
     expect(backend.sessionStatus()).toMatchObject({
       state: 'ended',
       terminalError: expect.stringContaining('faster than the session could handle'),
@@ -493,6 +501,85 @@ it('a slow URL policy holds back neither a new tab nor a dialog', async () => {
     await vi.waitFor(() => expect(named(ws, 'Page.handleJavaScriptDialog')).toHaveLength(1));
     expect(named(ws, 'Fetch.continueRequest')).toHaveLength(0);
     expect(backend.sessionStatus().state).toBe('active');
+  } finally {
+    release();
+    await backend.close();
+  }
+});
+
+it('a backlog of subresource requests holds back no navigation', async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((r) => {
+    release = r;
+  });
+  const policy = vi.fn(async (_tab: string | undefined, url: string) => {
+    if (url.includes('/sub/')) await gate;
+  });
+  const { backend, ws } = await started(policy);
+  try {
+    for (let n = 0; n < 1024; n++) paused(ws, 'session', `r${n}`, `https://example.test/sub/${n}`);
+    paused(ws, 'session', 'page', 'https://example.test/next', 'Document');
+    await vi.waitFor(() =>
+      expect(named(ws, 'Fetch.continueRequest')).toEqual([
+        expect.objectContaining({ params: { requestId: 'page' } }),
+      ]),
+    );
+    expect(backend.sessionStatus().state).toBe('active');
+  } finally {
+    release();
+    await backend.close();
+  }
+});
+
+it('decides a download’s frame as it arrives, however long the download waits', async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((r) => {
+    release = r;
+  });
+  const { backend, ws } = await started(() => gate);
+  const event = vi.fn(async (_method: string, _p: unknown, _tracked?: boolean) => {});
+  const frames = new Map<string, string>();
+  backend.files = {
+    frames,
+    frame(id: string, tab: string) {
+      frames.set(id, tab);
+      return true;
+    },
+    event,
+    close: async () => {},
+    created: false,
+    cleanupFailed: false,
+  } as unknown as NonNullable<BrowserCDP['files']>;
+  try {
+    // A frame attached behind a full target lane is still tracked when its
+    // download begins.
+    await holdTargets(ws);
+    ws.message({
+      method: 'Page.frameAttached',
+      sessionId: 'session',
+      params: { frameId: 'early' },
+    });
+    ws.message({
+      method: 'Browser.downloadWillBegin',
+      params: { guid: 'one', frameId: 'early' },
+    });
+    await vi.waitFor(() => expect(event).toHaveBeenCalledTimes(1));
+    expect(event.mock.calls[0]![2]).toBe(true);
+    // A download waiting its turn keeps the frame it began in, though the frame
+    // is gone by the time the download is handled.
+    for (let n = 0; n < 256; n++) paused(ws, 'session', `r${n}`, 'https://example.test/');
+    ws.message({ method: 'Page.frameAttached', sessionId: 'session', params: { frameId: 'late' } });
+    ws.message({ method: 'Browser.downloadWillBegin', params: { guid: 'two', frameId: 'late' } });
+    ws.message({ method: 'Page.frameDetached', sessionId: 'session', params: { frameId: 'late' } });
+    // And one from a frame never seen is not.
+    ws.message({
+      method: 'Browser.downloadWillBegin',
+      params: { guid: 'three', frameId: 'stranger' },
+    });
+    expect(event).toHaveBeenCalledTimes(1);
+    release();
+    await vi.waitFor(() => expect(event).toHaveBeenCalledTimes(3));
+    expect(event.mock.calls.slice(1).map((c) => c[2])).toEqual([true, false]);
   } finally {
     release();
     await backend.close();

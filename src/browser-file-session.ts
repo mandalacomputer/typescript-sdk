@@ -371,13 +371,14 @@ export class BrowserFiles {
       /* Quota and guardian bound leftovers. */
     }
   }
-  async event(method: string, p: Message): Promise<void> {
+  /** `tracked`: whether the download's frame was tracked when it began. */
+  async event(method: string, p: Message, tracked?: boolean): Promise<void> {
     if (!this.policy.downloads || !this.live() || typeof p.guid !== 'string' || !GUID.test(p.guid))
       return;
     const guid = p.guid;
     if (method === 'Browser.downloadWillBegin') {
       if (this.downloads.has(guid)) return;
-      if (!this.frames.has(p.frameId)) {
+      if (!(tracked ?? this.frames.has(p.frameId))) {
         await this.cancelUntracked(guid);
         return;
       }

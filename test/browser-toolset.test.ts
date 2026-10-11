@@ -744,6 +744,32 @@ describe.skipIf(!executable)('real Chromium through Anthropic toolResult', () =>
     expect(text(success(await browser.toolResult(use('get_page_text'))))).toContain('worker page');
     expect(browser.sessionStatus.state).toBe('active');
   }, 30000);
+  it('opens and navigates another tab while the URL policy holds a page’s subresources', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const { browser, base, hits } = await fixture({
+      urlPolicy: async (_ctx, target) => {
+        if (target.includes('/img/')) await gate;
+      },
+    });
+    try {
+      success(await browser.toolResult(use('navigate', { url: `${base}/heavy` })));
+      const started = Date.now();
+      success(await browser.toolResult(use('new_tab')));
+      const page = success(await browser.toolResult(use('navigate', { url: `${base}/second` })));
+      expect(text(page)).toContain('Driver test');
+      expect(Date.now() - started).toBeLessThan(4000);
+      expect(hits.filter((hit) => hit.startsWith('/img/'))).toHaveLength(0);
+    } finally {
+      release();
+    }
+    await expect
+      .poll(() => hits.filter((hit) => hit.startsWith('/img/')).length, { timeout: 10000 })
+      .toBe(400);
+    expect(browser.sessionStatus.state).toBe('active');
+  }, 30000);
   it('loads a page that pauses hundreds of requests at once', async () => {
     const { browser, base, hits } = await fixture({ urlPolicy: async () => {} });
     success(await browser.toolResult(use('navigate', { url: `${base}/heavy` })));

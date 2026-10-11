@@ -36,21 +36,28 @@ const EVENTS = new Set([
   'Runtime.consoleAPICalled',
   'Network.responseReceived',
 ]);
-// Events are handled concurrently up to this many at once in each of two lanes,
-// and the rest wait their turn in arrival order within their lane. A heavy page
-// pauses hundreds of requests at once, and each one waits for the URL policy
-// and a reply from Chromium. Chromium holds a paused request until it is
-// answered, so one waiting its turn is not lost. Command replies never wait.
-const EVENT_CONCURRENCY = 256;
-// Events whose handlers wait on caller code (the URL policy, download approval)
-// have their own lane, so a slow policy cannot hold back the rest: a new tab's
-// attach, a dialog to dismiss, a target's end. Nothing in the other lane waits
-// for these: a session's own events can only follow its attach.
-const SLOW_EVENTS = new Set([
-  'Fetch.requestPaused',
-  'Browser.downloadWillBegin',
-  'Browser.downloadProgress',
+// Bookkeeping that awaits nothing (frame tracking, tab titles, console and
+// network lines) is done the moment it arrives, in arrival order, and never
+// waits behind anything.
+const AT_ONCE = new Set([
+  'Target.targetInfoChanged',
+  'Page.frameAttached',
+  'Page.frameDetached',
+  'Page.frameNavigated',
+  'Runtime.consoleAPICalled',
+  'Network.responseReceived',
 ]);
+// Every other event is handled in one of three lanes, up to this many at once
+// in each, with the rest waiting their turn in arrival order within their lane.
+// A heavy page pauses hundreds of requests at once, and each one waits for the
+// URL policy and a reply from Chromium. Chromium holds a paused request until
+// it is answered, so one waiting its turn is not lost. Command replies never
+// wait. The lanes keep a slow URL policy from holding back what must not wait:
+// - policy: subresource requests and downloads, which wait on caller code;
+// - navigation: document requests, which a navigate command waits on;
+// - target: attaches, detaches, target ends and dialogs, which wait only on
+//   Chromium. A session's own events can only follow its attach.
+const EVENT_CONCURRENCY = 256;
 type Lane = {
   running: number;
   queue: { message: Message; size: number }[];
@@ -93,6 +100,7 @@ const COMPACT: Record<string, (p: Message) => Message> = {
   // Headers and request bodies stay behind; the URL is kept whole for the policy.
   'Fetch.requestPaused': (p) => ({
     requestId: owned(p.requestId),
+    resourceType: owned(p.resourceType),
     request: { url: owned(p.request.url) },
   }),
 };
@@ -208,8 +216,11 @@ export class BrowserCDP {
   #closing: Promise<void> | undefined;
   #failed = false;
   #tasks = new Set<Promise<void>>();
-  #slow: Lane = { running: 0, queue: [] };
-  #fast: Lane = { running: 0, queue: [] };
+  #lanes: Record<'policy' | 'navigation' | 'target', Lane> = {
+    policy: { running: 0, queue: [] },
+    navigation: { running: 0, queue: [] },
+    target: { running: 0, queue: [] },
+  };
   #queuedBytes = 0;
   // Session -> the session it was attached under, as attaches arrive.
   #parents = new Map<string, string>();
@@ -217,6 +228,9 @@ export class BrowserCDP {
   // for each detach event, every session it took with it.
   #detached = new Set<string>();
   #gone = new WeakMap<Message, string[]>();
+  // Whether a download's frame was tracked when the download began, decided in
+  // arrival order: frame events are not queued, and a download may be.
+  #tracked = new WeakMap<Message, boolean>();
   #tabs = new Map<string, Message>();
   #sessions = new Map<string, string>();
   // Cross-process frame session -> the owned tab it renders in, and its target.
@@ -468,8 +482,7 @@ export class BrowserCDP {
       this.#buttons,
     ])
       map.clear();
-    this.#slow.queue = [];
-    this.#fast.queue = [];
+    for (const lane of Object.values(this.#lanes)) lane.queue = [];
     this.#queuedBytes = 0;
     this.#parents.clear();
     this.#detached.clear();
@@ -544,11 +557,24 @@ export class BrowserCDP {
     // the detach that would free it stuck in the queue behind it.
     if (message.method === 'Target.detachedFromTarget' && typeof child === 'string')
       this.#gone.set(message, this.#detach(child));
-    const lane = SLOW_EVENTS.has(message.method) ? this.#slow : this.#fast;
+    if (message.method === 'Browser.downloadWillBegin')
+      this.#tracked.set(message, this.files?.frames.has(message.params?.frameId) === true);
+    if (AT_ONCE.has(message.method)) {
+      this.#run(message);
+      return;
+    }
+    const lane =
+      message.method === 'Fetch.requestPaused'
+        ? message.params?.resourceType === 'Document'
+          ? this.#lanes.navigation
+          : this.#lanes.policy
+        : message.method.startsWith('Browser.download')
+          ? this.#lanes.policy
+          : this.#lanes.target;
     // Arrival order is kept within a lane: nothing overtakes an event waiting there.
     if (lane.queue.length || lane.running >= EVENT_CONCURRENCY) {
       if (
-        this.#slow.queue.length + this.#fast.queue.length >= EVENT_QUEUE_LIMIT ||
+        Object.values(this.#lanes).reduce((n, l) => n + l.queue.length, 0) >= EVENT_QUEUE_LIMIT ||
         this.#queuedBytes + size > EVENT_QUEUE_BYTES
       ) {
         this.#terminalError =
@@ -562,10 +588,14 @@ export class BrowserCDP {
     }
     this.#run(message, lane);
   }
-  #run(message: Message, lane: Lane): void {
+  #run(message: Message, lane?: Lane): void {
     const task = this.#event(message);
-    lane.running++;
     this.#tasks.add(task);
+    if (!lane) {
+      void task.finally(() => this.#tasks.delete(task));
+      return;
+    }
+    lane.running++;
     void task.finally(() => {
       lane.running--;
       this.#tasks.delete(task);
@@ -633,7 +663,7 @@ export class BrowserCDP {
     let eventSession = session;
     try {
       if (method === 'Browser.downloadWillBegin' || method === 'Browser.downloadProgress') {
-        await this.files?.event(method, p);
+        await this.files?.event(method, p, this.#tracked.get(message));
         return;
       }
       if (method === 'Target.attachedToTarget') {
