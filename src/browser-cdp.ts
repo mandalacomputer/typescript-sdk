@@ -47,24 +47,41 @@ const EVENT_CONCURRENCY = 256;
 // bound, in events or in the bytes they hold.
 const EVENT_QUEUE_LIMIT = 8192;
 const EVENT_QUEUE_BYTES = 32 * 1024 * 1024;
-// Page-controlled payloads, cut to what the driver keeps as they arrive, so
-// that neither a waiting event nor a running handler holds more of them.
+// A copy with storage of its own. V8 can answer slice(), join() and template
+// literals with a view of the original string, so an excerpt kept as it is
+// would hold the page's whole payload alive. Exact either way: UTF-8 cannot
+// carry a lone surrogate, and a string with any surrogate is stored two bytes
+// a character already.
+function own(value: string): string {
+  return /[\uD800-\uDFFF]/.test(value)
+    ? Buffer.from(value, 'utf16le').toString('utf16le')
+    : Buffer.from(value, 'utf8').toString('utf8');
+}
+const owned = (value: unknown): unknown => (typeof value === 'string' ? own(value) : value);
+// Page-controlled payloads, cut to what the driver keeps as they arrive and
+// copied out of them, so that neither a waiting event nor a running handler
+// holds more of them.
 const COMPACT: Record<string, (p: Message) => Message> = {
   'Runtime.consoleAPICalled': (p) => ({
-    text: (p.args as Message[])
-      .slice(0, 20)
-      .map((a) => String(a.value ?? a.description ?? '').slice(0, 1000))
-      .join(' '),
+    text: own(
+      (p.args as Message[])
+        .slice(0, 20)
+        .map((a) => String(a.value ?? a.description ?? '').slice(0, 1000))
+        .join(' '),
+    ),
   }),
   'Network.responseReceived': (p) => ({
-    text: `${p.response.status} ${String(p.response.url).slice(0, 2000)}`,
+    text: own(`${p.response.status} ${String(p.response.url).slice(0, 2000)}`),
   }),
   'Page.javascriptDialogOpening': (p) => ({
-    type: p.type,
-    message: String(p.message ?? '').slice(0, 1000),
+    type: owned(p.type),
+    message: own(String(p.message ?? '').slice(0, 1000)),
   }),
   // Headers and request bodies stay behind; the URL is kept whole for the policy.
-  'Fetch.requestPaused': (p) => ({ requestId: p.requestId, request: { url: p.request.url } }),
+  'Fetch.requestPaused': (p) => ({
+    requestId: owned(p.requestId),
+    request: { url: owned(p.request.url) },
+  }),
 };
 const AUTO_ATTACH = { autoAttach: true, waitForDebuggerOnStart: true, flatten: true };
 const INTERCEPT = { patterns: [{ urlPattern: '*', requestStage: 'Request' }] };
@@ -269,7 +286,7 @@ export class BrowserCDP {
                 );
               else pending.resolve(message.result ?? {});
             }
-          } else this.#dispatch(message, text.length);
+          } else this.#dispatch(message, text.length * 2);
         } catch {
           this.#fail();
         }
@@ -486,6 +503,7 @@ export class BrowserCDP {
     }
   }
 
+  /** `bytes` is the event's size as UTF-16, the most V8 stores per character. */
   #dispatch(message: Message, bytes: number): void {
     if (!EVENTS.has(message.method)) return;
     const cut = COMPACT[message.method];
@@ -493,7 +511,7 @@ export class BrowserCDP {
     if (cut) {
       try {
         message.params = cut(message.params);
-        size = JSON.stringify(message.params).length;
+        size = JSON.stringify(message.params).length * 2;
       } catch {
         /* Malformed: left whole, for the handler to refuse as before. */
       }

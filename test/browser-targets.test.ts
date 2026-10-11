@@ -1,4 +1,6 @@
 import { EventEmitter } from 'node:events';
+import v8 from 'node:v8';
+import vm from 'node:vm';
 import { afterEach, expect, it, vi } from 'vitest';
 import { BrowserCDP } from '../src/browser-cdp.js';
 import type { BrowserConnection } from '../src/browser-connection.js';
@@ -404,6 +406,53 @@ it('bounds the bytes waiting events hold, keeping only what it uses of page payl
       state: 'ended',
       terminalError: expect.stringContaining('faster than the session could handle'),
     });
+  } finally {
+    release();
+    await backend.close();
+  }
+});
+
+it('keeps no page payload alive behind what it cut from it', async () => {
+  // V8 can answer slice(), join() and template literals with a view of the
+  // original string, so an excerpt can hold its whole payload alive.
+  v8.setFlagsFromString('--expose-gc');
+  const gc = vm.runInNewContext('gc') as () => void;
+  const heap = () => {
+    gc();
+    gc();
+    return v8.getHeapStatistics().used_heap_size;
+  };
+  let release!: () => void;
+  const gate = new Promise<void>((r) => {
+    release = r;
+  });
+  const { backend, ws } = await started(() => gate);
+  try {
+    // Every handler busy, so everything below waits in the queue.
+    for (let n = 0; n < 256; n++) paused(ws, 'session', `r${n}`, 'https://example.test/');
+    const huge = 'x'.repeat(1024 * 1024);
+    const before = heap();
+    for (let n = 0; n < 40; n++) {
+      ws.message({
+        method: 'Runtime.consoleAPICalled',
+        sessionId: 'session',
+        params: { type: 'log', args: [{ type: 'string', value: huge }] },
+      });
+      ws.message({
+        method: 'Page.javascriptDialogOpening',
+        sessionId: 'session',
+        params: { type: 'alert', message: huge },
+      });
+      ws.message({
+        method: 'Network.responseReceived',
+        sessionId: 'session',
+        params: { response: { status: 200, url: `https://example.test/${huge}` } },
+      });
+    }
+    const grown = heap() - before;
+    expect(backend.sessionStatus().state).toBe('active');
+    // 120 MiB of payloads arrived; what waits is a few hundred KiB of text.
+    expect(grown).toBeLessThan(16 * 1024 * 1024);
   } finally {
     release();
     await backend.close();
