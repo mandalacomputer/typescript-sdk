@@ -17,6 +17,8 @@ type Socket = EventEmitter & {
   gone: Set<string>;
   /** Sessions whose commands are never answered. */
   silent: Set<string>;
+  /** Methods whose replies the test sends itself. */
+  held: Set<string>;
   ended: boolean;
   message(value: unknown): void;
 };
@@ -27,6 +29,7 @@ vi.mock('ws', () => ({
     tabs = 0;
     gone = new Set<string>();
     silent = new Set<string>();
+    held = new Set<string>();
     ended = false;
     constructor() {
       super();
@@ -50,7 +53,7 @@ vi.mock('ws', () => ({
       queueMicrotask(() => {
         callback();
         const session = command.sessionId;
-        if (session && this.silent.has(session)) return;
+        if ((session && this.silent.has(session)) || this.held.has(command.method)) return;
         if (session && this.gone.has(session)) {
           this.message({
             id: command.id,
@@ -720,6 +723,73 @@ it('frames that come and go do not use up frame tracking', async () => {
     download(ws, 'late', 'last-inner');
     await vi.waitFor(() => expect(event).toHaveBeenCalledTimes(1));
     expect(event.mock.calls[0]![2]).toBe(true);
+  } finally {
+    await backend.close();
+  }
+});
+
+it('a frame-tree reply that arrives with newer frame events does not undo them', async () => {
+  const { backend, ws } = await started();
+  const { event, frames } = stubFiles(backend);
+  ws.held.add('Page.getFrameTree');
+  const treeFor = async (session: string) => {
+    await vi.waitFor(() =>
+      expect(ws.sent.some((c) => c.method === 'Page.getFrameTree' && c.sessionId === session)).toBe(
+        true,
+      ),
+    );
+    return ws.sent.find((c) => c.method === 'Page.getFrameTree' && c.sessionId === session)!.id;
+  };
+  try {
+    // A frame swaps back into its parent's process while its tree is on its
+    // way: the reply, the detach and the parent's report land in one turn.
+    attach(ws, 'session', 'x', 'iframe');
+    const first = await treeFor('x');
+    ws.gone.add('x');
+    ws.message({
+      id: first,
+      result: {
+        frameTree: { frame: { id: 'x-target' }, childFrames: [{ frame: { id: 'x-child' } }] },
+      },
+    });
+    ws.message({
+      method: 'Target.detachedFromTarget',
+      sessionId: 'session',
+      params: { sessionId: 'x' },
+    });
+    ws.message({
+      method: 'Page.frameAttached',
+      sessionId: 'session',
+      params: { frameId: 'x-target' },
+    });
+    ws.message({
+      method: 'Page.frameNavigated',
+      sessionId: 'session',
+      params: { frame: { id: 'x-target' } },
+    });
+    // A live frame whose child goes while its tree is on its way.
+    attach(ws, 'session', 'y', 'iframe');
+    const second = await treeFor('y');
+    ws.message({
+      id: second,
+      result: {
+        frameTree: { frame: { id: 'y-target' }, childFrames: [{ frame: { id: 'y-child' } }] },
+      },
+    });
+    ws.message({
+      method: 'Page.frameDetached',
+      sessionId: 'y',
+      params: { frameId: 'y-child', reason: 'remove' },
+    });
+    await vi.waitFor(() => expect(on(ws, 'y')).toContain('Runtime.runIfWaitingForDebugger'));
+    await new Promise((r) => setTimeout(r, 10));
+    download(ws, 'one', 'x-target');
+    download(ws, 'two', 'x-child');
+    download(ws, 'three', 'y-child');
+    download(ws, 'four', 'y-target');
+    await vi.waitFor(() => expect(event).toHaveBeenCalledTimes(4));
+    expect(event.mock.calls.map((c) => c[2])).toEqual([true, false, false, true]);
+    expect([...frames.keys()].sort()).toEqual(['x-target', 'y-target']);
   } finally {
     await backend.close();
   }

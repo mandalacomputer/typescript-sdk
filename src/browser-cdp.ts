@@ -244,6 +244,8 @@ export class BrowserCDP {
   // away takes the frames only it could see with it (Chromium reports no
   // detach for them), but not one its parent has reported since.
   #frameSource = new Map<string, string>();
+  // For each frame-tree request on its way: the frames events have reported since.
+  #snapshots = new Set<Set<string>>();
   #ready = new Map<string, { promise: Promise<void>; resolve: () => void }>();
   #creating: { promise: Promise<void>; resolve: () => void } | undefined;
   #active: string | undefined;
@@ -664,9 +666,26 @@ export class BrowserCDP {
     this.#frameSource.set(frame, session);
     return true;
   }
-  #trackTree(tree: Message, tab: string, session: string): void {
-    if (this.#track(tree.frame.id, tab, session))
-      for (const child of tree.childFrames ?? []) this.#trackTree(child, tab, session);
+  #trackTree(tree: Message, tab: string, session: string, skip: Set<string>): void {
+    if (skip.has(tree.frame.id) || this.#track(tree.frame.id, tab, session))
+      for (const child of tree.childFrames ?? []) this.#trackTree(child, tab, session, skip);
+  }
+  /**
+   * Track the frames a session holds now. The reply is a snapshot: a frame
+   * event that arrived while it was on its way is newer and stands, and a
+   * session that went meanwhile has nothing left to track.
+   */
+  async #snapshot(session: string, tab: string): Promise<void> {
+    if (!this.files) return;
+    const touched = new Set<string>();
+    this.#snapshots.add(touched);
+    try {
+      const { frameTree } = await this.send('Page.getFrameTree', {}, session);
+      if (this.#owner(session) === tab && !this.#detached.has(session))
+        this.#trackTree(frameTree, tab, session, touched);
+    } finally {
+      this.#snapshots.delete(touched);
+    }
   }
   #untrack(frame: string): void {
     this.files?.frames.delete(frame);
@@ -682,8 +701,7 @@ export class BrowserCDP {
       // Its root frame has the frame target's id: downloads from it belong to the tab.
       this.#track(info.targetId, tab, child);
       for (const [name, args] of FRAME_INIT) await this.send(name, args, child);
-      if (this.files)
-        this.#trackTree((await this.send('Page.getFrameTree', {}, child)).frameTree, tab, child);
+      await this.#snapshot(child, tab);
       await this.send('Runtime.runIfWaitingForDebugger', {}, child);
     } catch {
       // Usually the frame went away first. If not, it stays paused: a frame
@@ -749,12 +767,7 @@ export class BrowserCDP {
           ['Target.setAutoAttach', AUTO_ATTACH],
         ];
         for (const [name, args] of initializers) await this.send(name, args, child);
-        if (this.files)
-          this.#trackTree(
-            (await this.send('Page.getFrameTree', {}, child)).frameTree,
-            target,
-            child,
-          );
+        await this.#snapshot(child, target);
         await this.send('Runtime.runIfWaitingForDebugger', {}, child);
         this.#ready.get(target)?.resolve();
       } else if (method === 'Target.targetInfoChanged') {
@@ -805,6 +818,8 @@ export class BrowserCDP {
       } else {
         const tab = this.#owner(session);
         if (!tab) return;
+        const frame = method.startsWith('Page.frame') ? (p.frameId ?? p.frame?.id) : undefined;
+        if (typeof frame === 'string') for (const touched of this.#snapshots) touched.add(frame);
         if (method === 'Page.frameAttached') this.#track(p.frameId, tab, session);
         // A swap is the frame moving to another process, where it lives on.
         if (method === 'Page.frameDetached' && p.reason !== 'swap') this.#untrack(p.frameId);
