@@ -173,10 +173,13 @@ it('runs a cross-process frame under its page’s request policy and never close
   }
 });
 
-it('releases dedicated workers and still closes targets no owned page holds', async () => {
+it('holds dedicated workers paused and still closes targets no owned page holds', async () => {
   const { backend, ws } = await started();
   try {
+    attach(ws, 'session', 'frame', 'iframe');
+    await vi.waitFor(() => expect(on(ws, 'frame')).toContain('Runtime.runIfWaitingForDebugger'));
     attach(ws, 'session', 'worker', 'worker');
+    attach(ws, 'frame', 'frame-worker', 'worker');
     attach(ws, undefined, 'popup', 'page');
     attach(ws, 'stranger', 'orphan', 'iframe');
     await vi.waitFor(() => expect(named(ws, 'Target.closeTarget')).toHaveLength(2));
@@ -184,12 +187,10 @@ it('releases dedicated workers and still closes targets no owned page holds', as
       'popup-target',
       'orphan-target',
     ]);
-    await vi.waitFor(() =>
-      expect(named(ws, 'Target.detachFromTarget')).toEqual([
-        expect.objectContaining({ params: { sessionId: 'worker' } }),
-      ]),
-    );
-    expect(on(ws, 'worker')).toEqual(['Runtime.runIfWaitingForDebugger']);
+    // Never released, never detached (which would release it), never closed.
+    expect(on(ws, 'worker')).toEqual([]);
+    expect(on(ws, 'frame-worker')).toEqual([]);
+    expect(named(ws, 'Target.detachFromTarget')).toEqual([]);
     expect(backend.sessionStatus().state).toBe('active');
   } finally {
     await backend.close();
@@ -222,21 +223,20 @@ it('a frame that goes away during its setup leaves the session running', async (
   }
 });
 
-it('a worker that ends before it is released leaves the session running', async () => {
+it('an action waiting on a tab that detaches fails at once, not the session', async () => {
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
   const { backend, ws } = await started();
   try {
-    ws.silent.add('worker');
-    attach(ws, 'session', 'worker', 'worker');
-    await vi.waitFor(() => expect(on(ws, 'worker')).toEqual(['Runtime.runIfWaitingForDebugger']));
-    ws.message({
-      method: 'Target.detachedFromTarget',
-      sessionId: 'session',
-      params: { sessionId: 'worker' },
-    });
+    ws.silent.add('session');
+    const action = backend.perform('get_page_text', {});
+    const failed = expect(action).rejects.toThrow(
+      'Chromium could not complete the browser action.',
+    );
+    await vi.waitFor(() => expect(on(ws, 'session')).toContain('Runtime.evaluate'));
+    ws.message({ method: 'Target.detachedFromTarget', params: { sessionId: 'session' } });
+    await failed;
     await vi.advanceTimersByTimeAsync(20000);
     expect(backend.sessionStatus().state).toBe('active');
-    expect(ws.ended).toBe(false);
   } finally {
     await backend.close();
   }
@@ -286,7 +286,7 @@ it.each([1, 300])(
       // remaining attaches wait in the queue.
       for (let n = 0; n < count; n++) {
         ws.silent.add(`nested-${n}`);
-        attach(ws, 'frame', `nested-${n}`, n % 2 ? 'worker' : 'iframe');
+        attach(ws, 'frame', `nested-${n}`, 'iframe');
       }
       await vi.waitFor(() =>
         expect(ws.sent.filter((c) => c.sessionId?.startsWith('nested-'))).toHaveLength(

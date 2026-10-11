@@ -36,10 +36,11 @@ export type MandalaBrowserToolsetOptions = Omit<
 /** An isolated Chromium context; sessionPolicy opts into bounded lease renewal.
  *
  * The URL policy checks navigation and intercepted HTTP(S) requests, including
- * those of cross-site frames and dedicated workers, which run under it. It is
- * not network isolation: configure guest egress controls for that. Popups are
- * unsupported. Files require remoteFilePolicy; uploads also require confirm.
- * JavaScript execution is off by default and requires confirm when enabled.
+ * those of cross-site frames, which run under it. It is not network isolation:
+ * configure guest egress controls for that. Dedicated workers are held paused
+ * and never run; popups are unsupported. Files require remoteFilePolicy;
+ * uploads also require confirm. JavaScript execution is off by default and
+ * requires confirm when enabled.
  */
 export class MandalaBrowserToolset extends BetaAbstractBrowserToolset20260801 {
   readonly #backend: BrowserCDP;

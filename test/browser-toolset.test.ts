@@ -157,12 +157,12 @@ const pages = (port: number): Record<string, [string, string | Buffer]> => ({
   '/churn-last': ['text/html', `<p>last</p><script>fetch('/churn-final')</script>`],
   '/worker-host': [
     'text/html',
-    `<title>Worker host</title><script>const w=new Worker('/worker.js');w.onmessage=e=>{document.title=e.data}</script>`,
+    `<title>Worker host</title><p>worker page</p><script>new Worker('/worker.js')</script>`,
   ],
-  '/worker.js': [
-    'text/javascript',
-    `fetch('/worker-blocked').then(()=>'leaked',()=>'refused').then(r=>fetch('/worker-allowed').then(()=>postMessage('worker '+r)))`,
-  ],
+  // Chromium fetches the script of a worker started by a worker without any
+  // interception, so this page's URL policy would never see nested-worker.js.
+  '/worker.js': ['text/javascript', `fetch('/worker-fetch');new Worker('/nested-worker.js')`],
+  '/nested-worker.js': ['text/javascript', `fetch('/nested-worker-fetch')`],
   '/heavy': [
     'text/html',
     `<title>Heavy</title><p>heavy page</p>${Array.from({ length: 400 }, (_, n) => `<img src="/img/${n}">`).join('')}`,
@@ -721,22 +721,28 @@ describe.skipIf(!executable)('real Chromium through Anthropic toolResult', () =>
     expect(browser.sessionStatus.state).toBe('active');
     expect(text(success(await browser.toolResult(use('get_page_text'))))).toContain('churned');
   }, 30000);
-  it('runs dedicated workers under their page’s URL policy', async () => {
-    const { browser, base, hits } = await fixture({
+  it('holds dedicated workers paused, so a nested worker cannot escape the URL policy', async () => {
+    const seen: string[] = [];
+    const { browser, base, hits, url } = await fixture({
       urlPolicy: (_ctx, target) => {
-        if (target.endsWith('/worker-blocked')) throw new ToolError('not permitted');
+        seen.push(target);
+        if (target.endsWith('/nested-worker.js')) throw new ToolError('not permitted');
       },
-      configs: { javascript_exec: { enabled: true } },
-      confirm: () => true,
     });
+    const port = new URL(base).port;
     success(await browser.toolResult(use('navigate', { url: `${base}/worker-host` })));
-    await expect.poll(() => hits, { timeout: 10000 }).toContain('/worker-allowed');
-    expect(hits).not.toContain('/worker-blocked');
+    // The worker's own script is fetched under the page's policy, then it waits.
+    await expect.poll(() => hits, { timeout: 10000 }).toContain('/worker.js');
+    expect(seen).toContain(`${base}/worker.js`);
     await expect
-      .poll(async () =>
-        text(success(await browser.toolResult(use('javascript_exec', { text: 'document.title' })))),
-      )
-      .toContain('worker refused');
+      .poll(() => targets(url), { timeout: 10000 })
+      .toContain(`worker http://127.0.0.1:${port}/worker.js`);
+    await new Promise((r) => setTimeout(r, 1000));
+    expect(hits).not.toContain('/worker-fetch');
+    expect(hits).not.toContain('/nested-worker.js');
+    expect(hits).not.toContain('/nested-worker-fetch');
+    expect(text(success(await browser.toolResult(use('get_page_text'))))).toContain('worker page');
+    expect(browser.sessionStatus.state).toBe('active');
   }, 30000);
   it('loads a page that pauses hundreds of requests at once', async () => {
     const { browser, base, hits } = await fixture({ urlPolicy: async () => {} });

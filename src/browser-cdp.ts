@@ -537,24 +537,16 @@ export class BrowserCDP {
   #dropFrame(session: string): void {
     if (this.#frames.delete(session)) this.#abandon(session);
   }
-  /** A child target of an owned tab. It runs; closing it would close its tab. */
-  async #child(child: string, info: Message, tab: string): Promise<void> {
+  /** A cross-process frame of an owned tab. It runs; closing it would close its tab. */
+  async #frame(child: string, info: Message, tab: string): Promise<void> {
     try {
-      if (info.type === 'worker') {
-        // A dedicated worker's requests are intercepted on its frame's session,
-        // under the policy that frame already has, and a worker cannot be
-        // closed: release it and stop listening to it.
-        await this.send('Runtime.runIfWaitingForDebugger', {}, child);
-        await this.send('Target.detachFromTarget', { sessionId: child });
-        return;
-      }
       this.#frames.set(child, { tab, target: info.targetId });
       for (const [name, args] of FRAME_INIT) await this.send(name, args, child);
       await this.send('Runtime.runIfWaitingForDebugger', {}, child);
     } catch {
-      // Usually the frame or worker went away first. If not, it stays paused:
-      // a child that could not be given the request policy never runs, and
-      // its tab carries on without it.
+      // Usually the frame went away first. If not, it stays paused: a frame
+      // that could not be given the request policy never runs, and its tab
+      // carries on without it.
       this.#dropFrame(child);
     }
   }
@@ -577,10 +569,16 @@ export class BrowserCDP {
           await this.send('Target.detachFromTarget', { sessionId: child });
           return;
         }
-        if (parent !== undefined && (info.type === 'iframe' || info.type === 'worker')) {
-          await this.#child(child, info, parent);
+        if (parent !== undefined && info.type === 'iframe') {
+          await this.#frame(child, info, parent);
           return;
         }
+        // A dedicated worker of an owned tab is held where it is: attached and
+        // paused, never released. It cannot be closed (Chromium refuses), and
+        // it cannot be run under the URL policy: a worker can start a nested
+        // worker, whose script Chromium fetches with no session's interception
+        // applied. Its tab carries on without it.
+        if (parent !== undefined && info.type === 'worker') return;
         const target: string = info.targetId;
         if (!this.#ready.has(target) && this.#creating) await this.#creating.promise;
         if (info.type !== 'page' || !this.#ready.has(target)) {

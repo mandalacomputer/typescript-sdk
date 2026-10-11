@@ -2032,12 +2032,16 @@ revokes its capability; it does not stop Chromium or delete the computer.
   Callbacks must finish promptly. This is **not network isolation**: use guest
   egress controls for DNS/IP containment, WebSockets, WebRTC, WebTransport and
   browser traffic outside those intercepted requests.
-- Cross-site frames (which Chromium runs in their own process) and dedicated
-  workers run as part of their tab, and their HTTP(S) requests go through the
-  same URL hook with that tab's ID. A cross-site frame's contents are not part
-  of `read_page`, `find` or `get_page_text`; screenshots and coordinate input
-  reach it. Popups and other new top-level targets are unsupported and are
-  closed; if one cannot be closed, the driver closes its session.
+- Cross-site frames (which Chromium runs in their own process) run as part of
+  their tab, and their HTTP(S) requests go through the same URL hook with that
+  tab's ID. A cross-site frame's contents are not part of `read_page`, `find`
+  or `get_page_text`; screenshots and coordinate input reach it.
+- Dedicated workers are held paused and never run: Chromium fetches the script
+  of a worker started by another worker without any interception the driver
+  could apply, so a running worker could reach URLs the hook refuses. The page
+  itself carries on. Popups and other new top-level targets are unsupported
+  and are closed; if one cannot be closed, the driver closes its session.
+  Sites that depend on these may not work with this driver.
 - `read_page` returns accessibility roles/names and element refs; `find`
   performs a case-insensitive substring search over that tree. Each read/find
   replaces that tab's refs. Navigation invalidates them. Ask for a new page

@@ -74,14 +74,15 @@ This is the summary you read to decide whether to upgrade.
   carries `completed`, `failedIndex` and the results so far, and which
   `isTransient()` never calls worth sending again. Neither does it call an
   error whose answer cannot be read as a refusal before dispatch.
-- **The browser toolset runs cross-site frames and dedicated workers.**
-  `MandalaBrowserToolset` treats a site-isolated cross-site frame (its own
-  Chromium target) and a page's dedicated workers as part of their tab: they
-  run, and their HTTP(S) requests reach `urlPolicy` with that tab's ID. It
-  never closes them, since closing a frame closes its whole tab. A cross-site
-  frame's contents are not in `read_page`, `find` or `get_page_text`;
-  screenshots and coordinate input reach it. Popups and other new top-level
-  targets are still closed.
+- **The browser toolset runs cross-site frames.** `MandalaBrowserToolset`
+  treats a site-isolated cross-site frame (its own Chromium target) as part of
+  its tab: it runs, and its HTTP(S) requests reach `urlPolicy` with that tab's
+  ID. It is never closed, since closing a frame closes its whole tab. Its
+  contents are not in `read_page`, `find` or `get_page_text`; screenshots and
+  coordinate input reach it. A page's dedicated workers are held paused and
+  never run, rather than ending the session: a worker can start another whose
+  script Chromium fetches outside any interception the URL policy could
+  apply. Popups and other new top-level targets are still closed.
 - **A renewable browser session rides out a failed renewal.** A renewal that
   fails in passing (a connection error, a timeout, a 408, a 429 or a 5xx) is
   retried with backoff, honouring `Retry-After`, until shortly before the lease
