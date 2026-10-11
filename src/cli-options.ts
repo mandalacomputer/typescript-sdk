@@ -721,7 +721,9 @@ export const COMMANDS: readonly Command[] = [
         'max-cost-usd',
         'A run on AI credits stops before a model call past this many USD, 0.25 to 20 (default 2); ignored with MANDALA_MODEL_KEY',
       ),
-      flag('provider', 'Model provider: anthropic or openai'),
+      flag('provider', 'Model provider (default: inferred from --model, else anthropic)', {
+        choices: ['anthropic', 'openai'],
+      }),
       flag('model', 'Model override'),
       flag('system', 'Standing instructions'),
     ],
@@ -800,6 +802,11 @@ export class CliError extends Error {
     super(message);
     this.name = 'CliError';
   }
+  /**
+   * The command a refused command line was read as, when the parser got that
+   * far: what the JSON envelope's `command` names for a usage error.
+   */
+  command?: string;
 }
 
 export type Parsed = {
@@ -988,6 +995,19 @@ export function parseArgs(argv: string[]): Parsed {
     rest: [],
     paired: {},
   };
+  try {
+    return readArgs(argv, parsed);
+  } catch (error) {
+    // Named after the command it was read as, so the JSON envelope says which
+    // command was mistyped rather than `""`. A line that never reached a whole
+    // command (an unknown word, a bare group) names none.
+    if (error instanceof CliError && parsed.command && error.command === undefined)
+      error.command = parsed.command.path;
+    throw error;
+  }
+}
+
+function readArgs(argv: string[], parsed: Parsed): Parsed {
   let positional = false;
   // The option read just before this word, for a flag that must follow it.
   let previous: Flag | undefined;

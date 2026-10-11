@@ -3914,6 +3914,92 @@ export function toInputContext(d: unknown, what: string): InputContext {
   );
 }
 
+/** What one completed action of a batch answered. */
+export type InputBatchActionResult = {
+  ok: boolean;
+  /** On a completed `type`: how it was typed, as {@link TypeResult.mechanism}. */
+  mechanism?: 'physical' | 'unicode' | 'mixed' | (string & {});
+  raw: Record<string, unknown>;
+};
+
+/**
+ * What {@link Computer.inputBatch} answers: the actions it carried out, in
+ * order, one result each.
+ *
+ * A returned result is a batch that completed — `ok` is `true` and
+ * `completed` is every action sent. One that stopped part-way is raised as
+ * {@link InputBatchError}, carrying this same shape with `ok: false`,
+ * `failedIndex` and `error`.
+ */
+export type InputBatchResult = {
+  ok: boolean;
+  /** How many actions completed, from the first. Not a rollback guarantee. */
+  completed: number;
+  /** One per completed action. */
+  results: InputBatchActionResult[];
+  /**
+   * Zero-based index of the action that failed, on a batch that stopped.
+   * That action may have partly applied.
+   */
+  failedIndex?: number;
+  /** Why the batch stopped, on a batch that did. */
+  error?: string;
+  /** The desktop after the batch, for a call made with `{ context: true }`. */
+  context?: InputContext;
+  raw: Record<string, unknown>;
+};
+
+/**
+ * Decode a batch answer, refusing rather than guessing: `ok`, `completed` and
+ * `results` are required, `completed` must count `results`, and a stopped
+ * batch must say where. `context` is decoded only when `asked`.
+ */
+export function toInputBatchResult(d: unknown, what: string, asked = false): InputBatchResult {
+  const refuse = (field: string, expected: string): never => {
+    throw new MandalaError(
+      `expected an input batch result from ${what}: ${field} must be ${expected}`,
+    );
+  };
+  if (!isRecord(d)) return refuse('the response', 'an object');
+  if (typeof d.ok !== 'boolean') refuse('ok', 'a boolean');
+  const completed = d.completed;
+  if (typeof completed !== 'number' || !Number.isSafeInteger(completed) || completed < 0)
+    refuse('completed', 'a nonnegative whole number');
+  if (!Array.isArray(d.results)) refuse('results', 'an array');
+  const rows = d.results as unknown[];
+  if (rows.length !== completed)
+    refuse('results', `one result per completed action (${completed})`);
+  const results = rows.map((row, i): InputBatchActionResult => {
+    if (!isRecord(row) || typeof row.ok !== 'boolean') refuse(`results[${i}].ok`, 'a boolean');
+    const r = row as Record<string, unknown>;
+    if (r.mechanism !== undefined && typeof r.mechanism !== 'string')
+      refuse(`results[${i}].mechanism`, 'a string when present');
+    const out: InputBatchActionResult = { ok: r.ok as boolean, raw: { ...r } };
+    if (typeof r.mechanism === 'string' && r.mechanism) out.mechanism = r.mechanism;
+    return out;
+  });
+  const result: InputBatchResult = {
+    ok: d.ok as boolean,
+    completed: completed as number,
+    results,
+    raw: { ...d },
+  };
+  if (d.failed_index !== undefined) {
+    const at = d.failed_index;
+    if (typeof at !== 'number' || !Number.isSafeInteger(at) || at < 0)
+      refuse('failed_index', 'a nonnegative whole number when present');
+    result.failedIndex = at as number;
+  }
+  if (d.error !== undefined) {
+    if (typeof d.error !== 'string') refuse('error', 'a string when present');
+    if (d.error) result.error = d.error as string;
+  }
+  if (!result.ok && result.failedIndex === undefined)
+    refuse('failed_index', 'present on a batch that stopped');
+  if (asked && result.ok) result.context = toInputContext(d, what);
+  return result;
+}
+
 export function toTypeResult(d: unknown): TypeResult {
   const r = isRecord(d) ? d : {};
   return {

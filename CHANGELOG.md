@@ -34,8 +34,58 @@ This is the summary you read to decide whether to upgrade.
   is refused before any request. A run the credits cannot start fails with the
   error code `insufficient_credits` and the billing link in
   `details.top_up_url`.
+- **Drive a browser with Claude's browser toolset.** `MandalaBrowserToolset`,
+  from `mandala-computer/anthropic`, implements Anthropic's
+  `browser_toolset_20260801` over the computer's authenticated CDP endpoint,
+  with no SSH tunnel, local browser or Playwright. It runs in its own
+  nonpersistent 1280 × 720 browser context, never adopts the desktop's tabs, and
+  keeps the tabs that survive when creating another is interrupted. A URL
+  policy hook sees direct navigations and intercepted HTTP(S) requests,
+  redirects included. `javascript_exec` is off by default and needs `confirm`.
+  It needs a running Linux computer with Chromium and the optional `ws` peer,
+  8.18 or newer, which importing the package root never loads.
+- **Raw browser connections, and renewable browser sessions.**
+  `Computer.createBrowserConnection()`, `renewBrowserConnection()` and
+  `revokeBrowserConnection()` mint, extend and revoke the WSS capability for
+  the computer's managed Chromium, as `BrowserConnection` and
+  `BrowserSessionLease`. With a `BrowserSessionPolicy`, which is also the
+  toolset's `sessionPolicy`, a session is a 30-minute lease renewed on the same
+  socket up to a two-hour limit. Without one it is the ten-minute grant, and a
+  server without renewable sessions refuses the policy rather than quietly
+  granting the shorter one.
+- **Browser uploads and downloads, explicitly.** `BrowserFilePolicy` stages
+  the files a model may upload (`stageLocalFile`, `stageGuestFile`,
+  `stageDocument`) as `BrowserStagedFile` handles, each bound to one computer,
+  task, context and toolset. Every upload still passes `confirm`. Downloads are
+  a separate opt-in through `approveDownload`, which sees a `BrowserDownload`
+  before its read-only guest path is published. Both are off by default, with
+  hard ceilings on size and count. A file type the policy refuses does not
+  count against the upload byte quota.
+- **Choose the hosted agent's provider.** `agent()`, `agentOnce()` and
+  `agentStream()` take `provider: 'anthropic' | 'openai'`, and
+  `mandala agent run` takes `--provider`. A `claude-*`, `gpt-*` or o-series
+  model infers it, `provider: 'openai'` alone runs `gpt-6.1-sol`, and omitting
+  both keeps the Anthropic default. OpenAI runs need your own key.
+- **Send a batch of OpenAI computer actions.** `computer.inputBatch(actions)`
+  sends 1 to 32 OpenAI actions, in OpenAI's own spelling, as one request. It
+  answers an `InputBatchResult`, and with `{ context: true }` the desktop after
+  the batch. A batch refused before any action ran throws the ordinary error.
+  One that stopped part-way throws the new `InputBatchError`, whose `result`
+  carries `completed`, `failedIndex` and the results so far, and which
+  `isTransient()` never calls worth sending again.
 
 ### Changed
+
+- **`mandala agent run --provider` takes only `anthropic` or `openai`**, and
+  the parser refuses anything else as a usage error (exit 2) before any
+  request, where it used to be `invalid_arguments` with exit 1. The two
+  choices are in `mandala manifest` and the shell completions.
+- **`AgentStop` names every stop reason the platform documents**: `pause_turn`,
+  `credits_exhausted`, `max_cost`, `incomplete` and `safety_check` beside
+  `end_turn`, `max_steps`, `rate_limited` and `refusal`. Only `end_turn` is
+  `finished`, as before.
+- **A webhook URL longer than 2048 characters is refused before the call**,
+  as `WEBHOOK_URL_MAX`, the platform's own ceiling.
 
 - **An omitted `modelKey` is no longer refused.** It used to be a
   `ValidationError` before the call; it is now a run on AI credits. An empty
@@ -51,6 +101,13 @@ This is the summary you read to decide whether to upgrade.
 
 ### Fixed
 
+- **`zoom` checks the crop came from the capture it measured.** The computer
+  toolset's zoom read a crop without checking which capture it said it was
+  cut from. It now refuses a crop that names another capture, as the Python
+  driver does, rather than show the model a picture of the wrong frame.
+- **A usage error's `--json` envelope names its command.** `command` was `""`
+  for every line the parser refused. It now names the command the line was
+  read as, and stays `""` only when no whole command was typed.
 - **Install beside an older `@anthropic-ai/sdk`.** 0.11.0 declared its optional
   peer as `>=0.132.0`, and npm refuses to install a package beside an optional
   peer outside its range, so a project on an older Anthropic SDK could not

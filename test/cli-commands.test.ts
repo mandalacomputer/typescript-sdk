@@ -2078,10 +2078,21 @@ describe('agent streams and cancellation', () => {
     ).toBe(0);
     expect(h.rec.last().body).toMatchObject({ provider: 'openai' });
     const invalid = harness();
-    expect(
-      (await invalid.run(['agent', 'run', 'work', '--computer', COMPUTER.id, '--provider', 'typo']))
-        .code,
-    ).not.toBe(0);
+    const refused = await invalid.run([
+      'agent',
+      'run',
+      'work',
+      '--computer',
+      COMPUTER.id,
+      '--provider',
+      'typo',
+    ]);
+    // A usage error, from the parser's own choices, like every other flag with
+    // a fixed vocabulary: exit 2, not 1 (invalid_arguments).
+    expect(refused.code).toBe(2);
+    expect(refused.frames.at(-1).error.message).toContain(
+      '--provider must be one of: anthropic, openai',
+    );
     expect(invalid.rec.calls).toHaveLength(0);
   });
 
@@ -2623,6 +2634,29 @@ describe('wait options and signal cleanup', () => {
 });
 
 describe('malformed arguments are offline failures', () => {
+  it.each([
+    ['computers list', ['computers', 'list', '--unknown']],
+    ['computers create', ['computers', 'create', '--cpu', 'nan']],
+    ['computers stop', ['computers', 'stop', 'vm', '--force=true']],
+    ['computers get', ['computers', 'get']],
+    ['agent run', ['agent', 'run', 'work']],
+    ['agent run', ['agent', 'run', 'work', '--computer', 'vm', '--provider', 'typo']],
+    ['credits', ['credits', '--limit']],
+    ['', ['unknown']],
+    ['', ['computers']],
+  ])('names the command %j on the usage error envelope of %j', async (command, argv) => {
+    const h = harness();
+    const result = await h.run(argv);
+    expect(result.code).toBe(2);
+    expect(result.frames).toHaveLength(1);
+    expect(result.frames[0]).toMatchObject({
+      command,
+      ok: false,
+      error: { code: 'invalid_arguments' },
+    });
+    expect(h.rec.calls).toEqual([]);
+  });
+
   it.each([
     [2, ['unknown']],
     [2, ['computers']],

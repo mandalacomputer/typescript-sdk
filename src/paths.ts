@@ -1219,7 +1219,10 @@ export const nameBody = (name?: string): Json => {
 
 export type ExecArgs = {
   command: string;
-  /** Positive integer seconds; at most 600 in foreground, ignored after decoding in background. */
+  /**
+   * Positive integer seconds; at most {@link MAX_EXEC_TIMEOUT_S} (600) in the
+   * foreground, ignored after decoding in the background.
+   */
   timeoutS?: number;
   /** Run in the logged-in desktop session — with DISPLAY, HOME, XAUTHORITY. */
   desktop?: boolean;
@@ -1254,6 +1257,8 @@ export type ExecArgs = {
  * sooner it says so the better.
  */
 export const MAX_ENV_ENTRIES = LIMITS['exec.maxEnvEntries'];
+/** The longest a foreground command may run, in seconds; a background one is not bound by it. */
+export const MAX_EXEC_TIMEOUT_S = LIMITS['exec.maxTimeoutSeconds'];
 export const MAX_ENV_ENTRY_BYTES = LIMITS['exec.maxEnvEntryBytes'];
 
 /** Bytes, not characters: the platform's limit is on the encoded entry. */
@@ -1397,9 +1402,9 @@ export function execBody(args: ExecArgs): Json {
     // Mirrors the platform's own foreground timeout ceiling and the fact that
     // it refuses only in the foreground.
     if (!flag(args.background, 'background')) {
-      if (args.timeoutS > 600) {
+      if (args.timeoutS > MAX_EXEC_TIMEOUT_S) {
         throw new ValidationError(
-          `timeoutS must be no greater than 600 (got ${args.timeoutS}); use execBackground for longer commands`,
+          `timeoutS must be no greater than ${MAX_EXEC_TIMEOUT_S} (got ${args.timeoutS}); use execBackground for longer commands`,
         );
       }
     }
@@ -1765,6 +1770,132 @@ export function clipboardBody(text: string): Json {
 // the same seven stubs.
 
 export const MODIFIER_JOIN = '+';
+
+/** The most OpenAI actions one batch carries; the platform refuses more. */
+export const INPUT_BATCH_MAX = 32;
+
+/** Keys held around an OpenAI pointer gesture: OpenAI sends them, or `null`. */
+type HeldKeys = { keys?: readonly string[] | null };
+
+/**
+ * One OpenAI computer action, in OpenAI's own spelling — `type`, `x`, `y`,
+ * `button`, `keys`, `path`, `text`, `scroll_x` and `scroll_y` — so the
+ * `actions` of a Responses API `computer_call` can be passed as they came.
+ * Structurally the same as the `openai` package's `ComputerAction`.
+ */
+export type OpenAIComputerAction =
+  | ({
+      type: 'click';
+      x: number;
+      y: number;
+      button: 'left' | 'right' | 'wheel' | 'back' | 'forward';
+    } & HeldKeys)
+  | ({ type: 'double_click'; x: number; y: number } & HeldKeys)
+  | ({ type: 'move'; x: number; y: number } & HeldKeys)
+  | ({ type: 'drag'; path: readonly { x: number; y: number }[] } & HeldKeys)
+  | ({ type: 'scroll'; x: number; y: number; scroll_x: number; scroll_y: number } & HeldKeys)
+  | { type: 'keypress'; keys: readonly string[] }
+  | { type: 'type'; text: string }
+  | { type: 'wait' }
+  | { type: 'screenshot' };
+
+/** The fields each OpenAI action reads, beside `type`: the platform's own table. */
+const OPENAI_FIELDS: Readonly<Record<string, readonly string[]>> = {
+  click: ['x', 'y', 'button', 'keys'],
+  double_click: ['x', 'y', 'keys'],
+  move: ['x', 'y', 'keys'],
+  drag: ['path', 'keys'],
+  scroll: ['x', 'y', 'scroll_x', 'scroll_y', 'keys'],
+  keypress: ['keys'],
+  type: ['text'],
+  wait: [],
+  screenshot: [],
+};
+const OPENAI_BUTTONS: readonly string[] = ['left', 'right', 'wheel', 'back', 'forward'];
+
+/**
+ * The body of an OpenAI batch: the actions as a JSON array, each checked
+ * before anything is sent.
+ *
+ * Checked for SHAPE — a known `type`, the fields that type needs with the
+ * right types, and no field it does not read — rather than for the platform's
+ * budgets (typed characters, wheel notches, drag points and waits summed over
+ * the batch), which it refuses itself before anything runs. A field the type
+ * does not read is refused rather than dropped, as the platform refuses it, so
+ * no part of a model's action silently disappears on the way. `keys: null` is
+ * OpenAI's "no keys" and is left off the wire.
+ */
+export function inputBatchBody(actions: readonly OpenAIComputerAction[]): Json[] {
+  if (!Array.isArray(actions)) throw new ValidationError('actions must be an array');
+  if (actions.length < 1 || actions.length > INPUT_BATCH_MAX) {
+    throw new ValidationError(
+      `a batch holds 1 to ${INPUT_BATCH_MAX} actions (got ${actions.length})`,
+    );
+  }
+  return actions.map((action: unknown, i) => {
+    const at = `actions[${i}]`;
+    if (!isRecord(action)) throw new ValidationError(`${at} must be an object`);
+    const type = action.type;
+    const reads = typeof type === 'string' ? OPENAI_FIELDS[type] : undefined;
+    if (typeof type !== 'string' || !Object.hasOwn(OPENAI_FIELDS, type) || !reads) {
+      throw new ValidationError(
+        `${at}.type must be one of ${Object.keys(OPENAI_FIELDS).join(', ')} (got ${JSON.stringify(type)})`,
+      );
+    }
+    for (const key of Object.keys(action)) {
+      if (key !== 'type' && action[key] !== undefined && !reads.includes(key)) {
+        throw new ValidationError(`${at}: OpenAI ${type} does not take ${key}`);
+      }
+    }
+    const body: Json = { type };
+    if (reads.includes('x')) {
+      body.x = finite(action.x as number, `${at}.x`);
+      body.y = finite(action.y as number, `${at}.y`);
+    }
+    if (type === 'click') {
+      if (typeof action.button !== 'string' || !OPENAI_BUTTONS.includes(action.button)) {
+        throw new ValidationError(`${at}.button must be one of ${OPENAI_BUTTONS.join(', ')}`);
+      }
+      body.button = action.button;
+    }
+    if (type === 'drag') {
+      const path = action.path;
+      if (!Array.isArray(path) || path.length < 2) {
+        throw new ValidationError(`${at}.path must be at least two {x, y} points`);
+      }
+      body.path = path.map((p: unknown, j) => {
+        if (!isRecord(p)) throw new ValidationError(`${at}.path[${j}] must be an {x, y} point`);
+        return {
+          x: finite(p.x as number, `${at}.path[${j}].x`),
+          y: finite(p.y as number, `${at}.path[${j}].y`),
+        };
+      });
+    }
+    if (type === 'scroll') {
+      body.scroll_x = finite(action.scroll_x as number, `${at}.scroll_x`);
+      body.scroll_y = finite(action.scroll_y as number, `${at}.scroll_y`);
+    }
+    if (type === 'type') {
+      if (typeof action.text !== 'string' || !action.text) {
+        throw new ValidationError(`${at}.text must be a nonempty string`);
+      }
+      body.text = action.text;
+    }
+    if (reads.includes('keys')) {
+      const keys = action.keys;
+      if (type === 'keypress' || (keys !== undefined && keys !== null)) {
+        if (!Array.isArray(keys) || keys.some((k) => typeof k !== 'string')) {
+          throw new ValidationError(`${at}.keys must be an array of key names`);
+        }
+        if (type === 'keypress' && keys.length === 0) {
+          throw new ValidationError(`${at}.keys must name at least one key`);
+        }
+        body.keys = [...keys];
+      }
+    }
+    return body;
+  });
+}
 
 export const pointerBody = (action: string, x: number, y: number): Json => ({
   action,
@@ -2694,6 +2825,12 @@ export type WebhookUpdateArgs = Partial<WebhookCreateArgs>;
  */
 function webhookUrl(url: unknown): string {
   const text = requireString(url, 'url');
+  // Counted as the platform counts it: the string as sent, before parsing.
+  if (text.length > WEBHOOK_URL_MAX) {
+    throw new ValidationError(
+      `url is ${text.length} characters; the platform accepts at most ${WEBHOOK_URL_MAX}`,
+    );
+  }
   let parsed: URL;
   try {
     parsed = new URL(text);
@@ -2736,6 +2873,8 @@ function idList(v: unknown, what: string): string[] {
 
 /** The most characters a subscription's description may hold — the platform's DESCRIPTION_MAX. */
 export const WEBHOOK_DESCRIPTION_MAX = LIMITS['webhook.descriptionMaxChars'];
+/** The longest delivery URL the platform takes, in characters as sent. */
+export const WEBHOOK_URL_MAX = LIMITS['webhook.urlMaxChars'];
 /**
  * The most computer ids one subscription may name — the platform's
  * COMPUTERS_MAX. A bound, not a design number: past it, filter at the receiver.

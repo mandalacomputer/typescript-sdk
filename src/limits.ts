@@ -17,6 +17,8 @@ export const LIMITS = {
   'clipboard.writeMaxBytes': 64 * 1024,
   'exec.maxEnvEntries': 64,
   'exec.maxEnvEntryBytes': 4096,
+  'exec.maxTimeoutSeconds': 600,
+  'webhook.urlMaxChars': 2048,
   'webhook.descriptionMaxChars': 200,
   'webhook.computersMax': 64,
   'webhook.replayWindowSeconds': 300,

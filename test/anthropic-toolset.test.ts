@@ -72,6 +72,8 @@ function desktop(
     intrude?: (index: number) => boolean;
     unnamed?: boolean;
     refuseCrop?: number;
+    /** A pinned crop answers naming another capture than the one asked for. */
+    mislabelCrop?: boolean;
   } = {},
 ) {
   let capture = opts.capture ?? screen;
@@ -143,7 +145,8 @@ function desktop(
         }
         const headers: Record<string, string> = { 'content-type': 'image/png' };
         if (!opts.unnamed) {
-          headers['x-gc-capture'] = from.name;
+          headers['x-gc-capture'] =
+            opts.mislabelCrop && call.query.capture !== undefined ? 'f'.repeat(16) : from.name;
           headers['x-gc-capture-size'] = `${from.size.width}x${from.size.height}`;
         }
         return new Response(png(out), { headers });
@@ -543,6 +546,19 @@ describe('zoom', () => {
       expect(d.cuts).toEqual([]);
     },
   );
+
+  it('refuses a crop that comes back naming another capture than the one measured', async () => {
+    // The Python driver's check, kept here too: a pinned crop exists to rule
+    // out a picture of some other capture, so one that says it is of another
+    // is not handed to the model as though it were the region it asked for.
+    const d = desktop({ width: 1280, height: 800 }, { mislabelCrop: true });
+    const t = await toolset(d);
+    await t.toolResult(use('screenshot'));
+    const r = await t.toolResult(use('zoom', { region: [100, 100, 300, 200] }));
+    expect(r.is_error).toBe(true);
+    expect(text(r)).toContain('cut from another capture than the one measured');
+    expect((r.content as { type: string }[]).some((b) => b.type === 'image')).toBe(false);
+  });
 
   it('refuses to zoom on a platform that does not name its captures', async () => {
     // An unpinned crop is the guess this exists to stop making, so there is

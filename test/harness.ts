@@ -1059,6 +1059,18 @@ export const anyRoute: Responder = (call) => {
   // bug instead of catching it and neither method had ever worked (OPL-4176).
   if (path.endsWith('/windows')) return json({ windows: [WINDOW] });
   if (/\/windows\/[^/]+$/.test(path)) return json({ ok: true, gone: false, window: WINDOW });
+  // An OpenAI batch answers the batch: every action completed, in order, and
+  // the desktop after it when asked.
+  if (path.endsWith('/input') && Array.isArray(call.body)) {
+    return json({
+      ok: true,
+      completed: call.body.length,
+      results: call.body.map((a) =>
+        isRecord(a) && a.type === 'type' ? { ok: true, mechanism: 'physical' } : { ok: true },
+      ),
+      ...(call.query.context === '1' ? { context: { windows: [WINDOW], focused: WINDOW } } : {}),
+    });
+  }
   // An input call that asked for the desktop afterwards (OPL-5472) gets it, in
   // the platform's shape; one that did not gets the plain ack below.
   if (path.endsWith('/input') && call.query.context === '1') {

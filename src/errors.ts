@@ -17,7 +17,7 @@
  * reached for.
  */
 
-import type { Operation } from './models.js';
+import type { InputBatchResult, Operation } from './models.js';
 
 /**
  * A caller mistake, refused before the request went out.
@@ -660,6 +660,39 @@ export function agentRouteError(err: APIError, stepsSeen = 0, run: AgentRunConte
   }
   rebuilt.idempotencyKey = err.idempotencyKey;
   return rebuilt;
+}
+
+/**
+ * An OpenAI input batch that STOPPED PART-WAY: some of its actions ran.
+ *
+ * Raised by {@link Computer.inputBatch} when the platform answers with the
+ * batch's own result rather than an ordinary refusal — execution began and
+ * stopped at {@link InputBatchError.result}`.failedIndex`, after `completed`
+ * actions that are on the desktop. The failing action may have partly applied.
+ * `status` is the HTTP status the platform answered with (409 for a computer
+ * that stopped running, 502 or 503 for a guest or monitor that failed, and so
+ * on).
+ *
+ * A refusal before any action was sent — a malformed batch, a computer that is
+ * not running, the input lane busy — is NOT this: it is the ordinary error for
+ * its status, and nothing was done.
+ *
+ * NEVER SEND THE SAME BATCH AGAIN AUTOMATICALLY. Replaying it repeats every
+ * completed action. Take a fresh screenshot and decide what is left to do.
+ * {@link isTransient} answers false for this class, whatever its status.
+ */
+export class InputBatchError extends APIError {
+  override name = 'InputBatchError';
+  constructor(
+    message: string,
+    status: number,
+    body: unknown,
+    /** The batch as far as it went: `ok: false`, `completed`, `failedIndex`, `error`, `results`. */
+    readonly result: InputBatchResult,
+    metadata: ErrorMetadata = {},
+  ) {
+    super(message, status, body, undefined, metadata);
+  }
 }
 
 /** 403 — authenticated, but the key's role on the account is too low. */
@@ -1577,6 +1610,9 @@ export function isTransient(err: unknown): boolean {
   // also carries the per-request timeout, which used to be a plain
   // ConnectionError and so used to be told it was safe to replay a create.
   if (err instanceof ConnectionInterruptedError) return false;
+  // A batch that stopped part-way has actions on the desktop already; sending
+  // it again repeats them, whatever its status would otherwise say.
+  if (err instanceof InputBatchError) return false;
   // A relayed model 429 on an agent run that had already acted: the wait is the
   // model provider's, but replaying the prompt repeats the steps it took.
   if (err instanceof APIError && afterAgentSteps.has(err)) return false;

@@ -71,6 +71,7 @@ import type {
 } from '@anthropic-ai/sdk/resources/beta';
 import type { Computer } from './computer.js';
 import { APIError } from './errors.js';
+import type { ScreenshotInfo } from './models.js';
 
 /** What {@link MandalaComputerToolset} takes beside the computer: Anthropic's own options. */
 export type MandalaComputerToolsetOptions = BetaComputerToolsetOptions;
@@ -545,9 +546,9 @@ export class MandalaComputerToolset extends BetaAbstractComputerToolset20260801 
         height: Math.max(1, bottom - top),
       };
       const { width, scale } = cropShrink(region);
-      let bytes: Uint8Array;
+      let cut: ScreenshotInfo;
       try {
-        bytes = await this.computer.screenshot(width, {
+        cut = await this.computer.screenshotWithInfo(width, {
           capture,
           region,
           ...(scale === undefined ? {} : { scale }),
@@ -568,10 +569,16 @@ export class MandalaComputerToolset extends BetaAbstractComputerToolset20260801 
             'screenshot and zoom again',
         );
       }
-      const size = pngSize(bytes);
+      // Checked rather than trusted, as the Python driver checks it: the one
+      // answer a pinned crop exists to rule out is a crop of some other
+      // capture, so a picture that does not say it is of this one is not
+      // handed to the model as though it were.
+      if (cut.capture !== capture)
+        throw new ToolError('the zoom came back cut from another capture than the one measured');
+      const size = pngSize(cut.bytes);
       if (!size || !fits(size))
         throw new ToolError('the zoomed picture came back larger than the model can be shown');
-      return { data: base64(bytes), mediaType: 'image/png' };
+      return { data: base64(cut.bytes), mediaType: 'image/png' };
     }
   }
 

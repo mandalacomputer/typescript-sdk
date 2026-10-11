@@ -132,6 +132,7 @@ export {
   CreateOnlyConflictError,
   FileExistsError,
   GatewayTimeoutError,
+  InputBatchError,
   InsufficientCreditsError,
   isTransient,
   MandalaError,
@@ -212,6 +213,8 @@ export type {
   GuestDirectoryEntry,
   GuestWindow,
   Holdings,
+  InputBatchActionResult,
+  InputBatchResult,
   InputContext,
   LifecycleAck,
   Move,
@@ -269,6 +272,7 @@ export type {
   EgressProxyArgs,
   ExecArgs,
   MoveArgs,
+  OpenAIComputerAction,
   OperationListArgs,
   PasteShortcut,
   ScreenshotFormat,
@@ -290,6 +294,7 @@ export type {
 export {
   COMPUTER_STATES,
   CREDITS_PAGE_MAX,
+  INPUT_BATCH_MAX,
   OPERATIONS_PAGE_MAX,
   PASTE_MAX_BYTES,
   SCREENSHOT_FORMATS,
@@ -301,6 +306,7 @@ export {
   TYPE_MAX_CHARS,
   WEBHOOK_COMPUTERS_MAX,
   WEBHOOK_DESCRIPTION_MAX,
+  WEBHOOK_URL_MAX,
   WINDOW_ACTIONS,
 } from './paths.js';
 export type {

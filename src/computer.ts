@@ -4,6 +4,7 @@ import {
   type AgentArgs,
   type AgentEvent,
   type AgentResult,
+  type AgentStop,
   toAgentEvent,
   toAgentResult,
 } from './agent.js';
@@ -44,6 +45,7 @@ import {
   errorForEventStatus,
   FileExistsError,
   type GatewayTimeoutError,
+  InputBatchError,
   type InsufficientCreditsError,
   type isTransient,
   MandalaError,
@@ -87,6 +89,7 @@ import type {
   GuestDirectory,
   GuestWindow,
   Holdings,
+  InputBatchResult,
   InputContext,
   Move,
   Point,
@@ -123,6 +126,7 @@ import {
   toExecResult,
   toGuestDirectory,
   toHoldings,
+  toInputBatchResult,
   toInputContext,
   toMove,
   toSchedule,
@@ -772,6 +776,21 @@ const UNICODE_TYPE_TIMEOUT_MS = 95_000 + 15_000;
 
 /** The query that asks an input action for the desktop after it. */
 const CONTEXT_QUERY: Query = { context: '1' };
+
+/**
+ * How long an OpenAI input batch may take: the platform's proxy allows 93
+ * seconds for the batch, its context read and transport together, plus the
+ * same 15 seconds of slack {@link UNICODE_TYPE_TIMEOUT_MS} has.
+ */
+const INPUT_BATCH_TIMEOUT_MS = 93_000 + 15_000;
+
+/**
+ * Whether a refusal's body is a batch's own result rather than an ordinary
+ * error: the platform's reference tells the two apart by `completed`, which an
+ * ordinary error never carries.
+ */
+const batchAnswer = (body: unknown): boolean =>
+  P.isRecord(body) && Object.hasOwn(body, 'completed');
 
 /**
  * A create-only upload's 409, never left looking like a passing conflict.
@@ -4317,6 +4336,93 @@ export class Computer {
   }
 
   /**
+   * Carry out 1 to 32 OpenAI computer actions as one request, in order.
+   *
+   * `actions` are OpenAI's own action objects — `click`, `double_click`,
+   * `move`, `drag`, `scroll`, `keypress`, `type`, `wait` and `screenshot`, in
+   * OpenAI's spelling — so a Responses API `computer_call`'s `actions` can be
+   * passed as they came:
+   *
+   * ```ts
+   * const done = await c.inputBatch(call.actions);
+   * console.log(`${done.completed} actions`);
+   * ```
+   *
+   * The whole batch is checked first, here and then by the platform, before a
+   * suspended computer is woken or anything is sent, and runs on one input lane
+   * so no other API input interleaves. `screenshot` is a marker answered with
+   * `ok`: read the picture with {@link screenshot} afterwards. `{ context: true }`
+   * adds the desktop after the batch, as {@link type} does.
+   *
+   * A batch REFUSED before any action ran — a malformed one, a computer that is
+   * not running, the input lane busy — throws the ordinary error for its status,
+   * and nothing happened. A batch that STOPPED PART-WAY throws
+   * {@link InputBatchError}: `result.completed` actions ran, and the one at
+   * `result.failedIndex` may have partly applied. **Never send the same batch
+   * again automatically** — that repeats what already ran. Look at a fresh
+   * screenshot first; {@link isTransient} answers false for it.
+   *
+   * Sent with a request deadline of at least 108 seconds, whatever the client's
+   * default: the platform's proxy allows the batch 93.
+   */
+  inputBatch(
+    actions: readonly P.OpenAIComputerAction[],
+    opts: InputOptions & { context: true },
+  ): Promise<InputBatchResult & { context: InputContext }>;
+  inputBatch(
+    actions: readonly P.OpenAIComputerAction[],
+    opts?: InputOptions,
+  ): Promise<InputBatchResult>;
+  async inputBatch(
+    actions: readonly P.OpenAIComputerAction[],
+    opts: InputOptions = {},
+  ): Promise<InputBatchResult> {
+    const context = P.flag(opts?.context, 'context');
+    const body = P.inputBatchBody(actions);
+    const path = P.computerAction(this.id, 'input');
+    const where = `POST ${path}`;
+    let data: unknown;
+    try {
+      data = await this.#t.json('POST', path, {
+        body,
+        minTimeoutMs: INPUT_BATCH_TIMEOUT_MS,
+        query: context ? CONTEXT_QUERY : undefined,
+        signal: opts.signal,
+      });
+    } catch (err) {
+      if (!(err instanceof APIError) || !batchAnswer(err.body)) throw err;
+      // Execution began: the answer is the batch as far as it went, under the
+      // status of what stopped it. Not the status's own class, which for a 409
+      // or a 503 would call sending it again worth trying.
+      throw new InputBatchError(
+        err.message,
+        err.status,
+        err.body,
+        toInputBatchResult(err.body, where),
+        {
+          requestId: err.requestId,
+          allow: err.allow,
+          wwwAuthenticate: err.wwwAuthenticate,
+          method: err.method,
+        },
+      );
+    }
+    const result = toInputBatchResult(data, where, context);
+    // A success status with a stopped batch contradicts the platform's own
+    // contract; reported the same way, so a returned result always ran in full.
+    if (!result.ok || result.completed !== body.length) {
+      throw new InputBatchError(
+        result.error ?? `the batch stopped after ${result.completed} of ${body.length} actions`,
+        200,
+        data,
+        { ...result, ok: false },
+        { method: 'POST' },
+      );
+    }
+    return result;
+  }
+
+  /**
    * Press a chord, e.g. `key('ctrl', 'c')` or `key('Return')`.
    *
    * Both this SDK's names and X11 keysyms are accepted, so the spellings a
@@ -5946,10 +6052,10 @@ export class Computer {
    * reaches the cap with `stop: 'max_cost'`.
    *
    * Throws `MandalaError` if the stream ends without a result. It does **not**
-   * throw when a run ends unfinished: `max_steps`, `rate_limited` and `refusal`
-   * leave real work on the desktop, and discarding the result would discard the
-   * only account of what was done to the machine. Check
-   * {@link AgentResult.finished}.
+   * throw when a run ends unfinished: `max_steps`, `rate_limited`, `refusal`,
+   * `credits_exhausted`, `max_cost` and the rest of {@link AgentStop} leave real
+   * work on the desktop, and discarding the result would discard the only
+   * account of what was done to the machine. Check {@link AgentResult.finished}.
    *
    * **A RUN CAN BE REFUSED PART-WAY THROUGH, AFTER BILLED STEPS.** Authorization
    * is not settled once at the start of a call this long: the API rechecks the

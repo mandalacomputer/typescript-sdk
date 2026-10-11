@@ -33,7 +33,7 @@ its Claude Code plugin manifest, which a test holds to the package version.
 | --- | --- |
 | typescript-sdk | `package.json` `version`; `export const VERSION` in `src/index.ts` |
 | python-sdk | `pyproject.toml` `version`; `__version__` in `src/mandala_computer/__init__.py` |
-| mcp | `package.json` `version`; `SERVER_VERSION` in `src/server.ts`; `version` in `plugin/.claude-plugin/plugin.json` |
+| mcp | `package.json` `version`; `SERVER_VERSION` in `src/version.ts`; `version` in `plugin/.claude-plugin/plugin.json` |
 
 Before opening the pull request, search each repository for the old version
 so a place added after this list was written does not slip past it; from
