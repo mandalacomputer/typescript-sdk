@@ -2036,12 +2036,17 @@ revokes its capability; it does not stop Chromium or delete the computer.
   their tab, and their HTTP(S) requests go through the same URL hook with that
   tab's ID. A cross-site frame's contents are not part of `read_page`, `find`
   or `get_page_text`; screenshots and coordinate input reach it.
-- Dedicated workers are held paused and never run: Chromium fetches the script
-  of a worker started by another worker without any interception the driver
-  could apply, so a running worker could reach URLs the hook refuses. The page
-  itself carries on. Popups and other new top-level targets are unsupported
-  and are closed; if one cannot be closed, the driver closes its session.
-  Sites that depend on these may not work with this driver.
+- Pages cannot start dedicated workers. In every frame of a tab (cross-site,
+  `about:blank`, `srcdoc` and `javascript:` frames included) `new Worker(...)`
+  throws a `SecurityError` before the page's own scripts run, whatever the
+  script URL (`blob:` and `data:` included), and the binding cannot be
+  replaced. A worker cannot run under the URL hook: Chromium fetches the
+  script of a worker started by another worker without any interception the
+  driver could apply, and a worker held paused is released, unpoliced, when
+  its page closes or navigates. The page itself carries on. Shared workers,
+  service workers, popups and other new top-level targets are unsupported and
+  are closed; if one cannot be closed, the driver closes its session. Sites
+  that depend on these may not work with this driver.
 - `read_page` returns accessibility roles/names and element refs; `find`
   performs a case-insensitive substring search over that tree. Each read/find
   replaces that tab's refs. Navigation invalidates them. Ask for a new page

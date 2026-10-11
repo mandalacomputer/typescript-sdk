@@ -107,6 +107,19 @@ const COMPACT: Record<string, (p: Message) => Message> = {
   }),
 };
 const AUTO_ATTACH = { autoAttach: true, waitForDebuggerOnStart: true, flatten: true };
+// Dedicated workers cannot run under the URL policy: Chromium fetches the
+// script of a worker started by a worker with no session's interception, and
+// a worker held paused is released, unpoliced, when its page closes or
+// navigates. So no frame of an owned tab can construct one. Chromium runs this
+// in every new document of the session's frames (same-process children and
+// about:blank, srcdoc and javascript: frames included) before the page's own
+// scripts, and in the documents that already exist; the binding cannot be
+// reassigned or deleted. Shared and service workers are closed as targets.
+const NO_WORKERS = {
+  source:
+    "(()=>{const Worker=function Worker(){throw new DOMException('Dedicated workers are disabled in this browser session.','SecurityError')};Object.defineProperty(globalThis,'Worker',{value:Worker,writable:false,configurable:false,enumerable:false})})()",
+  runImmediately: true,
+};
 const INTERCEPT = { patterns: [{ urlPattern: '*', requestStage: 'Request' }] };
 // A site-isolated cross-site frame is its own target, attached under its page
 // and paused until released. Chromium intercepts its subresource requests on
@@ -119,6 +132,7 @@ const FRAME_INIT: [string, Message][] = [
   ['Fetch.enable', INTERCEPT],
   ['Runtime.enable', {}],
   ['Page.enable', {}],
+  ['Page.addScriptToEvaluateOnNewDocument', NO_WORKERS],
   ['Target.setAutoAttach', AUTO_ATTACH],
 ];
 // Renewal keeps trying until this long before the lease deadline, so that the
@@ -850,11 +864,10 @@ export class BrowserCDP {
           await this.#frame(child, info, parent);
           return;
         }
-        // A dedicated worker of an owned tab is held where it is: attached and
-        // paused, never released. It cannot be closed (Chromium refuses), and
-        // it cannot be run under the URL policy: a worker can start a nested
-        // worker, whose script Chromium fetches with no session's interception
-        // applied. Its tab carries on without it.
+        // No frame of an owned tab can construct a dedicated worker (see
+        // NO_WORKERS). Should one attach regardless, it is held where it is:
+        // attached and paused, never released here, since it cannot be closed
+        // (Chromium refuses) nor run under the URL policy.
         if (parent !== undefined && info.type === 'worker') return;
         const target: string = info.targetId;
         if (!this.#ready.has(target) && this.#creating) await this.#creating.promise;
@@ -871,6 +884,7 @@ export class BrowserCDP {
         eventSession = child; // Initialization can race with this target's destruction.
         const initializers: [string, Message][] = [
           ['Page.enable', {}],
+          ['Page.addScriptToEvaluateOnNewDocument', NO_WORKERS],
           ['Runtime.enable', {}],
           ['DOM.enable', {}],
           ['Accessibility.enable', {}],

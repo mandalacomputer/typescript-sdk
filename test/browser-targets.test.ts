@@ -203,6 +203,7 @@ it('runs a cross-process frame under its page’s request policy and never close
       'Fetch.enable',
       'Runtime.enable',
       'Page.enable',
+      'Page.addScriptToEvaluateOnNewDocument',
       'Target.setAutoAttach',
       'Runtime.runIfWaitingForDebugger',
     ]);
@@ -1142,6 +1143,37 @@ it('re-reads at most 16 cache restores at once', async () => {
     await new Promise((r) => setTimeout(r, 20));
     expect(named(ws, 'Page.getFrameTree')).toHaveLength(16);
     expect(backend.sessionStatus().state).toBe('active');
+  } finally {
+    await backend.close();
+  }
+});
+
+it('makes Worker construction throw in every document of a tab and its frames, before they run', async () => {
+  const { backend, ws } = await started();
+  try {
+    attach(ws, 'session', 'frame', 'iframe');
+    await vi.waitFor(() => expect(on(ws, 'frame')).toContain('Runtime.runIfWaitingForDebugger'));
+    for (const session of ['session', 'frame']) {
+      const methods = on(ws, session);
+      const script = ws.sent.find(
+        (c) => c.sessionId === session && c.method === 'Page.addScriptToEvaluateOnNewDocument',
+      )!;
+      expect(methods.indexOf('Page.addScriptToEvaluateOnNewDocument')).toBeLessThan(
+        methods.indexOf('Runtime.runIfWaitingForDebugger'),
+      );
+      expect(script.params.runImmediately).toBe(true);
+      // The script's own effect, in a fresh realm.
+      const realm = vm.createContext({ DOMException });
+      vm.runInContext('globalThis.Worker = function Worker() {}', realm);
+      vm.runInContext(String(script.params.source), realm);
+      expect(() => vm.runInContext("new Worker('/w.js')", realm)).toThrow(
+        'Dedicated workers are disabled',
+      );
+      expect(() =>
+        vm.runInContext("'use strict'; globalThis.Worker = function () {}", realm),
+      ).toThrow();
+      expect(() => vm.runInContext("'use strict'; delete globalThis.Worker", realm)).toThrow();
+    }
   } finally {
     await backend.close();
   }

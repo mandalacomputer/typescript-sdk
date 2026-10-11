@@ -139,6 +139,8 @@ it('disables uploads and gates JavaScript without opening a connection', async (
 const executable = process.env.MANDALA_TEST_CHROMIUM;
 // 127.0.0.1 and localhost are different sites, so each frame below is cross-site
 // from its parent and runs as its own target.
+const workerAttempts = (port: number, where: string) =>
+  `const results=[];for(const [kind,make] of [['url',()=>new Worker('/escape-worker.js?${where}-url')],['blob',()=>new Worker(URL.createObjectURL(new Blob(["fetch('http://127.0.0.1:${port}/worker-escape?${where}-blob')"],{type:'text/javascript'})))],['data',()=>new Worker("data:text/javascript,fetch('http://127.0.0.1:${port}/worker-escape?${where}-data')")]]){let r;try{make();r='created'}catch(e){r=e.name}results.push(kind+':'+r)}`;
 const downloadFrame = (port: number) =>
   `<iframe src="http://localhost:${port}/dl-outer" style="position:absolute;left:0;top:0;border:0;width:600px;height:400px"></iframe>`;
 const pages = (port: number): Record<string, [string, string | Buffer]> => ({
@@ -189,6 +191,18 @@ const pages = (port: number): Record<string, [string, string | Buffer]> => ({
   '/nav-churn': [
     'text/html',
     `<body style="margin:0"><p id="state" style="position:absolute;top:500px">churning</p><iframe id="f" src="http://a.test:${port}/dl-outer" style="position:absolute;left:0;top:0;border:0;width:600px;height:400px"></iframe><script>(async()=>{const f=document.getElementById('f');await new Promise(r=>{f.onload=r});for(let n=0;n<40;n++){const loaded=new Promise(r=>{f.onload=r});f.src='http://'+(n%2?'a':'b')+'.test:${port}/dl-outer?'+n;await loaded}const loaded=new Promise(r=>{f.onload=r});f.src='http://a.test:${port}/dl-outer';await loaded;document.getElementById('state').textContent='churned'})()</script></body>`,
+  ],
+  // Every way this page has to start a dedicated worker, here, in a nested
+  // same-site frame and in a cross-site frame; each worker would request
+  // /worker-escape, which the URL policy refuses.
+  '/escape-host': [
+    'text/html',
+    `<body><p id="state">trying</p><iframe src="/escape-frame?same"></iframe><iframe src="http://localhost:${port}/escape-frame?cross"></iframe><script>${workerAttempts(port, 'host')};const blank=document.createElement('iframe');document.body.append(blank);let r;try{new blank.contentWindow.Worker('/escape-worker.js?blank');r='created'}catch(e){r=e.name}results.push('blank:'+r);document.getElementById('state').textContent=results.join(' ')</script></body>`,
+  ],
+  '/escape-frame': ['text/html', `<body><script>${workerAttempts(port, 'frame')}</script></body>`],
+  '/escape-worker.js': [
+    'text/javascript',
+    `fetch('http://127.0.0.1:${port}/worker-escape?'+location.search.slice(1))`,
   ],
   '/heavy': [
     'text/html',
@@ -288,7 +302,10 @@ describe.skipIf(!executable)('real Chromium through Anthropic toolResult', () =>
         return;
       }
       const page = pages(req.socket.localPort!)[
-        req.url!.replace(/^\/img\/\d+$/, '/img').replace(/^\/dl-outer\?\d+$/, '/dl-outer')
+        req
+          .url!.replace(/^\/img\/\d+$/, '/img')
+          .replace(/^\/dl-outer\?\d+$/, '/dl-outer')
+          .replace(/^\/(escape-frame|escape-worker\.js)\?.*$/, '/$1')
       ];
       if (page) {
         res.writeHead(200, { 'Content-Type': page[0] });
@@ -757,26 +774,18 @@ describe.skipIf(!executable)('real Chromium through Anthropic toolResult', () =>
     expect(browser.sessionStatus.state).toBe('active');
     expect(text(success(await browser.toolResult(use('get_page_text'))))).toContain('churned');
   }, 30000);
-  it('holds dedicated workers paused, so a nested worker cannot escape the URL policy', async () => {
+  it('a page cannot start a dedicated worker, nor through one a nested worker', async () => {
     const seen: string[] = [];
     const { browser, base, hits, url } = await fixture({
       urlPolicy: (_ctx, target) => {
         seen.push(target);
-        if (target.endsWith('/nested-worker.js')) throw new ToolError('not permitted');
       },
     });
-    const port = new URL(base).port;
     success(await browser.toolResult(use('navigate', { url: `${base}/worker-host` })));
-    // The worker's own script is fetched under the page's policy, then it waits.
-    await expect.poll(() => hits, { timeout: 10000 }).toContain('/worker.js');
-    expect(seen).toContain(`${base}/worker.js`);
-    await expect
-      .poll(() => targets(url), { timeout: 10000 })
-      .toContain(`worker http://127.0.0.1:${port}/worker.js`);
     await new Promise((r) => setTimeout(r, 1000));
-    expect(hits).not.toContain('/worker-fetch');
-    expect(hits).not.toContain('/nested-worker.js');
-    expect(hits).not.toContain('/nested-worker-fetch');
+    expect((await targets(url)).filter((target) => target.startsWith('worker'))).toEqual([]);
+    expect(hits.filter((hit) => hit.includes('worker'))).toEqual(['/worker-host']);
+    expect(seen.filter((target) => target.includes('worker.js'))).toEqual([]);
     expect(text(success(await browser.toolResult(use('get_page_text'))))).toContain('worker page');
     expect(browser.sessionStatus.state).toBe('active');
   }, 30000);
@@ -883,6 +892,41 @@ describe.skipIf(!executable)('real Chromium through Anthropic toolResult', () =>
     await expect.poll(() => began().length, { timeout: 10000 }).toBe(1);
     expect(began()[0]![2]).toBe(true);
   }, 60000);
+  it.each(['navigates away', 'closes'])(
+    'no dedicated worker gets a request past the URL policy when its page %s',
+    async (exit) => {
+      const seen: string[] = [];
+      const { browser, base, hits } = await fixture({
+        urlPolicy: (_ctx, target) => {
+          seen.push(target);
+          if (target.includes('/worker-escape')) throw new ToolError('not permitted');
+        },
+      });
+      success(await browser.toolResult(use('navigate', { url: `${base}/escape-host` })));
+      await expect.poll(() => hits.filter((hit) => hit.startsWith('/escape-frame')).length).toBe(2);
+      await expect
+        .poll(async () => text(success(await browser.toolResult(use('get_page_text')))))
+        .toContain('blank:');
+      const attempts = text(success(await browser.toolResult(use('get_page_text'))));
+      await new Promise((r) => setTimeout(r, 500));
+      if (exit === 'closes') {
+        success(await browser.toolResult(use('new_tab')));
+        const first = tabs(success(await browser.toolResult(use('list_tabs'))))[0]!.tab_id;
+        success(await browser.toolResult(use('close_tab', { tab_id: first })));
+      } else success(await browser.toolResult(use('navigate', { url: `${base}/after` })));
+      await new Promise((r) => setTimeout(r, 1500));
+      // Nothing a worker would have asked for reached the server, the URL
+      // policy or anywhere else: no worker ever started.
+      expect(hits.filter((hit) => hit.includes('worker'))).toEqual([]);
+      expect(seen.filter((url) => url.includes('worker'))).toEqual([]);
+      // Construction itself is refused, here and in the about:blank frame.
+      expect(attempts).toContain(
+        'url:SecurityError blob:SecurityError data:SecurityError blank:SecurityError',
+      );
+      expect(browser.sessionStatus.state).toBe('active');
+    },
+    30000,
+  );
   it('loads a page that pauses hundreds of requests at once', async () => {
     const { browser, base, hits } = await fixture({ urlPolicy: async () => {} });
     success(await browser.toolResult(use('navigate', { url: `${base}/heavy` })));
