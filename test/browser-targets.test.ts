@@ -222,6 +222,57 @@ it('a frame that goes away during its setup leaves the session running', async (
   }
 });
 
+it('a worker that ends before it is released leaves the session running', async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  const { backend, ws } = await started();
+  try {
+    ws.silent.add('worker');
+    attach(ws, 'session', 'worker', 'worker');
+    await vi.waitFor(() => expect(on(ws, 'worker')).toEqual(['Runtime.runIfWaitingForDebugger']));
+    ws.message({
+      method: 'Target.detachedFromTarget',
+      sessionId: 'session',
+      params: { sessionId: 'worker' },
+    });
+    await vi.advanceTimersByTimeAsync(20000);
+    expect(backend.sessionStatus().state).toBe('active');
+    expect(ws.ended).toBe(false);
+  } finally {
+    await backend.close();
+  }
+});
+
+it('detaches reach handlers even when every event slot is waiting on a gone target', async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  const { backend, ws } = await started();
+  try {
+    // 300 frames whose setup Chromium never answers: 256 hold every slot and
+    // the rest of the attaches, then all the detaches, wait in the queue.
+    for (let n = 0; n < 300; n++) {
+      ws.silent.add(`frame-${n}`);
+      attach(ws, 'session', `frame-${n}`, 'iframe');
+    }
+    await vi.waitFor(() =>
+      expect(ws.sent.filter((c) => c.sessionId?.startsWith('frame-'))).toHaveLength(256),
+    );
+    for (let n = 0; n < 300; n++)
+      ws.message({
+        method: 'Target.detachedFromTarget',
+        sessionId: 'session',
+        params: { sessionId: `frame-${n}` },
+      });
+    await vi.advanceTimersByTimeAsync(20000);
+    expect(backend.sessionStatus().state).toBe('active');
+    // A frame already gone when its attach came up is not set up at all.
+    expect(ws.sent.filter((c) => c.sessionId?.startsWith('frame-'))).toHaveLength(256);
+    // And the session still works.
+    paused(ws, 'session', 'after', 'https://allowed.test/');
+    await vi.waitFor(() => expect(named(ws, 'Fetch.continueRequest')).toHaveLength(1));
+  } finally {
+    await backend.close();
+  }
+});
+
 it('a request whose target already detached does not end the session', async () => {
   const { backend, ws } = await started();
   try {

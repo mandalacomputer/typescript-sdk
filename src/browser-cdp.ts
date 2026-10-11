@@ -158,6 +158,7 @@ export class BrowserCDP {
   #failed = false;
   #tasks = new Set<Promise<void>>();
   #queue: Message[] = [];
+  #detached = new Set<string>();
   #tabs = new Map<string, Message>();
   #sessions = new Map<string, string>();
   // Cross-process frame session -> the owned tab it renders in, and its target.
@@ -409,6 +410,7 @@ export class BrowserCDP {
     ])
       map.clear();
     this.#queue = [];
+    this.#detached.clear();
     this.#active = undefined;
     this.#changes = [];
     for (const pending of this.#pending.values())
@@ -456,6 +458,11 @@ export class BrowserCDP {
 
   #dispatch(message: Message): void {
     if (!EVENTS.has(message.method)) return;
+    // A detach takes effect on arrival. Chromium need not answer a command on
+    // a session that has gone, and a handler waiting on one would otherwise
+    // hold its slot until the command deadline ended the whole session, with
+    // the detach that would free it stuck in the queue behind it.
+    if (message.method === 'Target.detachedFromTarget') this.#detach(message.params?.sessionId);
     // Arrival order is kept: nothing overtakes an event already waiting.
     if (this.#queue.length || this.#tasks.size >= EVENT_CONCURRENCY) {
       if (this.#queue.length >= EVENT_QUEUE_LIMIT) {
@@ -486,12 +493,20 @@ export class BrowserCDP {
     for (const [tab, s] of this.#sessions) if (s === session) return tab;
     return undefined;
   }
-  #dropFrame(session: string): void {
-    if (!this.#frames.delete(session)) return;
-    // Chromium need not answer a command on a session that has gone away.
+  #detach(session: unknown): void {
+    if (typeof session !== 'string') return;
+    // Remembered until the detach event itself is handled in order, so that an
+    // attach for this session still waiting in the queue is not acted on.
+    this.#detached.add(session);
+    this.#abandon(session);
+  }
+  #abandon(session: string): void {
     for (const pending of this.#pending.values())
       if (pending.session === session)
-        pending.reject(new BrowserDriverError('Browser frame detached.'));
+        pending.reject(new SessionGone('Chromium could not complete the browser action.'));
+  }
+  #dropFrame(session: string): void {
+    if (this.#frames.delete(session)) this.#abandon(session);
   }
   /** A child target of an owned tab. It runs; closing it would close its tab. */
   async #child(child: string, info: Message, tab: string): Promise<void> {
@@ -526,6 +541,7 @@ export class BrowserCDP {
       if (method === 'Target.attachedToTarget') {
         const info = p.targetInfo;
         const child: string = p.sessionId;
+        if (this.#detached.has(child)) return; // Gone before its turn came.
         const parent = this.#owner(session);
         if (info.browserContextId !== this.#context && parent === undefined) {
           await this.send('Runtime.runIfWaitingForDebugger', {}, child);
@@ -574,6 +590,7 @@ export class BrowserCDP {
         if (this.#tabs.has(p.targetInfo.targetId))
           this.#tabs.set(p.targetInfo.targetId, p.targetInfo);
       } else if (method === 'Target.detachedFromTarget') {
+        this.#detached.delete(p.sessionId);
         this.#dropFrame(p.sessionId);
       } else if (method === 'Target.targetDestroyed') {
         for (const [frame, { target }] of this.#frames)

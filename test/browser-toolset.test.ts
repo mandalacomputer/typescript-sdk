@@ -148,6 +148,13 @@ const pages = (port: number): Record<string, [string, string | Buffer]> => ({
     `<body style="margin:0"><button style="width:400px;height:100px" onclick="fetch('/frame-clicked')">child button</button><script>fetch('/frame-blocked').catch(()=>{});fetch('/frame-allowed')</script><iframe src="http://127.0.0.1:${port}/frame-nested"></iframe></body>`,
   ],
   '/frame-nested': ['text/html', `<p>nested</p><script>fetch('/nested-allowed')</script>`],
+  // Cross-site frames added and removed faster than they can be set up.
+  '/frame-churn': [
+    'text/html',
+    `<title>Churn</title><p id="state">churning</p><script>(async()=>{for(let n=0;n<40;n++){const f=document.createElement('iframe');f.src='http://localhost:${port}/churn-child';document.body.append(f);await new Promise(r=>setTimeout(r,(n%4)*5));f.remove()}const last=document.createElement('iframe');last.src='http://localhost:${port}/churn-last';document.body.append(last);document.getElementById('state').textContent='churned'})()</script>`,
+  ],
+  '/churn-child': ['text/html', `<p>child</p><script>fetch('/churn-fetch').catch(()=>{})</script>`],
+  '/churn-last': ['text/html', `<p>last</p><script>fetch('/churn-final')</script>`],
   '/worker-host': [
     'text/html',
     `<title>Worker host</title><script>const w=new Worker('/worker.js');w.onmessage=e=>{document.title=e.data}</script>`,
@@ -704,6 +711,15 @@ describe.skipIf(!executable)('real Chromium through Anthropic toolResult', () =>
     );
     await expect.poll(() => hits).toContain('/frame-clicked');
     expect(tabs(success(await browser.toolResult(use('list_tabs'))))).toHaveLength(1);
+  }, 30000);
+  it('survives cross-site frames that come and go faster than they are set up', async () => {
+    const { browser, base, hits } = await fixture({
+      urlPolicy: () => new Promise((r) => setTimeout(r, 5)),
+    });
+    success(await browser.toolResult(use('navigate', { url: `${base}/frame-churn` })));
+    await expect.poll(() => hits, { timeout: 15000 }).toContain('/churn-final');
+    expect(browser.sessionStatus.state).toBe('active');
+    expect(text(success(await browser.toolResult(use('get_page_text'))))).toContain('churned');
   }, 30000);
   it('runs dedicated workers under their page’s URL policy', async () => {
     const { browser, base, hits } = await fixture({
