@@ -140,7 +140,7 @@ const executable = process.env.MANDALA_TEST_CHROMIUM;
 // 127.0.0.1 and localhost are different sites, so each frame below is cross-site
 // from its parent and runs as its own target.
 const workerAttempts = (port: number, where: string) =>
-  `const results=[];for(const [kind,make] of [['url',()=>new Worker('/escape-worker.js?${where}-url')],['blob',()=>new Worker(URL.createObjectURL(new Blob(["fetch('http://127.0.0.1:${port}/worker-escape?${where}-blob')"],{type:'text/javascript'})))],['data',()=>new Worker("data:text/javascript,fetch('http://127.0.0.1:${port}/worker-escape?${where}-data')")]]){let r;try{make();r='created'}catch(e){r=e.name}results.push(kind+':'+r)}`;
+  `try{delete window.Worker}catch{}try{window.Worker=function(){}}catch{}const results=[];for(const [kind,make] of [['url',()=>new Worker('/escape-worker.js?${where}-url')],['blob',()=>new Worker(URL.createObjectURL(new Blob(["fetch('http://127.0.0.1:${port}/worker-escape?${where}-blob')"],{type:'text/javascript'})))],['data',()=>new Worker("data:text/javascript,fetch('http://127.0.0.1:${port}/worker-escape?${where}-data')")]]){let r;try{make();r='created'}catch(e){r=e.name}results.push(kind+':'+r)}`;
 const downloadFrame = (port: number) =>
   `<iframe src="http://localhost:${port}/dl-outer" style="position:absolute;left:0;top:0;border:0;width:600px;height:400px"></iframe>`;
 const pages = (port: number): Record<string, [string, string | Buffer]> => ({

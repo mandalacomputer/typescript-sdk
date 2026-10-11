@@ -1169,10 +1169,6 @@ it('makes Worker construction throw in every document of a tab and its frames, b
       expect(() => vm.runInContext("new Worker('/w.js')", realm)).toThrow(
         'Dedicated workers are disabled',
       );
-      expect(() =>
-        vm.runInContext("'use strict'; globalThis.Worker = function () {}", realm),
-      ).toThrow();
-      expect(() => vm.runInContext("'use strict'; delete globalThis.Worker", realm)).toThrow();
     }
   } finally {
     await backend.close();
