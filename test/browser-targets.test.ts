@@ -1209,9 +1209,11 @@ it('releases a page it did not open before closing it, offline and unable to sta
     expect(on(ws, 'popup')).toEqual([
       'Page.enable',
       'Network.enable',
+      'Network.setCacheDisabled',
       'Network.setBypassServiceWorker',
       'Network.emulateNetworkConditionsByRule',
       'Page.addScriptToEvaluateOnNewDocument',
+      'Emulation.setScriptExecutionDisabled',
       'Target.setAutoAttach',
       'Runtime.runIfWaitingForDebugger',
     ]);
@@ -1285,3 +1287,25 @@ it('takes a popup offline the older way on a Chromium without per-rule emulation
     await backend.close();
   }
 });
+
+it.each([false, true])(
+  'a popup that detaches before its fence starts is refused quietly (tab being created: %s)',
+  async (creating) => {
+    const { backend, ws } = await started();
+    try {
+      ws.gone.add('early');
+      // Its attach and its detach arrive together, before either is handled,
+      // while a new tab may still be on its way.
+      const opening = creating ? backend.perform('new_tab', {}) : undefined;
+      attach(ws, undefined, 'early', 'page');
+      ws.message({ method: 'Target.detachedFromTarget', params: { sessionId: 'early' } });
+      ws.message({ method: 'Target.targetDestroyed', params: { targetId: 'early-target' } });
+      await opening;
+      await new Promise((r) => setTimeout(r, 20));
+      expect(backend.sessionStatus().state).toBe('active');
+      expect(named(ws, 'Target.closeTarget')).toEqual([]);
+    } finally {
+      await backend.close();
+    }
+  },
+);

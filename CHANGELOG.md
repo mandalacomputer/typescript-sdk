@@ -82,8 +82,10 @@ This is the summary you read to decide whether to upgrade.
   coordinate input reach it, and a download from it, or from a frame inside
   it, is handled as one from the tab. Popups (`window.open`, `target=_blank`
   links) are refused without wedging the tab that opened them: each is let go
-  offline, unable to start workers, and closed before it can load, and the
-  opener's next action answers as usual. As with WebSockets, `urlPolicy` is not network isolation:
+  offline, uncached and with scripts disabled in its own process, and closed
+  before it can load, and the opener's next action answers as usual (a
+  sandboxed or other out-of-process frame written into one is the exception
+  below until the popup closes). As with WebSockets, `urlPolicy` is not network isolation:
   a sandboxed or other out-of-process frame that starts running before the
   driver can attach to it (Chromium starts a sandboxed `srcdoc` frame this
   way) makes its first requests before `urlPolicy` can see them, and can keep
