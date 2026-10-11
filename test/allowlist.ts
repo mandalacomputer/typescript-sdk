@@ -190,8 +190,6 @@ export const ALLOWED: ReadonlySet<string> = new Set(
  * design is that it is enumerable.
  */
 export const UNIMPLEMENTED: ReadonlySet<string> = new Set([
-  // OPL-5864: direct HTTP is available; this contract prerequisite adds no wrapper.
-  'GET credits',
   // GAP (OPL-5878): the platform's authenticated CDP transport ships first.
   // Use direct HTTP until the browser driver adds connection lifecycle wrappers.
   // The OpenAI-shaped door onto the agent loop. Deliberately not wrapped: a
@@ -520,8 +518,6 @@ export const UNIMPLEMENTED_PARAMETERS: ReadonlySet<string> = new Set([
   'POST computers/:id/input  body:scroll_x',
   'POST computers/:id/input  body:scroll_y',
 
-  // OPL-5866 adds funded-agent options; this client currently sends its own model key.
-  'POST computers/:id/agent  body:max_cost_usd',
   // `manage_keys: true` is refused from every API key (403): the permission is
   // granted only from a dashboard session, and false is the default. There is
   // nothing for this SDK to send.

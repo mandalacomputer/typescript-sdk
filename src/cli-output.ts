@@ -10,6 +10,7 @@ import {
   CreateOnlyConflictError,
   FileExistsError,
   GatewayTimeoutError,
+  InsufficientCreditsError,
   MandalaError,
   MethodNotAllowedError,
   MoveRequiredError,
@@ -69,6 +70,7 @@ const API_CODES: readonly [new (...args: never[]) => APIError, string][] = [
   [ComputerNotRunningError, 'not_running'],
   [ConflictError, 'conflict'],
   [AuthenticationError, 'unauthenticated'],
+  [InsufficientCreditsError, 'insufficient_credits'],
   [PlanLimitError, 'plan_limit'],
   [PermissionDeniedError, 'permission_denied'],
   [NotFoundError, 'not_found'],
@@ -190,6 +192,11 @@ export function errorInfo(error: unknown): {
       message: error.message,
       status: error.status,
       ...(error.reason === undefined ? {} : { reason: error.reason }),
+      // The billing link, where the agent's own error frame puts it, so a
+      // refusal reads the same whether it was the response or a frame.
+      ...(error instanceof InsufficientCreditsError && error.topUpUrl !== undefined
+        ? { details: { top_up_url: error.topUpUrl } }
+        : {}),
       ...recoveryInfo(error),
     };
   if (error instanceof Error && error.name === 'AbortError')

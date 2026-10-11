@@ -24,6 +24,7 @@ const expectedCommands = [
   'account',
   'usage',
   'billing',
+  'credits',
   'computers list',
   'computers create',
   'computers get',

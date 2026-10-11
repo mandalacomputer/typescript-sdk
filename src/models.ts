@@ -1491,6 +1491,209 @@ export function toUsageReport(d: Record<string, unknown>): UsageReport {
 }
 
 /**
+ * Where a lot of AI credits came from: `plan_grant` (the plan's monthly
+ * grant), `admin_grant`, `topup` (a purchased pack) or `adjust`. An open set:
+ * a kind this version does not know is kept as sent.
+ */
+export type CreditLotKind = 'plan_grant' | 'admin_grant' | 'topup' | 'adjust' | (string & {});
+
+/**
+ * What one ledger entry did: `credit` adds a lot, `debit` and `clawback`
+ * consume credits (and may create debt), `expire` removes a remainder, and
+ * `debt_settle` applies a new credit to existing debt. An open set, like
+ * {@link CreditLotKind}: the amounts carry no sign, so never add up a kind you
+ * do not know the direction of.
+ */
+export type CreditEntryKind =
+  | 'credit'
+  | 'debit'
+  | 'expire'
+  | 'clawback'
+  | 'debt_settle'
+  | (string & {});
+
+/** One unexpired lot of credits with something left in it. Amounts are USD micros. */
+export type CreditLot = {
+  id: string;
+  kind: CreditLotKind;
+  /** What the lot was issued with. One USD is 1,000,000 micros. */
+  amountMicros: number;
+  /** What is left in it, before account debt and active reservations. */
+  remainingMicros: number;
+  /** Exclusive expiry instant, RFC 3339 UTC. */
+  expiresAt: string;
+  createdAt: string;
+};
+
+/** The current plan period's grant. */
+export type CreditGrant = {
+  periodStart: string;
+  /** Exclusive end of the period. */
+  periodEnd: string;
+  /** Issued this period, upgrade differences included; a downgrade does not lower it. */
+  grantedMicros: number;
+  /** Issued minus remaining: spending, debt settlement and removed credits, not only model use. */
+  usedMicros: number;
+};
+
+/** One line of the credit journal. */
+export type CreditEntry = {
+  /** The journal sequence number; entries come newest first. */
+  id: number;
+  /** The lot credited or expired; `null` for a debit that spans lots. */
+  lotId: string | null;
+  kind: CreditEntryKind;
+  /** Nonnegative: read the direction off {@link CreditEntry.kind}. */
+  amountMicros: number;
+  /** New debt this entry created — not the account's running debt. */
+  debtMicros: number;
+  /** The model a debit was billed for; `null` otherwise. */
+  model: string | null;
+  /** The funded run a debit belongs to; `null` otherwise. */
+  runId: string | null;
+  /** The model call within that run; `null` otherwise. */
+  step: number | null;
+  createdAt: string;
+};
+
+/**
+ * What `client.credits.read()` answers: the account's AI credit balance, its
+ * live lots, the current plan grant, and ONE page of the journal.
+ *
+ * Every amount is an integer number of USD micros (1,000,000 = $1), markup
+ * already included. The balances and lots are current on every page, not pinned
+ * to the first; follow {@link CreditReport.nextBefore} for older entries.
+ */
+export type CreditReport = {
+  /** Unexpired, unspent lot remainders, summed. */
+  balanceMicros: number;
+  /**
+   * Balance minus debt and held credits — what a funded run can start on. May
+   * be negative, and is zero while {@link CreditReport.frozen}.
+   */
+  availableMicros: number;
+  /** Reserved for model calls in flight. */
+  heldMicros: number;
+  /** Outstanding debt, which the next grant or top-up settles first. */
+  debtMicros: number;
+  /** No recognized plan, or the account is suspended: credits are kept, but cannot be spent, and still expire. */
+  frozen: boolean;
+  /** This plan period's grant; `null` with no current plan period. */
+  grant: CreditGrant | null;
+  /** Unexpired lots with a positive remainder, earliest expiry first. */
+  lots: CreditLot[];
+  /** This page of the journal, newest first. */
+  entries: CreditEntry[];
+  /** Pass as `before` for the next, older page; `null` on the last one. */
+  nextBefore: number | null;
+  raw: Record<string, unknown>;
+};
+
+/**
+ * Decode a credit report, refusing rather than guessing.
+ *
+ * Every field the platform documents is required and type-checked, the way
+ * {@link toAccountQuota} reads the account: this is money, and an amount this
+ * SDK could not read reported as zero would be a balance nobody has. Unknown
+ * extra fields are not refused — they stay in `raw` — and the two `kind`s are
+ * open sets, so the platform can add one without breaking every read.
+ */
+export function toCreditReport(value: unknown, method: string, path: string): CreditReport {
+  const refuse = (field: string, expected: string): never => {
+    throw new MandalaError(
+      `expected a credit report from ${method} ${path}: ${field} must be ${expected}`,
+    );
+  };
+  const record = (v: unknown, field: string): Record<string, unknown> =>
+    isRecord(v) ? v : refuse(field, 'an object');
+  const text = (v: unknown, field: string): string =>
+    typeof v === 'string' && v.length > 0 ? v : refuse(field, 'a nonempty string');
+  const nullableText = (v: unknown, field: string): string | null =>
+    v === null
+      ? null
+      : typeof v === 'string' && v.length > 0
+        ? v
+        : refuse(field, 'null or a nonempty string');
+  const micros = (v: unknown, field: string): number =>
+    typeof v === 'number' && Number.isSafeInteger(v) && v >= 0
+      ? v
+      : refuse(field, 'a nonnegative safe integer');
+  const signedMicros = (v: unknown, field: string): number =>
+    typeof v === 'number' && Number.isSafeInteger(v) ? v : refuse(field, 'a safe integer');
+  const positive = (v: unknown, field: string): number =>
+    typeof v === 'number' && Number.isSafeInteger(v) && v >= 1
+      ? v
+      : refuse(field, 'a positive safe integer');
+  const instant = (v: unknown, field: string): string => {
+    const s = text(v, field);
+    const at = new Date(s);
+    if (
+      !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z$/.test(s) ||
+      !Number.isFinite(at.getTime()) ||
+      at.toISOString().slice(0, 19) !== s.slice(0, 19)
+    )
+      refuse(field, 'an RFC 3339 UTC timestamp');
+    return s;
+  };
+  const list = (v: unknown, field: string): unknown[] =>
+    Array.isArray(v) ? v : refuse(field, 'an array');
+
+  const d = record(value, 'the response');
+  if (typeof d.frozen !== 'boolean') refuse('frozen', 'a boolean');
+  const grant =
+    d.grant === null
+      ? null
+      : (() => {
+          const g = record(d.grant, 'grant');
+          return {
+            periodStart: instant(g.period_start, 'grant.period_start'),
+            periodEnd: instant(g.period_end, 'grant.period_end'),
+            grantedMicros: micros(g.granted_micros, 'grant.granted_micros'),
+            usedMicros: micros(g.used_micros, 'grant.used_micros'),
+          };
+        })();
+  const lots = list(d.lots, 'lots').map((v, i): CreditLot => {
+    const at = `lots[${i}]`;
+    const lot = record(v, at);
+    return {
+      id: text(lot.id, `${at}.id`),
+      kind: text(lot.kind, `${at}.kind`),
+      amountMicros: micros(lot.amount_micros, `${at}.amount_micros`),
+      remainingMicros: micros(lot.remaining_micros, `${at}.remaining_micros`),
+      expiresAt: instant(lot.expires_at, `${at}.expires_at`),
+      createdAt: instant(lot.created_at, `${at}.created_at`),
+    };
+  });
+  const entries = list(d.entries, 'entries').map((v, i): CreditEntry => {
+    const at = `entries[${i}]`;
+    const entry = record(v, at);
+    return {
+      id: positive(entry.id, `${at}.id`),
+      lotId: nullableText(entry.lot_id, `${at}.lot_id`),
+      kind: text(entry.kind, `${at}.kind`),
+      amountMicros: micros(entry.amount_micros, `${at}.amount_micros`),
+      debtMicros: micros(entry.debt_micros, `${at}.debt_micros`),
+      model: nullableText(entry.model, `${at}.model`),
+      runId: nullableText(entry.run_id, `${at}.run_id`),
+      step: entry.step === null ? null : micros(entry.step, `${at}.step`),
+      createdAt: instant(entry.created_at, `${at}.created_at`),
+    };
+  });
+  return {
+    balanceMicros: micros(d.balance_micros, 'balance_micros'),
+    availableMicros: signedMicros(d.available_micros, 'available_micros'),
+    heldMicros: micros(d.held_micros, 'held_micros'),
+    debtMicros: micros(d.debt_micros, 'debt_micros'),
+    frozen: d.frozen as boolean,
+    grant,
+    lots,
+    entries,
+    nextBefore: d.next_before === null ? null : positive(d.next_before, 'next_before'),
+    raw: { ...d },
+  };
+}
+
+/**
  * The one snapshot state that is not a snapshot.
  *
  * A capture registers its row before any bytes move and that row becomes
@@ -3815,6 +4018,17 @@ export type Activity = {
   httpStatus?: number;
   exitCode?: number;
   executionId?: string;
+  /**
+   * On a managed-agent run's summary: whether the run spent the account's AI
+   * credits (`true`) or ran on its caller's own model key (`false`).
+   */
+  funded?: boolean;
+  /**
+   * On a managed-agent run's summary: what it charged the account's AI
+   * credits, in USD. Zero for a run on its caller's own key, whose model bill
+   * is that provider's.
+   */
+  costUsd?: number;
   raw: Record<string, unknown>;
 };
 
@@ -3900,6 +4114,11 @@ export function toActivity(d: unknown, what = 'an activity'): Activity {
   const exit = optionalCount(d.exit_code);
   if (exit !== undefined) out.exitCode = exit;
   if (typeof d.execution_id === 'string') out.executionId = d.execution_id;
+  if (typeof d.funded === 'boolean') out.funded = d.funded;
+  // A charge is a finite, nonnegative number or it is not reported: the same
+  // rule the agent's own cost fields follow.
+  if (typeof d.cost_usd === 'number' && Number.isFinite(d.cost_usd) && d.cost_usd >= 0)
+    out.costUsd = d.cost_usd;
   return out;
 }
 

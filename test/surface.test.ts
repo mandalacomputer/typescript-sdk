@@ -483,8 +483,14 @@ async function exerciseEverything(client: Client): Promise<void> {
     provider: 'anthropic',
     modelKey: 'sk-test',
   });
+  // A run on the account's AI credits: no key, and the cost cap that only a
+  // funded run reads.
+  await c.agentOnce({ prompt: 'do a thing', maxCostUsd: 1.5 });
 
   await client.account.read();
+  // The newest page, and an older one of a chosen size.
+  await client.credits.read();
+  await client.credits.read({ before: 120, limit: 10 });
   // Both bounds, because a call that names neither cannot show the parameter
   // sweep that this SDK can send either.
   await client.usage.read();

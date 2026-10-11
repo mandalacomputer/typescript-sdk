@@ -557,6 +557,67 @@ export const USAGE = {
 };
 
 /**
+ * One credit report, in the platform's own spelling: a grant lot and a top-up,
+ * a debit and the grant's credit on the page, and an older page to follow.
+ */
+export const CREDITS = {
+  balance_micros: 12_345_678,
+  available_micros: 11_845_678,
+  held_micros: 250_000,
+  debt_micros: 250_000,
+  frozen: false,
+  grant: {
+    period_start: '2026-10-01T00:00:00.000Z',
+    period_end: '2026-11-01T00:00:00.000Z',
+    granted_micros: 10_000_000,
+    used_micros: 2_654_322,
+  },
+  lots: [
+    {
+      id: 'lot_grant',
+      kind: 'plan_grant',
+      amount_micros: 10_000_000,
+      remaining_micros: 7_345_678,
+      expires_at: '2026-11-01T00:00:00.000Z',
+      created_at: '2026-10-01T00:00:05.000Z',
+    },
+    {
+      id: 'lot_topup',
+      kind: 'topup',
+      amount_micros: 5_000_000,
+      remaining_micros: 5_000_000,
+      expires_at: '2027-10-02T09:30:00.000Z',
+      created_at: '2026-10-02T09:30:00.000Z',
+    },
+  ],
+  entries: [
+    {
+      id: 42,
+      lot_id: null,
+      kind: 'debit',
+      amount_micros: 1_234_567,
+      debt_micros: 0,
+      model: 'claude-sonnet-5-5',
+      run_id: 'run-1',
+      step: 3,
+      created_at: '2026-10-09T12:00:00.000Z',
+    },
+    {
+      id: 41,
+      lot_id: 'lot_grant',
+      kind: 'credit',
+      amount_micros: 10_000_000,
+      debt_micros: 0,
+      model: null,
+      run_id: null,
+      step: null,
+      created_at: '2026-10-01T00:00:05.000Z',
+    },
+  ],
+  next_before: 41,
+};
+
+/**
  * One published template, in the platform's own spelling (platform OPL-3789).
  *
  * `document` as an OBJECT, not the canonical string the store keeps: the
@@ -1058,6 +1119,7 @@ export const anyRoute: Responder = (call) => {
   // A stub that answered one shape for both would let a caller reading `live`
   // off the wrong response pass.
   if (path === '/usage') return json(USAGE);
+  if (path === '/credits') return json(CREDITS);
   // The secret is on exactly two answers, and a mock that put it on every one
   // would let a decoder that read it off a GET pass. The delete is an ack, and
   // the two POST actions answer different shapes: a rotate is the subscription

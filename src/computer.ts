@@ -26,8 +26,8 @@ import {
   connectionId,
 } from './browser-connection.js';
 import {
-  // `GatewayTimeoutError`, `isTransient`, `ModelProviderError`,
-  // `PlanLimitError` and `RateLimitError` are TYPE-ONLY,
+  // `GatewayTimeoutError`, `InsufficientCreditsError`, `isTransient`,
+  // `ModelProviderError`, `PlanLimitError` and `RateLimitError` are TYPE-ONLY,
   // and kept rather than dropped: every reference to them in this file is a
   // `{@link}` in a doc comment, so as values they are dead, and
   // `verbatimModuleSyntax` would emit a runtime import for bindings nothing
@@ -44,6 +44,7 @@ import {
   errorForEventStatus,
   FileExistsError,
   type GatewayTimeoutError,
+  type InsufficientCreditsError,
   type isTransient,
   MandalaError,
   type ModelProviderError,
@@ -208,21 +209,26 @@ export const GUEST_PROBE = 'exit 0';
 const DESKTOP_PROBE = 'true';
 
 /**
- * Trim and refuse a missing model-provider key before it becomes an empty header.
+ * The `X-Model-Key` header a run is sent with, or none for a funded run.
  *
- * A {@link ValidationError} rather than a bare {@link MandalaError}: nothing has
- * been sent, and this is the caller's argument being wrong — the same class
- * every other local refusal in this SDK throws, so `catch (e) { if (e instanceof
- * ValidationError) }` catches this one too.
+ * `undefined` is the one spelling of "run on the account's AI credits". A key
+ * that IS given must be a nonblank string, and is refused here otherwise rather
+ * than sent: the platform refuses a blank header anyway, and a key read from an
+ * environment variable that is set but empty is a mistake to name, not a reason
+ * to spend credits. A {@link ValidationError} rather than a bare
+ * {@link MandalaError}: nothing has been sent, and this is the caller's argument
+ * being wrong — the same class every other local refusal in this SDK throws.
  */
-const requireModelKey = (key: string | undefined, what: string): string => {
-  const trimmed = key?.trim() ?? '';
+const modelKeyHeaders = (key: unknown, what: string): Record<string, string> => {
+  if (key === undefined) return {};
+  const trimmed = typeof key === 'string' ? key.trim() : '';
   if (!trimmed) {
     throw new ValidationError(
-      `${what} needs your own Anthropic or OpenAI API key as modelKey — the platform does not store one.`,
+      `${what}: modelKey must be your own Anthropic or OpenAI API key, or left out to run on the ` +
+        "account's AI credits — it was given, but empty.",
     );
   }
-  return trimmed;
+  return { [MODEL_KEY_HEADER]: trimmed };
 };
 
 export type { WaitOptions } from './wait.js';
@@ -5931,6 +5937,14 @@ export class Computer {
    * if (!result.finished) console.warn(`did not finish: ${result.stop}`);
    * ```
    *
+   * **Without `modelKey` the run spends the account's AI credits** (see
+   * {@link AgentArgs.modelKey}): Anthropic only, capped by `maxCostUsd`, and
+   * reported in `costUsd` on the result and on each step. An account whose
+   * credits cannot cover the first model call is refused before the run with
+   * {@link InsufficientCreditsError}, whose `topUpUrl` is where to add more; one
+   * that runs out part-way ends with `stop: 'credits_exhausted'`, and one that
+   * reaches the cap with `stop: 'max_cost'`.
+   *
    * Throws `MandalaError` if the stream ends without a result. It does **not**
    * throw when a run ends unfinished: `max_steps`, `rate_limited` and `refusal`
    * leave real work on the desktop, and discarding the result would discard the
@@ -5947,7 +5961,9 @@ export class Computer {
    * **A 402, 504 OR 529 HERE IS THE MODEL API'S STATUS**, for the account behind
    * `modelKey` (billing, timeout, overloaded), relayed — never a Mandala plan
    * limit. A 402 is raised as {@link ModelProviderError}, not
-   * {@link PlanLimitError}, and a 504 as a plain {@link APIError}, not
+   * {@link PlanLimitError} — unless it carries `top_up_url`, the platform's
+   * refusal of a funded run, raised as {@link InsufficientCreditsError} — and a
+   * 504 as a plain {@link APIError}, not
    * {@link GatewayTimeoutError}; a 403 without `reason: "revoked"` may likewise
    * be the model key's own `permission_error`. So may a 404, 413 or 429 whose
    * `error` starts `model API: `, the prefix the platform puts on what it
@@ -5957,7 +5973,8 @@ export class Computer {
    * {@link TooLargeError}, and a 429 it answered as a {@link RateLimitError}
    * whose `limit`, `remaining` and `resetSeconds` are `undefined`, because the
    * Mandala budget did not refuse it. Once the run has taken a step,
-   * {@link isTransient} answers false for that 429: running the prompt again
+   * {@link isTransient} answers false for that 429, and on a funded run for
+   * any 429 (its provider failures carry no prefix): running the prompt again
    * would repeat the steps already on the desktop. The platform's own 404, 413
    * and 429 carry no prefix and keep their classes.
    *
@@ -5981,11 +5998,12 @@ export class Computer {
     // Named here as well, though agentStream checks the same argument a line
     // later: it would name ITSELF, and this is the method the caller called.
     // agentOnce below does the same thing for the same reason.
-    requireModelKey(args.modelKey, 'agent()');
+    const headers = modelKeyHeaders(args.modelKey, 'agent()');
+    const run = { funded: !(MODEL_KEY_HEADER in headers), baseUrl: this.#t.baseUrl };
     // Steps the stream delivered before any failure: evidence the run acted,
     // even when the failure frame itself lists none (see agentRouteError).
     let steps = 0;
-    for await (const ev of this.agentStream(args)) {
+    for await (const ev of this.#agentStream(args, headers)) {
       if (ev.type === 'step') steps += 1;
       if (ev.type === 'done') {
         // A done event is terminal even if a proxy or server leaves the SSE
@@ -6013,6 +6031,7 @@ export class Computer {
           ? agentRouteError(
               errorForEventStatus(ev.status, message, ev.raw, { method: 'POST' }),
               steps,
+              run,
             )
           : new MandalaError(message);
       }
@@ -6045,6 +6064,12 @@ export class Computer {
    * platform is free to add types, and falling over on the first unrecognised
    * one would turn a forward-compatible addition into an outage.
    *
+   * A funded run (no `modelKey`) the account's credits cannot start is refused
+   * with {@link InsufficientCreditsError}: thrown, when the refusal is the
+   * response, or as an `error` event with `status` 402 and `topUpUrl` set, when
+   * it comes after the stream opened. Each `step` of a funded run carries
+   * `costUsd` and `creditsRemainingUsd`.
+   *
    * An `error` event can be a mid-run refusal rather than a model or guest
    * failure: the credential, the role and the account's standing are rechecked
    * before each model call and each tool, so a key revoked, a member demoted or
@@ -6071,38 +6096,54 @@ export class Computer {
   agentStream(args: AgentArgs): AsyncGenerator<AgentEvent> {
     // A plain method wrapping an inner generator, rather than `async *` with
     // the check in its body. A generator's body does not run until the first
-    // next(), so `const s = c.agentStream({ prompt })` with no key SUCCEEDED
+    // next(), so `const s = c.agentStream({ prompt, modelKey: '' })` SUCCEEDED
     // and the refusal surfaced wherever the stream was eventually consumed —
     // possibly in another function, possibly never. Every other local refusal
     // in this SDK happens where the mistake was made, and this is what it costs
     // to keep that true here. The name is passed too: it read `agent()`, about
-    // a method the caller had not called.
-    const modelKey = requireModelKey(args.modelKey, 'agentStream()');
-    return this.#agentStream(args, modelKey);
+    // a method the caller had not called. The body is built here for the same
+    // reason, so a bad `maxCostUsd` is refused at the call too.
+    const headers = modelKeyHeaders(args.modelKey, 'agentStream()');
+    P.agentBody({ ...args, stream: true });
+    return this.#agentStream(args, headers);
   }
 
-  async *#agentStream(args: AgentArgs, modelKey: string): AsyncGenerator<AgentEvent> {
+  async *#agentStream(
+    args: AgentArgs,
+    headers: Record<string, string>,
+  ): AsyncGenerator<AgentEvent> {
+    const run = { funded: !(MODEL_KEY_HEADER in headers), baseUrl: this.#t.baseUrl };
     let steps = 0;
-    for await (const raw of this.#t.sse('POST', P.computerAction(this.id, 'agent'), {
-      body: P.agentBody({
-        prompt: args.prompt,
-        stream: true,
-        system: args.system,
-        maxSteps: args.maxSteps,
-        model: args.model,
-        provider: args.provider,
-      }),
-      headers: { [MODEL_KEY_HEADER]: modelKey },
-      signal: args.signal,
-    })) {
-      const ev = toAgentEvent(raw.event, raw.data, steps);
-      if (!ev) continue;
-      if (ev.type === 'step') steps += 1;
-      yield ev;
-      // Both frames are terminal. Do not wait for a proxy or platform that
-      // leaves the response open for heartbeats after announcing the outcome.
-      // Returning also closes Transport.sse and cancels its response reader.
-      if (ev.type === 'done' || ev.type === 'error') return;
+    try {
+      for await (const raw of this.#t.sse('POST', P.computerAction(this.id, 'agent'), {
+        body: P.agentBody({
+          prompt: args.prompt,
+          stream: true,
+          system: args.system,
+          maxSteps: args.maxSteps,
+          maxCostUsd: args.maxCostUsd,
+          model: args.model,
+          provider: args.provider,
+        }),
+        headers,
+        signal: args.signal,
+      })) {
+        const ev = toAgentEvent(raw.event, raw.data, steps, run.baseUrl);
+        if (!ev) continue;
+        if (ev.type === 'step') steps += 1;
+        yield ev;
+        // Both frames are terminal. Do not wait for a proxy or platform that
+        // leaves the response open for heartbeats after announcing the outcome.
+        // Returning also closes Transport.sse and cancels its response reader.
+        if (ev.type === 'done' || ev.type === 'error') return;
+      }
+    } catch (err) {
+      // A refusal answered as the RESPONSE, before any frame: the platform
+      // checks a funded run's credits before it opens the stream, and that 402
+      // is the platform's own rather than the table's plan limit — the same
+      // mapping agentOnce() gives the same response. Everything the mapping
+      // does not rebuild is thrown exactly as it came.
+      throw err instanceof APIError ? agentRouteError(err, steps, run) : err;
     }
     args.signal?.throwIfAborted();
     throw new MandalaError('the agent stream ended without a result');
@@ -6142,9 +6183,14 @@ export class Computer {
    * {@link GatewayTimeoutError}. A 529 is likewise the model API's.
    * {@link APIError.body} carries what the platform reported about the steps.
    * Do not retry any of those unchanged.
+   *
+   * Without `modelKey` the run is funded, as {@link agent}'s is: a 402 carrying
+   * `top_up_url` is {@link InsufficientCreditsError}, and the result carries
+   * `costUsd`.
    */
   async agentOnce(args: AgentArgs): Promise<AgentResult> {
-    const modelKey = requireModelKey(args.modelKey, 'agentOnce()');
+    const headers = modelKeyHeaders(args.modelKey, 'agentOnce()');
+    const run = { funded: !(MODEL_KEY_HEADER in headers), baseUrl: this.#t.baseUrl };
     const data = await this.#t
       .json<Record<string, unknown>>('POST', P.computerAction(this.id, 'agent'), {
         body: P.agentBody({
@@ -6152,10 +6198,11 @@ export class Computer {
           stream: false,
           system: args.system,
           maxSteps: args.maxSteps,
+          maxCostUsd: args.maxCostUsd,
           model: args.model,
           provider: args.provider,
         }),
-        headers: { [MODEL_KEY_HEADER]: modelKey },
+        headers,
         signal: args.signal,
         // One held request for a run that is minutes of clicking — the same
         // exemption the streaming route gets, for the same reason. The
@@ -6168,7 +6215,7 @@ export class Computer {
         // API's billing refusal for the caller's key, not a plan limit; a
         // relayed 404/413/429 is the model provider's, and a 504 with the run's
         // usage or steps is the platform answering, not an edge cut.
-        throw err instanceof APIError ? agentRouteError(err) : err;
+        throw err instanceof APIError ? agentRouteError(err, 0, run) : err;
       });
     if (!P.isRecord(data) || data.stop == null) {
       throw new MandalaError(

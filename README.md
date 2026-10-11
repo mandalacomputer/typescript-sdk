@@ -1624,6 +1624,51 @@ screenshots and tool results go to that provider. Mandala-funded OpenAI runs
 are unavailable. An action batch must fit the remaining step and API budget
 before it starts; a partial failure stops the run without replaying input.
 
+#### Running on AI credits
+
+Leave `modelKey` out and the run spends the account's Mandala AI credits
+instead of your provider account:
+
+```ts
+const result = await c.agent({
+  prompt: 'Open the settings and turn on dark mode.',
+  maxCostUsd: 1, // 0.25 to 20; the platform's default is 2
+});
+console.log(`charged $${result.costUsd}`);
+```
+
+A funded run is Anthropic only. It uses the platform's own system prompt, so
+`system` is refused, and it allows `claude-sonnet-5-5` (the default) or
+`claude-opus-5-5`. The account needs a plan, a supported billing country, and
+at least $0.25 of credits for the first model call. Each model call reserves
+$0.25 and then settles what it actually cost. `maxCostUsd` caps the run: it
+ends with `stop: 'max_cost'` rather than start a call the cap cannot cover,
+and the last call can take the total past it. A run that runs out of credits
+part-way ends with `stop: 'credits_exhausted'`. Neither is an error, and the
+steps already taken stand.
+
+Only an omitted `modelKey` means credits. An empty or blank string is refused
+before anything is sent, so a key read from an environment variable that is
+set but empty is reported, not quietly billed to credits.
+
+`costUsd` on the result is what the run charged, markup included. Each step
+carries `costUsd`, the running total so far (several actions from one model
+reply repeat it, so do not add them up), and `creditsRemainingUsd`, the
+account's available credits after that call, which can go negative after an
+overrun. A run on your own key carries neither. Its Activities summary row
+carries `funded` and `costUsd`.
+
+An account whose credits cannot cover the first call is refused before the run
+starts with **`InsufficientCreditsError`** (a 402 carrying the platform's
+`top_up_url`). Its `topUpUrl` is the billing page to add credits on, as an
+absolute link resolved against your base URL. `agentStream()` throws it when it
+is the response, and yields it as an `error` event with `status: 402` and
+`topUpUrl` set when it arrives after the stream opened. It is not a
+`ModelProviderError`, and `isTransient` answers false for it.
+
+`client.credits.read()` reads the balance, the live lots, this plan period's
+grant and one page of the ledger. See [AI credits](#ai-credits).
+
 Ten clicks stop being ten images in *your* context. `maxSteps` bounds the loop,
 and bounds what your key is billed only loosely: a step is one **action on the
 desktop**, not one exchange with the model, and the two do not line up in either
@@ -1665,7 +1710,9 @@ already taken stand — on your key, and on that desktop.
 A **402**, **504** or **529** on these routes is the *model API's* status for the
 account behind your `modelKey` — billing, timeout, overloaded — relayed as it
 came. Your Mandala plan is not the cause, so `agent()` and `agentOnce()` raise a
-402 as `ModelProviderError` rather than `PlanLimitError`. A 403 without
+402 as `ModelProviderError` rather than `PlanLimitError`. The exception is a
+402 carrying `top_up_url`, which is the platform refusing a funded run and is
+raised as `InsufficientCreditsError` (see above). A 403 without
 `reason: "revoked"` may likewise be the model key's own `permission_error`.
 
 A 403 can come two ways, and they read differently. One that arrives as the
@@ -3036,6 +3083,40 @@ Two more fields worth knowing:
   arrive. The array is empty either way, and this flag is what tells "no
   computers ran" from "this key may not see which did".
 
+### AI credits
+
+The account's Mandala AI credits fund agent runs sent without a `modelKey` (see
+[Running on AI credits](#running-on-ai-credits)).
+
+```ts
+const credits = await client.credits.read();
+console.log(`available: ${credits.availableMicros / 1_000_000} USD`);
+for (const lot of credits.lots) console.log(lot.kind, lot.remainingMicros, lot.expiresAt);
+
+// The ledger, newest first, one page at a time.
+let page = credits;
+while (page.nextBefore !== null) {
+  page = await client.credits.read({ before: page.nextBefore, limit: 100 });
+}
+```
+
+Every amount is an integer number of USD micros (1,000,000 = $1), with the
+markup already included. `availableMicros` is the balance minus debt and the
+credits held for model calls in flight. It can be negative, and it is zero while
+`frozen` (no current plan, or a suspended account: the credits are kept and
+still expire). `grant` is this plan period's grant, or `null`. `lots` are the
+unexpired lots with something left, earliest expiry first. `entries` is one
+page of the journal: each entry's amount is unsigned, so read its direction from
+`kind` (`credit`, `debit`, `expire`, `clawback`, `debt_settle`), and `debtMicros`
+is the new debt that entry created. Both `kind`s are kept as sent, so a kind
+this version does not know arrives rather than failing the read.
+
+`before` and `limit` (1 to 100, default 50) are checked before anything is
+sent. The balances and lots are current on every page, not pinned to the first.
+The report is decoded strictly: a missing or mistyped field is a `MandalaError`
+rather than a zero. A workspace-scoped key is refused with
+`PermissionDeniedError`, because the ledger belongs to the whole account.
+
 ### Partial listings
 
 `list()` on computers, snapshots and builds fans out across every hypervisor
@@ -3186,6 +3267,9 @@ import {
   PlanLimitError,      //     402 — your plan will not allow this. Not a retry.
   ModelProviderError,  //     402 from agent()/agentOnce() — the model key's account
                        //           refused billing; not your plan. Not a retry.
+  InsufficientCreditsError,// 402 from agent()/agentOnce() with no modelKey — the
+                       //           account's AI credits cannot start the run;
+                       //           err.topUpUrl is where to add more.
   PermissionDeniedError,//    403 — the key's role is too low
   NotFoundError,       //     404 — no such computer, snapshot, guest file, or route
   MethodNotAllowedError,//    405 — method unsupported; see err.allow
@@ -3420,8 +3504,9 @@ npx --package=mandala-computer mandala computers list --json
 
 Requests use the credential precedence described above. Global `--profile` reaches
 every authenticated command, including `account`, `usage`, SSH and SCP. Agent
-runs also require `MANDALA_MODEL_KEY`, your model-provider key; account and usage
-reads need no model key.
+runs use `MANDALA_MODEL_KEY`, your model-provider key, when it is set; without
+it they spend the account's AI credits. Account, usage and credits reads need
+no model key.
 
 `mandala login [--profile name] [--workspace name] [--base-url URL]` always starts
 an explicit anonymous browser approval, even if an API-key environment variable
@@ -3488,7 +3573,7 @@ network access and never prompt for input; `logout` needs no network.
 | `artifacts` | `get`, `export`, `download`, `rm` |
 | `agent` | `run` |
 | `ssh-key` | `list`, `add`, `rm` |
-| Top-level commands | `login`, `logout`, `whoami`, `version`, `account`, `usage`, `billing`, `ssh`, `ssh-access`, `ssh-config`, `terminal`, `scp`, `manifest`, `completion` |
+| Top-level commands | `login`, `logout`, `whoami`, `version`, `account`, `usage`, `billing`, `credits`, `ssh`, `ssh-access`, `ssh-config`, `terminal`, `scp`, `manifest`, `completion` |
 
 Command-specific flags follow the command name. Flags with values accept
 `--name value` or `--name=value`; boolean flags take no value. Repeat only flags
@@ -3644,7 +3729,18 @@ mandala account
 mandala account --json
 mandala usage
 mandala usage --from 2026-08-01T00:00:00Z --to 2026-09-01T00:00:00Z --json
+mandala credits                 # AI credits: balance, lots, this period's grant, the newest ledger page
+mandala credits --before 41 --limit 100 --json
 ```
+
+`credits` reads the account's AI credits through `client.credits.read()`:
+available credits beside the balance, held credits and debt, whether the account
+is frozen, this period's grant, the live lots, and one page of the ledger, newest
+first, ending with the `--before` that reads the next page. Human output shows
+exact dollars; `--json` keeps the platform's integer micros (`balance_micros`,
+`next_before`). `--before` must be a positive whole number and `--limit` 1 to
+100, checked before any request. A workspace-scoped key is refused, since the
+ledger is the whole account's.
 
 `billing` is one screen over the two reads below, with no API of its own: the
 plan and its limits from `account`, then the current billing period from
@@ -4001,11 +4097,18 @@ mandala agent run 'Open the browser and find the documentation' --computer workb
 mandala agent run 'Summarize the visible page' --computer workbench --json
 ```
 
-Set `MANDALA_MODEL_KEY` before running these commands. `--computer` is required;
-the CLI never guesses which desktop to use. `--max-steps` bounds desktop actions
-from 1 through 100; `--model` selects a model and `--system` supplies standing
-instructions. Human output includes timestamped action/text lines and a final
-summary with `steps`, `stop`, `finished`, and token `usage`.
+Set `MANDALA_MODEL_KEY` to run on your own model-provider key. Unset, the run
+spends the account's AI credits instead, and `--max-cost-usd` (0.25 to 20,
+default 2) caps what it may charge. Set but empty is refused before any
+request, so a secret that failed to load does not quietly spend credits. `--computer`
+is required; the CLI never guesses which desktop to use. `--max-steps` bounds
+desktop actions from 1 through 100; `--model` selects a model and `--system`
+supplies standing instructions (your own key only). Human output includes
+timestamped action/text lines and a final summary with `steps`, `stop`,
+`finished`, and token `usage`; a run on credits adds `cost_usd` to the summary
+and `cost_usd` and `credits_remaining_usd` to each step. A run the credits
+cannot start fails with `insufficient_credits`, whose message and
+`details.top_up_url` name the billing page.
 
 Only `finished: true` (`stop: "end_turn"`) exits zero. A step limit, refusal, rate
 limit, error frame, or stream ending without a final result exits nonzero. An

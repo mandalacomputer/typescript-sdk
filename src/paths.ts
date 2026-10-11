@@ -47,6 +47,8 @@ export const SNAPSHOTS = 'snapshots';
 export const MOVES = 'moves';
 /** What the account has used, over a window. Account-scoped, like {@link MOVES}. */
 export const USAGE = 'usage';
+/** The account's AI credits and their ledger. Account-wide: a workspace key is refused. */
+export const CREDITS = 'credits';
 /** Instantaneous account-wide quota, including for workspace-scoped keys. */
 export const ACCOUNT = 'account';
 /**
@@ -2376,6 +2378,47 @@ export function usageQuery(from?: Date | string, to?: Date | string): Query | un
   return Object.keys(query).length ? query : undefined;
 }
 
+// --- credits --------------------------------------------------------------
+
+/** The most ledger entries one credits page holds; the platform's default is 50. */
+export const CREDITS_PAGE_MAX = 100;
+
+/** Which page of the credit ledger to read. */
+export type CreditsArgs = {
+  /** Entries older than this id: the `nextBefore` of the page before. Omit for the newest. */
+  before?: number;
+  /** Entries per page, 1 to 100. The platform's default is 50. */
+  limit?: number;
+};
+
+/**
+ * The page to ask for, refused here rather than by a 400: the platform refuses
+ * anything but one positive integer `before` and one `limit` up to 100, and the
+ * mistake is knowable without the round trip. Undefined when neither is given,
+ * as {@link usageQuery} is, so the default read builds a bare URL.
+ */
+export function creditsQuery(args: CreditsArgs = {}): Query | undefined {
+  if (!isRecord(args)) throw new ValidationError(`options must be an object (got ${typeof args})`);
+  const q: Query = {};
+  if (args.before !== undefined) {
+    if (!Number.isSafeInteger(args.before) || args.before < 1) {
+      throw new ValidationError(
+        `before must be a positive whole number, the nextBefore of the page before (got ${String(args.before)})`,
+      );
+    }
+    q.before = args.before;
+  }
+  if (args.limit !== undefined) {
+    if (!Number.isInteger(args.limit) || args.limit < 1 || args.limit > CREDITS_PAGE_MAX) {
+      throw new ValidationError(
+        `limit must be a whole number from 1 to ${CREDITS_PAGE_MAX} (got ${String(args.limit)})`,
+      );
+    }
+    q.limit = args.limit;
+  }
+  return Object.keys(q).length ? q : undefined;
+}
+
 // --- windows --------------------------------------------------------------
 
 export const WINDOW_ACTIONS = [
@@ -2541,9 +2584,18 @@ export function deleteQuery(opts: { deleteSnapshots?: boolean; expect?: string }
  */
 export const MAX_AGENT_STEPS = LIMITS['agent.maxSteps'];
 
+/**
+ * The range a funded run's `max_cost_usd` may take, in USD, as the platform's
+ * reference states it. Refused here for the reason `maxSteps` is: the other
+ * clients refuse it before the call too.
+ */
+export const MIN_AGENT_COST_USD = 0.25;
+export const MAX_AGENT_COST_USD = 20;
+
 export function agentBody(args: {
   prompt: string;
   maxSteps?: number;
+  maxCostUsd?: number;
   system?: string;
   model?: string;
   provider?: 'anthropic' | 'openai';
@@ -2570,9 +2622,21 @@ export function agentBody(args: {
       `maxSteps is ${args.maxSteps}; the platform accepts at most ${MAX_AGENT_STEPS}`,
     );
   }
+  if (
+    args.maxCostUsd !== undefined &&
+    (typeof args.maxCostUsd !== 'number' ||
+      !Number.isFinite(args.maxCostUsd) ||
+      args.maxCostUsd < MIN_AGENT_COST_USD ||
+      args.maxCostUsd > MAX_AGENT_COST_USD)
+  ) {
+    throw new ValidationError(
+      `maxCostUsd must be a number from ${MIN_AGENT_COST_USD} to ${MAX_AGENT_COST_USD} (got ${String(args.maxCostUsd)})`,
+    );
+  }
   return omitUndefined({
     prompt: args.prompt,
     max_steps: args.maxSteps,
+    max_cost_usd: args.maxCostUsd,
     system: args.system,
     model: args.model,
     provider: args.provider,

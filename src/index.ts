@@ -24,6 +24,7 @@ import {
   ApiKeys,
   Builds,
   Computers,
+  Credits,
   Moves,
   Operations,
   Secrets,
@@ -52,6 +53,7 @@ export class Client {
   readonly apiKeys: ApiKeys;
   readonly builds: Builds;
   readonly computers: Computers;
+  readonly credits: Credits;
   readonly moves: Moves;
   readonly operations: Operations;
   readonly secrets: Secrets;
@@ -74,6 +76,7 @@ export class Client {
     this.apiKeys = new ApiKeys(this.#t);
     this.builds = new Builds(this.#t);
     this.computers = new Computers(this.#t);
+    this.credits = new Credits(this.#t);
     this.moves = new Moves(this.#t);
     this.operations = new Operations(this.#t);
     this.secrets = new Secrets(this.#t);
@@ -129,6 +132,7 @@ export {
   CreateOnlyConflictError,
   FileExistsError,
   GatewayTimeoutError,
+  InsufficientCreditsError,
   isTransient,
   MandalaError,
   MethodNotAllowedError,
@@ -195,6 +199,12 @@ export type {
   BuildProgress,
   BuildStep,
   ComputerUsage,
+  CreditEntry,
+  CreditEntryKind,
+  CreditGrant,
+  CreditLot,
+  CreditLotKind,
+  CreditReport,
   DeleteResult,
   EgressProxy,
   ExecResult,
@@ -255,6 +265,7 @@ export type {
   BrowserProxyArgs,
   ComputerState,
   CreateArgs,
+  CreditsArgs,
   EgressProxyArgs,
   ExecArgs,
   MoveArgs,
@@ -278,6 +289,7 @@ export type {
 } from './paths.js';
 export {
   COMPUTER_STATES,
+  CREDITS_PAGE_MAX,
   OPERATIONS_PAGE_MAX,
   PASTE_MAX_BYTES,
   SCREENSHOT_FORMATS,
@@ -294,6 +306,7 @@ export {
 export type {
   CallOptions,
   ComputerListOptions,
+  CreditsOptions,
   IdempotencyOptions,
   ListOptions,
   SnapshotCloneOptions,
@@ -304,6 +317,7 @@ export {
   ApiKeys,
   Builds,
   Computers,
+  Credits,
   Moves,
   Operations,
   Secrets,

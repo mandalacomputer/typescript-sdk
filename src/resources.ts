@@ -8,6 +8,7 @@ import {
   MandalaError,
   NotFoundError,
   OperationFailedError,
+  type PermissionDeniedError,
   suppressing,
   TimeoutError,
   ValidationError,
@@ -17,6 +18,7 @@ import type {
   ApiKey,
   ApiKeyCreated,
   BuildProgress,
+  CreditReport,
   LifecycleAck,
   Move,
   Operation,
@@ -52,6 +54,7 @@ import {
   toApiKey,
   toApiKeyCreated,
   toBuildProgress,
+  toCreditReport,
   toLifecycleAck,
   toMove,
   toOperation,
@@ -2038,6 +2041,46 @@ export class Usage {
     });
     if (!P.isRecord(data)) throw new MandalaError(`expected a usage report from GET ${P.USAGE}`);
     return toUsageReport(data);
+  }
+}
+
+/** Which page of the credit ledger to read, and a signal to cancel the read. */
+export type CreditsOptions = P.CreditsArgs & CallOptions;
+
+/**
+ * The account's Mandala AI credits: what funds an agent run sent without a
+ * model key of your own (see {@link Computer.agent}).
+ *
+ * Its own collection because `GET /credits` is its own route, account-wide like
+ * `usage`. A workspace-scoped key is refused with {@link PermissionDeniedError}:
+ * the ledger belongs to the whole account. Every role can read it, and so can
+ * an account with no plan or a suspended one.
+ */
+export class Credits {
+  #t: Transport;
+
+  /** @internal */
+  constructor(transport: Transport) {
+    this.#t = transport;
+  }
+
+  /**
+   * The balance, the live lots, this plan period's grant, and one page of the
+   * journal, newest first.
+   *
+   * Amounts are integer USD micros (1,000,000 = $1), markup included. Pass the
+   * page's {@link CreditReport.nextBefore} as `before` for older entries; the
+   * balances and lots are current on every page, not pinned to the first. A
+   * read never issues or expires credits. `before` and `limit` (1 to 100,
+   * default 50) are checked before anything is sent.
+   */
+  async read(opts: CreditsOptions = {}): Promise<CreditReport> {
+    const { signal, ...page } = opts;
+    const data = await this.#t.json('GET', P.CREDITS, {
+      query: P.creditsQuery(page),
+      signal,
+    });
+    return toCreditReport(data, 'GET', P.CREDITS);
   }
 }
 
