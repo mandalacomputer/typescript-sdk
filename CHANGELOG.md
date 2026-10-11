@@ -68,6 +68,9 @@ This is the summary you read to decide whether to upgrade.
   `mandala agent run` takes `--provider`. A `claude-*`, `gpt-*` or o-series
   model infers it, `provider: 'openai'` alone runs `gpt-6.1-sol`, and omitting
   both keeps the Anthropic default. OpenAI runs need your own key.
+  `--provider` takes only `anthropic` or `openai`; the parser refuses anything
+  else as a usage error (exit 2) before any request, and the two choices are
+  in `mandala manifest` and the shell completions.
 - **Send a batch of OpenAI computer actions.** `computer.inputBatch(actions)`
   sends 1 to 32 OpenAI actions, in OpenAI's own spelling, as one request. It
   answers an `InputBatchResult`, and with `{ context: true }` the desktop after
@@ -130,10 +133,6 @@ This is the summary you read to decide whether to upgrade.
 
 ### Changed
 
-- **`mandala agent run --provider` takes only `anthropic` or `openai`**, and
-  the parser refuses anything else as a usage error (exit 2) before any
-  request, where it used to be `invalid_arguments` with exit 1. The two
-  choices are in `mandala manifest` and the shell completions.
 - **`AgentStop` names every stop reason the platform documents**: `pause_turn`,
   `credits_exhausted`, `max_cost`, `incomplete` and `safety_check` beside
   `end_turn`, `max_steps`, `rate_limited` and `refusal`. Only `end_turn` is
