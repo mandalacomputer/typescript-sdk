@@ -34,6 +34,14 @@ vi.mock('ws', () => ({
       queueMicrotask(() => this.emit('open'));
     }
     message(value: unknown) {
+      // Chromium sends a session's Page events only once Page is enabled on it.
+      const event = value as { method?: string; sessionId?: string };
+      if (
+        event.method?.startsWith('Page.') &&
+        event.sessionId &&
+        !this.sent.some((c) => c.method === 'Page.enable' && c.sessionId === event.sessionId)
+      )
+        throw new Error(`${event.method} on ${event.sessionId}, which never enabled Page`);
       this.emit('message', Buffer.from(JSON.stringify(value)));
     }
     send(raw: string, callback: () => void) {
@@ -62,7 +70,20 @@ vi.mock('ws', () => ({
                 ? { targetId: tab }
                 : method === 'Target.closeTarget'
                   ? { success: true }
-                  : {},
+                  : method === 'Page.getFrameTree'
+                    ? {
+                        frameTree: {
+                          frame: {
+                            id:
+                              session === 'session'
+                                ? 'tab'
+                                : session?.startsWith('session-')
+                                  ? session.replace('session', 'tab')
+                                  : `${session}-target`,
+                          },
+                        },
+                      }
+                    : {},
         });
         if (method === 'Target.createTarget')
           this.message({
@@ -135,6 +156,27 @@ async function holdTargets(ws: Socket) {
     expect(ws.sent.filter((c) => c.sessionId?.startsWith('hold-'))).toHaveLength(256),
   );
 }
+// Frame tracking as the file session keeps it, 256 frames at most, with the
+// download handler replaced by a spy on whether its frame was tracked.
+function stubFiles(backend: BrowserCDP) {
+  const event = vi.fn(async (_method: string, _p: unknown, _tracked?: boolean) => {});
+  const frames = new Map<string, string>();
+  backend.files = {
+    frames,
+    frame(id: string, tab: string) {
+      if (!frames.has(id) && frames.size >= 256) return false;
+      frames.set(id, tab);
+      return true;
+    },
+    event,
+    close: async () => {},
+    created: false,
+    cleanupFailed: false,
+  } as unknown as NonNullable<BrowserCDP['files']>;
+  return { event, frames };
+}
+const download = (ws: Socket, guid: string, frameId: string) =>
+  ws.message({ method: 'Browser.downloadWillBegin', params: { guid, frameId } });
 const on = (ws: Socket, session: string) =>
   ws.sent.filter((c) => c.sessionId === session).map((c) => c.method);
 const named = (ws: Socket, method: string) => ws.sent.filter((c) => c.method === method);
@@ -153,6 +195,7 @@ it('runs a cross-process frame under its page’s request policy and never close
       'Network.setBypassServiceWorker',
       'Fetch.enable',
       'Runtime.enable',
+      'Page.enable',
       'Target.setAutoAttach',
       'Runtime.runIfWaitingForDebugger',
     ]);
@@ -541,23 +584,11 @@ it('decides a download’s frame as it arrives, however long the download waits'
     release = r;
   });
   const { backend, ws } = await started(() => gate);
-  const event = vi.fn(async (_method: string, _p: unknown, _tracked?: boolean) => {});
-  const frames = new Map<string, string>();
-  backend.files = {
-    frames,
-    frame(id: string, tab: string) {
-      frames.set(id, tab);
-      return true;
-    },
-    event,
-    close: async () => {},
-    created: false,
-    cleanupFailed: false,
-  } as unknown as NonNullable<BrowserCDP['files']>;
   try {
     // A frame attached behind a full target lane is still tracked when its
     // download begins.
     await holdTargets(ws);
+    const { event } = stubFiles(backend);
     ws.message({
       method: 'Page.frameAttached',
       sessionId: 'session',
@@ -592,21 +623,7 @@ it('decides a download’s frame as it arrives, however long the download waits'
 
 it('keeps a frame’s downloads tracked across a process swap, not past its removal', async () => {
   const { backend, ws } = await started();
-  const event = vi.fn(async (_method: string, _p: unknown, _tracked?: boolean) => {});
-  const frames = new Map<string, string>();
-  backend.files = {
-    frames,
-    frame(id: string, tab: string) {
-      frames.set(id, tab);
-      return true;
-    },
-    event,
-    close: async () => {},
-    created: false,
-    cleanupFailed: false,
-  } as unknown as NonNullable<BrowserCDP['files']>;
-  const download = (guid: string, frameId: string) =>
-    ws.message({ method: 'Browser.downloadWillBegin', params: { guid, frameId } });
+  const { event } = stubFiles(backend);
   const detached = (frameId: string, reason: string) =>
     ws.message({
       method: 'Page.frameDetached',
@@ -620,12 +637,89 @@ it('keeps a frame’s downloads tracked across a process swap, not past its remo
     detached('f', 'swap');
     attach(ws, 'session', 'f', 'iframe');
     await vi.waitFor(() => expect(on(ws, 'f')).toContain('Runtime.runIfWaitingForDebugger'));
-    download('one', 'f');
-    download('two', 'f-target');
+    download(ws, 'one', 'f');
+    download(ws, 'two', 'f-target');
     detached('f', 'remove');
-    download('three', 'f');
+    download(ws, 'three', 'f');
     await vi.waitFor(() => expect(event).toHaveBeenCalledTimes(3));
     expect(event.mock.calls.map((c) => c[2])).toEqual([true, true, false]);
+  } finally {
+    await backend.close();
+  }
+});
+
+it('tracks the same-process frames inside a cross-process frame, and forgets them with it', async () => {
+  const { backend, ws } = await started();
+  const { event, frames } = stubFiles(backend);
+  const frameEvent = (session: string, method: string, params: Record<string, unknown>) =>
+    ws.message({ method, sessionId: session, params });
+  try {
+    frameEvent('session', 'Page.frameAttached', { frameId: 'x-target' });
+    frameEvent('session', 'Page.frameDetached', { frameId: 'x-target', reason: 'swap' });
+    attach(ws, 'session', 'x', 'iframe');
+    await vi.waitFor(() => expect(on(ws, 'x')).toContain('Runtime.runIfWaitingForDebugger'));
+    // Page is on before the frame runs, and what it already holds is tracked.
+    expect(on(ws, 'x').indexOf('Page.enable')).toBeLessThan(
+      on(ws, 'x').indexOf('Runtime.runIfWaitingForDebugger'),
+    );
+    expect(on(ws, 'x')).toContain('Page.getFrameTree');
+    // Only the frame's own session reports a same-process frame inside it.
+    frameEvent('x', 'Page.frameAttached', { frameId: 'inner', parentFrameId: 'x-target' });
+    download(ws, 'one', 'inner');
+    // The frame swaps back into its parent's process: its session goes, with
+    // no detach for the frame inside it, and the parent reports the frame.
+    ws.message({
+      method: 'Target.detachedFromTarget',
+      sessionId: 'session',
+      params: { sessionId: 'x' },
+    });
+    frameEvent('session', 'Page.frameAttached', { frameId: 'x-target' });
+    download(ws, 'two', 'inner');
+    download(ws, 'three', 'x-target');
+    await vi.waitFor(() => expect(event).toHaveBeenCalledTimes(3));
+    expect(event.mock.calls.map((c) => c[2])).toEqual([true, false, true]);
+    expect([...frames.keys()]).toEqual(['x-target']);
+  } finally {
+    await backend.close();
+  }
+});
+
+it('frames that come and go do not use up frame tracking', async () => {
+  const { backend, ws } = await started();
+  const { event, frames } = stubFiles(backend);
+  try {
+    for (let n = 0; n < 300; n++) {
+      attach(ws, 'session', `c${n}`, 'iframe');
+      await vi.waitFor(() => expect(on(ws, `c${n}`)).toContain('Runtime.runIfWaitingForDebugger'), {
+        interval: 1,
+      });
+      ws.message({
+        method: 'Page.frameAttached',
+        sessionId: `c${n}`,
+        params: { frameId: `c${n}-inner` },
+      });
+      ws.message({
+        method: 'Page.frameDetached',
+        sessionId: 'session',
+        params: { frameId: `c${n}-target`, reason: 'remove' },
+      });
+      ws.message({
+        method: 'Target.detachedFromTarget',
+        sessionId: 'session',
+        params: { sessionId: `c${n}` },
+      });
+    }
+    expect(frames.size).toBeLessThan(5);
+    attach(ws, 'session', 'last', 'iframe');
+    await vi.waitFor(() => expect(on(ws, 'last')).toContain('Runtime.runIfWaitingForDebugger'));
+    ws.message({
+      method: 'Page.frameAttached',
+      sessionId: 'last',
+      params: { frameId: 'last-inner' },
+    });
+    download(ws, 'late', 'last-inner');
+    await vi.waitFor(() => expect(event).toHaveBeenCalledTimes(1));
+    expect(event.mock.calls[0]![2]).toBe(true);
   } finally {
     await backend.close();
   }

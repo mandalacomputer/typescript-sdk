@@ -79,7 +79,8 @@ This is the summary you read to decide whether to upgrade.
   its tab: it runs, and its HTTP(S) requests reach `urlPolicy` with that tab's
   ID. It is never closed, since closing a frame closes its whole tab. Its
   contents are not in `read_page`, `find` or `get_page_text`; screenshots and
-  coordinate input reach it. A page's dedicated workers are held paused and
+  coordinate input reach it, and a download from it, or from a frame inside
+  it, is handled as one from the tab. A page's dedicated workers are held paused and
   never run, rather than ending the session: a worker can start another whose
   script Chromium fetches outside any interception the URL policy could
   apply. Popups and other new top-level targets are still closed.

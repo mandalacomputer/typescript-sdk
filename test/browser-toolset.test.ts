@@ -9,6 +9,7 @@ import { ToolError, ToolsetConfigError } from '@anthropic-ai/sdk/helpers/beta/to
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { BrowserFilePolicy, MandalaBrowserToolset } from '../src/anthropic.js';
 import { BrowserCDP, BrowserDriverError } from '../src/browser-cdp.js';
+import { BrowserFiles } from '../src/browser-file-session.js';
 import { BrowserConnection, Client, type Computer } from '../src/index.js';
 import { BASE, json, recorder } from './harness.js';
 
@@ -138,6 +139,8 @@ it('disables uploads and gates JavaScript without opening a connection', async (
 const executable = process.env.MANDALA_TEST_CHROMIUM;
 // 127.0.0.1 and localhost are different sites, so each frame below is cross-site
 // from its parent and runs as its own target.
+const downloadFrame = (port: number) =>
+  `<iframe src="http://localhost:${port}/dl-outer" style="position:absolute;left:0;top:0;border:0;width:600px;height:400px"></iframe>`;
 const pages = (port: number): Record<string, [string, string | Buffer]> => ({
   '/frame-host': [
     'text/html',
@@ -163,6 +166,23 @@ const pages = (port: number): Record<string, [string, string | Buffer]> => ({
   // interception, so this page's URL policy would never see nested-worker.js.
   '/worker.js': ['text/javascript', `fetch('/worker-fetch');new Worker('/nested-worker.js')`],
   '/nested-worker.js': ['text/javascript', `fetch('/nested-worker-fetch')`],
+  // A download from a same-process frame inside a cross-site frame.
+  '/dl-host': ['text/html', downloadFrame(port)],
+  '/dl-outer': [
+    'text/html',
+    `<body style="margin:0"><iframe src="/dl-inner" style="border:0;width:400px;height:200px"></iframe></body>`,
+  ],
+  '/dl-inner': [
+    'text/html',
+    `<body style="margin:0"><a href="/dl.txt" download="notes.txt" style="display:block;width:400px;height:200px">download</a></body>`,
+  ],
+  '/dl.txt': ['text/plain', 'downloaded bytes'],
+  // Cross-site frames, each holding a same-process frame, added and removed;
+  // then the download frame.
+  '/dl-churn': [
+    'text/html',
+    `<body style="margin:0"><p id="state" style="position:absolute;top:500px">churning</p><script>(async()=>{for(let n=0;n<150;n++){const f=document.createElement('iframe');f.src='http://localhost:${port}/dl-outer?'+n;const loaded=new Promise(r=>{f.onload=r});document.body.append(f);await loaded;await new Promise(r=>setTimeout(r,5));f.remove()}document.body.insertAdjacentHTML('beforeend',${JSON.stringify(downloadFrame(port))});document.getElementById('state').textContent='churned'})()</script></body>`,
+  ],
   '/heavy': [
     'text/html',
     `<title>Heavy</title><p>heavy page</p>${Array.from({ length: 400 }, (_, n) => `<img src="/img/${n}">`).join('')}`,
@@ -172,8 +192,13 @@ const pages = (port: number): Record<string, [string, string | Buffer]> => ({
 describe.skipIf(!executable)('real Chromium through Anthropic toolResult', () => {
   let chrome: ChildProcess | undefined, server: Server | undefined, profile: string | undefined;
   const browsers: MandalaBrowserToolset[] = [];
+  const drivers: BrowserCDP[] = [];
+  let profileDownloads: string | undefined;
   afterEach(async () => {
     for (const browser of browsers.splice(0)) await browser.close();
+    for (const driver of drivers.splice(0)) await driver.close();
+    if (profileDownloads) await rm(profileDownloads, { recursive: true, force: true });
+    profileDownloads = undefined;
     if (server) {
       server.closeAllConnections();
       await new Promise<void>((resolve) => server!.close(() => resolve()));
@@ -253,7 +278,9 @@ describe.skipIf(!executable)('real Chromium through Anthropic toolResult', () =>
         res.end();
         return;
       }
-      const page = pages(req.socket.localPort!)[req.url!.replace(/^\/img\/\d+$/, '/img')];
+      const page = pages(req.socket.localPort!)[
+        req.url!.replace(/^\/img\/\d+$/, '/img').replace(/^\/dl-outer\?\d+$/, '/dl-outer')
+      ];
       if (page) {
         res.writeHead(200, { 'Content-Type': page[0] });
         res.end(page[1]);
@@ -770,6 +797,68 @@ describe.skipIf(!executable)('real Chromium through Anthropic toolResult', () =>
       .toBe(400);
     expect(browser.sessionStatus.state).toBe('active');
   }, 30000);
+  // The driver with a real file session (downloads left to the test) on the
+  // fixture's Chromium, and a spy on how each download's frame was judged.
+  async function fileDriver(url: string) {
+    const grant = Object.assign(
+      BrowserConnection.fromApi(payload, BASE, 'computers/vm-1/browser-connections'),
+      { url },
+    );
+    const computer = { id: 'vm-frames' } as unknown as Computer;
+    const backend = new BrowserCDP(
+      async () => grant,
+      async () => {},
+      async () => {},
+    );
+    const files = new BrowserFiles(
+      computer,
+      new BrowserFilePolicy(computer, { taskId: 'frames' }),
+      backend,
+    );
+    backend.files = files;
+    drivers.push(backend);
+    await backend.start();
+    profileDownloads = await mkdtemp(join(tmpdir(), 'mandala-downloads-'));
+    await backend.send('Browser.setDownloadBehavior', {
+      behavior: 'allowAndName',
+      browserContextId: files.context,
+      downloadPath: profileDownloads,
+      eventsEnabled: true,
+    });
+    const event = vi.spyOn(files, 'event');
+    const began = () =>
+      event.mock.calls.filter(([method]) => method === 'Browser.downloadWillBegin');
+    return { backend, files, began };
+  }
+  it('tracks a download from a same-process frame inside a cross-site frame', async () => {
+    const { url, base, hits } = await fixture();
+    const { backend, files, began } = await fileDriver(url);
+    await backend.perform('navigate', { url: `${base}/dl-host` });
+    await expect.poll(() => hits, { timeout: 10000 }).toContain('/dl-inner');
+    await new Promise((r) => setTimeout(r, 200));
+    await backend.perform('left_click', { target: { type: 'coordinate', x: 50, y: 50 } });
+    await expect.poll(() => began().length, { timeout: 10000 }).toBe(1);
+    const [, params, tracked] = began()[0]!;
+    expect(tracked).toBe(true);
+    expect(files.frames.has((params as { frameId: string }).frameId)).toBe(true);
+  }, 30000);
+  it('cross-site frames that come and go leave frame tracking room', async () => {
+    const { url, base, hits } = await fixture();
+    const { backend, files, began } = await fileDriver(url);
+    await backend.perform('navigate', { url: `${base}/dl-churn` });
+    await expect
+      .poll(() => backend.perform('get_page_text', {}), { timeout: 30000, interval: 200 })
+      .toBe('churned');
+    await expect.poll(() => hits, { timeout: 10000 }).toContain('/dl-inner');
+    expect(hits.filter((hit) => hit.startsWith('/dl-outer')).length).toBeGreaterThan(150);
+    // The page, the download frame and the frame inside it, and little else:
+    // Chromium reports no detach for a frame inside a removed cross-site frame.
+    await expect.poll(() => files.frames.size, { timeout: 5000 }).toBeLessThan(10);
+    await new Promise((r) => setTimeout(r, 200));
+    await backend.perform('left_click', { target: { type: 'coordinate', x: 50, y: 50 } });
+    await expect.poll(() => began().length, { timeout: 10000 }).toBe(1);
+    expect(began()[0]![2]).toBe(true);
+  }, 60000);
   it('loads a page that pauses hundreds of requests at once', async () => {
     const { browser, base, hits } = await fixture({ urlPolicy: async () => {} });
     success(await browser.toolResult(use('navigate', { url: `${base}/heavy` })));

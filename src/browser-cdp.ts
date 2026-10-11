@@ -111,11 +111,14 @@ const INTERCEPT = { patterns: [{ urlPattern: '*', requestStage: 'Request' }] };
 // A site-isolated cross-site frame is its own target, attached under its page
 // and paused until released. Chromium intercepts its subresource requests on
 // the frame's own session, so it gets the page's interception before it runs.
+// Its Page events report the same-process frames inside it, which only that
+// session sees, so downloads from them can be told apart from strangers'.
 const FRAME_INIT: [string, Message][] = [
   ['Network.enable', {}],
   ['Network.setBypassServiceWorker', { bypass: true }],
   ['Fetch.enable', INTERCEPT],
   ['Runtime.enable', {}],
+  ['Page.enable', {}],
   ['Target.setAutoAttach', AUTO_ATTACH],
 ];
 // Renewal keeps trying until this long before the lease deadline, so that the
@@ -237,6 +240,10 @@ export class BrowserCDP {
   #sessions = new Map<string, string>();
   // Cross-process frame session -> the owned tab it renders in, and its target.
   #frames = new Map<string, { tab: string; target: string }>();
+  // Tracked frame id -> the session that last reported it. A session that goes
+  // away takes the frames only it could see with it (Chromium reports no
+  // detach for them), but not one its parent has reported since.
+  #frameSource = new Map<string, string>();
   #ready = new Map<string, { promise: Promise<void>; resolve: () => void }>();
   #creating: { promise: Promise<void>; resolve: () => void } | undefined;
   #active: string | undefined;
@@ -487,6 +494,7 @@ export class BrowserCDP {
     for (const lane of Object.values(this.#lanes)) lane.queue = [];
     this.#queuedBytes = 0;
     this.#parents.clear();
+    this.#frameSource.clear();
     this.#detached.clear();
     this.#active = undefined;
     this.#changes = [];
@@ -638,6 +646,7 @@ export class BrowserCDP {
       this.#detached.add(s);
       this.#parents.delete(s);
       this.#abandon(s);
+      this.#forgetFrames(s);
     }
     return [...gone];
   }
@@ -647,15 +656,34 @@ export class BrowserCDP {
         pending.reject(new SessionGone('Chromium could not complete the browser action.'));
   }
   #dropFrame(session: string): void {
+    this.#forgetFrames(session);
     if (this.#frames.delete(session)) this.#abandon(session);
+  }
+  #track(frame: unknown, tab: string, session: string): boolean {
+    if (typeof frame !== 'string' || !this.files?.frame(frame, tab)) return false;
+    this.#frameSource.set(frame, session);
+    return true;
+  }
+  #trackTree(tree: Message, tab: string, session: string): void {
+    if (this.#track(tree.frame.id, tab, session))
+      for (const child of tree.childFrames ?? []) this.#trackTree(child, tab, session);
+  }
+  #untrack(frame: string): void {
+    this.files?.frames.delete(frame);
+    this.#frameSource.delete(frame);
+  }
+  #forgetFrames(session: string): void {
+    for (const [frame, source] of this.#frameSource) if (source === session) this.#untrack(frame);
   }
   /** A cross-process frame of an owned tab. It runs; closing it would close its tab. */
   async #frame(child: string, info: Message, tab: string): Promise<void> {
     try {
       this.#frames.set(child, { tab, target: info.targetId });
       // Its root frame has the frame target's id: downloads from it belong to the tab.
-      this.files?.frame(info.targetId, tab);
+      this.#track(info.targetId, tab, child);
       for (const [name, args] of FRAME_INIT) await this.send(name, args, child);
+      if (this.files)
+        this.#trackTree((await this.send('Page.getFrameTree', {}, child)).frameTree, tab, child);
       await this.send('Runtime.runIfWaitingForDebugger', {}, child);
     } catch {
       // Usually the frame went away first. If not, it stays paused: a frame
@@ -721,10 +749,12 @@ export class BrowserCDP {
           ['Target.setAutoAttach', AUTO_ATTACH],
         ];
         for (const [name, args] of initializers) await this.send(name, args, child);
-        if (this.files) {
-          const tree = await this.send('Page.getFrameTree', {}, child);
-          this.files.frameTree(tree.frameTree, target);
-        }
+        if (this.files)
+          this.#trackTree(
+            (await this.send('Page.getFrameTree', {}, child)).frameTree,
+            target,
+            child,
+          );
         await this.send('Runtime.runIfWaitingForDebugger', {}, child);
         this.#ready.get(target)?.resolve();
       } else if (method === 'Target.targetInfoChanged') {
@@ -765,17 +795,24 @@ export class BrowserCDP {
           kind: p.type,
           message: String(p.message ?? '').slice(0, 1000),
         });
-        await this.send('Page.handleJavaScriptDialog', { accept: false }, session);
+        try {
+          await this.send('Page.handleJavaScriptDialog', { accept: false }, session);
+        } catch (error) {
+          // Chromium reports a cross-site frame's dialog on its tab's session;
+          // should a frame session report it too, one dismissal is enough.
+          if (!this.#frames.has(session)) throw error;
+        }
       } else {
         const tab = this.#owner(session);
         if (!tab) return;
-        if (method === 'Page.frameAttached') this.files?.frame(p.frameId, tab);
+        if (method === 'Page.frameAttached') this.#track(p.frameId, tab, session);
         // A swap is the frame moving to another process, where it lives on.
-        if (method === 'Page.frameDetached' && p.reason !== 'swap')
-          this.files?.frames.delete(p.frameId);
+        if (method === 'Page.frameDetached' && p.reason !== 'swap') this.#untrack(p.frameId);
         if (method === 'Page.frameNavigated') {
-          this.#refs.delete(tab);
-          this.files?.frame(p.frame.id, tab);
+          // Element references are the tab's own document's; a cross-site
+          // frame navigating leaves them standing.
+          if (this.#sessions.get(tab) === session) this.#refs.delete(tab);
+          this.#track(p.frame.id, tab, session);
         } else if (method === 'Runtime.consoleAPICalled') append(this.#console, tab, p.text);
         else if (method === 'Network.responseReceived') append(this.#network, tab, p.text);
       }
@@ -789,8 +826,7 @@ export class BrowserCDP {
   }
   #dropTab(target: string): void {
     if (this.files)
-      for (const [frame, tab] of this.files.frames)
-        if (tab === target) this.files.frames.delete(frame);
+      for (const [frame, tab] of this.files.frames) if (tab === target) this.#untrack(frame);
     for (const [session, frame] of this.#frames) if (frame.tab === target) this.#dropFrame(session);
     this.#ready.get(target)?.resolve();
     for (const map of [

@@ -80,10 +80,6 @@ export class BrowserFiles {
     this.frames.set(id, tab);
     return true;
   }
-  frameTree(tree: Message, tab: string): void {
-    if (!this.frame(tree.frame.id, tab)) return;
-    for (const child of tree.childFrames ?? []) this.frameTree(child, tab);
-  }
   async execute(command: string, desktop = false): Promise<Buffer> {
     this.policy.check(this.computer);
     if (Buffer.byteLength(command) > 120000) throw new Error(FILE_ERROR);
