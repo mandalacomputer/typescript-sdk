@@ -233,7 +233,8 @@ describe.skipIf(!executable)('real Chromium through Anthropic toolResult', () =>
   afterEach(async () => {
     for (const browser of browsers.splice(0)) await browser.close();
     for (const driver of drivers.splice(0)) await driver.close();
-    if (profileDownloads) await rm(profileDownloads, { recursive: true, force: true });
+    if (profileDownloads)
+      await rm(profileDownloads, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     profileDownloads = undefined;
     if (server) {
       server.closeAllConnections();
