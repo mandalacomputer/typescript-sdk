@@ -158,7 +158,12 @@ export class BrowserCDP {
   #failed = false;
   #tasks = new Set<Promise<void>>();
   #queue: Message[] = [];
+  // Session -> the session it was attached under, as attaches arrive.
+  #parents = new Map<string, string>();
+  // Sessions known gone whose detach has not been handled in order yet, and
+  // for each detach event, every session it took with it.
   #detached = new Set<string>();
+  #gone = new WeakMap<Message, string[]>();
   #tabs = new Map<string, Message>();
   #sessions = new Map<string, string>();
   // Cross-process frame session -> the owned tab it renders in, and its target.
@@ -410,6 +415,7 @@ export class BrowserCDP {
     ])
       map.clear();
     this.#queue = [];
+    this.#parents.clear();
     this.#detached.clear();
     this.#active = undefined;
     this.#changes = [];
@@ -458,11 +464,19 @@ export class BrowserCDP {
 
   #dispatch(message: Message): void {
     if (!EVENTS.has(message.method)) return;
+    const child = message.params?.sessionId;
+    if (
+      message.method === 'Target.attachedToTarget' &&
+      typeof child === 'string' &&
+      typeof message.sessionId === 'string'
+    )
+      this.#parents.set(child, message.sessionId);
     // A detach takes effect on arrival. Chromium need not answer a command on
     // a session that has gone, and a handler waiting on one would otherwise
     // hold its slot until the command deadline ended the whole session, with
     // the detach that would free it stuck in the queue behind it.
-    if (message.method === 'Target.detachedFromTarget') this.#detach(message.params?.sessionId);
+    if (message.method === 'Target.detachedFromTarget' && typeof child === 'string')
+      this.#gone.set(message, this.#detach(child));
     // Arrival order is kept: nothing overtakes an event already waiting.
     if (this.#queue.length || this.#tasks.size >= EVENT_CONCURRENCY) {
       if (this.#queue.length >= EVENT_QUEUE_LIMIT) {
@@ -493,12 +507,27 @@ export class BrowserCDP {
     for (const [tab, s] of this.#sessions) if (s === session) return tab;
     return undefined;
   }
-  #detach(session: unknown): void {
-    if (typeof session !== 'string') return;
-    // Remembered until the detach event itself is handled in order, so that an
-    // attach for this session still waiting in the queue is not acted on.
-    this.#detached.add(session);
-    this.#abandon(session);
+  /** The session and every session attached beneath it, all gone now. */
+  #detach(session: string): string[] {
+    // Chromium need not report the detach of a session whose parent session
+    // has already gone, so the whole subtree goes with it.
+    const gone = new Set([session]);
+    for (let grew = true; grew; ) {
+      grew = false;
+      for (const [child, parent] of this.#parents)
+        if (gone.has(parent) && !gone.has(child)) {
+          gone.add(child);
+          grew = true;
+        }
+    }
+    for (const s of gone) {
+      // Remembered until this detach is handled in order, so that an attach
+      // for one of these sessions still waiting in the queue is not acted on.
+      this.#detached.add(s);
+      this.#parents.delete(s);
+      this.#abandon(s);
+    }
+    return [...gone];
   }
   #abandon(session: string): void {
     for (const pending of this.#pending.values())
@@ -590,8 +619,10 @@ export class BrowserCDP {
         if (this.#tabs.has(p.targetInfo.targetId))
           this.#tabs.set(p.targetInfo.targetId, p.targetInfo);
       } else if (method === 'Target.detachedFromTarget') {
-        this.#detached.delete(p.sessionId);
-        this.#dropFrame(p.sessionId);
+        for (const gone of this.#gone.get(message) ?? []) {
+          this.#detached.delete(gone);
+          this.#dropFrame(gone);
+        }
       } else if (method === 'Target.targetDestroyed') {
         for (const [frame, { target }] of this.#frames)
           if (target === p.targetId) this.#dropFrame(frame);

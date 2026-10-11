@@ -273,6 +273,48 @@ it('detaches reach handlers even when every event slot is waiting on a gone targ
   }
 });
 
+it.each([1, 300])(
+  'a detach takes every session beneath it along, %i descendants waiting',
+  async (count) => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const policy = vi.fn(async () => {});
+    const { backend, ws } = await started(policy);
+    try {
+      attach(ws, 'session', 'frame', 'iframe');
+      await vi.waitFor(() => expect(on(ws, 'frame')).toContain('Runtime.runIfWaitingForDebugger'));
+      // Descendants whose setup Chromium never answers; past 256 of them the
+      // remaining attaches wait in the queue.
+      for (let n = 0; n < count; n++) {
+        ws.silent.add(`nested-${n}`);
+        attach(ws, 'frame', `nested-${n}`, n % 2 ? 'worker' : 'iframe');
+      }
+      await vi.waitFor(() =>
+        expect(ws.sent.filter((c) => c.sessionId?.startsWith('nested-'))).toHaveLength(
+          Math.min(count, 256),
+        ),
+      );
+      // Chromium reports only the parent's detach.
+      ws.message({
+        method: 'Target.detachedFromTarget',
+        sessionId: 'session',
+        params: { sessionId: 'frame' },
+      });
+      await vi.advanceTimersByTimeAsync(20000);
+      expect(backend.sessionStatus().state).toBe('active');
+      expect(ws.sent.filter((c) => c.sessionId?.startsWith('nested-'))).toHaveLength(
+        Math.min(count, 256),
+      );
+      // Nothing beneath it is still treated as part of the tab.
+      paused(ws, 'nested-0', 'late', 'https://allowed.test/late');
+      paused(ws, 'session', 'after', 'https://allowed.test/after');
+      await vi.waitFor(() => expect(named(ws, 'Fetch.continueRequest')).toHaveLength(1));
+      expect(policy).not.toHaveBeenCalledWith('tab', 'https://allowed.test/late');
+    } finally {
+      await backend.close();
+    }
+  },
+);
+
 it('a request whose target already detached does not end the session', async () => {
   const { backend, ws } = await started();
   try {
