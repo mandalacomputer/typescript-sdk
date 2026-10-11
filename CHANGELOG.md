@@ -91,8 +91,9 @@ This is the summary you read to decide whether to upgrade.
 - **A heavy page keeps its browser session.** Browser events past 256 in
   flight wait their turn in arrival order rather than ending the session, so a
   page that pauses hundreds of requests at once loads. Only a page producing
-  more than 8,192 waiting events ends it, and `sessionStatus.terminalError`
-  says why.
+  more than 8,192 waiting events, or more than 32 MiB of them, ends it, and
+  `sessionStatus.terminalError` says why. Console, network-log, dialog and
+  paused-request events keep only what the toolset reports or checks.
 - **A missing `ws` is named.** Without the optional `ws` peer, the browser
   toolset's tool error says to install `ws` 8.18 or newer, instead of a generic
   browser failure. It is checked before a browser connection is created.

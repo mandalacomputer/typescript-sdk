@@ -374,3 +374,38 @@ it('ends the session, with a reason, when a page floods it past the queue', asyn
     await backend.close();
   }
 });
+
+it('bounds the bytes waiting events hold, keeping only what it uses of page payloads', async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((r) => {
+    release = r;
+  });
+  const { backend, ws } = await started(() => gate);
+  try {
+    for (let n = 0; n < 256; n++) paused(ws, 'session', `r${n}`, 'https://example.test/');
+    const huge = 'x'.repeat(1024 * 1024);
+    // 40 MiB of console output waits as the 40 KiB read_console would keep.
+    for (let n = 0; n < 40; n++)
+      ws.message({
+        method: 'Runtime.consoleAPICalled',
+        sessionId: 'session',
+        params: { type: 'log', args: [{ type: 'string', value: huge }] },
+      });
+    expect(backend.sessionStatus().state).toBe('active');
+    // A payload the driver keeps whole counts whole.
+    for (let n = 0; n < 40 && backend.sessionStatus().state === 'active'; n++)
+      ws.message({
+        method: 'Target.targetInfoChanged',
+        params: {
+          targetInfo: { targetId: 'other', type: 'page', url: `https://example.test/${huge}` },
+        },
+      });
+    expect(backend.sessionStatus()).toMatchObject({
+      state: 'ended',
+      terminalError: expect.stringContaining('faster than the session could handle'),
+    });
+  } finally {
+    release();
+    await backend.close();
+  }
+});

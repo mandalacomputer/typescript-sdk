@@ -43,8 +43,29 @@ const EVENTS = new Set([
 // lost. Command replies never wait here.
 const EVENT_CONCURRENCY = 256;
 // Only a page flooding the session faster than any policy could answer reaches
-// this, and it ends the session rather than growing without bound.
+// these, and they end the session rather than let the queue grow without
+// bound, in events or in the bytes they hold.
 const EVENT_QUEUE_LIMIT = 8192;
+const EVENT_QUEUE_BYTES = 32 * 1024 * 1024;
+// Page-controlled payloads, cut to what the driver keeps as they arrive, so
+// that neither a waiting event nor a running handler holds more of them.
+const COMPACT: Record<string, (p: Message) => Message> = {
+  'Runtime.consoleAPICalled': (p) => ({
+    text: (p.args as Message[])
+      .slice(0, 20)
+      .map((a) => String(a.value ?? a.description ?? '').slice(0, 1000))
+      .join(' '),
+  }),
+  'Network.responseReceived': (p) => ({
+    text: `${p.response.status} ${String(p.response.url).slice(0, 2000)}`,
+  }),
+  'Page.javascriptDialogOpening': (p) => ({
+    type: p.type,
+    message: String(p.message ?? '').slice(0, 1000),
+  }),
+  // Headers and request bodies stay behind; the URL is kept whole for the policy.
+  'Fetch.requestPaused': (p) => ({ requestId: p.requestId, request: { url: p.request.url } }),
+};
 const AUTO_ATTACH = { autoAttach: true, waitForDebuggerOnStart: true, flatten: true };
 const INTERCEPT = { patterns: [{ urlPattern: '*', requestStage: 'Request' }] };
 // A site-isolated cross-site frame is its own target, attached under its page
@@ -157,7 +178,8 @@ export class BrowserCDP {
   #closing: Promise<void> | undefined;
   #failed = false;
   #tasks = new Set<Promise<void>>();
-  #queue: Message[] = [];
+  #queue: { message: Message; size: number }[] = [];
+  #queuedBytes = 0;
   // Session -> the session it was attached under, as attaches arrive.
   #parents = new Map<string, string>();
   // Sessions known gone whose detach has not been handled in order yet, and
@@ -231,7 +253,8 @@ export class BrowserCDP {
       this.#ws = ws;
       ws.on('message', (raw) => {
         try {
-          const message = JSON.parse(raw.toString()) as Message;
+          const text = raw.toString();
+          const message = JSON.parse(text) as Message;
           if ('id' in message) {
             const pending = this.#pending.get(message.id);
             if (pending) {
@@ -246,7 +269,7 @@ export class BrowserCDP {
                 );
               else pending.resolve(message.result ?? {});
             }
-          } else this.#dispatch(message);
+          } else this.#dispatch(message, text.length);
         } catch {
           this.#fail();
         }
@@ -415,6 +438,7 @@ export class BrowserCDP {
     ])
       map.clear();
     this.#queue = [];
+    this.#queuedBytes = 0;
     this.#parents.clear();
     this.#detached.clear();
     this.#active = undefined;
@@ -462,8 +486,18 @@ export class BrowserCDP {
     }
   }
 
-  #dispatch(message: Message): void {
+  #dispatch(message: Message, bytes: number): void {
     if (!EVENTS.has(message.method)) return;
+    const cut = COMPACT[message.method];
+    let size = bytes;
+    if (cut) {
+      try {
+        message.params = cut(message.params);
+        size = JSON.stringify(message.params).length;
+      } catch {
+        /* Malformed: left whole, for the handler to refuse as before. */
+      }
+    }
     const child = message.params?.sessionId;
     if (
       message.method === 'Target.attachedToTarget' &&
@@ -479,13 +513,14 @@ export class BrowserCDP {
       this.#gone.set(message, this.#detach(child));
     // Arrival order is kept: nothing overtakes an event already waiting.
     if (this.#queue.length || this.#tasks.size >= EVENT_CONCURRENCY) {
-      if (this.#queue.length >= EVENT_QUEUE_LIMIT) {
+      if (this.#queue.length >= EVENT_QUEUE_LIMIT || this.#queuedBytes + size > EVENT_QUEUE_BYTES) {
         this.#terminalError =
           'The page produced browser events faster than the session could handle them. The session ended; create a new toolset to continue.';
         this.#fail();
         return;
       }
-      this.#queue.push(message);
+      this.#queue.push({ message, size });
+      this.#queuedBytes += size;
       return;
     }
     this.#run(message);
@@ -495,8 +530,11 @@ export class BrowserCDP {
     this.#tasks.add(task);
     void task.finally(() => {
       this.#tasks.delete(task);
-      while (!this.#failed && this.#queue.length && this.#tasks.size < EVENT_CONCURRENCY)
-        this.#run(this.#queue.shift()!);
+      while (!this.#failed && this.#queue.length && this.#tasks.size < EVENT_CONCURRENCY) {
+        const next = this.#queue.shift()!;
+        this.#queuedBytes -= next.size;
+        this.#run(next.message);
+      }
     });
   }
   /** The owned tab a session belongs to: the tab's own, or a frame inside it. */
@@ -660,21 +698,8 @@ export class BrowserCDP {
         if (method === 'Page.frameNavigated') {
           this.#refs.delete(tab);
           this.files?.frame(p.frame.id, tab);
-        } else if (method === 'Runtime.consoleAPICalled')
-          append(
-            this.#console,
-            tab,
-            (p.args as Message[])
-              .slice(0, 20)
-              .map((a) => String(a.value ?? a.description ?? '').slice(0, 1000))
-              .join(' '),
-          );
-        else if (method === 'Network.responseReceived')
-          append(
-            this.#network,
-            tab,
-            `${p.response.status} ${String(p.response.url).slice(0, 2000)}`,
-          );
+        } else if (method === 'Runtime.consoleAPICalled') append(this.#console, tab, p.text);
+        else if (method === 'Network.responseReceived') append(this.#network, tab, p.text);
       }
     } catch (error) {
       if (method === 'Fetch.requestPaused' && error instanceof RequestGone) return;
