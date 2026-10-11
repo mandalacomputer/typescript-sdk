@@ -155,6 +155,15 @@ export const COMMANDS: readonly Command[] = [
     'Show the plan and the current billing period on one screen: usage totals and the computers that ran longest',
   ),
   command(
+    'credits',
+    "Read the account's AI credits: balance, live lots, this period's grant, and one page of the ledger, newest first",
+    [],
+    [
+      num('before', 'Entries older than this id: the next_before of the page before'),
+      num('limit', 'Entries per page, 1 to 100 (default 50)'),
+    ],
+  ),
+  command(
     'computers list',
     'List computers with completeness status',
     [],
@@ -703,11 +712,15 @@ export const COMMANDS: readonly Command[] = [
   ),
   command(
     'agent run',
-    'Run an agent with MANDALA_MODEL_KEY',
+    "Run an agent on MANDALA_MODEL_KEY, your own model key, or without it on the account's AI credits",
     ['prompt'],
     [
       flag('computer', 'Target computer name or ID', { required: true }),
       num('max-steps', 'Maximum desktop actions'),
+      num(
+        'max-cost-usd',
+        'A run on AI credits stops before a model call past this many USD, 0.25 to 20 (default 2); ignored with MANDALA_MODEL_KEY',
+      ),
       flag('provider', 'Model provider: anthropic or openai'),
       flag('model', 'Model override'),
       flag('system', 'Standing instructions'),
@@ -1201,5 +1214,5 @@ function usageError(
 export function help(path = ''): string {
   const matches = COMMANDS.filter((c) => !path || c.path === path || c.path.startsWith(`${path} `));
   const exact = matches.length === 1 ? matches[0] : undefined;
-  return `mandala — cloud computers from your terminal\n\n${matches.map((c) => `  ${usage(c)}\n    ${c.description}`).join('\n')}\n\n${[...GLOBAL_FLAGS, ...(exact?.flags ?? [])].map((f) => `  --${f.name}${f.alias ? `, -${f.alias}` : ''}${f.type === 'boolean' ? '' : ` <${f.type}>`}${f.required ? ' (required)' : ''}  ${f.description}`).join('\n')}\n\nMANDALA_API_KEY authenticates requests; MANDALA_BASE_URL optionally selects a server.\nMANDALA_MODEL_KEY is required for agent run. No credentials are needed for help, version, manifest, completion or logout.\n${path.startsWith('ssh') ? `\nmandala ssh: our options go before <computer> (with --setup, --key and --json may follow it);\neverything after it goes to ssh unchanged. It never falls back to mandala terminal.\nMANDALA_SSH_GATEWAY=host[:port] (default ssh.mandala.computer:2222) and\nMANDALA_SSH_GATEWAY_KNOWN_HOSTS (a known_hosts line, or file, pinning that gateway's key)\npoint the SSH commands at another gateway.\n` : ''}`;
+  return `mandala — cloud computers from your terminal\n\n${matches.map((c) => `  ${usage(c)}\n    ${c.description}`).join('\n')}\n\n${[...GLOBAL_FLAGS, ...(exact?.flags ?? [])].map((f) => `  --${f.name}${f.alias ? `, -${f.alias}` : ''}${f.type === 'boolean' ? '' : ` <${f.type}>`}${f.required ? ' (required)' : ''}  ${f.description}`).join('\n')}\n\nMANDALA_API_KEY authenticates requests; MANDALA_BASE_URL optionally selects a server.\nMANDALA_MODEL_KEY is your own model key for agent run; without it the run spends the account's AI credits. No credentials are needed for help, version, manifest, completion or logout.\n${path.startsWith('ssh') ? `\nmandala ssh: our options go before <computer> (with --setup, --key and --json may follow it);\neverything after it goes to ssh unchanged. It never falls back to mandala terminal.\nMANDALA_SSH_GATEWAY=host[:port] (default ssh.mandala.computer:2222) and\nMANDALA_SSH_GATEWAY_KNOWN_HOSTS (a known_hosts line, or file, pinning that gateway's key)\npoint the SSH commands at another gateway.\n` : ''}`;
 }

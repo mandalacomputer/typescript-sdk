@@ -378,7 +378,8 @@ export class AuthenticationError extends APIError {
  * it. The API rate budget is not one of these: running out of it is a `429`,
  * {@link RateLimitError}.
  *
- * Never raised by the agent routes ({@link ModelProviderError} is their 402).
+ * Never raised by the agent routes: their 402 is {@link ModelProviderError}
+ * on your own model key and {@link InsufficientCreditsError} on AI credits.
  */
 export class PlanLimitError extends APIError {
   override name = 'PlanLimitError';
@@ -389,12 +390,13 @@ export class PlanLimitError extends APIError {
  * a 402, and a 404 or 413 the model API answered.
  *
  * `agent()` and `agentOnce()` raise this for a 402 where any other route would
- * raise {@link PlanLimitError}. Nothing inside an agent run can answer 402 on
- * the platform's own behalf: its mid-run rechecks cover the credential, the
- * role and the account's standing and answer 401 or 403 with
- * `reason: "revoked"`. A 402 there is the model API's own status (its
- * `billing_error`), relayed for the key you passed, so the fix is on that
- * account and not on your plan.
+ * raise {@link PlanLimitError}. The platform's one 402 on these routes is a
+ * funded run the account's AI credits cannot start, which carries a
+ * `top_up_url` and is an {@link InsufficientCreditsError} instead. Its mid-run
+ * rechecks cover the credential, the role and the account's standing and
+ * answer 401 or 403 with `reason: "revoked"`. Any other 402 there is the model
+ * API's own status (its `billing_error`), relayed for the key you passed, so
+ * the fix is on that account and not on your plan.
  *
  * They also raise it for a 404 or 413 the model API answered, where the status
  * table would give {@link NotFoundError} (no such computer) or
@@ -410,6 +412,64 @@ export class PlanLimitError extends APIError {
  */
 export class ModelProviderError extends APIError {
   override name = 'ModelProviderError';
+}
+
+/**
+ * 402 on the agent routes — a FUNDED run (one sent without `modelKey`) could
+ * not start, because the account's available Mandala AI credits do not cover
+ * its first model call.
+ *
+ * The platform's own refusal, told apart from the model provider's
+ * ({@link ModelProviderError}) by the `top_up_url` it carries: the billing page
+ * where credits are added, which {@link InsufficientCreditsError.topUpUrl}
+ * holds as a link. Raised by `agent()`, `agentStream()` and `agentOnce()`
+ * whether it arrived as the response or as the run's `error` frame.
+ *
+ * A run that runs out of credits AFTER it started is not this: it ends normally
+ * with `stop: 'credits_exhausted'`, and its steps stand.
+ *
+ * Not transient: {@link isTransient} answers false, as it does for every 402.
+ * Add credits, or run on your own key.
+ */
+export class InsufficientCreditsError extends APIError {
+  override name = 'InsufficientCreditsError';
+  /**
+   * Where to add credits: the platform's `top_up_url`, as an absolute link —
+   * resolved against the client's base URL when the platform sent a path.
+   * `undefined` only if what it sent cannot be made into an `http(s)` link;
+   * the value as sent is still on {@link APIError.body}.
+   */
+  readonly topUpUrl?: string;
+  constructor(
+    message: string,
+    status: number,
+    body?: unknown,
+    retryAfterMs?: number,
+    metadata: ErrorMetadata = {},
+    topUpUrl?: string,
+  ) {
+    super(message, status, body, retryAfterMs, metadata);
+    this.topUpUrl = topUpUrl;
+  }
+}
+
+/**
+ * The page to add credits on, as a link a person can open.
+ *
+ * The platform sends the billing page's path (`/billing`), which lives on the
+ * same origin as the API, so it is resolved against the client's base URL.
+ * Only an `http(s)` result is kept; anything else, or a relative path with no
+ * base to resolve it against, is `undefined` rather than a link nobody can
+ * follow.
+ */
+export function topUpLink(v: unknown, baseUrl?: string): string | undefined {
+  if (typeof v !== 'string' || !v.trim()) return undefined;
+  try {
+    const url = new URL(v.trim(), baseUrl);
+    return url.protocol === 'https:' || url.protocol === 'http:' ? url.href : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** The sentence a relayed model-provider 402 is raised with. */
@@ -465,12 +525,26 @@ function reportsSteps(body: unknown): boolean {
 const afterAgentSteps = new WeakSet<APIError>();
 
 /**
+ * What {@link agentRouteError} needs to know about the run, beyond its error.
+ */
+export type AgentRunContext = {
+  /** The run was sent without `X-Model-Key`, so it ran on AI credits. */
+  funded?: boolean;
+  /** The client's base URL, which a `top_up_url` path is resolved against. */
+  baseUrl?: string;
+};
+
+/**
  * The class an agent route's status deserves, where it is not the table's.
  * The same mapping as `_agent_route_error` in mandala-computer-python.
  *
- * - A 402 becomes a {@link ModelProviderError}, never a
+ * - A 402 carrying `top_up_url` becomes an {@link InsufficientCreditsError}:
+ *   the platform refusing a funded run the account's credits cannot start.
+ * - Any other 402 becomes a {@link ModelProviderError}, never a
  *   {@link PlanLimitError}: it is the model API's `billing_error` for the
- *   account behind `X-Model-Key`.
+ *   account behind `X-Model-Key`. On a FUNDED run there is no such key and no
+ *   account of the caller's behind one, so the same 402 stays a plain
+ *   {@link APIError} with the platform's own sentence.
  * - A 404 or 413 the model API answered (see {@link relayedFromModel}) becomes
  *   a {@link ModelProviderError} rather than a {@link NotFoundError} or
  *   {@link TooLargeError}. An unprefixed one is the platform's own and is
@@ -498,8 +572,8 @@ const afterAgentSteps = new WeakSet<APIError>();
  * body (and so its `reason`, `code` and `operationId`), `retryAfterMs`,
  * `requestId`, `allow`, `wwwAuthenticate`, `method` and `idempotencyKey`.
  */
-export function agentRouteError(err: APIError, stepsSeen = 0): APIError {
-  if (err instanceof ModelProviderError) return err;
+export function agentRouteError(err: APIError, stepsSeen = 0, run: AgentRunContext = {}): APIError {
+  if (err instanceof ModelProviderError || err instanceof InsufficientCreditsError) return err;
   const metadata: ErrorMetadata = {
     requestId: err.requestId,
     allow: err.allow,
@@ -507,7 +581,21 @@ export function agentRouteError(err: APIError, stepsSeen = 0): APIError {
     method: err.method,
   };
   let rebuilt: APIError;
-  if (err.status === 402) {
+  const topUp = errorRecord(err.body)?.top_up_url;
+  if (err.status === 402 && typeof topUp === 'string' && topUp.trim()) {
+    const link = topUpLink(topUp, run.baseUrl);
+    rebuilt = new InsufficientCreditsError(
+      link ? `${err.message} (add credits at ${link})` : err.message,
+      err.status,
+      err.body,
+      err.retryAfterMs,
+      metadata,
+      link,
+    );
+  } else if (err.status === 402 && run.funded) {
+    // Not the table's PlanLimitError either: no plan limit refuses inside a run.
+    rebuilt = new APIError(err.message, err.status, err.body, err.retryAfterMs, metadata);
+  } else if (err.status === 402) {
     rebuilt = new ModelProviderError(
       `${MODEL_BILLING_MESSAGE}: ${err.message}`,
       err.status,
@@ -1381,7 +1469,9 @@ function withoutRefusalReason(body: unknown): unknown {
  * account behind `X-Model-Key` (billing, timeout, overloaded), relayed — not a
  * Mandala plan limit, which is why a 402 there is a {@link ModelProviderError},
  * and a 504 with the run's `usage` or steps a plain {@link APIError} rather than
- * a {@link GatewayTimeoutError}. So is a 404, 413 or 429 whose `error` starts
+ * a {@link GatewayTimeoutError}. The exception is a 402 carrying `top_up_url`:
+ * a funded run the account's AI credits cannot start, an
+ * {@link InsufficientCreditsError}, which is not transient either. So is a 404, 413 or 429 whose `error` starts
  * `model API: `: the 404 and 413 are {@link ModelProviderError}s (not
  * transient), and the 429 a {@link RateLimitError} with no budget fields. That
  * 429 is transient only while the run has taken no step: once it has, the steps

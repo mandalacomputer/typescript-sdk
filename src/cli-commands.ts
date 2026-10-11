@@ -66,6 +66,7 @@ import {
   type BackgroundExec,
   type BuildProgress,
   type Client,
+  type CreditReport,
   type GuestDirectory,
   type Listing,
   type Move,
@@ -608,6 +609,60 @@ function accountText(q: AccountQuota): string {
 }
 
 /**
+ * USD micros as dollars, exactly: integer arithmetic, so $0.000001 is not
+ * rounded away, with at least two decimals and no trailing zeros past them.
+ */
+export function usdMicros(micros: number): string {
+  const sign = micros < 0 ? '-' : '';
+  const abs = BigInt(Math.abs(micros));
+  const cents = (abs % 1_000_000n)
+    .toString()
+    .padStart(6, '0')
+    .replace(/0{1,4}$/, '');
+  return `${sign}$${abs / 1_000_000n}.${cents.padEnd(2, '0')}`;
+}
+
+/**
+ * `credits` for a person, one line each, raw, as {@link usageLines}: the caller
+ * escapes each line. Amounts are dollars; `--json` keeps the platform's micros.
+ */
+function creditLines(r: CreditReport): string[] {
+  return [
+    'AI credits (account-wide)',
+    `Available: ${usdMicros(r.availableMicros)} (balance ${usdMicros(r.balanceMicros)}; held ${usdMicros(r.heldMicros)}; debt ${usdMicros(r.debtMicros)})`,
+    ...(r.frozen
+      ? [
+          'Frozen: no current plan, or the account is suspended; credits are kept but cannot be spent, and still expire',
+        ]
+      : []),
+    r.grant
+      ? `This period's grant: ${usdMicros(r.grant.grantedMicros)} issued, ${usdMicros(r.grant.usedMicros)} used (${r.grant.periodStart} to ${r.grant.periodEnd})`
+      : "This period's grant: none",
+    ...(r.lots.length
+      ? [
+          'Lots, earliest expiry first:',
+          ...r.lots.map(
+            (l) =>
+              `  ${l.kind} ${l.id}: ${usdMicros(l.remainingMicros)} left of ${usdMicros(l.amountMicros)}; expires ${l.expiresAt}`,
+          ),
+        ]
+      : ['Lots: none with credit left']),
+    ...(r.entries.length
+      ? [
+          'Ledger, newest first:',
+          ...r.entries.map(
+            (e) =>
+              `  #${e.id} ${e.createdAt} ${e.kind} ${usdMicros(e.amountMicros)}${e.debtMicros ? `; new debt ${usdMicros(e.debtMicros)}` : ''}${e.model ? `; ${e.model}` : ''}${e.runId ? `; run ${e.runId}${e.step === null ? '' : ` call ${e.step}`}` : ''}`,
+          ),
+        ]
+      : ['Ledger: no entries on this page']),
+    r.nextBefore === null
+      ? 'End of the ledger'
+      : `Older entries: mandala credits --before ${r.nextBefore}`,
+  ];
+}
+
+/**
  * The dashboard page for one computer, beside the API the client talks to: the
  * base URL less its `/api/v1`, or its origin when it does not end in one.
  */
@@ -1014,6 +1069,8 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
     };
     if (path === 'operations list') P.operationsQuery(operationPage);
     if (path === 'usage') checkUsageWindow(usageWindow.from, usageWindow.to);
+    const creditPage = { before: n('before'), limit: n('limit') };
+    if (path === 'credits') P.creditsQuery(creditPage);
     // Preparation and pure SDK validation happen before name resolution or any request.
     const bypassFlag =
       path === 'computers create'
@@ -1213,20 +1270,21 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
     const provider = s('provider');
     if (provider !== undefined && provider !== 'anthropic' && provider !== 'openai')
       throw new CliError('invalid_arguments', '--provider must be anthropic or openai');
+    // MANDALA_MODEL_KEY unset, or set to nothing, is a run on the account's AI
+    // credits: an environment variable cleared with `MANDALA_MODEL_KEY=` reads
+    // as unset everywhere else in a shell, and here it means "no key of mine".
+    const modelKey = io.env.MANDALA_MODEL_KEY?.trim() ? io.env.MANDALA_MODEL_KEY : undefined;
     const agent: AgentArgs = {
       provider,
       prompt: target,
-      modelKey: io.env.MANDALA_MODEL_KEY ?? '',
+      modelKey,
       maxSteps: n('max-steps'),
+      maxCostUsd: n('max-cost-usd'),
       model: s('model'),
       system: s('system'),
       signal,
     };
-    if (path === 'agent run') {
-      P.agentBody({ ...agent, stream: true });
-      if (!agent.modelKey.trim())
-        throw new CliError('missing_credentials', 'Set MANDALA_MODEL_KEY to run an agent');
-    }
+    if (path === 'agent run') P.agentBody({ ...agent, stream: true });
     const hook = {
       url: path === 'webhooks create' ? target : s('url'),
       description: s('description'),
@@ -1378,6 +1436,18 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
           );
         io.stdout.write(
           `${usageLines(report)
+            .map((line) => terminalSafe(redact(line, io.env, io.secrets) as string))
+            .join('\n')}\n`,
+        );
+        return 0;
+      }
+      case 'credits': {
+        const report = await client.credits.read({ ...creditPage, signal });
+        const { raw: _raw, ...data } = report;
+        // The decoded fields, in the API's snake_case: amounts stay in micros.
+        if (json) return output.result(snakeKeys(data));
+        io.stdout.write(
+          `${creditLines(report)
             .map((line) => terminalSafe(redact(line, io.env, io.secrets) as string))
             .join('\n')}\n`,
         );
@@ -1994,16 +2064,27 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
         const c = await resolveComputer(client, s('computer')!, signal);
         watching = true;
         for await (const event of c.agentStream(agent)) {
-          if (event.type === 'error')
+          if (event.type === 'error') {
+            // The funded run the account's credits could not start, reported
+            // on the stream: the same refusal InsufficientCreditsError is when
+            // it is the response, under the same code, with where to top up.
+            const short = event.status === 402 && event.topUpUrl !== undefined;
             return output.error(
-              new CliError('agent_error', event.error, {
-                status: event.status,
-                steps: event.steps,
-                usage: event.usage,
-              }),
+              new CliError(
+                short ? 'insufficient_credits' : 'agent_error',
+                short ? `${event.error} (add credits at ${event.topUpUrl})` : event.error,
+                {
+                  status: event.status,
+                  steps: event.steps,
+                  usage: event.usage,
+                  ...(event.costUsd === undefined ? {} : { costUsd: event.costUsd }),
+                  ...(event.topUpUrl === undefined ? {} : { topUpUrl: event.topUpUrl }),
+                },
+              ),
               1,
               true,
             );
+          }
           if (event.type === 'done') {
             const code = event.result.finished ? 0 : 1;
             const { raw: _raw, ...summary } = event.result;

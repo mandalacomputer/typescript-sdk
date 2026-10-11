@@ -1550,10 +1550,20 @@ describe('server-sent events', () => {
     expect(rec.last().headers['X-Model-Key']).toBe('sk-ant-test');
   });
 
-  it('refuses to start a run with no model key of your own', async () => {
+  it('refuses an empty model key rather than running on credits', async () => {
     const rec = recorder(anyRoute);
     const c = await client(rec).computers.get('vm-1');
-    await expect(c.agent({ prompt: 'go', modelKey: '' })).rejects.toThrow(/does not store one/);
+    await expect(c.agent({ prompt: 'go', modelKey: '' })).rejects.toThrow(/given, but empty/);
+    expect(rec.calls.some((call) => call.path.endsWith('/agent'))).toBe(false);
+  });
+
+  it('sends no model key header for a run on AI credits', async () => {
+    const rec = recorder(streaming('event: done\ndata: {"stop":"end_turn"}\n\n'));
+    const c = await client(rec).computers.get('vm-1');
+    await c.agent({ prompt: 'go' });
+    expect(Object.keys(rec.last().headers).map((h) => h.toLowerCase())).not.toContain(
+      'x-model-key',
+    );
   });
 });
 

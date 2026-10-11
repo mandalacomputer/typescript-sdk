@@ -3592,21 +3592,26 @@ describe('the agent loop', () => {
     expect(rec.calls.every((call) => !call.path.endsWith('/agent'))).toBe(true);
   });
 
-  it('refuses a missing model key where the call was made, not at the first next()', async () => {
+  it('refuses an empty model key where the call was made, not at the first next()', async () => {
     // An async generator's body does not run until the stream is iterated, so
     // the check inside it let `agentStream({ prompt })` SUCCEED and surfaced the
     // refusal wherever the stream was eventually consumed — possibly in another
     // function, possibly never. And it named `agent()`, about a method the
-    // caller had not called.
+    // caller had not called. An empty key is the mistake now: an absent one is
+    // a run on AI credits.
     const { rec, client: c } = client(anyRoute);
     const computer = await c.computers.get('vm-1');
     expect(() => computer.agentStream({ prompt: 'go', modelKey: '' })).toThrow(
-      /agentStream\(\) needs/,
+      /agentStream\(\): modelKey/,
     );
+    // So is a bad cost cap, built at the call for the same reason.
+    expect(() => computer.agentStream({ prompt: 'go', maxCostUsd: 0.1 })).toThrow(/maxCostUsd/);
     // Each entry point still names itself.
-    await expect(computer.agent({ prompt: 'go', modelKey: '' })).rejects.toThrow(/agent\(\) needs/);
+    await expect(computer.agent({ prompt: 'go', modelKey: ' ' })).rejects.toThrow(
+      /agent\(\): modelKey/,
+    );
     await expect(computer.agentOnce({ prompt: 'go', modelKey: '' })).rejects.toThrow(
-      /agentOnce\(\) needs/,
+      /agentOnce\(\): modelKey/,
     );
     expect(rec.calls.every((call) => !call.path.endsWith('/agent'))).toBe(true);
   });

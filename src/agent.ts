@@ -7,14 +7,16 @@
  * that stream.
  *
  * It runs on **your** Anthropic or OpenAI key, which the platform never stores: pass it
- * as `modelKey` and it travels on the one request as `X-Model-Key`. A step is
+ * as `modelKey` and it travels on the one request as `X-Model-Key`. Leave
+ * `modelKey` out and the run is FUNDED instead: it spends the account's
+ * Mandala AI credits, Anthropic only, capped by `maxCostUsd`. A step is
  * one ACTION on the desktop rather than one exchange with the model — several
  * can come out of a single reply, a paused turn costs tokens and no step, and a
  * `bash` call takes no screenshot — so `maxSteps` bounds the loop and bounds
  * what that key is billed only loosely.
  */
 
-import { MandalaError } from './errors.js';
+import { MandalaError, topUpLink } from './errors.js';
 import { num, str } from './models.js';
 import { isRecord } from './paths.js';
 
@@ -29,6 +31,18 @@ export type AgentStep = {
   detail?: string;
   /** Set when the action was refused. The loop continues; the model adapts. */
   error?: string;
+  /**
+   * A funded run's cumulative charge so far, in USD, markup included. Absent
+   * on a run on your own key. Several actions from one model reply repeat the
+   * same total: it is a running total, so do not add these up.
+   */
+  costUsd?: number;
+  /**
+   * The account's available AI credits after this step's model call, in USD.
+   * Can be negative after an overrun. Absent on a run on your own key, and
+   * when the platform could not read the balance after charging.
+   */
+  creditsRemainingUsd?: number;
 };
 
 /**
@@ -71,6 +85,13 @@ export type AgentResult = {
   text: string;
   usage: AgentUsage;
   /**
+   * What a funded run charged the account's AI credits, in USD, markup
+   * included. Absent on a run on your own key, whose model bill is your
+   * provider's. Can exceed `maxCostUsd` by the last model call: the cap stops
+   * the next call, not one already made.
+   */
+  costUsd?: number;
+  /**
    * Every step the run took, as the platform reported them.
    *
    * Carried only by `agentOnce()`'s non-streaming answer (`steps_taken`), and
@@ -109,6 +130,14 @@ export type AgentEvent =
        * caller deciding whether to retry needs it.
        */
       steps: AgentStep[];
+      /** What a funded run had charged when it failed, in USD. Absent on your own key. */
+      costUsd?: number;
+      /**
+       * Where to add AI credits, when the failure was the account running short
+       * of them: a `402` before the first model call. An absolute URL,
+       * resolved against the client's base URL when the platform sent a path.
+       */
+      topUpUrl?: string;
       /** The error frame as it arrived, for anything above that this SDK does not model. */
       raw: Record<string, unknown>;
     };
@@ -119,11 +148,30 @@ export type AgentArgs = {
   /** The task, in plain language. */
   prompt: string;
   /**
-   * Your Anthropic or OpenAI API key. The platform does not store one and will not run
-   * without it.
+   * Your Anthropic or OpenAI API key, sent as `X-Model-Key`. The platform does
+   * not store it, and your provider bills you directly.
+   *
+   * **Leave it out and the run spends the account's Mandala AI credits.** A
+   * funded run is Anthropic only, uses the platform's system prompt (so
+   * `system` is refused), and allows `claude-sonnet-5-5` (its default) or
+   * `claude-opus-5-5`. It needs a plan, a supported billing country, and
+   * at least $0.25 of credits for its first model call; short of that it is
+   * refused before it starts with `InsufficientCreditsError`. Running
+   * out part-way ends the run with `stop: 'credits_exhausted'`.
+   *
+   * Only `undefined` means "use credits". An empty or blank string is refused
+   * before the call, so a key read from an environment variable that is set but
+   * empty is caught rather than quietly billed to credits.
    */
-  modelKey: string;
-  /** Standing instructions carried into the run. */
+  modelKey?: string;
+  /**
+   * A funded run's budget in USD, from 0.25 to 20; the platform's default is
+   * 2. Checked before each model call, so the run ends with
+   * `stop: 'max_cost'` rather than start a call the cap cannot cover — and the
+   * last call can take the total past it. Ignored on a run on your own key.
+   */
+  maxCostUsd?: number;
+  /** Standing instructions carried into the run. Needs your own `modelKey`. */
   system?: string;
   /**
    * Step cap — how many ACTIONS the loop may take on the desktop.
@@ -163,6 +211,17 @@ export type AgentArgs = {
 //
 // `stop` is not routed through `str` either: it CLASSIFIES, and the comment on
 // it says why that is a stricter rule than being readable.
+//
+// The money fields are stricter again. A charge is a NUMBER the platform sent
+// or it is absent: never a coerced string, never `num`'s zero for "unreadable",
+// because a funded run reported as costing $0 is a worse answer than one
+// reported as not saying. Absent rather than thrown, for the reason above: a
+// frame is decoded inside the caller's `for await`, and a throw there would end
+// a running agent over a figure it could have done without.
+
+/** A USD amount the platform sent: a finite number, nonnegative unless `signed`. */
+const usd = (v: unknown, signed = false): number | undefined =>
+  typeof v === 'number' && Number.isFinite(v) && (signed || v >= 0) ? v : undefined;
 
 export function toAgentUsage(d: unknown): AgentUsage {
   const u = isRecord(d) ? d : {};
@@ -176,7 +235,7 @@ export function toAgentUsage(d: unknown): AgentUsage {
 
 export function toAgentStep(d: unknown, fallbackN: number): AgentStep {
   const s = isRecord(d) ? d : {};
-  return {
+  const step: AgentStep = {
     n: num(s.n, fallbackN),
     tool: str(s.tool),
     // Absent stays absent: `undefined` here is "the platform did not send one",
@@ -186,6 +245,13 @@ export function toAgentStep(d: unknown, fallbackN: number): AgentStep {
     detail: s.detail == null ? undefined : str(s.detail),
     error: s.error == null ? undefined : str(s.error),
   };
+  const cost = usd(s.cost_usd);
+  if (cost !== undefined) step.costUsd = cost;
+  // Signed: an overrun can leave the account below zero, and that is a real
+  // balance rather than a malformed one.
+  const remaining = usd(s.credits_remaining_usd, true);
+  if (remaining !== undefined) step.creditsRemainingUsd = remaining;
+  return step;
 }
 
 export function toAgentResult(d: unknown): AgentResult {
@@ -206,6 +272,8 @@ export function toAgentResult(d: unknown): AgentResult {
     usage: toAgentUsage(r.usage),
     raw: { ...r },
   };
+  const cost = usd(r.cost_usd);
+  if (cost !== undefined) result.costUsd = cost;
   // Present only when the answer carried a list: the non-streaming form sends
   // it and the streaming `done` frame does not, so absent is "not sent", never
   // "no steps".
@@ -222,11 +290,14 @@ export function toAgentResult(d: unknown): AgentResult {
  * The platform is free to add event types, and a client that fell over on the
  * first unrecognised one would turn a forward-compatible addition into an
  * outage.
+ *
+ * `baseUrl` is the client's, and resolves an `error` frame's `top_up_url`.
  */
 export function toAgentEvent(
   event: string,
   data: unknown,
   stepCount: number,
+  baseUrl?: string,
 ): AgentEvent | undefined {
   switch (event) {
     case 'step':
@@ -258,7 +329,7 @@ export function toAgentEvent(
       // cannot be read is a zero rather than a throw inside the caller's loop,
       // and `steps` is an array or it is empty — never a scalar spread into one.
       const rawSteps = Array.isArray(e?.steps) ? e.steps : [];
-      return {
+      const failed: Extract<AgentEvent, { type: 'error' }> = {
         type: 'error',
         error: said || 'the run failed',
         status: num(e?.status),
@@ -266,6 +337,11 @@ export function toAgentEvent(
         steps: rawSteps.map((s, i) => toAgentStep(s, i + 1)),
         raw: e ? { ...e } : {},
       };
+      const cost = usd(e?.cost_usd);
+      if (cost !== undefined) failed.costUsd = cost;
+      const topUp = topUpLink(e?.top_up_url, baseUrl);
+      if (topUp !== undefined) failed.topUpUrl = topUp;
+      return failed;
     }
     default:
       return undefined;

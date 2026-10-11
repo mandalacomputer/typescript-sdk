@@ -9,6 +9,41 @@ This is the summary you read to decide whether to upgrade.
 
 ## [Unreleased]
 
+### Added
+
+- **Run the agent on the account's AI credits.** `agent()`, `agentOnce()` and
+  `agentStream()` take `modelKey` as optional: leave it out and the run spends
+  the account's Mandala AI credits (Anthropic only, the platform's system
+  prompt, `claude-sonnet-5-5` or `claude-opus-5-5`). `maxCostUsd` (0.25 to 20,
+  default 2) caps a funded run, which then ends with `stop: 'max_cost'`; one
+  that runs out part-way ends with `stop: 'credits_exhausted'`. A funded
+  result carries `costUsd`, each step `costUsd` and `creditsRemainingUsd`, and
+  an Activities row `funded` and `costUsd`. An account whose credits cannot
+  start the run is refused with the new `InsufficientCreditsError`, whose
+  `topUpUrl` is the billing page, as an absolute link. Needs a platform with
+  funded runs enabled for the account; otherwise a run without a key is
+  refused with a 400 as before.
+- **Read the AI credit ledger.** `client.credits.read({ before, limit })`
+  returns a `CreditReport`: the available balance, held credits, debt, whether
+  the account is frozen, this period's grant, the live lots, and one page of
+  the journal, newest first, with `nextBefore` for the next page. Amounts are
+  integer USD micros, and the report is decoded strictly. `mandala credits`
+  prints it, in dollars, or in micros with `--json`.
+- **`mandala agent run` on credits.** Without `MANDALA_MODEL_KEY` (unset or
+  empty) the run spends the account's AI credits, and `--max-cost-usd` caps it.
+  A run the credits cannot start fails with the error code
+  `insufficient_credits` and the billing link.
+
+### Changed
+
+- **An omitted `modelKey` is no longer refused.** It used to be a
+  `ValidationError` before the call; it is now a run on AI credits. An empty
+  or blank `modelKey` is still refused, so a key read from an environment
+  variable that is set but empty does not quietly become a funded run. A 402
+  carrying `top_up_url` on the agent routes is `InsufficientCreditsError`; every
+  other 402 there is still `ModelProviderError` on your own key, and a plain
+  `APIError` on a funded run, which sent no key to blame.
+
 ### Fixed
 
 - **Install beside an older `@anthropic-ai/sdk`.** 0.11.0 declared its optional

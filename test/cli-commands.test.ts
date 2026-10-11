@@ -7,7 +7,7 @@ import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { main } from '../src/cli.js';
-import { dashboardUrl, type LegacyCommands, runCli } from '../src/cli-commands.js';
+import { dashboardUrl, type LegacyCommands, runCli, usdMicros } from '../src/cli-commands.js';
 import { COMMANDS, type Flag, GLOBAL_FLAGS, help, parseArgs } from '../src/cli-options.js';
 import { type CliIO, runtime } from '../src/cli-runtime.js';
 import { looksLikeSecretValue } from '../src/cli-secrets.js';
@@ -19,6 +19,7 @@ import {
   buildEvents,
   type Call,
   COMPUTER,
+  CREDITS,
   DIRECTORY,
   EXEC_OK,
   guestFile,
@@ -2198,6 +2199,161 @@ describe('agent streams and cancellation', () => {
     expect(result.out).toContain(`${stamp} step:`);
     expect(result.out).toContain(`${stamp} done:`);
     expect(result.out).not.toContain('\u001b');
+  });
+});
+
+describe('AI credits and funded agent runs', () => {
+  const sse = (event: string, data: unknown) =>
+    new Response(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`, {
+      headers: { 'content-type': 'text/event-stream' },
+    });
+
+  it('reads credits as the decoded report in snake_case, amounts in micros', async () => {
+    const h = harness();
+    const result = await h.run(['credits']);
+    expect(result.code).toBe(0);
+    expect(h.rec.routes()).toEqual([['GET', 'credits']]);
+    expect(h.rec.last().query).toEqual({});
+    const { raw: _raw, ...expected } = { ...CREDITS, raw: undefined };
+    expect(result.frames[0]).toMatchObject({ command: 'credits', ok: true });
+    expect(result.frames[0].data).toEqual(expected);
+  });
+
+  it('forwards --before and --limit', async () => {
+    const h = harness();
+    expect((await h.run(['credits', '--before', '41', '--limit', '10'])).code).toBe(0);
+    expect(h.rec.last().query).toEqual({ before: '41', limit: '10' });
+  });
+
+  it.each([
+    [1, ['credits', '--before', '0']],
+    [1, ['credits', '--before', '1.5']],
+    [1, ['credits', '--limit', '101']],
+    [2, ['credits', 'extra']],
+    [2, ['credits', '--limit']],
+  ])('exits %i for %j, making no requests', async (code, argv) => {
+    const h = harness();
+    expect((await h.run(argv)).code).toBe(code);
+    expect(h.rec.calls).toEqual([]);
+  });
+
+  it('prints dollars, the grant, the lots and the next page for a person', async () => {
+    const h = harness(anyRoute, undefined, { NO_COLOR: '1' });
+    const result = await h.run(['credits'], false);
+    expect(result.code).toBe(0);
+    expect(result.out).toContain('AI credits (account-wide)');
+    expect(result.out).toContain(
+      'Available: $11.845678 (balance $12.345678; held $0.25; debt $0.25)',
+    );
+    expect(result.out).toContain("This period's grant: $10.00 issued, $2.654322 used");
+    expect(result.out).toContain(
+      '  topup lot_topup: $5.00 left of $5.00; expires 2027-10-02T09:30:00.000Z',
+    );
+    expect(result.out).toContain(
+      '  #42 2026-10-09T12:00:00.000Z debit $1.234567; claude-sonnet-5-5; run run-1 call 3',
+    );
+    expect(result.out).toContain('Older entries: mandala credits --before 41');
+    expect(result.out).not.toContain('Frozen');
+  });
+
+  it('formats micros exactly', () => {
+    expect(usdMicros(0)).toBe('$0.00');
+    expect(usdMicros(1)).toBe('$0.000001');
+    expect(usdMicros(250_000)).toBe('$0.25');
+    expect(usdMicros(5_000_000)).toBe('$5.00');
+    expect(usdMicros(1_234_500)).toBe('$1.2345');
+    expect(usdMicros(-1_500_000)).toBe('-$1.50');
+    expect(usdMicros(-Number.MAX_SAFE_INTEGER)).toBe('-$9007199254.740991');
+  });
+
+  it('runs an agent on credits when MANDALA_MODEL_KEY is unset or empty, with --max-cost-usd', async () => {
+    for (const environment of [{ MANDALA_MODEL_KEY: undefined }, { MANDALA_MODEL_KEY: '  ' }]) {
+      const h = harness(anyRoute, undefined, environment);
+      const result = await h.run([
+        'agent',
+        'run',
+        'work',
+        '--computer',
+        COMPUTER.id,
+        '--max-cost-usd',
+        '1.5',
+      ]);
+      expect(result.code).toBe(0);
+      expect(h.rec.last().body).toMatchObject({ prompt: 'work', max_cost_usd: 1.5 });
+      expect(Object.keys(h.rec.last().headers).map((k) => k.toLowerCase())).not.toContain(
+        'x-model-key',
+      );
+    }
+  });
+
+  it.each(['0.1', '21'])('refuses --max-cost-usd %s before any request', async (cap) => {
+    const h = harness();
+    const result = await h.run(['agent', 'run', 'work', '--computer', 'vm', '--max-cost-usd', cap]);
+    expect(result.code).toBe(1);
+    expect(h.rec.calls).toEqual([]);
+  });
+
+  it('reports a funded run the credits cannot start as insufficient_credits, with the link', async () => {
+    const frame = {
+      error: 'Insufficient AI credits',
+      status: 402,
+      top_up_url: '/billing',
+      cost_usd: 0,
+      usage: { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0 },
+      steps: [],
+    };
+    const h = harness(
+      (call) => (call.path.endsWith('/agent') ? sse('error', frame) : anyRoute(call)),
+      undefined,
+      {
+        MANDALA_MODEL_KEY: '',
+      },
+    );
+    const result = await h.run(['agent', 'run', 'work', '--computer', COMPUTER.id]);
+    expect(result.code).toBe(1);
+    expect(result.frames.at(-1).data.error).toMatchObject({
+      code: 'insufficient_credits',
+      details: { status: 402, top_up_url: 'https://api.test/billing', cost_usd: 0 },
+    });
+    expect(result.frames.at(-1).data.error.message).toContain('https://api.test/billing');
+  });
+
+  it('reports the same refusal answered before the stream under the same code', async () => {
+    const h = harness(
+      (call) =>
+        call.path.endsWith('/agent')
+          ? json({ error: 'Insufficient AI credits', top_up_url: '/billing' }, { status: 402 })
+          : anyRoute(call),
+      undefined,
+      { MANDALA_MODEL_KEY: '' },
+    );
+    const result = await h.run(['agent', 'run', 'work', '--computer', COMPUTER.id]);
+    expect(result.code).toBe(1);
+    expect(result.frames.at(-1).data.error).toMatchObject({
+      code: 'insufficient_credits',
+      status: 402,
+    });
+    expect(result.frames.at(-1).data.error.message).toContain('https://api.test/billing');
+  });
+
+  it('puts the run cost in the done frame and on each step', async () => {
+    const h = harness((call) =>
+      call.path.endsWith('/agent')
+        ? new Response(
+            `event: step\ndata: ${JSON.stringify({ n: 1, tool: 'bash', cost_usd: 0.3, credits_remaining_usd: 1.2 })}\n\n` +
+              `event: done\ndata: ${JSON.stringify({ steps: 1, stop: 'credits_exhausted', text: 'out', cost_usd: 0.3 })}\n\n`,
+            { headers: { 'content-type': 'text/event-stream' } },
+          )
+        : anyRoute(call),
+    );
+    const result = await h.run(['agent', 'run', 'work', '--computer', COMPUTER.id]);
+    expect(result.code).toBe(1);
+    expect(result.frames[0].data).toMatchObject({ cost_usd: 0.3, credits_remaining_usd: 1.2 });
+    expect(result.frames[1].data).toMatchObject({
+      stop: 'credits_exhausted',
+      finished: false,
+      cost_usd: 0.3,
+    });
   });
 });
 
