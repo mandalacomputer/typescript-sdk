@@ -140,7 +140,7 @@ const executable = process.env.MANDALA_TEST_CHROMIUM;
 // 127.0.0.1 and localhost are different sites, so each frame below is cross-site
 // from its parent and runs as its own target.
 const workerAttempts = (port: number, where: string) =>
-  `try{delete window.Worker}catch{}try{window.Worker=function(){}}catch{}const results=[];for(const [kind,make] of [['url',()=>new Worker('/escape-worker.js?${where}-url')],['blob',()=>new Worker(URL.createObjectURL(new Blob(["fetch('http://127.0.0.1:${port}/worker-escape?${where}-blob')"],{type:'text/javascript'})))],['data',()=>new Worker("data:text/javascript,fetch('http://127.0.0.1:${port}/worker-escape?${where}-data')")]]){let r;try{make();r='created'}catch(e){r=e.name}results.push(kind+':'+r)}`;
+  `const results=[];for(const [kind,make] of [['url',()=>new Worker('/escape-worker.js?${where}-url')],['blob',()=>new Worker(URL.createObjectURL(new Blob(["fetch('http://127.0.0.1:${port}/worker-escape?${where}-blob')"],{type:'text/javascript'})))],['data',()=>new Worker("data:text/javascript,fetch('http://127.0.0.1:${port}/worker-escape?${where}-data')")],['again',()=>{try{delete window.Worker}catch{}try{window.Worker=function(){}}catch{}return new Worker('/escape-worker.js?${where}-again')}]]){let r;try{make();r='created'}catch(e){r=e.name}results.push(kind+':'+r)}`;
 const downloadFrame = (port: number) =>
   `<iframe src="http://localhost:${port}/dl-outer" style="position:absolute;left:0;top:0;border:0;width:600px;height:400px"></iframe>`;
 const pages = (port: number): Record<string, [string, string | Buffer]> => ({
@@ -197,7 +197,7 @@ const pages = (port: number): Record<string, [string, string | Buffer]> => ({
   // /worker-escape, which the URL policy refuses.
   '/escape-host': [
     'text/html',
-    `<body><p id="state">trying</p><iframe src="/escape-frame?same"></iframe><iframe src="http://localhost:${port}/escape-frame?cross"></iframe><script>${workerAttempts(port, 'host')};const blank=document.createElement('iframe');document.body.append(blank);let r;try{new blank.contentWindow.Worker('/escape-worker.js?blank');r='created'}catch(e){r=e.name}results.push('blank:'+r);document.getElementById('state').textContent=results.join(' ')</script></body>`,
+    `<body><p id="state">trying</p><iframe src="/escape-frame?same"></iframe><iframe src="http://localhost:${port}/escape-frame?cross"></iframe><script>try{window.open('/escape-frame?popup')}catch{}${workerAttempts(port, 'host')};const blank=document.createElement('iframe');document.body.append(blank);let r;try{new blank.contentWindow.Worker('/escape-worker.js?blank');r='created'}catch(e){r=e.name}results.push('blank:'+r);document.getElementById('state').textContent=results.join(' ')</script></body>`,
   ],
   '/escape-frame': ['text/html', `<body><script>${workerAttempts(port, 'frame')}</script></body>`],
   '/escape-worker.js': [
@@ -921,7 +921,7 @@ describe.skipIf(!executable)('real Chromium through Anthropic toolResult', () =>
       expect(seen.filter((url) => url.includes('worker'))).toEqual([]);
       // Construction itself is refused, here and in the about:blank frame.
       expect(attempts).toContain(
-        'url:SecurityError blob:SecurityError data:SecurityError blank:SecurityError',
+        'url:SecurityError blob:SecurityError data:SecurityError again:SecurityError blank:SecurityError',
       );
       expect(browser.sessionStatus.state).toBe('active');
     },
