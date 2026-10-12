@@ -91,13 +91,22 @@ it('a foreign title update does not invalidate children in a pending ownership s
   await expect(owners.resolve('live-child')).resolves.toMatchObject({ context: 'foreign-context' });
 });
 
-it.each([false, true])(
-  'composes foreign page/OOPIF snapshots while preserving newer detach events (detached: %s)',
-  async (detached) => {
+it.each([
+  [false, false],
+  [true, false],
+  [false, true],
+  [true, true],
+])(
+  'composes foreign page/OOPIF snapshots while preserving events (detached: %s, unrelated event: %s)',
+  async (detached, unrelatedEvent) => {
     let owners!: BrowserRequestOwners;
     let pageDone!: () => void;
     const pageSnapshotRecorded = new Promise<void>((resolve) => {
       pageDone = resolve;
+    });
+    let oopStarted!: () => void;
+    const oopSnapshotStarted = new Promise<void>((resolve) => {
+      oopStarted = resolve;
     });
     const send = vi.fn(async (method: string, params?: Record<string, any>, session?: string) => {
       if (method === 'Target.getTargetInfo') throw new Error('No target for nested frame');
@@ -110,7 +119,10 @@ it.each([false, true])(
             { targetId: 'foreign-worker', type: 'worker', browserContextId: 'foreign-context' },
           ],
         };
-      if (method === 'Target.attachToTarget') return { sessionId: `probe-${params!.targetId}` };
+      if (method === 'Target.attachToTarget') {
+        if (unrelatedEvent && params!.targetId === 'foreign-page') await oopSnapshotStarted;
+        return { sessionId: `probe-${params!.targetId}` };
+      }
       if (method === 'Page.getFrameTree') {
         if (session === 'probe-foreign-page')
           return {
@@ -120,8 +132,12 @@ it.each([false, true])(
             },
           };
         expect(session).toBe('probe-foreign-frame');
-        // Both queries started, then the parent snapshot recorded only its
-        // OOPIF placeholder. It must not invalidate the deeper iframe tree.
+        // In the interleaved case the OOPIF snapshot has already captured its
+        // watermark, then an unrelated frame event advances the global revision
+        // before the parent's snapshot starts. Its later watermark must not
+        // make the placeholder invalidate the deeper OOPIF snapshot.
+        if (unrelatedEvent) owners.owned('unrelated-child', 'own-tab', 'own-session');
+        oopStarted();
         await pageSnapshotRecorded;
         if (detached) owners.removed('foreign-frame');
         return {

@@ -6,6 +6,7 @@ export type RequestOwner = {
   live: boolean;
   source?: string;
   parent?: string;
+  // Last identity/lifecycle event for this frame, never a snapshot watermark.
   revision: number;
   epoch: number;
 };
@@ -35,7 +36,7 @@ export class BrowserRequestOwners {
     tab?: string,
     source?: string,
     parent?: unknown,
-    snapshotRevision?: number,
+    fromSnapshot = false,
   ): void {
     if (typeof id !== 'string' || !id) throw new Error('Invalid frame identity');
     const previous = this.frames.get(id);
@@ -48,9 +49,10 @@ export class BrowserRequestOwners {
       source,
       parent: typeof parent === 'string' ? parent : previous?.parent,
       live: true,
-      // Compatible tree snapshots can overlap (a page's OOPIF placeholder and
-      // that OOPIF's own tree). Only events invalidate in-flight snapshots.
-      revision: snapshotRevision ?? ++this.#revision,
+      // Snapshots with different start watermarks can still describe the same
+      // live frame. Preserve its last event revision so another frame's event
+      // cannot make a compatible snapshot invalidate an in-flight subtree.
+      revision: fromSnapshot ? (previous?.revision ?? 0) : ++this.#revision,
       epoch: previous?.epoch ?? 0,
     });
   }
@@ -190,7 +192,7 @@ export class BrowserRequestOwners {
     const previous = this.frames.get(id);
     // Events newer than this snapshot, including detach tombstones, win.
     if (previous && previous.revision > revision) return;
-    this.#record(id, context, tab, source, tree.frame.parentId ?? parent, revision);
+    this.#record(id, context, tab, source, tree.frame.parentId ?? parent, true);
     for (const child of tree.childFrames ?? [])
       this.#tree(child, context, tab, source, revision, id, budget);
   }
