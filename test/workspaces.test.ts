@@ -47,6 +47,7 @@ describe('client.workspaces', () => {
         role: 'owner',
         acceptedAt: WORKSPACE_MEMBER.accepted_at,
         suspended: false,
+        seatSuspended: false,
         raw: WORKSPACE_MEMBER,
       },
     ]);
@@ -62,6 +63,45 @@ describe('client.workspaces', () => {
     const [member] = await client.workspaces.members(WORKSPACE.id);
     expect(member?.name).toBeNull();
   });
+
+  it.each([
+    { suspended: false, seat_suspended: false },
+    { suspended: false, seat_suspended: true },
+    { suspended: true, seat_suspended: false },
+    { suspended: true, seat_suspended: true },
+  ])('keeps sign-in and seat suspension independent (%j)', async (flags) => {
+    const row = { ...WORKSPACE_MEMBER, ...flags, future_field: 'kept' };
+    const { client } = sdk(() => json([row]));
+    const [member] = await client.workspaces.members(WORKSPACE.id);
+    expect(member?.suspended).toBe(flags.suspended);
+    expect(member?.seatSuspended).toBe(flags.seat_suspended);
+    expect(member?.raw).toEqual(row);
+  });
+
+  it.each([false, true])(
+    'leaves an older server seat state unknown when suspended is %s',
+    async (suspended) => {
+      const { seat_suspended: _seat, ...older } = WORKSPACE_MEMBER;
+      const row = { ...older, suspended };
+      const { client } = sdk(() => json([row]));
+      const [member] = await client.workspaces.members(WORKSPACE.id);
+      expect(member?.suspended).toBe(suspended);
+      expect(member?.seatSuspended).toBeUndefined();
+      expect(member).not.toHaveProperty('seatSuspended');
+      expect(member?.raw).toEqual(row);
+      expect(member?.raw).not.toHaveProperty('seat_suspended');
+    },
+  );
+
+  it.each([null, 0, 1, 'false', 'true', [], {}].map((seat_suspended) => ({ seat_suspended })))(
+    'refuses a supplied seat_suspended that is not a boolean (%j)',
+    async ({ seat_suspended }) => {
+      const { client } = sdk(() => json([{ ...WORKSPACE_MEMBER, seat_suspended }]));
+      await expect(client.workspaces.members(WORKSPACE.id)).rejects.toThrow(
+        /seat_suspended.*boolean/,
+      );
+    },
+  );
 
   it('refuses a workspace without an id, or a member who cannot say whether they are suspended', async () => {
     const noId = sdk(() => json([{ name: 'x' }]));

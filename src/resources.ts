@@ -2597,9 +2597,11 @@ export class Workspaces {
   }
 
   /**
-   * The people who reach a workspace, oldest member first: the account's
-   * accepted members, since everybody on the account reaches every workspace
-   * at their account role (invitations not yet accepted are left out).
+   * The account's accepted members, oldest member first, with their account
+   * role in every workspace. Invitations not yet accepted are left out.
+   * Members waiting for a plan seat remain listed with `seatSuspended: true`;
+   * the separate `suspended` flag is a global sign-in restriction. An older
+   * server may omit the seat state, leaving `seatSuspended` undefined.
    *
    * A key confined to a workspace is refused with a
    * {@link PermissionDeniedError}, because the list is the whole account's:

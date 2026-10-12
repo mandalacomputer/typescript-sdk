@@ -1899,6 +1899,28 @@ describe('snapshots', () => {
     expect(members.frames.at(-1).data).toEqual([WORKSPACE_MEMBER]);
   });
 
+  it.each([true, false])(
+    'preserves raw workspace seat state with jsonMode=%s',
+    async (jsonMode) => {
+      const { seat_suspended: _seat, ...older } = WORKSPACE_MEMBER;
+      const rows = [
+        { ...WORKSPACE_MEMBER, suspended: false, seat_suspended: false },
+        { ...WORKSPACE_MEMBER, suspended: false, seat_suspended: true },
+        { ...WORKSPACE_MEMBER, suspended: true, seat_suspended: false },
+        { ...WORKSPACE_MEMBER, suspended: true, seat_suspended: true },
+        older,
+      ];
+      const h = harness((call) =>
+        call.path === `/workspaces/${WORKSPACE.id}/members` ? json(rows) : anyRoute(call),
+      );
+      const result = await h.run(['workspaces', 'members', WORKSPACE.id], jsonMode);
+      expect(result.code).toBe(0);
+      const printed = jsonMode ? result.frames.at(-1).data : JSON.parse(result.out);
+      expect(printed).toEqual(rows);
+      expect(printed.at(-1)).not.toHaveProperty('seat_suspended');
+    },
+  );
+
   // A workspace by name, as a computer is taken by name (OPL-5471). It was
   // sent as typed, and `workspaces get customers` answered not found.
   it.each([
