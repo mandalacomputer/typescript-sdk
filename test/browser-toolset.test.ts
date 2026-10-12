@@ -1230,7 +1230,6 @@ describe.skipIf(!executable)('real Chromium through Anthropic toolResult', () =>
         );
         drivers.push(driver);
         const commands = vi.spyOn(driver, 'send');
-        let closing: Promise<void> | undefined;
         try {
           let socket: InstanceType<typeof WebSocket> | undefined;
           const originalSend = WebSocket.prototype.send;
@@ -1273,7 +1272,12 @@ describe.skipIf(!executable)('real Chromium through Anthropic toolResult', () =>
           await expect.poll(() => entered).toBe(true);
           expect(hits).not.toContain('/root-held-denied');
           if (ending === 'disconnect') socket!.terminate();
-          else closing = driver.close();
+          else {
+            // Exercise a graceful downstream disconnect without letting the
+            // SDK dispose its context first. Cleanup must come from the guardian.
+            socket!.close();
+            await expect.poll(() => socket!.readyState, { timeout: 5000 }).toBe(WebSocket.CLOSED);
+          }
 
           await expect
             .poll(async () => (await control.send('Target.getBrowserContexts')).browserContextIds, {
@@ -1284,9 +1288,14 @@ describe.skipIf(!executable)('real Chromium through Anthropic toolResult', () =>
             foreign.browserContextId,
           );
           await expect.poll(() => driver.sessionStatus().state).toBe('ended');
+          await foreignPage.evaluate(() => fetch('/foreign-after-guardian'));
+          expect(hits).toContain('/foreign-after-guardian');
+          expect(hits).not.toContain('/root-held-denied');
+          expect(
+            commands.mock.calls.filter(([method]) => method === 'Target.disposeBrowserContext'),
+          ).toEqual([]);
           const lateCommandStart = commands.mock.calls.length;
           release();
-          await closing;
           await driver.close();
           expect(
             commands.mock.calls
@@ -1295,14 +1304,14 @@ describe.skipIf(!executable)('real Chromium through Anthropic toolResult', () =>
                 ([method]) => method === 'Fetch.continueRequest' || method === 'Fetch.failRequest',
               ),
           ).toEqual([]);
-          await foreignPage.evaluate(() => fetch('/foreign-after-guardian'));
-          expect(hits).toContain('/foreign-after-guardian');
+          // Observe beyond context removal and callback settlement so a delayed
+          // localhost request cannot be mistaken for successful interception.
+          await new Promise((resolve) => setTimeout(resolve, 1000));
           expect(hits).not.toContain('/root-held-denied');
           await foreignContext.close();
         } finally {
           try {
             release();
-            await closing;
             await driver.close();
           } finally {
             commands.mockRestore();
