@@ -2801,7 +2801,8 @@ export class Computer {
    *
    * Polls 250ms after the first probe, then doubling up to `pollMs`, so a
    * session that appears a moment after a probe is not a whole interval late;
-   * a refusal polled through waits `pollMs` (or its `Retry-After`).
+   * the no-desktop 409 without a reason uses that ramp too. Other retryable
+   * failures wait `pollMs` (or their `Retry-After`).
    */
   async waitForDesktop(opts: WaitOptions = {}): Promise<this> {
     const { timeoutMs = 180_000, pollMs = 3_000, signal } = opts;
@@ -2810,7 +2811,7 @@ export class Computer {
     const deadline = Date.now() + timeoutMs;
     let probed = false;
     // Ordinary "not yet" answers so far, which is what ramps the sleep: see
-    // rampDelay. A refusal polled through sets its own delay and leaves it.
+    // rampDelay. Other retryable failures set their own delay and leave it.
     let notYet = 0;
     for (;;) {
       let delayMs: number | undefined;
@@ -2840,7 +2841,11 @@ export class Computer {
           // a 429 or a `contention` 409 is the moment too. A 4xx about the
           // request is not, and must not become a timeout.
           if (!isDeadlineAbort(err) && !isTransientForPoll(err)) throw err;
-          delayMs = retryDelay(pollMs, err);
+          // A reasonless no-desktop response is an ordinary "not yet" for
+          // this probe. Keep the conservative retry delay for other failures.
+          if (!(err instanceof APIError && err.status === 409 && err.reason === undefined)) {
+            delayMs = retryDelay(pollMs, err);
+          }
         }
       }
       if (Date.now() >= deadline) {

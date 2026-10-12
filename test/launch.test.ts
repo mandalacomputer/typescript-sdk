@@ -15,6 +15,9 @@ const computer = (status = 'running', held = 1024) => ({
   running_ram_mb: held,
 });
 const guest = { exit_code: 0, stdout_b64: '', stderr_b64: '' };
+const NO_DESKTOP = {
+  error: 'no active desktop session in the guest (it may still be booting, or nobody is logged in)',
+};
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -1284,10 +1287,6 @@ describe('launch with an egress proxy', () => {
 });
 
 describe('launch waits for the desktop session', () => {
-  const NO_DESKTOP = {
-    error:
-      'no active desktop session in the guest (it may still be booting, or nobody is logged in)',
-  };
   const isDesktopProbe = (call: { path: string; body: unknown }) =>
     call.path.endsWith('/exec') && (call.body as { session?: string }).session === 'desktop';
   const desktopComputer = (extra: Record<string, unknown> = {}) => ({
@@ -1544,27 +1543,140 @@ describe('fast first poll', () => {
     return { probes, get: () => client.computers.get('launch-42') };
   };
 
-  it('waitForDesktop probes again at 250ms, doubling up to pollMs', async () => {
+  it.each([
+    { label: 'a reasonless 409', body: NO_DESKTOP, status: 409 },
+    { label: 'an unfinished probe', body: UNFINISHED, status: 200 },
+  ])('waitForDesktop ramps after $label, doubling up to pollMs', async ({ body, status }) => {
     vi.useFakeTimers({ toFake: ['Date', 'performance', 'setTimeout', 'clearTimeout'] });
     let n = 0;
-    const { probes, get } = desktopGet(() => json(++n < 6 ? UNFINISHED : guest));
+    const { probes, get } = desktopGet(() => (++n < 6 ? json(body, { status }) : json(guest)));
     const c = await get();
     await settle(c.waitForDesktop({ timeoutMs: 60_000, pollMs: 1_500 }));
     expect(gaps(probes)).toEqual([250, 500, 1_000, 1_500, 1_500]);
   });
 
-  it('waitForDesktop waits out a 429 Retry-After rather than ramping', async () => {
+  it('a bound launch notices the desktop within 250ms of a reasonless 409', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'performance', 'setTimeout', 'clearTimeout'] });
+    const probes: number[] = [];
+    const rec = recorder((call) => {
+      if (call.path.endsWith('/exec')) {
+        if ((call.body as { session?: string }).session === 'desktop') {
+          probes.push(Date.now());
+          if (probes.length === 1) return json(NO_DESKTOP, { status: 409 });
+        }
+        return json(guest);
+      }
+      return json(bound(false, { os: 'linux', secrets_applied: RECEIPT }));
+    });
+    const client = new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: rec.fetch });
+    const started = Date.now();
+    const c = await settle(
+      client.computers.launch({ secrets: [{ secretId: BINDING.secret_id, env: 'TOKEN' }] }),
+    );
+    expect(c.secretsDelivering).toBe(false);
+    expect(gaps(probes)).toEqual([250]);
+    expect(Date.now() - started).toBe(250);
+    expect(rec.last().body).toEqual({ command: 'true', session: 'desktop', timeout_s: 5 });
+  });
+
+  it('waitForDesktop respects a pollMs below the first ramp delay', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'performance', 'setTimeout', 'clearTimeout'] });
+    let n = 0;
+    const { probes, get } = desktopGet(() =>
+      ++n < 4 ? json(NO_DESKTOP, { status: 409 }) : json(guest),
+    );
+    const c = await get();
+    await settle(c.waitForDesktop({ pollMs: 100 }));
+    expect(gaps(probes)).toEqual([100, 100, 100]);
+  });
+
+  it.each([
+    { label: 'contention', status: 409, reason: 'contention', retryAfter: undefined, delay: 3_000 },
+    {
+      label: 'another reason',
+      status: 409,
+      reason: 'starting',
+      retryAfter: undefined,
+      delay: 3_000,
+    },
+    { label: 'rate limiting', status: 429, reason: undefined, retryAfter: undefined, delay: 3_000 },
+    { label: 'Retry-After', status: 429, reason: undefined, retryAfter: '5', delay: 5_000 },
+    { label: 'bad gateway', status: 502, reason: undefined, retryAfter: undefined, delay: 3_000 },
+    {
+      label: 'unavailable service',
+      status: 503,
+      reason: undefined,
+      retryAfter: undefined,
+      delay: 3_000,
+    },
+  ])('waitForDesktop keeps the retry delay for $label and resumes the ramp', async (failure) => {
     vi.useFakeTimers({ toFake: ['Date', 'performance', 'setTimeout', 'clearTimeout'] });
     let n = 0;
     const { probes, get } = desktopGet(() => {
       n++;
-      if (n === 1) return json(UNFINISHED);
+      if (n === 1) return json(NO_DESKTOP, { status: 409 });
       if (n === 2)
-        return json({ error: 'rate limited' }, { status: 429, headers: { 'Retry-After': '5' } });
+        return json(
+          { error: failure.label, reason: failure.reason },
+          {
+            status: failure.status,
+            headers: failure.retryAfter ? { 'Retry-After': failure.retryAfter } : {},
+          },
+        );
       return json(n < 4 ? UNFINISHED : guest);
     });
     const c = await get();
     await settle(c.waitForDesktop({ timeoutMs: 60_000, pollMs: 3_000 }));
-    expect(gaps(probes)).toEqual([250, 5_000, 500]);
+    expect(gaps(probes)).toEqual([250, failure.delay, 500]);
+  });
+
+  it('waitForDesktop caps the no-desktop sleep at its deadline without another probe', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'performance', 'setTimeout', 'clearTimeout'] });
+    const { probes, get } = desktopGet(() => json(NO_DESKTOP, { status: 409 }));
+    const c = await get();
+    const started = Date.now();
+    const result = c.waitForDesktop({ timeoutMs: 600 }).catch((err) => err);
+    await vi.advanceTimersByTimeAsync(600);
+    expect(await result).toBeInstanceOf(TimeoutError);
+    expect(probes.map((stamp) => stamp - started)).toEqual([0, 250]);
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(probes).toHaveLength(2);
+  });
+
+  it('waitForDesktop preserves cancellation during the no-desktop sleep', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'performance', 'setTimeout', 'clearTimeout'] });
+    const { probes, get } = desktopGet(() => json(NO_DESKTOP, { status: 409 }));
+    const c = await get();
+    const controller = new AbortController();
+    const reason = new Error('cancel desktop wait');
+    const result = c.waitForDesktop({ signal: controller.signal }).catch((err) => err);
+    await vi.advanceTimersByTimeAsync(100);
+    controller.abort(reason);
+    expect(await result).toBe(reason);
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(probes).toHaveLength(1);
+  });
+
+  it.each([
+    { label: 'forbidden', status: 403, reason: undefined },
+    { label: 'computer is not running', status: 409, reason: 'unavailable' },
+    { label: 'file exists', status: 409, reason: 'exists' },
+    { label: 'origin timeout', status: 524, reason: undefined },
+  ])('waitForDesktop surfaces $label immediately after a no-desktop response', async (failure) => {
+    vi.useFakeTimers({ toFake: ['Date', 'performance', 'setTimeout', 'clearTimeout'] });
+    let n = 0;
+    const { probes, get } = desktopGet(() =>
+      ++n === 1
+        ? json(NO_DESKTOP, { status: 409 })
+        : json({ error: failure.label, reason: failure.reason }, { status: failure.status }),
+    );
+    const c = await get();
+    const result = c.waitForDesktop().catch((err) => err);
+    await vi.advanceTimersByTimeAsync(250);
+    const error = await result;
+    expect(error).not.toBeInstanceOf(TimeoutError);
+    expect(error.status).toBe(failure.status);
+    expect(error.reason).toBe(failure.reason);
+    expect(gaps(probes)).toEqual([250]);
   });
 });
