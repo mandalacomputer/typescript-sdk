@@ -56,6 +56,12 @@ export const ALLOWED: ReadonlySet<string> = new Set(
       // no move from an id that does not exist.
       ['POST', 'computers/:id/move'],
       ['PUT', 'computers/:id/workspace'],
+      // Public URLs (platform OPL-3753): a port inside a computer served on
+      // `<label>.mandala.dev`.
+      ['GET', 'computers/:id/public-urls'],
+      ['POST', 'computers/:id/public-urls'],
+      ['PATCH', 'computers/:id/public-urls/:urlId'],
+      ['DELETE', 'computers/:id/public-urls/:urlId'],
       ['GET', 'moves'],
 
       // Computer use.
@@ -196,6 +202,12 @@ export const UNIMPLEMENTED: ReadonlySet<string> = new Set([
   // here, and a second, worse OpenAI client inside this SDK would be a
   // maintenance obligation with no user.
   'POST chat/completions',
+  // Public URLs (platform OPL-3753), behind a flag on the platform until its
+  // edge exists. Wrapped in the release that follows it there.
+  'GET computers/:id/public-urls',
+  'POST computers/:id/public-urls',
+  'PATCH computers/:id/public-urls/:urlId',
+  'DELETE computers/:id/public-urls/:urlId',
 ]);
 
 /**
@@ -298,6 +310,8 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
     ['body:cpu', 'body:ram_mb', 'body:disk_gb', 'header:Idempotency-Key'],
   ],
   ['PUT computers/:id/workspace', ['body:workspace_id']],
+  ['POST computers/:id/public-urls', ['body:port', 'body:label', 'body:access']],
+  ['PATCH computers/:id/public-urls/:urlId', ['body:port', 'body:access']],
   ['GET moves', []],
 
   // Computer use.
@@ -569,6 +583,8 @@ export function patternFor(path: string): string {
       out.push(':resultId');
     else if (out.length === 3 && out[0] === 'computers' && prev === 'artifacts')
       out.push(':artifactId');
+    else if (out.length === 3 && out[0] === 'computers' && prev === 'public-urls')
+      out.push(':urlId');
     else if (prev === 'windows') out.push(':window');
     else out.push(seg);
   }
