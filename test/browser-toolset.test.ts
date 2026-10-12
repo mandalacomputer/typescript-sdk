@@ -9,6 +9,7 @@ import { ToolError, ToolsetConfigError } from '@anthropic-ai/sdk/helpers/beta/to
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { BrowserFilePolicy, MandalaBrowserToolset } from '../src/anthropic.js';
 import { BrowserCDP, BrowserDriverError } from '../src/browser-cdp.js';
+import { BrowserSessionLease } from '../src/browser-connection.js';
 import { BrowserFiles } from '../src/browser-file-session.js';
 import { BrowserConnection, Client, type Computer } from '../src/index.js';
 import { BASE, json, recorder } from './harness.js';
@@ -148,7 +149,51 @@ const downloadFrame = (port: number) =>
 // an inline handler URL is document.URL, so window.URL.
 const popupScript = (how: string) =>
   `const w=window.open('${how === 'blank' ? '' : `/popup-target?${how}`}');const blob=()=>window.URL.createObjectURL(new Blob(["fetch('/popup-worker?blob')"]));const made=[];try{w.fetch('/popup-fetch?from-opener').catch(()=>{})}catch{}try{new w.Worker(blob());made.push('worker')}catch{}try{new w.Worker('/popup-worker.js');made.push('script-worker')}catch{}try{const f=w.document.createElement('iframe');w.document.body.appendChild(f);new f.contentWindow.Worker(blob());made.push('frame-worker')}catch{}${how === 'blank' ? "try{w.alert('from the popup')}catch{}" : ''}try{w.location='/popup-target?moved'}catch{}document.getElementById('opened').textContent='opened:'+!!w+' made:'+made.join(',')`;
+// A sandboxed srcdoc frame can run before Chromium's auto-attach event, even
+// with waitForDebuggerOnStart. Its first script must be protected too. A
+// positive request and completion message distinguish refusal from a frame
+// that never ran. Workers report only after their own two requests settle.
+function sandboxHost(port: number, kind: 'fetch' | 'blob' | 'data' | 'nested'): string {
+  const base = `http://127.0.0.1:${port}`;
+  const requests = `Promise.allSettled([fetch('${base}/srcdoc-blocked-${kind}',{mode:'no-cors'}),fetch('${base}/srcdoc-allowed-${kind}',{mode:'no-cors'})])`;
+  const workerSource = `${requests}.then(()=>postMessage('complete'))`;
+  const source =
+    kind === 'nested'
+      ? `const nested=new Worker('data:text/javascript,'+encodeURIComponent(${JSON.stringify(workerSource)}));nested.onmessage=()=>postMessage('complete');nested.onerror=()=>postMessage('refused')`
+      : workerSource;
+  const work =
+    kind === 'fetch'
+      ? `${requests}.then(()=>parent.postMessage('srcdoc-complete','*'))`
+      : `const source=${JSON.stringify(source)};try{const worker=new Worker(${kind !== 'data' ? "URL.createObjectURL(new Blob([source],{type:'text/javascript'}))" : "'data:text/javascript,'+encodeURIComponent(source)"});worker.onmessage=()=>parent.postMessage('srcdoc-complete','*');worker.onerror=()=>parent.postMessage('srcdoc-worker-refused','*')}catch(e){parent.postMessage(e.name==='SecurityError'?'srcdoc-worker-refused':'srcdoc-failed','*')}`;
+  const srcdoc = `<script>fetch('${base}/srcdoc-executed-${kind}',{mode:'no-cors'});${work}</script>`;
+  return `<p id="state">waiting for srcdoc</p><script>const frame=document.createElement('iframe');frame.sandbox='allow-scripts';addEventListener('message',event=>{if(event.source===frame.contentWindow)document.getElementById('state').textContent=event.data});frame.srcdoc=${JSON.stringify(srcdoc).replaceAll('<', '\\u003c')};document.body.append(frame)</script>`;
+}
 const pages = (port: number): Record<string, [string, string | Buffer]> => ({
+  '/srcdoc-host-fetch': ['text/html', sandboxHost(port, 'fetch')],
+  '/srcdoc-host-blob': ['text/html', sandboxHost(port, 'blob')],
+  '/srcdoc-host-data': ['text/html', sandboxHost(port, 'data')],
+  '/srcdoc-host-nested': ['text/html', sandboxHost(port, 'nested')],
+  '/policy-host': [
+    'text/html',
+    `<p>policy host</p><script>fetch('/policy-main').catch(()=>{})</script><iframe src="/policy-child"></iframe>`,
+  ],
+  '/policy-child': ['text/html', `<script>fetch('/policy-child-request').catch(()=>{})</script>`],
+  '/foreign-host': [
+    'text/html',
+    `<p>foreign host</p><script>fetch('/foreign-main');new Worker('/foreign-worker.js')</script><iframe src="/foreign-child"></iframe>`,
+  ],
+  '/foreign-child': ['text/html', `<script>fetch('/foreign-child-request')</script>`],
+  '/foreign-worker.js': ['text/javascript', `fetch('/foreign-worker-request')`],
+  '/foreign-oop-host': [
+    'text/html',
+    `<iframe src="http://localhost:${port}/foreign-oop-frame"></iframe>`,
+  ],
+  '/foreign-oop-frame': ['text/html', '<iframe src="/foreign-oop-nested"></iframe>'],
+  '/foreign-oop-nested': ['text/html', `<script>fetch('/foreign-oop-nested-hit')</script>`],
+  '/root-held-host': [
+    'text/html',
+    `<p>held request page</p><script>fetch('/root-held-denied').catch(()=>{})</script>`,
+  ],
   '/frame-host': [
     'text/html',
     `<title>Frame host</title><p>host page</p><iframe src="http://localhost:${port}/frame-child" style="position:absolute;left:0;top:100px;width:400px;height:300px;border:0"></iframe>`,
@@ -356,6 +401,7 @@ describe.skipIf(!executable)('real Chromium through Anthropic toolResult', () =>
     if (!address || typeof address === 'string') throw new Error('no address');
     return {
       browser,
+      computer,
       url,
       revoke,
       hits,
@@ -793,6 +839,295 @@ describe.skipIf(!executable)('real Chromium through Anthropic toolResult', () =>
     await expect.poll(() => hits).toContain('/frame-clicked');
     expect(tabs(success(await browser.toolResult(use('list_tabs'))))).toHaveLength(1);
   }, 30000);
+  it.each(['fetch', 'blob', 'data', 'nested'] as const)(
+    'checks sandboxed srcdoc %s requests before they reach the server',
+    async (kind) => {
+      const seen: [string | undefined, string][] = [];
+      const { browser, base, hits } = await fixture({
+        urlPolicy: (ctx, target) => {
+          seen.push([ctx.tabId, target]);
+          if (new URL(target).pathname.startsWith('/srcdoc-blocked-'))
+            throw new ToolError('not permitted');
+        },
+      });
+      const tab = tabs(
+        success(await browser.toolResult(use('navigate', { url: `${base}/srcdoc-host-${kind}` }))),
+      )[0]!.tab_id;
+      let state = '';
+      await expect
+        .poll(
+          async () => {
+            state = text(success(await browser.toolResult(use('get_page_text'))));
+            return /srcdoc-(complete|worker-refused)/.test(state);
+          },
+          { timeout: 10000 },
+        )
+        .toBe(true);
+      // This signal is independent of Worker support: the sandbox's own
+      // first script ran and could make an allowed HTTP request.
+      await expect.poll(() => hits).toContain(`/srcdoc-executed-${kind}`);
+      expect.soft(hits.filter((hit) => hit === `/srcdoc-blocked-${kind}`)).toEqual([]);
+      expect.soft(seen).toContainEqual([tab, `${base}/srcdoc-executed-${kind}`]);
+      if (kind === 'fetch' || state.includes('srcdoc-complete')) {
+        expect.soft(hits.filter((hit) => hit === `/srcdoc-allowed-${kind}`)).toHaveLength(1);
+        expect.soft(seen).toContainEqual([tab, `${base}/srcdoc-blocked-${kind}`]);
+        expect.soft(seen).toContainEqual([tab, `${base}/srcdoc-allowed-${kind}`]);
+      }
+      expect(browser.sessionStatus.state).toBe('active');
+    },
+    30000,
+  );
+  it('isolates two toolsets and leaves default/foreign contexts and their workers usable', async () => {
+    const firstSeen: [string | undefined, string][] = [];
+    const secondSeen: [string | undefined, string][] = [];
+    const {
+      browser: first,
+      computer,
+      base,
+      hits,
+      url,
+    } = await fixture({
+      urlPolicy: (ctx, target) => {
+        firstSeen.push([ctx.tabId, target]);
+        if (/\/(policy-(main|child-request)|foreign-)/.test(new URL(target).pathname))
+          throw new ToolError('first policy refused');
+      },
+    });
+    const second = new MandalaBrowserToolset(computer, {
+      urlPolicy: (ctx, target) => {
+        secondSeen.push([ctx.tabId, target]);
+        if (new URL(target).pathname.startsWith('/foreign-')) throw new ToolError('not ours');
+      },
+    });
+    browsers.push(second);
+    const { chromium } = await import('playwright-core');
+    const observer = await chromium.connectOverCDP(url);
+    try {
+      const firstTab = tabs(
+        success(await first.toolResult(use('navigate', { url: `${base}/policy-host` }))),
+      )[0]!.tab_id;
+      const secondTab = tabs(
+        success(await second.toolResult(use('navigate', { url: `${base}/policy-host` }))),
+      )[0]!.tab_id;
+      const other = await observer.newContext();
+      const defaultPage = await observer.contexts()[0]!.newPage();
+      const otherPage = await other.newPage();
+      await Promise.all([
+        defaultPage.goto(`${base}/foreign-host`),
+        otherPage.goto(`${base}/foreign-host`),
+      ]);
+      await expect
+        .poll(() => hits.filter((hit) => hit === '/foreign-worker-request').length)
+        .toBe(2);
+      await expect
+        .poll(() => hits.filter((hit) => hit === '/foreign-child-request').length)
+        .toBe(2);
+      await expect.poll(() => hits.filter((hit) => hit === '/policy-child-request').length).toBe(1);
+      expect(hits.filter((hit) => hit === '/policy-main')).toHaveLength(1);
+      for (const [seen, tab] of [
+        [firstSeen, firstTab],
+        [secondSeen, secondTab],
+      ] as const) {
+        expect(
+          seen.filter(([, target]) => new URL(target).pathname.startsWith('/foreign-')),
+        ).toEqual([]);
+        for (const path of ['/policy-main', '/policy-child-request'])
+          expect(seen.filter(([, target]) => target === `${base}${path}`)).toEqual([
+            [tab, `${base}${path}`],
+          ]);
+      }
+      await first.close();
+      await defaultPage.evaluate(() => fetch('/foreign-after-close'));
+      expect(hits).toContain('/foreign-after-close');
+      success(await second.toolResult(use('navigate', { url: `${base}/second` })));
+      expect(second.sessionStatus.state).toBe('active');
+      await other.close();
+      await defaultPage.close();
+    } finally {
+      await observer.close();
+    }
+  }, 30000);
+
+  it.each(['default', 'incognito'] as const)(
+    'keeps its policy active while a %s context requests from a same-process child inside an OOPIF',
+    async (profile) => {
+      const seen: string[] = [];
+      const { browser, base, hits, url } = await fixture({
+        urlPolicy: (_context, target) => {
+          seen.push(new URL(target).pathname);
+          if (
+            new URL(target).pathname.startsWith('/foreign-') ||
+            target.endsWith('/root-held-denied')
+          )
+            throw new ToolError('denied');
+        },
+      });
+      success(await browser.toolResult(use('navigate', { url: base })));
+      const { chromium } = await import('playwright-core');
+      const observer = await chromium.connectOverCDP(url);
+      const foreignContext =
+        profile === 'default' ? observer.contexts()[0]! : await observer.newContext();
+      const page = await foreignContext.newPage();
+      try {
+        await page.goto(`${base}/foreign-oop-host`);
+        await expect.poll(() => hits).toContain('/foreign-oop-nested-hit');
+        const control = await observer.newBrowserCDPSession();
+        const { targetInfos } = await control.send('Target.getTargets');
+        const oop = targetInfos.find(
+          (info) => info.type === 'iframe' && info.url.endsWith('/foreign-oop-frame'),
+        );
+        expect(oop, 'fixture must use a real out-of-process iframe').toBeDefined();
+        const frame = page.frames().find((f) => f.url().endsWith('/foreign-oop-frame'));
+        expect(frame).toBeDefined();
+        const probe = await foreignContext.newCDPSession(frame!);
+        try {
+          const { frameTree } = await probe.send('Page.getFrameTree');
+          const nested = frameTree.childFrames?.find((child) =>
+            child.frame.url.endsWith('/foreign-oop-nested'),
+          );
+          expect(nested).toBeDefined();
+          await expect(
+            control.send('Target.getTargetInfo', { targetId: nested!.frame.id }),
+          ).rejects.toThrow('No target');
+        } finally {
+          await probe.detach();
+        }
+        expect(seen.filter((path) => path.startsWith('/foreign-'))).toEqual([]);
+        expect(browser.sessionStatus.state).toBe('active');
+        success(await browser.toolResult(use('navigate', { url: `${base}/root-held-host` })));
+        await expect.poll(() => seen).toContain('/root-held-denied');
+        success(await browser.toolResult(use('navigate', { url: `${base}/second` })));
+        expect(hits).not.toContain('/root-held-denied');
+        expect(browser.sessionStatus.state).toBe('active');
+      } finally {
+        await page.close();
+        if (profile === 'incognito') await foreignContext.close();
+        await observer.close();
+      }
+    },
+    30000,
+  );
+
+  async function heldRequestEnding(ending: 'close' | 'expiry' | 'renewal' | 'disconnect') {
+    const { base, hits, url } = await fixture();
+    const { default: WebSocket } = await import('ws');
+    const { chromium } = await import('playwright-core');
+    const observer = await chromium.connectOverCDP(url);
+    const control = await observer.newBrowserCDPSession();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let entered!: () => void;
+    const held = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const shortLease = BrowserSessionLease.fromApi(
+      {
+        id,
+        lifecycle_version: 2,
+        server_time: '2000-01-01T00:00:00.000Z',
+        attach_expires_at: '2000-01-01T00:00:02.000Z',
+        lease_expires_at: '2000-01-01T00:00:02.000Z',
+        absolute_expires_at: '2000-01-01T00:02:00.000Z',
+        lease_seconds: 60,
+        idle_timeout_seconds: 0,
+      },
+      id,
+    );
+    const grant = { id, url, token, lease: shortLease } as BrowserConnection;
+    const driver = new BrowserCDP(
+      async () => grant,
+      async () => {},
+      async (_tab, target) => {
+        if (target === `${base}/root-held-denied`) {
+          entered();
+          await gate;
+          throw new ToolError('denied');
+        }
+      },
+      async () => {
+        throw new Error('renewal refused');
+      },
+      ending === 'expiry' || ending === 'renewal'
+        ? { leaseSeconds: 60, maxDurationSeconds: 120, autoRenew: ending === 'renewal' }
+        : undefined,
+    );
+    drivers.push(driver);
+    const driverSend = vi.spyOn(driver, 'send');
+    let socket: InstanceType<typeof WebSocket> | undefined;
+    const originalSend = WebSocket.prototype.send;
+    const spy = vi.spyOn(WebSocket.prototype, 'send').mockImplementation(function (
+      this: InstanceType<typeof WebSocket>,
+      ...args: Parameters<typeof originalSend>
+    ) {
+      if (String(args[0]).includes('Target.createBrowserContext')) socket = this;
+      return originalSend.apply(this, args);
+    });
+    try {
+      await driver.start();
+    } finally {
+      spy.mockRestore();
+    }
+    let closing: Promise<void> | undefined;
+    try {
+      const tab = driver.state().tabs[0]!.tab_id;
+      const { targetInfo } = await control.send('Target.getTargetInfo', { targetId: tab });
+      const foreignPage = await observer.contexts()[0]!.newPage();
+      await foreignPage.goto(base);
+      await driver.perform('navigate', { url: `${base}/root-held-host` });
+      await held;
+      if (ending === 'close') closing = driver.close();
+      if (ending === 'disconnect') socket!.terminate();
+      await expect
+        .poll(async () => (await control.send('Target.getBrowserContexts')).browserContextIds, {
+          timeout: 10000,
+        })
+        .not.toContain(targetInfo.browserContextId);
+      await expect.poll(() => driver.sessionStatus().state).toBe('ended');
+      const lateCommandStart = driverSend.mock.calls.length;
+      release();
+      await closing;
+      if (ending === 'disconnect') {
+        // Wait for the held callback to settle after the transport has ended.
+        await driver.close();
+        expect(
+          driverSend.mock.calls
+            .slice(lateCommandStart)
+            .filter(
+              ([method]) => method === 'Fetch.continueRequest' || method === 'Fetch.failRequest',
+            ),
+        ).toEqual([]);
+      }
+      await foreignPage.evaluate(() => fetch('/foreign-after-end'));
+      expect(hits).toContain('/foreign-after-end');
+      // OPL-5952: Chromium can resume a paused HTTP request when Fetch detaches
+      // on abrupt CDP loss, before disposeOnDetach destroys its context. Linux CI
+      // reproduced this delivery. Keep the original strict assertion as an opt-in
+      // diagnostic; a passing run does not establish transport-loss isolation.
+      if (ending !== 'disconnect' || process.env.MANDALA_TEST_STRICT_CDP_LOSS === '1')
+        expect(hits).not.toContain('/root-held-denied');
+      expect(driver.sessionStatus().state).toBe('ended');
+      await foreignPage.close();
+    } finally {
+      release();
+      await closing;
+      await observer.close();
+      driverSend.mockRestore();
+    }
+  }
+
+  it.each(['close', 'expiry', 'renewal'] as const)(
+    'does not release a held denied request on %s, and keeps another context usable',
+    heldRequestEnding,
+    30000,
+  );
+  it(
+    'cleans up after abrupt CDP loss without promising pending-request isolation',
+    () => heldRequestEnding('disconnect'),
+    30000,
+  );
+
   it('survives cross-site frames that come and go faster than they are set up', async () => {
     const { browser, base, hits } = await fixture({
       urlPolicy: () => new Promise((r) => setTimeout(r, 5)),

@@ -36,12 +36,17 @@ export type MandalaBrowserToolsetOptions = Omit<
 /** An isolated Chromium context; sessionPolicy opts into bounded lease renewal.
  *
  * The URL policy checks navigation and intercepted HTTP(S) requests, including
- * those of cross-site frames, which run under it. It is not network isolation:
- * configure guest egress controls for that. Like WebSockets, a sandboxed or
- * other out-of-process frame that starts running before the driver can attach
- * can make requests, and create workers, that the policy does not see. Other
- * pages cannot start dedicated workers (constructing one throws a
- * SecurityError); shared and service workers are unsupported, and popups are
+ * those of frames and workers, at the browser before a page executes. It is
+ * not network isolation: configure guest egress controls for that, including
+ * non-HTTP transports. Abrupt control-connection loss or failed context disposal
+ * can let Chromium resume a pending HTTP request without policy approval before
+ * removing the context. While the connection and disposal remain available,
+ * unresolved request ownership ends this toolset's context before uncertain
+ * traffic is released; an unobserved frame that disappears
+ * from another context can trigger that conservative shutdown too. Dedicated
+ * workers are unsupported: construction throws when the driver attached before
+ * the frame ran, while an already-running frame can retain its constructor;
+ * its workers' HTTP requests still meet the policy. Shared and service workers are unsupported, and popups are
  * closed before they load, without holding up their opener. Files require
  * remoteFilePolicy; uploads also require confirm. JavaScript execution is off by default and
  * requires confirm when enabled.
