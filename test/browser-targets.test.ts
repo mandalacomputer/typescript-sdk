@@ -33,6 +33,7 @@ type Socket = EventEmitter & {
 const sockets = vi.hoisted(() => [] as Socket[]);
 vi.mock('ws', () => ({
   default: class extends EventEmitter {
+    readyState = 1;
     sent: Command[] = [];
     tabs = 0;
     gone = new Set<string>();
@@ -129,6 +130,7 @@ vi.mock('ws', () => ({
     }
     terminate() {
       if (!this.ended) {
+        this.readyState = 3;
         this.ended = true;
         this.emit('close');
       }
@@ -170,11 +172,10 @@ const paused = (
   requestId: string,
   url: string,
   resourceType = 'Fetch',
-  frameId = 'tab',
+  frameId = session === 'session' ? 'tab' : `${session}-target`,
 ) =>
   ws.message({
     method: 'Fetch.requestPaused',
-    sessionId: session,
     params: { requestId, resourceType, frameId, request: { url } },
   });
 // Fill every slot of the lane that does not wait on caller code: frames whose
@@ -225,7 +226,6 @@ it('runs a cross-process frame under its page’s request policy and never close
     expect(on(ws, 'frame')).toEqual([
       'Network.enable',
       'Network.setBypassServiceWorker',
-      'Fetch.enable',
       'Runtime.enable',
       'Page.enable',
       'Page.addScriptToEvaluateOnNewDocument',
@@ -245,19 +245,18 @@ it('runs a cross-process frame under its page’s request policy and never close
     );
     expect(named(ws, 'Fetch.failRequest')).toEqual([
       expect.objectContaining({
-        sessionId: 'frame',
         params: { requestId: 'r1', errorReason: 'BlockedByClient' },
       }),
     ]);
     expect(named(ws, 'Fetch.continueRequest')).toEqual([
-      expect.objectContaining({ sessionId: 'nested', params: { requestId: 'r2' } }),
+      expect.objectContaining({ params: { requestId: 'r2' } }),
     ]);
     expect(policy).toHaveBeenCalledWith('tab', 'https://blocked.test/');
     expect(policy).toHaveBeenCalledWith('tab', 'https://allowed.test/');
     expect(named(ws, 'Target.closeTarget')).toEqual([]);
     expect(backend.sessionStatus().state).toBe('active');
     expect(backend.state().tabs).toEqual([expect.objectContaining({ tab_id: 'tab' })]);
-    // A detached frame's late requests are not answered for it.
+    // A detached frame's late requests are refused without invoking policy.
     ws.message({
       method: 'Target.detachedFromTarget',
       sessionId: 'session',
@@ -268,6 +267,107 @@ it('runs a cross-process frame under its page’s request policy and never close
     expect(policy).not.toHaveBeenCalledWith('tab', 'https://allowed.test/late');
     expect(backend.sessionStatus().state).toBe('active');
   } finally {
+    await backend.close();
+  }
+});
+
+it('does not continue a late allow after a frame detaches and reappears', async () => {
+  let release!: () => void;
+  const policy = vi.fn(
+    () =>
+      new Promise<void>((resolve) => {
+        release = resolve;
+      }),
+  );
+  const { backend, ws } = await started(policy);
+  try {
+    ws.message({
+      method: 'Page.frameAttached',
+      sessionId: 'session',
+      params: { frameId: 'f', parentFrameId: 'tab' },
+    });
+    paused(ws, 'session', 'held', 'https://allowed.test/', 'Fetch', 'f');
+    await vi.waitFor(() => expect(policy).toHaveBeenCalledTimes(1));
+    ws.message({
+      method: 'Page.frameDetached',
+      sessionId: 'session',
+      params: { frameId: 'f', reason: 'remove' },
+    });
+    ws.message({
+      method: 'Page.frameAttached',
+      sessionId: 'session',
+      params: { frameId: 'f', parentFrameId: 'tab' },
+    });
+    release();
+    await vi.waitFor(() => expect(named(ws, 'Fetch.failRequest')).toHaveLength(1));
+    expect(named(ws, 'Fetch.continueRequest')).toEqual([]);
+  } finally {
+    release?.();
+    await backend.close();
+  }
+});
+
+it('retires descendant request ownership when a new document omits detach events', async () => {
+  const policy = vi.fn(async () => {});
+  const { backend, ws } = await started(policy);
+  try {
+    ws.message({
+      method: 'Page.frameAttached',
+      sessionId: 'session',
+      params: { frameId: 'old-child', parentFrameId: 'tab' },
+    });
+    ws.message({
+      method: 'Page.frameNavigated',
+      sessionId: 'session',
+      params: { frame: { id: 'tab', url: 'https://next.test/' } },
+    });
+    paused(ws, 'session', 'old-request', 'https://allowed.test/', 'Fetch', 'old-child');
+    await vi.waitFor(() => expect(named(ws, 'Fetch.failRequest')).toHaveLength(1));
+    expect(policy).not.toHaveBeenCalled();
+    expect(named(ws, 'Fetch.continueRequest')).toEqual([]);
+  } finally {
+    await backend.close();
+  }
+});
+
+it('does not initialize a frame detached during the probe-session check', async () => {
+  const { backend, ws } = await started();
+  try {
+    attach(ws, 'session', 'gone-during-check', 'iframe');
+    ws.message({
+      method: 'Target.detachedFromTarget',
+      sessionId: 'session',
+      params: { sessionId: 'gone-during-check' },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(on(ws, 'gone-during-check')).toEqual([]);
+    expect(backend.sessionStatus().state).toBe('active');
+  } finally {
+    await backend.close();
+  }
+});
+
+it('disposes its context before detaching root interception when attribution times out', async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  const { backend, ws } = await started();
+  try {
+    ws.held.add('Target.getTargetInfo');
+    ws.held.add('Target.disposeBrowserContext');
+    paused(ws, 'session', 'uncertain', 'https://foreign.test/', 'Fetch', 'unobserved');
+    await vi.advanceTimersByTimeAsync(5001);
+    const disposal = named(ws, 'Target.disposeBrowserContext').at(-1)!;
+    expect(disposal.params).toEqual({ browserContextId: 'context' });
+    expect(ws.ended).toBe(false);
+    expect(named(ws, 'Fetch.continueRequest')).toEqual([]);
+    const closing = backend.close();
+    expect(named(ws, 'Target.disposeBrowserContext')).toHaveLength(1);
+    ws.message({ id: disposal.id, result: {} });
+    await vi.advanceTimersByTimeAsync(1);
+    await closing;
+    expect(ws.ended).toBe(true);
+    expect(backend.sessionStatus().terminalError).toContain('could not be attributed');
+  } finally {
+    ws.held.clear();
     await backend.close();
   }
 });
@@ -468,7 +568,9 @@ it('ends the session, with a reason, when a page floods it past the queue', asyn
       state: 'ended',
       terminalError: expect.stringContaining('faster than the session could handle'),
     });
-    expect(ws.ended).toBe(true);
+    // Context disposal, not queue drainage, gates interceptor detachment.
+    await vi.waitFor(() => expect(ws.ended).toBe(true));
+    expect(named(ws, 'Target.disposeBrowserContext')).toHaveLength(1);
   } finally {
     release();
     await backend.close();
@@ -597,8 +699,14 @@ it('a backlog of subresource and frame requests holds back no top-level navigati
   try {
     for (let n = 0; n < 512; n++) paused(ws, 'session', `r${n}`, `https://example.test/sub/${n}`);
     // Frame documents are documents too, but nothing waits on them.
-    for (let n = 0; n < 512; n++)
+    for (let n = 0; n < 512; n++) {
+      ws.message({
+        method: 'Page.frameAttached',
+        sessionId: 'session',
+        params: { frameId: `f-${n}`, parentFrameId: 'tab' },
+      });
       paused(ws, 'session', `f${n}`, `https://example.test/sub/frame-${n}`, 'Document', `f-${n}`);
+    }
     paused(ws, 'session', 'page', 'https://example.test/next', 'Document', 'tab');
     await vi.waitFor(() =>
       expect(named(ws, 'Fetch.continueRequest')).toEqual([
@@ -1228,7 +1336,7 @@ it('releases a page it did not open before closing it, offline and unable to sta
     const close = ws.sent.findIndex((c) => c.method === 'Target.closeTarget');
     expect(release).toBeLessThan(close);
     expect(named(ws, 'Target.closeTarget')[0]!.params).toEqual({ targetId: 'popup-target' });
-    expect(named(ws, 'Fetch.enable').map((c) => c.sessionId)).toEqual(['session']);
+    expect(named(ws, 'Fetch.enable').map((c) => c.sessionId)).toEqual([undefined]);
     // Its dialog is dismissed, and not reported as the tab's.
     ws.message({
       method: 'Page.javascriptDialogOpening',

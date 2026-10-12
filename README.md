@@ -2026,33 +2026,35 @@ revokes its capability; it does not stop Chromium or delete the computer.
   limits destinations; it does not decide whether a form submission is safe.
 - Uploads and downloads default to denied. Opt in with the remote file policy
   described below. A local Anthropic file policy does not authorize guest reads.
-- The URL hook checks direct navigations and **intercepted HTTP(S) requests,
-  including redirects**. Background request checks have a tab ID but no tool
+- The URL hook checks direct navigations and **HTTP(S) requests intercepted
+  at the browser, including redirects, frames and their workers**. Background request checks have a tab ID but no tool
   call ID. Allow by returning nothing; refuse by throwing `ToolError`.
   Callbacks must finish promptly. This is **not network isolation**: use guest
   egress controls for DNS/IP containment, WebSockets, WebRTC, WebTransport and
-  browser traffic outside those intercepted requests. That includes a
-  sandboxed or other out-of-process frame that starts running before the
-  driver can attach to it (Chromium starts a sandboxed `srcdoc` frame this
-  way). Its first requests go out before the hook can see them, and its
-  scripts can keep the browser's own `Worker` constructor and start workers
-  with it at any time, whose requests can escape the hook, notably when their
-  page closes or navigates.
+  browser traffic outside those intercepted requests. Interception starts
+  before this toolset opens a page, so a sandboxed `srcdoc` frame's first
+  requests are covered even when it runs before the driver can attach.
+  Requests from other browser contexts are released without calling your
+  policy after their ownership is established. Ownership checks and retained
+  frame history are bounded: if ownership cannot be established, the driver
+  ends its own context before releasing uncertain traffic. This can end an
+  otherwise healthy toolset when another context's frame disappears before
+  the driver has observed it. Create a new toolset to continue.
 - Cross-site frames (which Chromium runs in their own process) run as part of
   their tab. Chromium holds one that loads a URL until the driver has attached
-  to it, so its HTTP(S) requests go through the same URL hook with that tab's
-  ID; one that starts running without waiting is the exception above. A cross-site frame's contents are not part of `read_page`, `find`
+  to it. Its HTTP(S) requests go through the same URL hook with that tab's
+  ID, including requests sent before attachment. A cross-site frame's contents are not part of `read_page`, `find`
   or `get_page_text`; screenshots and coordinate input reach it.
-- Pages cannot start dedicated workers. In every frame the driver attaches
+- Dedicated workers are unsupported. In every frame the driver attaches
   to before it runs (cross-site frames that load a URL, and same-process
   `about:blank`, `srcdoc` and `javascript:` frames) `new Worker(...)` throws a
   `SecurityError` before the page's own scripts run, whatever the script URL
   (`blob:` and `data:` included), and the binding cannot be replaced. A frame
-  that starts running before the driver can attach is not covered (see the
-  URL hook above). A worker cannot run under the URL hook: Chromium fetches the
-  script of a worker started by another worker without any interception the
-  driver could apply, and a worker held paused is released, unpoliced, when
-  its page closes or navigates. The page itself carries on. Shared workers and
+  that starts running before the driver can attach can retain the original
+  constructor and create workers. Their HTTP(S) requests, including nested
+  workers' requests, still meet the browser-root URL hook. A worker held for
+  the debugger is not released by the driver; if Chromium releases it when
+  its page closes, requests attributed to an ended frame are refused. Shared workers and
   service workers are unsupported and are closed; if one cannot be closed, the
   driver closes its session.
 - Popups and other new top-level pages the driver did not open (`window.open`,
@@ -2063,10 +2065,9 @@ revokes its capability; it does not stop Chromium or delete the computer.
   about to close. On a Chromium too old for per-rule network emulation, the
   opener's page also sees itself offline for that moment. Requests the opener
   makes through such a window's `about:blank` document are the opener's own,
-  under the URL hook with the opener's tab ID. The out-of-process frame limit
-  of the URL hook (above) applies inside a popup too: a sandboxed `srcdoc`
-  frame the opener writes into one runs in a process of its own, until the
-  popup closes. Sites that depend on popups or workers may not work with this
+  under the URL hook with the opener's tab ID. Browser-root interception also
+  covers a sandboxed frame written into a popup; the ownership-failure rule
+  above applies if its owner cannot be established. Sites that depend on popups or workers may not work with this
   driver.
 - `read_page` returns accessibility roles/names and element refs; `find`
   performs a case-insensitive substring search over that tree. Each read/find

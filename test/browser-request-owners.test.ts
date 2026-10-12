@@ -1,0 +1,117 @@
+import { expect, it, vi } from 'vitest';
+import { BrowserRequestOwners } from '../src/browser-request-owners.js';
+
+it('proves same-process foreign ownership with a temporary, read-only attachment', async () => {
+  let owners!: BrowserRequestOwners;
+  let announced!: Promise<boolean>;
+  let otherAttach!: Promise<boolean>;
+  const send = vi.fn(async (method: string, params?: Record<string, any>) => {
+    if (method === 'Target.getTargetInfo') throw new Error('No target');
+    if (method === 'Target.getTargets')
+      return { targetInfos: [{ targetId: 'foreign', type: 'page' }] };
+    if (method === 'Target.attachToTarget') {
+      // Chromium announces the manual attach before its command response.
+      announced = owners.probeAttached('probe', 'foreign');
+      otherAttach = owners.probeAttached('automatic', 'foreign');
+      return { sessionId: 'probe' };
+    }
+    if (method === 'Page.getFrameTree')
+      return { frameTree: { frame: { id: 'foreign' }, childFrames: [{ frame: { id: 'child' } }] } };
+    if (method === 'Target.detachFromTarget') expect(params).toEqual({ sessionId: 'probe' });
+    return {};
+  });
+  owners = new BrowserRequestOwners(
+    'ours',
+    send,
+    () => [],
+    () => true,
+  );
+  const [first, second] = await Promise.all([owners.resolve('child'), owners.resolve('child')]);
+  expect(first).toMatchObject({ context: '', tab: undefined });
+  expect(second).toBe(first);
+  await expect(announced).resolves.toBe(true);
+  await expect(otherAttach).resolves.toBe(false);
+  expect(send.mock.calls.filter(([method]) => method === 'Target.attachToTarget')).toHaveLength(1);
+  expect(send.mock.calls.map(([method]) => method)).not.toContain(
+    'Runtime.runIfWaitingForDebugger',
+  );
+  expect(send.mock.calls.map(([method]) => method)).not.toContain('Page.enable');
+  expect(send.mock.calls.at(-1)?.[0]).toBe('Target.detachFromTarget');
+});
+
+it('retains owned tombstones and cannot convert an owned frame into a foreign one', async () => {
+  const send = vi.fn(async () => ({}));
+  const owners = new BrowserRequestOwners(
+    'ours',
+    send,
+    () => [],
+    () => true,
+  );
+  owners.owned('child', 'tab', 'session', 'tab');
+  owners.detached('session');
+  await expect(owners.resolve('child')).resolves.toMatchObject({
+    context: 'ours',
+    tab: 'tab',
+    live: false,
+  });
+  expect(() =>
+    owners.target({ targetId: 'child', type: 'iframe', browserContextId: 'foreign' }),
+  ).toThrow('ownership changed');
+  expect(send).not.toHaveBeenCalled();
+});
+
+it('failed metadata and snapshots never prove foreign ownership', async () => {
+  const send = vi.fn(async () => {
+    throw new Error('gone');
+  });
+  const owners = new BrowserRequestOwners(
+    'ours',
+    send,
+    () => [{ session: 'session', tab: 'tab' }],
+    () => true,
+  );
+  await expect(owners.resolve('unknown')).resolves.toBeUndefined();
+  expect(owners.frames.size).toBe(0);
+});
+
+it('waits for a restored tree before deciding requests from its previously retired children', async () => {
+  let deliver!: (value: Record<string, any>) => void;
+  const send = vi.fn(
+    () =>
+      new Promise<Record<string, any>>((resolve) => {
+        deliver = resolve;
+      }),
+  );
+  const owners = new BrowserRequestOwners(
+    'ours',
+    send,
+    () => [{ session: 'session', tab: 'tab' }],
+    () => true,
+  );
+  owners.owned('tab', 'tab', 'session');
+  owners.owned('old-child', 'tab', 'session', 'tab');
+  owners.owned('restored-child', 'tab', 'session', 'tab');
+  owners.navigated('tab');
+  const refresh = owners.refresh('session', 'tab');
+  const request = owners.resolve('restored-child');
+  deliver({
+    frameTree: { frame: { id: 'tab' }, childFrames: [{ frame: { id: 'restored-child' } }] },
+  });
+  await refresh;
+  await expect(request).resolves.toMatchObject({ tab: 'tab', live: true });
+  expect(owners.frames.get('old-child')?.live).toBe(false);
+});
+
+it('bounds retained provenance without evicting owned frame tombstones', () => {
+  const owners = new BrowserRequestOwners(
+    'ours',
+    async () => ({}),
+    () => [],
+    () => true,
+  );
+  owners.owned('old', 'tab', 'session');
+  owners.removed('old');
+  for (let i = 0; i < 8191; i++) owners.target({ targetId: `f-${i}`, type: 'page' });
+  expect(() => owners.target({ targetId: 'overflow', type: 'page' })).toThrow('provenance full');
+  expect(owners.frames.get('old')).toMatchObject({ context: 'ours', live: false });
+});

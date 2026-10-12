@@ -8,6 +8,7 @@ import type {
 } from './browser-connection.js';
 
 import type { BrowserFiles } from './browser-file-session.js';
+import { BrowserRequestOwners } from './browser-request-owners.js';
 import { APIError, ConnectionError } from './errors.js';
 
 // CDP is an extensible protocol. Values stay inside this backend; the Anthropic
@@ -27,6 +28,7 @@ const EVENTS = new Set([
   'Target.attachedToTarget',
   'Target.detachedFromTarget',
   'Target.targetInfoChanged',
+  'Target.targetCreated',
   'Target.targetDestroyed',
   'Fetch.requestPaused',
   'Page.javascriptDialogOpening',
@@ -41,6 +43,7 @@ const EVENTS = new Set([
 // waits behind anything.
 const AT_ONCE = new Set([
   'Target.targetInfoChanged',
+  'Target.targetCreated',
   'Page.frameAttached',
   'Page.frameDetached',
   'Page.frameNavigated',
@@ -107,18 +110,16 @@ const COMPACT: Record<string, (p: Message) => Message> = {
   }),
 };
 const AUTO_ATTACH = { autoAttach: true, waitForDebuggerOnStart: true, flatten: true };
-// Dedicated workers cannot run under the URL policy: Chromium fetches the
-// script of a worker started by a worker with no session's interception, and
-// a worker held paused is released, unpoliced, when its page closes or
-// navigates. So frames of an owned tab cannot construct one. Chromium runs this
+// Dedicated workers are unsupported. Chromium runs this
 // in every new document of the session's frames (same-process children and
 // about:blank, srcdoc and javascript: frames included) before the page's own
 // scripts, and in the documents that already exist; the binding cannot be
 // reassigned or deleted. A cross-process frame that Chromium starts without
 // waiting for the driver (a sandboxed srcdoc frame) runs its first scripts
 // before its session can register this, so it can keep the original
-// constructor for later, as it makes its first requests before its
-// interception is on. Shared and service workers are closed as targets.
+// constructor for later. Browser-root interception also covers that frame's
+// HTTP requests and requests its workers make. Shared and service workers are
+// closed as targets.
 const NO_WORKERS = {
   source:
     "(()=>{const Worker=function Worker(){throw new DOMException('Dedicated workers are disabled in this browser session.','SecurityError')};Object.defineProperty(globalThis,'Worker',{value:Worker,writable:false,configurable:false,enumerable:false})})()",
@@ -126,16 +127,13 @@ const NO_WORKERS = {
 };
 const INTERCEPT = { patterns: [{ urlPattern: '*', requestStage: 'Request' }] };
 // A site-isolated cross-site frame is its own target, attached under its page
-// and, when it loads a URL, paused until released. Chromium intercepts its
-// subresource requests on the frame's own session, so it gets the page's
-// interception before it runs. (A frame Chromium starts without waiting, a
-// sandboxed srcdoc frame, has run its first scripts by then.)
+// and, when it loads a URL, paused until released. The browser-root interceptor
+// already covers it, even when Chromium starts its scripts before attaching.
 // Its Page events report the same-process frames inside it, which only that
 // session sees, so downloads from them can be told apart from strangers'.
 const FRAME_INIT: [string, Message][] = [
   ['Network.enable', {}],
   ['Network.setBypassServiceWorker', { bypass: true }],
-  ['Fetch.enable', INTERCEPT],
   ['Runtime.enable', {}],
   ['Page.enable', {}],
   ['Page.addScriptToEvaluateOnNewDocument', NO_WORKERS],
@@ -241,6 +239,10 @@ export class BrowserCDP {
   #counter = 0;
   #grant: BrowserConnection | undefined;
   #context: string | undefined;
+  #requestOwners?: BrowserRequestOwners;
+  #ending?: Promise<void>;
+  #disposing?: Promise<void>;
+  #disposed = false;
   #lease: BrowserSessionLease | undefined;
   #leaseDeadline = 0;
   #leaseTimer: ReturnType<typeof setTimeout> | undefined;
@@ -385,6 +387,15 @@ export class BrowserCDP {
           disposeOnDetach: true,
         })
       ).browserContextId;
+      this.#requestOwners = new BrowserRequestOwners(
+        this.#context!,
+        (method, params, session) => this.send(method, params, session),
+        () => [
+          ...[...this.#sessions].map(([tab, session]) => ({ tab, session })),
+          ...[...this.#frames].map(([session, { tab }]) => ({ tab, session })),
+        ],
+        () => this.fileLive(),
+      );
       await this.send('Browser.setDownloadBehavior', {
         behavior: 'deny',
         browserContextId: this.#context,
@@ -392,6 +403,9 @@ export class BrowserCDP {
       if (this.files) await this.files.setup(this.#context!);
       await this.send('Target.setDiscoverTargets', { discover: true });
       await this.send('Target.setAutoAttach', AUTO_ATTACH);
+      // Browser-root interception covers requests from documents that Chromium
+      // starts before their frame target can attach, and their workers.
+      await this.send('Fetch.enable', INTERCEPT);
       await this.#newTab();
       this.#scheduleLease();
     } catch (error) {
@@ -518,6 +532,7 @@ export class BrowserCDP {
   }
 
   #fail(): void {
+    if (this.#failed) return;
     this.#failed = true;
     void this.files?.close();
     clearTimeout(this.#leaseTimer);
@@ -552,11 +567,29 @@ export class BrowserCDP {
             'Browser connection ended. Create a new toolset for a fresh session.',
         ),
       );
-    this.#ws?.terminate();
+    // Detaching an interceptor can release its paused requests. When the
+    // transport is still usable, destroy only our context first; this command
+    // bypasses event queues and is allowed even after the failure flag is set.
+    // A lost transport instead relies on the context's disposeOnDetach option.
+    this.#ending = this.#dispose().finally(() => this.#ws?.terminate());
+  }
+
+  #dispose(): Promise<void> {
+    if (this.#disposing) return this.#disposing;
+    if (this.#disposed || !this.#context || this.#ws?.readyState !== 1) return Promise.resolve();
+    this.#disposing = (async () => {
+      try {
+        await this.send('Target.disposeBrowserContext', { browserContextId: this.#context });
+        this.#disposed = true;
+      } catch {
+        /* disposeOnDetach is the final fallback for a lost connection. */
+      }
+    })();
+    return this.#disposing;
   }
 
   async send(method: string, params: Message = {}, sessionId?: string): Promise<Message> {
-    if (!this.#ws || this.#failed)
+    if (!this.#ws || (this.#failed && method !== 'Target.disposeBrowserContext'))
       throw new BrowserDriverError(
         this.#terminalError ??
           'Browser connection ended. Create a new toolset for a fresh session.',
@@ -590,6 +623,7 @@ export class BrowserCDP {
 
   /** `bytes` is the event's size as UTF-16, the most V8 stores per character. */
   #dispatch(message: Message, bytes: number): void {
+    if (this.#failed) return;
     if (!EVENTS.has(message.method)) return;
     const cut = COMPACT[message.method];
     let size = bytes;
@@ -632,7 +666,7 @@ export class BrowserCDP {
         ? message.params?.resourceType === 'Document' &&
           // A tab's main frame has the tab's own target id.
           typeof message.params.frameId === 'string' &&
-          message.params.frameId === this.#owner(message.sessionId)
+          message.params.frameId === this.#requestOwners?.frames.get(message.params.frameId)?.tab
           ? this.#lanes.navigation
           : this.#lanes.policy
         : message.method.startsWith('Browser.download')
@@ -695,6 +729,7 @@ export class BrowserCDP {
         }
     }
     for (const s of gone) {
+      this.#requestOwners?.detached(s);
       // Remembered until this detach is handled in order, so that an attach
       // for one of these sessions still waiting in the queue is not acted on.
       this.#detached.add(s);
@@ -838,6 +873,7 @@ export class BrowserCDP {
    */
   async #refusePage(session: string, target: string): Promise<void> {
     if (this.#detached.has(session)) return; // Gone before its turn came.
+    this.#requestOwners?.refused(target);
     this.#refusing.add(session);
     let failed: unknown;
     try {
@@ -904,15 +940,15 @@ export class BrowserCDP {
   async #frame(child: string, info: Message, tab: string): Promise<void> {
     try {
       this.#frames.set(child, { tab, target: info.targetId });
+      this.#requestOwners?.owned(info.targetId, tab, child);
       // Its root frame has the frame target's id: downloads from it belong to the tab.
       this.#track(info.targetId, tab, child);
       for (const [name, args] of FRAME_INIT) await this.send(name, args, child);
       await this.#snapshot(child, tab);
       await this.send('Runtime.runIfWaitingForDebugger', {}, child);
     } catch {
-      // Usually the frame went away first. If not, it stays paused: a frame
-      // that could not be given the request policy never runs, and its tab
-      // carries on without it.
+      // Usually the frame went away first. A held frame stays paused; a frame
+      // Chromium started early remains covered by browser-root interception.
       this.#dropFrame(child);
     }
   }
@@ -939,7 +975,10 @@ export class BrowserCDP {
         const info = p.targetInfo;
         const child: string = p.sessionId;
         if (this.#detached.has(child)) return; // Gone before its turn came.
+        if (await this.#requestOwners?.probeAttached(child, info.targetId)) return;
+        if (this.#detached.has(child) || !this.fileLive()) return;
         const parent = this.#owner(session);
+        if (parent === undefined) this.#requestOwners?.target(info);
         if (info.browserContextId !== this.#context && parent === undefined) {
           await this.send('Runtime.runIfWaitingForDebugger', {}, child);
           await this.send('Target.detachFromTarget', { sessionId: child });
@@ -956,6 +995,7 @@ export class BrowserCDP {
         if (parent !== undefined && info.type === 'worker') return;
         const target: string = info.targetId;
         if (!this.#ready.has(target) && this.#creating) await this.#creating.promise;
+        if (this.#detached.has(child) || !this.fileLive()) return;
         if (info.type === 'page' && !this.#ready.has(target)) {
           await this.#refusePage(child, target);
           return;
@@ -970,6 +1010,7 @@ export class BrowserCDP {
         }
         this.#sessions.set(target, child);
         this.#tabs.set(target, info);
+        this.#requestOwners?.owned(target, target, child);
         eventSession = child; // Initialization can race with this target's destruction.
         const initializers: [string, Message][] = [
           ['Page.enable', {}],
@@ -983,14 +1024,14 @@ export class BrowserCDP {
             'Emulation.setDeviceMetricsOverride',
             { width: 1280, height: 720, deviceScaleFactor: 1, mobile: false },
           ],
-          ['Fetch.enable', INTERCEPT],
           ['Target.setAutoAttach', AUTO_ATTACH],
         ];
         for (const [name, args] of initializers) await this.send(name, args, child);
         await this.#snapshot(child, target);
         await this.send('Runtime.runIfWaitingForDebugger', {}, child);
         this.#ready.get(target)?.resolve();
-      } else if (method === 'Target.targetInfoChanged') {
+      } else if (method === 'Target.targetInfoChanged' || method === 'Target.targetCreated') {
+        this.#requestOwners?.target(p.targetInfo);
         if (this.#tabs.has(p.targetInfo.targetId))
           this.#tabs.set(p.targetInfo.targetId, p.targetInfo);
       } else if (method === 'Target.detachedFromTarget') {
@@ -1004,24 +1045,39 @@ export class BrowserCDP {
         if (!this.#ready.has(p.targetId) && this.#creating) await this.#creating.promise;
         this.#dropTab(p.targetId);
       } else if (method === 'Fetch.requestPaused') {
-        const tab = this.#owner(session);
-        if (!tab) return; // Detached targets take their pending requests with them.
+        // Only the root interceptor is installed. No request is released while
+        // its ownership is unknown, including requests from vanished frames.
+        if (session !== undefined || !this.fileLive()) return;
+        const owner = await this.#requestOwners?.resolve(p.frameId);
+        if (!this.fileLive()) return;
+        if (!owner) {
+          this.#terminalError =
+            'A browser request could not be attributed safely. The session ended; create a new toolset to continue.';
+          this.#fail();
+          return;
+        }
+        if (owner.context !== this.#context) {
+          await this.send('Fetch.continueRequest', { requestId: p.requestId });
+          return;
+        }
+        const tab = owner.tab;
+        const epoch = owner.epoch;
         let allowed = true;
         try {
+          if (!tab || !owner.live || !this.#sessions.has(tab)) throw new Error('Frame ended');
           await this.#checkURL(p.request.url, tab);
         } catch {
           allowed = false;
         }
-        if (this.#owner(session) !== tab) return;
+        if (!this.fileLive()) return;
+        const current = this.#requestOwners?.frames.get(p.frameId);
+        if (!tab || !current?.live || current.epoch !== epoch || !this.#sessions.has(tab))
+          allowed = false;
         if (!allowed) this.#change({ type: 'navigation_refused' });
-        await this.send(
-          allowed ? 'Fetch.continueRequest' : 'Fetch.failRequest',
-          {
-            requestId: p.requestId,
-            ...(allowed ? {} : { errorReason: 'BlockedByClient' }),
-          },
-          session,
-        );
+        await this.send(allowed ? 'Fetch.continueRequest' : 'Fetch.failRequest', {
+          requestId: p.requestId,
+          ...(allowed ? {} : { errorReason: 'BlockedByClient' }),
+        });
       } else if (method === 'Page.javascriptDialogOpening') {
         // A refused popup's dialog is dismissed too, unreported.
         if (!this.#refusing.has(session))
@@ -1041,6 +1097,17 @@ export class BrowserCDP {
         const tab = this.#owner(session);
         if (!tab) return;
         const frame = method.startsWith('Page.frame') ? (p.frameId ?? p.frame?.id) : undefined;
+        if (typeof frame === 'string') {
+          if (method === 'Page.frameAttached' || method === 'Page.frameNavigated')
+            this.#requestOwners?.owned(frame, tab, session, p.parentFrameId ?? p.frame?.parentId);
+          if (method === 'Page.frameNavigated') {
+            this.#requestOwners?.navigated(frame);
+            if (p.type === 'BackForwardCacheRestore')
+              void this.#requestOwners?.refresh(session, tab);
+          }
+          if (method === 'Page.frameDetached' && p.reason !== 'swap')
+            this.#requestOwners?.removed(frame);
+        }
         if (typeof frame === 'string')
           for (const pending of this.#snapshots)
             if (pending.overflow) continue;
@@ -1079,6 +1146,7 @@ export class BrowserCDP {
     }
   }
   #dropTab(target: string): void {
+    this.#requestOwners?.closedTab(target);
     if (this.files)
       for (const [frame, tab] of this.files.frames) if (tab === target) this.#untrack(frame);
     for (const [frame, o] of this.#orphans) if (o.tab === target) this.#orphans.delete(frame);
@@ -1561,18 +1629,11 @@ export class BrowserCDP {
 
   async #cleanup(): Promise<void> {
     try {
+      await this.#dispose();
       await this.files?.close();
       if (this.#ws) {
-        if (this.#context && !this.#failed) {
-          try {
-            await this.send('Target.disposeBrowserContext', {
-              browserContextId: this.#context,
-            });
-          } catch {
-            /* Detach also disposes it. */
-          }
-        }
         this.#fail();
+        await this.#ending;
       }
       await Promise.allSettled(this.#tasks);
     } finally {
