@@ -330,6 +330,32 @@ it('retires descendant request ownership when a new document omits detach events
   }
 });
 
+it('a delayed error-document event does not refuse the next allowed root navigation', async () => {
+  let release!: () => void;
+  const policy = vi.fn(
+    () =>
+      new Promise<void>((resolve) => {
+        release = resolve;
+      }),
+  );
+  const { backend, ws } = await started(policy);
+  try {
+    paused(ws, 'session', 'next', 'https://allowed.test/', 'Document', 'tab');
+    await vi.waitFor(() => expect(policy).toHaveBeenCalledTimes(1));
+    ws.message({
+      method: 'Page.frameNavigated',
+      sessionId: 'session',
+      params: { frame: { id: 'tab', url: 'chrome-error://chromewebdata/' } },
+    });
+    release();
+    await vi.waitFor(() => expect(named(ws, 'Fetch.continueRequest')).toHaveLength(1));
+    expect(named(ws, 'Fetch.failRequest')).toEqual([]);
+  } finally {
+    release?.();
+    await backend.close();
+  }
+});
+
 it('does not initialize a frame detached during the probe-session check', async () => {
   const { backend, ws } = await started();
   try {

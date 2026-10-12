@@ -264,6 +264,8 @@ export class BrowserCDP {
   // for each detach event, every session it took with it.
   #detached = new Set<string>();
   #gone = new WeakMap<Message, string[]>();
+  #attaching = new Map<string, Message>();
+  #detachedAttachments = new WeakSet<Message>();
   // Whether a download's frame was tracked when the download began, decided in
   // arrival order: frame events are not queued, and a download may be.
   #tracked = new WeakMap<Message, boolean | Promise<boolean>>();
@@ -552,6 +554,7 @@ export class BrowserCDP {
     for (const lane of Object.values(this.#lanes)) lane.queue = [];
     this.#queuedBytes = 0;
     this.#parents.clear();
+    this.#attaching.clear();
     this.#frameSource.clear();
     this.#refusing.clear();
     this.#frameParent.clear();
@@ -636,6 +639,8 @@ export class BrowserCDP {
       }
     }
     const child = message.params?.sessionId;
+    if (message.method === 'Target.attachedToTarget' && typeof child === 'string')
+      this.#attaching.set(child, message);
     if (
       message.method === 'Target.attachedToTarget' &&
       typeof child === 'string' &&
@@ -729,6 +734,11 @@ export class BrowserCDP {
         }
     }
     for (const s of gone) {
+      const attaching = this.#attaching.get(s);
+      if (attaching) {
+        this.#detachedAttachments.add(attaching);
+        this.#attaching.delete(s);
+      }
       this.#requestOwners?.detached(s);
       // Remembered until this detach is handled in order, so that an attach
       // for one of these sessions still waiting in the queue is not acted on.
@@ -811,7 +821,7 @@ export class BrowserCDP {
   /** Re-read a session's frames after a back/forward cache restore. */
   #restore(session: string, tab: string): void {
     if (this.#restoring.size >= RESTORES) return;
-    const restore = this.#snapshot(session, tab)
+    const restore = this.#snapshot(session, tab, true)
       .then(() => this.#adopt())
       .catch(() => {})
       .finally(() => {
@@ -838,14 +848,17 @@ export class BrowserCDP {
    * event that arrived while it was on its way is newer and stands, and a
    * session that went meanwhile has nothing left to track.
    */
-  async #snapshot(session: string, tab: string): Promise<void> {
-    if (!this.files) return;
+  async #snapshot(session: string, tab: string, restore = false): Promise<void> {
+    if (!this.files && !restore) return;
     const pending = { touched: new Set<string>(), overflow: false };
     this.#snapshots.add(pending);
     try {
-      const { frameTree } = await this.send('Page.getFrameTree', {}, session);
+      const snapshot = this.send('Page.getFrameTree', {}, session);
+      const ownership = restore ? this.#requestOwners?.refresh(session, tab, snapshot) : undefined;
+      const { frameTree } = await snapshot;
       if (!pending.overflow && this.#owner(session) === tab && !this.#detached.has(session))
         this.#trackTree(frameTree, tab, session, pending.touched);
+      await ownership;
     } finally {
       this.#snapshots.delete(pending);
     }
@@ -976,7 +989,8 @@ export class BrowserCDP {
         const child: string = p.sessionId;
         if (this.#detached.has(child)) return; // Gone before its turn came.
         if (await this.#requestOwners?.probeAttached(child, info.targetId)) return;
-        if (this.#detached.has(child) || !this.fileLive()) return;
+        if (this.#detachedAttachments.has(message) || this.#detached.has(child) || !this.fileLive())
+          return;
         const parent = this.#owner(session);
         if (parent === undefined) this.#requestOwners?.target(info);
         if (info.browserContextId !== this.#context && parent === undefined) {
@@ -995,7 +1009,8 @@ export class BrowserCDP {
         if (parent !== undefined && info.type === 'worker') return;
         const target: string = info.targetId;
         if (!this.#ready.has(target) && this.#creating) await this.#creating.promise;
-        if (this.#detached.has(child) || !this.fileLive()) return;
+        if (this.#detachedAttachments.has(message) || this.#detached.has(child) || !this.fileLive())
+          return;
         if (info.type === 'page' && !this.#ready.has(target)) {
           await this.#refusePage(child, target);
           return;
@@ -1102,11 +1117,13 @@ export class BrowserCDP {
             this.#requestOwners?.owned(frame, tab, session, p.parentFrameId ?? p.frame?.parentId);
           if (method === 'Page.frameNavigated') {
             this.#requestOwners?.navigated(frame);
-            if (p.type === 'BackForwardCacheRestore')
-              void this.#requestOwners?.refresh(session, tab);
           }
-          if (method === 'Page.frameDetached' && p.reason !== 'swap')
+          if (method === 'Page.frameDetached' && p.reason !== 'swap') {
+            // A snapshot may mention a frame whose attach was never observed.
+            // Keep its detach as a tombstone so that late tree cannot revive it.
+            this.#requestOwners?.owned(frame, tab, session);
             this.#requestOwners?.removed(frame);
+          }
         }
         if (typeof frame === 'string')
           for (const pending of this.#snapshots)
@@ -1143,6 +1160,9 @@ export class BrowserCDP {
       if (error instanceof SessionGone) return;
       if (eventSession && this.#owner(eventSession) === undefined) return;
       this.#fail();
+    } finally {
+      if (method === 'Target.attachedToTarget' && this.#attaching.get(p.sessionId) === message)
+        this.#attaching.delete(p.sessionId);
     }
   }
   #dropTab(target: string): void {

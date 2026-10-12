@@ -55,7 +55,7 @@ export class BrowserRequestOwners {
     this.removed(id);
   }
 
-  removed(id: string): void {
+  removed(id: string, descendantsOnly = false): void {
     const removed = new Set([id]);
     for (let changed = true; changed; ) {
       changed = false;
@@ -65,6 +65,7 @@ export class BrowserRequestOwners {
           changed = true;
         }
     }
+    if (descendantsOnly) removed.delete(id);
     for (const frame of removed) {
       const owner = this.frames.get(frame);
       if (owner) {
@@ -77,26 +78,25 @@ export class BrowserRequestOwners {
 
   navigated(id: string): void {
     // A new document retires descendants even when Chromium emits no detach
-    // events. Keep the root's identity, with a new epoch for late decisions.
-    this.removed(id);
-    const owner = this.frames.get(id);
-    if (owner) owner.live = true;
+    // events. Do not advance the live root's epoch: a delayed error-document
+    // event may arrive while the next allowed navigation is being checked.
+    this.removed(id, true);
   }
 
-  refresh(session: string, tab: string): Promise<void> {
+  refresh(session: string, tab: string, snapshot?: Promise<Message>): Promise<void> {
     const pending = this.#refreshing.get(session);
-    if (pending) return pending;
+    if (pending && !snapshot) return pending;
     const revision = this.#revision;
     const task = (async () => {
       try {
-        const { frameTree } = await this.send('Page.getFrameTree', {}, session);
+        const { frameTree } = await (snapshot ?? this.send('Page.getFrameTree', {}, session));
         if (this.live() && this.sessions().some((s) => s.session === session && s.tab === tab))
           this.#tree(frameTree, this.context, tab, session, revision);
       } catch {
         /* A failed restore leaves descendant requests refused. */
       }
     })().finally(() => {
-      this.#refreshing.delete(session);
+      if (this.#refreshing.get(session) === task) this.#refreshing.delete(session);
     });
     this.#refreshing.set(session, task);
     return task;
@@ -142,6 +142,7 @@ export class BrowserRequestOwners {
       (info.browserContextId !== undefined && typeof info.browserContextId !== 'string')
     )
       return;
+    if (info.browserContextId === undefined && !['page', 'iframe'].includes(info.type)) return;
     if (info.browserContextId !== this.context)
       this.#record(info.targetId, info.browserContextId ?? '');
   }
@@ -168,8 +169,8 @@ export class BrowserRequestOwners {
     const id = tree.frame.id;
     const previous = this.frames.get(id);
     // Events newer than this snapshot, including detach tombstones, win.
-    if (!previous || previous.revision <= revision)
-      this.#record(id, context, tab, source, tree.frame.parentId ?? parent);
+    if (previous && previous.revision > revision) return;
+    this.#record(id, context, tab, source, tree.frame.parentId ?? parent);
     for (const child of tree.childFrames ?? [])
       this.#tree(child, context, tab, source, revision, id, budget);
   }

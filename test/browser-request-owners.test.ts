@@ -74,6 +74,23 @@ it('failed metadata and snapshots never prove foreign ownership', async () => {
   expect(owners.frames.size).toBe(0);
 });
 
+it('does not infer foreign ownership from absent context on worker or other target metadata', async () => {
+  const owners = new BrowserRequestOwners(
+    'ours',
+    async () => {
+      throw new Error('unavailable');
+    },
+    () => [],
+    () => true,
+  );
+  for (const type of ['worker', 'shared_worker', 'service_worker', 'tab', 'other', 'browser_ui']) {
+    owners.target({ targetId: type, type });
+    await expect(owners.resolve(type)).resolves.toBeUndefined();
+  }
+  owners.target({ targetId: 'explicit-worker', type: 'worker', browserContextId: 'foreign' });
+  await expect(owners.resolve('explicit-worker')).resolves.toMatchObject({ context: 'foreign' });
+});
+
 it('waits for a restored tree before deciding requests from its previously retired children', async () => {
   let deliver!: (value: Record<string, any>) => void;
   const send = vi.fn(
