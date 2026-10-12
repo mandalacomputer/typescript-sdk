@@ -2066,17 +2066,43 @@ describe('snapshots', () => {
     expect(h.rec.calls).toHaveLength(0);
   });
 
-  // The platform deletes only an empty workspace (409 while it holds any), so
-  // neither the confirmation nor the help may promise its computers are kept.
-  it('says a workspace that holds computers cannot be deleted, never that they are kept', async () => {
+  // The platform refuses deletion while a workspace holds computers or active secrets.
+  it('explains the computer and secret prerequisites before workspace deletion', async () => {
     const result = await harness().run(['workspaces', 'rm', WORKSPACE.name]);
     const message: string = result.frames[0].error.message;
-    expect(message).toMatch(/a workspace that still holds computers cannot be deleted/);
+    expect(message).toContain('computers or active secrets cannot be deleted');
+    expect(message).toContain(
+      'Move its computers to another workspace in the dashboard or delete them',
+    );
+    expect(message).toContain('explicitly delete its active secrets first');
     expect(message).not.toMatch(/kept|not touched/);
     const help = COMMANDS.find((c) => c.path === 'workspaces rm')!.description;
-    expect(help).toMatch(/it must hold no computers/);
+    expect(help).toMatch(/it must hold no computers or active secrets/);
     expect(help).not.toMatch(/kept|not touched/);
   });
+
+  it.each([false, true])(
+    'reports a workspace secret conflict without retry or cleanup (json=%s)',
+    async (jsonMode) => {
+      const message =
+        'This workspace still holds 1 secret. Delete it first: a workspace that holds secrets cannot be deleted.';
+      const h = harness(() => json({ error: message, reason: 'unsupported' }, { status: 409 }));
+      const result = await h.run(['workspaces', 'rm', WORKSPACE.id, '--yes'], jsonMode);
+
+      expect(result.code).toBe(1);
+      if (jsonMode) {
+        expect(result.frames).toHaveLength(1);
+        expect(result.frames[0]).toMatchObject({
+          ok: false,
+          error: { code: 'conflict', status: 409, reason: 'unsupported', message },
+        });
+      } else {
+        expect(result.out).toBe('');
+        expect(result.err).toContain(message);
+      }
+      expect(h.rec.routes()).toEqual([['DELETE', `workspaces/${WORKSPACE.id}`]]);
+    },
+  );
 
   it('refuses to rename or delete a workspace name that fits more than one', async () => {
     const twin = { ...WORKSPACE, id: 'wsp-bbbbbbbbbbbb' };
