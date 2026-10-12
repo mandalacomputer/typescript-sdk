@@ -138,6 +138,79 @@ it('disables uploads and gates JavaScript without opening a connection', async (
 });
 
 const executable = process.env.MANDALA_TEST_CHROMIUM;
+const guardianProxy = process.env.MANDALA_TEST_CDP_PROXY;
+
+// Platform validation supplies the real guardian adapter. Public SDK CI does
+// not download or substitute a copy of the guardian implementation.
+async function startGuardianProxy(upstream: string) {
+  const child = spawn('python3', [guardianProxy!, upstream], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const exited = new Promise<void>((resolve) => {
+    child.once('exit', () => resolve());
+    child.once('error', () => resolve());
+  });
+  async function close() {
+    if (child.exitCode !== null || child.signalCode !== null) return;
+    const timer = setTimeout(() => child.kill('SIGKILL'), 5000);
+    try {
+      child.kill();
+      await exited;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  let stderr = '';
+  child.stderr!.on('data', (chunk: Buffer) => {
+    stderr = `${stderr}${chunk.toString()}`.slice(-4096);
+  });
+  const lines = createInterface({ input: child.stdout! });
+  try {
+    const url = await new Promise<string>((resolve, reject) => {
+      const cleanup = () => {
+        clearTimeout(timer);
+        lines.close();
+        child.stdout!.resume();
+        child.off('error', fail);
+        child.off('exit', fail);
+      };
+      const fail = () => {
+        cleanup();
+        reject(new Error(`Guardian proxy did not expose CDP: ${stderr}`));
+      };
+      const timer = setTimeout(fail, 10000);
+      child.once('error', fail);
+      child.once('exit', fail);
+      lines.once('line', (line) => {
+        try {
+          const value = JSON.parse(line) as { url: unknown };
+          if (typeof value.url !== 'string') throw new Error('Missing guardian URL');
+          const parsed = new URL(value.url);
+          if (
+            parsed.protocol !== 'ws:' ||
+            parsed.hostname !== '127.0.0.1' ||
+            parsed.pathname !== new URL(upstream).pathname ||
+            parsed.username ||
+            parsed.password ||
+            parsed.search ||
+            parsed.hash
+          )
+            throw new Error('Invalid local guardian URL');
+          cleanup();
+          resolve(value.url);
+        } catch (error) {
+          cleanup();
+          reject(error);
+        }
+      });
+    });
+    return { url, close };
+  } catch (error) {
+    await close();
+    throw error;
+  }
+}
+
 // 127.0.0.1 and localhost are different sites, so each frame below is cross-site
 // from its parent and runs as its own target.
 const workerAttempts = (port: number, where: string) =>
@@ -1126,6 +1199,121 @@ describe.skipIf(!executable)('real Chromium through Anthropic toolResult', () =>
     'cleans up after abrupt CDP loss without promising pending-request isolation',
     () => heldRequestEnding('disconnect'),
     30000,
+  );
+
+  it.skipIf(!guardianProxy).each(['disconnect', 'close'] as const)(
+    'a live backend guardian prevents held HTTP delivery on SDK %s',
+    async (ending) => {
+      const { base, hits, url } = await fixture();
+      const proxy = await startGuardianProxy(url);
+      try {
+        const { chromium } = await import('playwright-core');
+        const { default: WebSocket } = await import('ws');
+        // The observer uses the unproxied browser connection and installs no
+        // Fetch interceptor. Only the SDK connection protects the held request.
+        const observer = await chromium.connectOverCDP(url);
+        let release!: () => void;
+        const gate = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        let entered = false;
+        const driver = new BrowserCDP(
+          async () => ({ id, url: proxy.url, token }) as BrowserConnection,
+          async () => {},
+          async (_tab, target) => {
+            if (target === `${base}/root-held-denied`) {
+              entered = true;
+              await gate;
+              throw new ToolError('denied');
+            }
+          },
+        );
+        drivers.push(driver);
+        const commands = vi.spyOn(driver, 'send');
+        let closing: Promise<void> | undefined;
+        try {
+          let socket: InstanceType<typeof WebSocket> | undefined;
+          const originalSend = WebSocket.prototype.send;
+          const capture = vi.spyOn(WebSocket.prototype, 'send').mockImplementation(function (
+            this: InstanceType<typeof WebSocket>,
+            ...args: Parameters<typeof originalSend>
+          ) {
+            if (String(args[0]).includes('Target.createBrowserContext')) socket = this;
+            return originalSend.apply(this, args);
+          });
+          try {
+            await driver.start();
+          } finally {
+            capture.mockRestore();
+          }
+          const capabilities = await driver.send('Mandala.getConnectionCapabilities');
+          expect(capabilities.context_guard_version).toBe(1);
+          expect(capabilities.protected_disconnects).toEqual(
+            expect.arrayContaining(['downstream', 'host_link']),
+          );
+          const interception = commands.mock.calls.filter(([method]) => method === 'Fetch.enable');
+          expect(interception).toHaveLength(1);
+          expect(interception[0]![2]).toBeUndefined();
+          const contextCreation = commands.mock.calls.find(
+            ([method]) => method === 'Target.createBrowserContext',
+          );
+          expect(contextCreation?.[1]?.disposeOnDetach).toBe(true);
+          expect(socket).toBeDefined();
+
+          const control = await observer.newBrowserCDPSession();
+          const { targetInfo: owned } = await control.send('Target.getTargetInfo', {
+            targetId: driver.state().tabs[0]!.tab_id,
+          });
+          const foreignContext = await observer.newContext();
+          const foreignPage = await foreignContext.newPage();
+          await foreignPage.goto(base);
+          const foreignSession = await foreignContext.newCDPSession(foreignPage);
+          const { targetInfo: foreign } = await foreignSession.send('Target.getTargetInfo');
+          await driver.perform('navigate', { url: `${base}/root-held-host` });
+          await expect.poll(() => entered).toBe(true);
+          expect(hits).not.toContain('/root-held-denied');
+          if (ending === 'disconnect') socket!.terminate();
+          else closing = driver.close();
+
+          await expect
+            .poll(async () => (await control.send('Target.getBrowserContexts')).browserContextIds, {
+              timeout: 10000,
+            })
+            .not.toContain(owned.browserContextId);
+          expect((await control.send('Target.getBrowserContexts')).browserContextIds).toContain(
+            foreign.browserContextId,
+          );
+          await expect.poll(() => driver.sessionStatus().state).toBe('ended');
+          const lateCommandStart = commands.mock.calls.length;
+          release();
+          await closing;
+          await driver.close();
+          expect(
+            commands.mock.calls
+              .slice(lateCommandStart)
+              .filter(
+                ([method]) => method === 'Fetch.continueRequest' || method === 'Fetch.failRequest',
+              ),
+          ).toEqual([]);
+          await foreignPage.evaluate(() => fetch('/foreign-after-guardian'));
+          expect(hits).toContain('/foreign-after-guardian');
+          expect(hits).not.toContain('/root-held-denied');
+          await foreignContext.close();
+        } finally {
+          try {
+            release();
+            await closing;
+            await driver.close();
+          } finally {
+            commands.mockRestore();
+            await observer.close();
+          }
+        }
+      } finally {
+        await proxy.close();
+      }
+    },
+    45000,
   );
 
   it('survives cross-site frames that come and go faster than they are set up', async () => {

@@ -2034,11 +2034,11 @@ revokes its capability; it does not stop Chromium or delete the computer.
   browser traffic outside those intercepted requests. Interception starts
   before this toolset opens a page, so while the control connection is active,
   a sandboxed `srcdoc` frame's first requests are covered even when it runs
-  before the driver can attach. If that connection is lost abruptly, or
-  context disposal fails, Chromium can resume a pending HTTP request before
-  removing the context, without the URL hook approving it. The SDK ends the
-  session and attempts cleanup, but cannot prevent this delivery after losing
-  control. Use independent guest egress enforcement when that guarantee is needed.
+  before the driver can attach. On an unguarded connection, abrupt control
+  loss or failed context disposal can let Chromium resume a pending HTTP
+  request before removing the context, without the URL hook approving it.
+  The SDK ends the session and attempts cleanup. Use independent guest egress
+  enforcement when protection must survive losing browser control.
   Requests from other browser contexts are released without calling your
   policy after their ownership is established. Ownership checks and retained
   frame history are bounded: if ownership cannot be established, the driver
@@ -2046,6 +2046,20 @@ revokes its capability; it does not stop Chromium or delete the computer.
   control connection and disposal remain available. This can end an
   otherwise healthy toolset when another context's frame disappears before
   the driver has observed it. Create a new toolset to continue.
+- A backend advertising `context_guard_version: 1` through the root CDP
+  method `Mandala.getConnectionCapabilities` protects the advertised
+  `downstream` and `host_link` disconnects: loss of the SDK connection or the
+  daemon's link to the guardian. The guardian must remain alive and connected
+  to Chromium. This SDK already creates its context with `disposeOnDetach: true`,
+  so no SDK opt-in is needed on a backend with that capability. Before detaching
+  interception, the guardian disposes only those contexts created on that
+  connection with this flag. If disposal cannot be acknowledged, the guardian
+  retains the upstream connection and interception while cleanup remains
+  pending. This occupies a bounded connection slot and can stall other HTTP
+  requests intercepted at the same browser root; eventual cleanup is not
+  guaranteed. Guardian failure or loss of its connection to Chromium remains
+  outside this protection (OPL-5954): pending HTTP requests can still resume
+  without policy approval. The URL hook remains **not network isolation**.
 - Cross-site frames (which Chromium runs in their own process) run as part of
   their tab. Chromium holds one that loads a URL until the driver has attached
   to it. Its HTTP(S) requests go through the same URL hook with that tab's
