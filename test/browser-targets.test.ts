@@ -398,6 +398,68 @@ it('disposes its context before detaching root interception when attribution tim
   }
 });
 
+it('keeps its context alive when foreign target metadata changes during a frame probe', async () => {
+  const policy = vi.fn(async () => {});
+  const { backend, ws } = await started(policy);
+  const foreign = { targetId: 'foreign-root', type: 'page', browserContextId: 'foreign-context' };
+  const command = async (method: string, sessionId?: string) => {
+    await vi.waitFor(() =>
+      expect(ws.sent.some((c) => c.method === method && c.sessionId === sessionId)).toBe(true),
+    );
+    return ws.sent.findLast((c) => c.method === method && c.sessionId === sessionId)!;
+  };
+  for (const method of [
+    'Target.getTargetInfo',
+    'Target.getTargets',
+    'Target.attachToTarget',
+    'Page.getFrameTree',
+  ])
+    ws.held.add(method);
+  try {
+    paused(ws, 'session', 'foreign-request', 'https://foreign.test/', 'Fetch', 'live-child');
+    ws.message({
+      id: (await command('Target.getTargetInfo')).id,
+      error: { code: -32602, message: 'No target' },
+    });
+    ws.message({
+      id: (await command('Page.getFrameTree', 'session')).id,
+      result: { frameTree: { frame: { id: 'tab' } } },
+    });
+    ws.message({ id: (await command('Target.getTargets')).id, result: { targetInfos: [foreign] } });
+    const attach = await command('Target.attachToTarget');
+    ws.message({
+      method: 'Target.attachedToTarget',
+      params: { sessionId: 'probe', targetInfo: foreign },
+    });
+    ws.message({ id: attach.id, result: { sessionId: 'probe' } });
+    const snapshot = await command('Page.getFrameTree', 'probe');
+    ws.message({
+      method: 'Target.targetInfoChanged',
+      params: { targetInfo: { ...foreign, title: 'New title' } },
+    });
+    ws.message({
+      id: snapshot.id,
+      result: {
+        frameTree: {
+          frame: { id: 'foreign-root' },
+          childFrames: [{ frame: { id: 'live-child' } }],
+        },
+      },
+    });
+    await vi.waitFor(() =>
+      expect(named(ws, 'Fetch.continueRequest')).toEqual([
+        expect.objectContaining({ params: { requestId: 'foreign-request' } }),
+      ]),
+    );
+    expect(policy).not.toHaveBeenCalled();
+    expect(named(ws, 'Target.disposeBrowserContext')).toEqual([]);
+    expect(backend.sessionStatus().state).toBe('active');
+  } finally {
+    ws.held.clear();
+    await backend.close();
+  }
+});
+
 it('holds dedicated workers paused and still closes targets no owned page holds', async () => {
   const { backend, ws } = await started();
   try {

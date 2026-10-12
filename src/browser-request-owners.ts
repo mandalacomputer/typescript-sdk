@@ -143,8 +143,19 @@ export class BrowserRequestOwners {
     )
       return;
     if (info.browserContextId === undefined && !['page', 'iframe'].includes(info.type)) return;
-    if (info.browserContextId !== this.context)
-      this.#record(info.targetId, info.browserContextId ?? '');
+    if (info.browserContextId !== this.context) {
+      const context = info.browserContextId ?? '';
+      const previous = this.frames.get(info.targetId);
+      if (previous) {
+        if (previous.context !== context || previous.tab !== undefined)
+          throw new Error('Frame ownership changed');
+        // Titles, URLs and other Target metadata do not change immutable
+        // ownership or invalidate a frame-tree snapshot already in flight.
+        // Only frame lifecycle events should advance its revision/liveness.
+        return;
+      }
+      this.#record(info.targetId, context);
+    }
   }
 
   // A manual attach can be announced before its command response. Keep its

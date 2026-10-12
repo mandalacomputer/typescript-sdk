@@ -60,6 +60,37 @@ it('retains owned tombstones and cannot convert an owned frame into a foreign on
   expect(send).not.toHaveBeenCalled();
 });
 
+it('a foreign title update does not invalidate children in a pending ownership snapshot', async () => {
+  let owners!: BrowserRequestOwners;
+  const foreign = { targetId: 'foreign-root', type: 'page', browserContextId: 'foreign-context' };
+  const send = vi.fn(async (method: string) => {
+    if (method === 'Target.getTargetInfo') throw new Error('Not a Target');
+    if (method === 'Target.getTargets') return { targetInfos: [foreign] };
+    if (method === 'Target.attachToTarget') return { sessionId: 'probe' };
+    if (method === 'Page.getFrameTree') {
+      const before = owners.frames.get('foreign-root')!;
+      const revision = before.revision;
+      owners.target({ ...foreign, title: 'New title' });
+      expect(owners.frames.get('foreign-root')).toBe(before);
+      expect(before.revision).toBe(revision);
+      return {
+        frameTree: {
+          frame: { id: 'foreign-root' },
+          childFrames: [{ frame: { id: 'live-child' } }],
+        },
+      };
+    }
+    return {};
+  });
+  owners = new BrowserRequestOwners(
+    'ours',
+    send,
+    () => [],
+    () => true,
+  );
+  await expect(owners.resolve('live-child')).resolves.toMatchObject({ context: 'foreign-context' });
+});
+
 it('failed metadata and snapshots never prove foreign ownership', async () => {
   const send = vi.fn(async () => {
     throw new Error('gone');
