@@ -4574,9 +4574,10 @@ export type WorkspaceDeleted = {
 };
 
 /**
- * Somebody who reaches a workspace: a member of the account, since workspaces
- * do not divide people. `role` is their role on the account, which is their
- * role in every workspace.
+ * An accepted member of the account, since workspaces do not divide people.
+ * `role` is their account role in every workspace. The roster includes members
+ * waiting for a plan seat and members restricted from signing in; presence
+ * alone does not mean they can act on the account.
  */
 export type WorkspaceMember = {
   /** `usr-` and sixteen hex characters. */
@@ -4588,8 +4589,14 @@ export type WorkspaceMember = {
   role: Role;
   /** When they joined the account. */
   acceptedAt: string;
-  /** `true` when they cannot sign in at the moment; still on the account. */
+  /** A global sign-in restriction; independent of `seatSuspended`. */
   suspended: boolean;
+  /**
+   * `true` while they are waiting for a plan seat and cannot act on the
+   * account. Independent of the global sign-in restriction in `suspended`.
+   * `undefined` when an older server omits the field: the seat state is unknown.
+   */
+  seatSuspended?: boolean;
   raw: Record<string, unknown>;
 };
 
@@ -4617,8 +4624,8 @@ export function toWorkspaceDeleted(d: unknown, what = 'a workspace deletion'): W
 }
 
 /**
- * Strict on the id and on `suspended`: a member this client cannot say is
- * suspended or not is not one to report as able to sign in.
+ * Strict on the id and on `suspended`. A supplied `seat_suspended` must also
+ * be boolean; an older server's missing field leaves the seat state unknown.
  */
 export function toWorkspaceMember(d: unknown, what = 'a workspace member'): WorkspaceMember {
   if (!isRecord(d) || typeof d.user_id !== 'string' || !d.user_id) {
@@ -4627,7 +4634,10 @@ export function toWorkspaceMember(d: unknown, what = 'a workspace member'): Work
   if (typeof d.suspended !== 'boolean') {
     throw new MandalaError(`expected ${what} to say whether they are suspended`);
   }
-  return {
+  if ('seat_suspended' in d && typeof d.seat_suspended !== 'boolean') {
+    throw new MandalaError(`expected ${what}'s seat_suspended to be a boolean`);
+  }
+  const member: WorkspaceMember = {
     userId: d.user_id,
     email: str(d.email),
     name: nullableText(d.name, `${what}'s name`),
@@ -4636,6 +4646,8 @@ export function toWorkspaceMember(d: unknown, what = 'a workspace member'): Work
     suspended: d.suspended,
     raw: { ...d },
   };
+  if (typeof d.seat_suspended === 'boolean') member.seatSuspended = d.seat_suspended;
+  return member;
 }
 
 // --- lifecycle operations ------------------------------------------------------

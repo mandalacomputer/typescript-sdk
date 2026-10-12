@@ -884,6 +884,7 @@ export const WORKSPACE_MEMBER = {
   role: 'owner',
   accepted_at: '2026-08-01T00:00:00.000Z',
   suspended: false,
+  seat_suspended: false,
 };
 
 /** A finished lifecycle operation, as `GET operations/:id` answers it (OPL-5055). */

@@ -3083,6 +3083,16 @@ deleted workspace a computer may still carry). `members()` is refused to such a
 key with a `PermissionDeniedError`, because the list is the whole account's:
 use an account-wide key.
 
+`members()` lists the account's accepted members, oldest first, including those
+waiting for a plan seat. Pending invitations are left out. A member's `role`
+applies across workspaces, but their presence in the roster does not mean they
+can act on the account. `seatSuspended: true` means they are waiting for a plan
+seat and cannot act on the account; `suspended` is a separate global sign-in
+restriction. Either flag can be true independently. The API supplies
+`seat_suspended` as a boolean; when an older server omits it, the SDK leaves
+`seatSuspended` undefined (unknown), rather than assuming false. `raw` preserves
+the original fields, as does the CLI's normal and `--json` member output.
+
 ### Usage
 
 What the account has spent, in the same figures the dashboard shows and the

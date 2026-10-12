@@ -631,7 +631,7 @@ export const COMMANDS: readonly Command[] = [
   command('workspaces get', 'Read one workspace, by name or ID', ['workspace']),
   command(
     'workspaces members',
-    'List the people who reach a workspace, by name or ID; needs a key that is not confined to a workspace',
+    "List the account's accepted members for a workspace, by name or ID; needs an account-wide key",
     ['workspace'],
   ),
   command(
