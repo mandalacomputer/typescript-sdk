@@ -1225,7 +1225,7 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
     if (path === 'workspaces rm' && !b('yes'))
       throw new CliError(
         'confirmation_required',
-        `deleting workspace ${target} revokes every API key confined to it; a workspace that still holds computers or active secrets cannot be deleted. Move or delete its computers and explicitly delete its secrets first. Pass --yes to delete it`,
+        `deleting workspace ${target} revokes every API key confined to it; a workspace that still holds computers or active secrets cannot be deleted. Move its computers to another workspace in the dashboard or delete them, and explicitly delete its active secrets first. Pass --yes to delete it`,
       );
     if (path === 'files list') P.directoryQuery(args[1]!);
     if (path === 'computers secrets set' && !b('clear') && !bindings.length)

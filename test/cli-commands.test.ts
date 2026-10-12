@@ -2072,8 +2072,9 @@ describe('snapshots', () => {
     const message: string = result.frames[0].error.message;
     expect(message).toContain('computers or active secrets cannot be deleted');
     expect(message).toContain(
-      'Move or delete its computers and explicitly delete its secrets first',
+      'Move its computers to another workspace in the dashboard or delete them',
     );
+    expect(message).toContain('explicitly delete its active secrets first');
     expect(message).not.toMatch(/kept|not touched/);
     const help = COMMANDS.find((c) => c.path === 'workspaces rm')!.description;
     expect(help).toMatch(/it must hold no computers or active secrets/);

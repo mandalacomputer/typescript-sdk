@@ -2655,8 +2655,9 @@ export class Workspaces {
   /**
    * Delete a workspace. Only an empty workspace can be deleted: one that still
    * holds computers or active secrets is refused with a {@link ConflictError}
-   * (409) saying how many, and nothing is deleted or revoked. Move or delete
-   * the computers and explicitly delete the active secrets before retrying.
+   * (409) saying how many, and nothing is deleted or revoked. Move the computers
+   * to another workspace in the dashboard or delete them, and explicitly delete
+   * the active secrets before retrying.
    * An active-secret refusal has `reason: 'unsupported'` and is not retried
    * automatically. Deleted secrets do not block workspace deletion, but still
    * count toward the account's lifetime limit of 1000 secrets. If the
