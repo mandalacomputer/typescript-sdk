@@ -204,6 +204,7 @@ type ComputerAction =
   | 'restart'
   | 'clone'
   | 'move'
+  | 'workspace'
   | 'screenshot'
   | 'input'
   | 'clipboard'
@@ -944,6 +945,21 @@ function workspaceIdArg(v: unknown, what: string): string | undefined {
  */
 export function computerWorkspace(v: unknown): string | undefined {
   return workspaceIdArg(v, 'workspaceId');
+}
+
+/** An explicit destination: null removes the computer from its workspace. */
+export function workspaceMoveBody(workspaceId: unknown): { workspace_id: string | null } {
+  if (
+    workspaceId !== null &&
+    (typeof workspaceId !== 'string' ||
+      workspaceId.length !== 16 ||
+      !/^wsp-[0-9a-f]{12}$/.test(workspaceId))
+  ) {
+    throw new ValidationError(
+      'workspaceId must be wsp- followed by 12 lowercase hexadecimal digits, or null for unassigned',
+    );
+  }
+  return { workspace_id: workspaceId };
 }
 
 export type UpdateArgs = {

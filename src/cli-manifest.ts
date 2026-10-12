@@ -27,7 +27,7 @@ export function manifest() {
       exec: 'JSON data contains base64 stdout/stderr, decoded text, exit_code and completion flags; process exit follows the remote status (124 on timeout, 1 if unknown)',
       exec_poll:
         'computers exec-poll: JSON data contains pid, running, exit_code, base64 and decoded stdout/stderr read since the last poll; process exit is 0 while the command runs, then its exit status (1 if unknown). computers exec-kill exits 0 once the command is killed',
-      move: 'computers move: JSON data is the move (state, live, the target cpu/ram_mb/disk_gb, started_at); with --wait the process exits 0 only when its state is done',
+      move: 'computers move --workspace: JSON data is the updated computer; --workspace conflicts with host sizing, wait and idempotency flags. With --ram-mb, JSON data is the move (state, live, the target cpu/ram_mb/disk_gb, started_at); with --wait the process exits 0 only when its state is done',
     },
     commands: COMMANDS.map((c) => ({
       path: c.path.split(' '),

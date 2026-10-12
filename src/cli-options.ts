@@ -5,6 +5,8 @@ export type Flag = {
   type: 'boolean' | 'string' | 'number';
   description: string;
   required?: boolean;
+  /** Any of these explicitly supplied flags satisfies this flag's requirement. */
+  required_unless?: readonly string[];
   repeatable?: boolean;
   choices?: readonly string[];
   conflicts?: readonly string[];
@@ -282,11 +284,15 @@ export const COMMANDS: readonly Command[] = [
   ),
   command(
     'computers move',
-    'Move a stopped computer to another host in its region that can run a size its own host cannot (after resize answered move_required), resizing it there; one move runs per account at a time',
+    'Move a computer to an explicit workspace with --workspace (member/owner account-wide credential; stopped, no snapshots or secret bindings), or relocate a stopped computer to another host with --ram-mb after resize answered move_required; one host move runs per account at a time',
     ['computer'],
     [
+      flag('workspace', 'Destination workspace ID, or unassigned; never uses the saved default', {
+        conflicts: ['ram-mb', 'cpu', 'disk-gb', 'wait', 'timeout-ms', 'poll-ms', 'idempotency-key'],
+      }),
       num('ram-mb', 'RAM in MiB: the size that did not fit, more than the computer has now', {
         required: true,
+        required_unless: ['workspace'],
       }),
       num('cpu', 'vCPU count to apply with the move (default: unchanged)'),
       num('disk-gb', 'Disk in GiB to apply with the move; disks grow only (default: unchanged)'),
@@ -1182,7 +1188,11 @@ function readArgs(argv: string[], parsed: Parsed): Parsed {
       throw usageError(c, `${bare} must be one of: ${choices.join(', ')}`);
   });
   for (const f of c.flags) {
-    if (f.required && parsed.flags[f.name] === undefined)
+    if (
+      f.required &&
+      parsed.flags[f.name] === undefined &&
+      !f.required_unless?.some((name) => parsed.flags[name] !== undefined)
+    )
       throw usageError(c, `${usage(c)} requires --${f.name}`);
     if (parsed.flags[f.name] !== undefined)
       for (const conflict of f.conflicts ?? []) {
@@ -1234,5 +1244,5 @@ function usageError(
 export function help(path = ''): string {
   const matches = COMMANDS.filter((c) => !path || c.path === path || c.path.startsWith(`${path} `));
   const exact = matches.length === 1 ? matches[0] : undefined;
-  return `mandala — cloud computers from your terminal\n\n${matches.map((c) => `  ${usage(c)}\n    ${c.description}`).join('\n')}\n\n${[...GLOBAL_FLAGS, ...(exact?.flags ?? [])].map((f) => `  --${f.name}${f.alias ? `, -${f.alias}` : ''}${f.type === 'boolean' ? '' : ` <${f.type}>`}${f.required ? ' (required)' : ''}  ${f.description}`).join('\n')}\n\nMANDALA_API_KEY authenticates requests; MANDALA_BASE_URL optionally selects a server.\nMANDALA_MODEL_KEY is your own model key for agent run; unset, the run spends the account's AI credits. No credentials are needed for help, version, manifest, completion or logout.\n${path.startsWith('ssh') ? `\nmandala ssh: our options go before <computer> (with --setup, --key and --json may follow it);\neverything after it goes to ssh unchanged. It never falls back to mandala terminal.\nMANDALA_SSH_GATEWAY=host[:port] (default ssh.mandala.computer:2222) and\nMANDALA_SSH_GATEWAY_KNOWN_HOSTS (a known_hosts line, or file, pinning that gateway's key)\npoint the SSH commands at another gateway.\n` : ''}`;
+  return `mandala — cloud computers from your terminal\n\n${matches.map((c) => `  ${usage(c)}\n    ${c.description}`).join('\n')}\n\n${[...GLOBAL_FLAGS, ...(exact?.flags ?? [])].map((f) => `  --${f.name}${f.alias ? `, -${f.alias}` : ''}${f.type === 'boolean' ? '' : ` <${f.type}>`}${f.required ? (f.required_unless?.length ? ` (required unless ${f.required_unless.map((name) => `--${name}`).join(' or ')})` : ' (required)') : ''}  ${f.description}`).join('\n')}\n\nMANDALA_API_KEY authenticates requests; MANDALA_BASE_URL optionally selects a server.\nMANDALA_MODEL_KEY is your own model key for agent run; unset, the run spends the account's AI credits. No credentials are needed for help, version, manifest, completion or logout.\n${path.startsWith('ssh') ? `\nmandala ssh: our options go before <computer> (with --setup, --key and --json may follow it);\neverything after it goes to ssh unchanged. It never falls back to mandala terminal.\nMANDALA_SSH_GATEWAY=host[:port] (default ssh.mandala.computer:2222) and\nMANDALA_SSH_GATEWAY_KNOWN_HOSTS (a known_hosts line, or file, pinning that gateway's key)\npoint the SSH commands at another gateway.\n` : ''}`;
 }

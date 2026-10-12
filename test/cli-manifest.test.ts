@@ -232,6 +232,29 @@ describe('one command inventory', () => {
     });
   });
 
+  it('advertises the explicit workspace mode and conditional host sizing requirement', () => {
+    const move = manifest().commands.find((c) => c.path.join(' ') === 'computers move')!;
+    expect(move.flags.find((f) => f.name === 'ram-mb')).toMatchObject({
+      required: true,
+      required_unless: ['workspace'],
+    });
+    expect(move.flags.find((f) => f.name === 'workspace')).toMatchObject({
+      conflicts: ['ram-mb', 'cpu', 'disk-gb', 'wait', 'timeout-ms', 'poll-ms', 'idempotency-key'],
+    });
+    expect(help('computers move')).toContain('required unless --workspace');
+    expect(manifest().output.move).toContain('updated computer');
+    for (const shell of ['bash', 'zsh', 'fish'] as const)
+      expect(
+        completion(shell)
+          .split('\n')
+          .some(
+            (line) =>
+              line.includes('computers move') &&
+              line.includes(shell === 'fish' ? '-l workspace' : '--workspace'),
+          ),
+      ).toBe(true);
+  });
+
   it('advertises finite account and usage reads without resource selectors', () => {
     const entries = manifest().commands.filter((c) => ['account', 'usage'].includes(c.path[0]!));
     expect(
@@ -252,6 +275,14 @@ describe('one command inventory', () => {
       expect(parseArgs(baseArgs(command)).path).toBe(command.path);
       for (const flag of [...GLOBAL_FLAGS, ...command.flags]) {
         const args = baseArgs(command);
+        for (const conflict of flag.conflicts ?? []) {
+          const at = args.indexOf(`--${conflict}`);
+          if (at >= 0)
+            args.splice(
+              at,
+              command.flags.find((f) => f.name === conflict)?.type === 'boolean' ? 1 : 2,
+            );
+        }
         const already = args.indexOf(`--${flag.name}`);
         if (already >= 0) args.splice(already, flag.type === 'boolean' ? 1 : 2);
         // A flag that completes another (--as after --secret) is typed after it.

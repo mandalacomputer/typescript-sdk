@@ -3074,13 +3074,31 @@ workspace REVOKES every API key confined to it, whoever holds it, and
 `revokedKeys` says how many. Only an empty workspace can be deleted: one that
 still holds computers or active secrets is refused with a `ConflictError` (409)
 saying how many, and nothing is deleted or revoked. Move the computers to another
-workspace in the dashboard or delete them, and explicitly delete the active
-secrets before retrying. An active-secret refusal has `reason: 'unsupported'`
+workspace with `computer.moveToWorkspace(workspaceId)` or delete them, and
+explicitly delete the active secrets before retrying. An active-secret refusal has `reason: 'unsupported'`
 and is not retried automatically. Deleted
 secrets do not block workspace deletion, but still count toward the account's
 lifetime limit of 1000 secrets. If the platform cannot confirm the workspace is
 empty, the answer is an
 `UnavailableError` (503), also with nothing deleted; try again shortly.
+
+Move an existing computer with an explicit workspace ID, or `null` to leave it
+unassigned:
+
+```ts
+await computer.moveToWorkspace('wsp-0123456789ab');
+await computer.moveToWorkspace(null);
+```
+
+This needs an account-wide credential with member or owner access. A credential
+confined to a workspace is refused, including moves to its own workspace or an
+unchanged destination. The computer must be stopped with no snapshots, secret
+bindings or credentialed proxies; the SDK does no automatic stop, session discard
+or cleanup. The method sends `PUT /computers/{id}/workspace` with
+`{ workspace_id: workspaceId }`, accepts `CallOptions` such as `signal`, and
+returns the same computer handle after a confirmed response. Errors preserve the
+cached state. If the outcome is uncertain, read the computer before retrying.
+The destination must belong to the same account.
 
 A key confined to a workspace lists that one workspace only, and any other id
 is a `NotFoundError`, the same as one that does not exist (so is the id of a
@@ -3739,7 +3757,7 @@ stderr naming them and the command to run next.
 Every command whose call is keyed takes `--idempotency-key KEY` (1 to 255
 printable ASCII characters, no space) and sends it instead of a key of its own:
 `computers create`, `start`, `stop`, `suspend`, `restart`, `clone`, `delete`,
-`rename`, `resize`, `move`, `idle-suspend`, `browser-proxy set` and `clear`,
+`rename`, `resize`, `move --ram-mb`, `idle-suspend`, `browser-proxy set` and `clear`,
 `egress-proxy set` and `clear`, and `snapshots restore` and `clone`. So a
 command whose answer was lost, and whose error named a key, can be sent again
 with that key: the platform does not carry one key out twice. What a resend
@@ -3771,7 +3789,7 @@ without `--yes` (`confirmation_required`), because deleting a workspace revokes
 every API key confined to it; its answer's `revoked_keys` says how many. A
 workspace that still holds computers or active secrets cannot be deleted: the
 platform refuses it (`conflict`, 409) saying how many, and nothing is deleted or
-revoked. Move its computers to another workspace in the dashboard or delete them,
+revoked. Move its computers with `computers move COMPUTER --workspace ID` or delete them,
 and explicitly delete its active secrets first. A secret refusal preserves
 `reason: "unsupported"` in `--json` output and is not retried automatically.
 Deleted secrets do not block workspace deletion,
@@ -3941,6 +3959,8 @@ mandala computers wait workbench --until egress-proxy
 mandala computers egress-proxy clear workbench
 mandala computers stop build-box && mandala computers resize build-box --cpu 4 --ram-mb 8192
 mandala computers move build-box --ram-mb 65536 --wait      # after resize answered move_required
+mandala computers move build-box --workspace wsp-0123456789ab
+mandala computers move build-box --workspace unassigned
 mandala moves list --computer build-box
 mandala computers view build-box
 mandala computers secrets get workbench
@@ -4112,6 +4132,14 @@ exits 0 only when its `state` is `done`. The other three ends exit 1 with a note
 account at a time. `moves list` prints the moves still running and those
 finished in the last day, one row per computer; `--computer` keeps one
 computer's, by name or id.
+
+`computers move COMPUTER --workspace ID` changes workspace membership and prints
+the updated computer; `--workspace unassigned` removes it from its workspace.
+The destination is always explicit: the saved profile's default is never used
+for a move. This mode needs an account-wide credential with member or owner
+access and the stopped computer prerequisites described under [Workspaces](#workspaces).
+It refuses `--ram-mb`, `--cpu`, `--disk-gb`, `--wait`, `--timeout-ms`, `--poll-ms`
+and `--idempotency-key` before making requests.
 
 `computers idle-suspend COMPUTER MINUTES` sets how long a computer may sit idle
 before its host suspends it: a number of minutes up to 10080 (a week), `off`
