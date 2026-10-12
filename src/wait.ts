@@ -258,8 +258,9 @@ export const FIRST_POLL_MS = 250;
  * For the readiness waits whose answer usually arrives within a second or two
  * of the first read. A flat interval rounds every one of those up to a whole
  * `pollMs`: a secret that landed a few hundred milliseconds after a read made
- * `launch()` sleep out the rest of three seconds before noticing. A poll that
- * FAILED does not ramp; that is {@link retryDelay}'s business, and it still
+ * `launch()` sleep out the rest of three seconds before noticing. Expected
+ * "not yet" refusals, such as `waitForDesktop`'s reasonless no-desktop 409,
+ * use this ramp too. Other failed polls use {@link retryDelay}, which still
  * honours `Retry-After`.
  */
 export const rampDelay = (turn: number, pollMs: number): number =>
