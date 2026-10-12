@@ -2085,6 +2085,20 @@ revokes its capability; it does not stop Chromium or delete the computer.
   held key and at most 100 key repeats. Coordinates outside the viewport and
   invalid crop rectangles are refused. Dialogs are dismissed and reported.
 
+The abrupt-loss limitation is tracked in OPL-5952 and was reproduced in Linux
+Chromium CI. To run the retained strict no-delivery diagnostic:
+
+```sh
+MANDALA_TEST_CHROMIUM=/path/to/chromium MANDALA_TEST_STRICT_CDP_LOSS=1 \
+  npm exec vitest -- run test/browser-toolset.test.ts -t 'abrupt CDP'
+```
+
+This opt-in assertion can fail when Chromium resumes the pending request.
+A passing run on one build does not establish a transport-loss guarantee.
+The default abrupt-loss test checks SDK termination, eventual context removal,
+unrelated-context availability and no late SDK continuation. Active-connection
+and successful orderly-shutdown tests always require no denied-request delivery.
+
 **Explicit browser files.** `BrowserFilePolicy` binds one exact Computer client
 (and its account authority), task ID, browser context and toolset. It cannot be
 reused with another computer or toolset. The harness stages files before the
