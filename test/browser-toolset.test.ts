@@ -184,6 +184,12 @@ const pages = (port: number): Record<string, [string, string | Buffer]> => ({
   ],
   '/foreign-child': ['text/html', `<script>fetch('/foreign-child-request')</script>`],
   '/foreign-worker.js': ['text/javascript', `fetch('/foreign-worker-request')`],
+  '/foreign-oop-host': [
+    'text/html',
+    `<iframe src="http://localhost:${port}/foreign-oop-frame"></iframe>`,
+  ],
+  '/foreign-oop-frame': ['text/html', '<iframe src="/foreign-oop-nested"></iframe>'],
+  '/foreign-oop-nested': ['text/html', `<script>fetch('/foreign-oop-nested-hit')</script>`],
   '/root-held-host': [
     'text/html',
     `<p>held request page</p><script>fetch('/root-held-denied').catch(()=>{})</script>`,
@@ -941,6 +947,66 @@ describe.skipIf(!executable)('real Chromium through Anthropic toolResult', () =>
       await observer.close();
     }
   }, 30000);
+
+  it.each(['default', 'incognito'] as const)(
+    'keeps its policy active while a %s context requests from a same-process child inside an OOPIF',
+    async (profile) => {
+      const seen: string[] = [];
+      const { browser, base, hits, url } = await fixture({
+        urlPolicy: (_context, target) => {
+          seen.push(new URL(target).pathname);
+          if (
+            new URL(target).pathname.startsWith('/foreign-') ||
+            target.endsWith('/root-held-denied')
+          )
+            throw new ToolError('denied');
+        },
+      });
+      success(await browser.toolResult(use('navigate', { url: base })));
+      const { chromium } = await import('playwright-core');
+      const observer = await chromium.connectOverCDP(url);
+      const foreignContext =
+        profile === 'default' ? observer.contexts()[0]! : await observer.newContext();
+      const page = await foreignContext.newPage();
+      try {
+        await page.goto(`${base}/foreign-oop-host`);
+        await expect.poll(() => hits).toContain('/foreign-oop-nested-hit');
+        const control = await observer.newBrowserCDPSession();
+        const { targetInfos } = await control.send('Target.getTargets');
+        const oop = targetInfos.find(
+          (info) => info.type === 'iframe' && info.url.endsWith('/foreign-oop-frame'),
+        );
+        expect(oop, 'fixture must use a real out-of-process iframe').toBeDefined();
+        const frame = page.frames().find((f) => f.url().endsWith('/foreign-oop-frame'));
+        expect(frame).toBeDefined();
+        const probe = await foreignContext.newCDPSession(frame!);
+        try {
+          const { frameTree } = await probe.send('Page.getFrameTree');
+          const nested = frameTree.childFrames?.find((child) =>
+            child.frame.url.endsWith('/foreign-oop-nested'),
+          );
+          expect(nested).toBeDefined();
+          await expect(
+            control.send('Target.getTargetInfo', { targetId: nested!.frame.id }),
+          ).rejects.toThrow('No target');
+        } finally {
+          await probe.detach();
+        }
+        expect(seen.filter((path) => path.startsWith('/foreign-'))).toEqual([]);
+        expect(browser.sessionStatus.state).toBe('active');
+        success(await browser.toolResult(use('navigate', { url: `${base}/root-held-host` })));
+        await expect.poll(() => seen).toContain('/root-held-denied');
+        success(await browser.toolResult(use('navigate', { url: `${base}/second` })));
+        expect(hits).not.toContain('/root-held-denied');
+        expect(browser.sessionStatus.state).toBe('active');
+      } finally {
+        await page.close();
+        if (profile === 'incognito') await foreignContext.close();
+        await observer.close();
+      }
+    },
+    30000,
+  );
 
   async function heldRequestEnding(ending: 'close' | 'expiry' | 'renewal' | 'disconnect') {
     const { base, hits, url } = await fixture();

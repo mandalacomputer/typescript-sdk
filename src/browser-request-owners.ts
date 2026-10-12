@@ -29,7 +29,14 @@ export class BrowserRequestOwners {
     private live: () => boolean,
   ) {}
 
-  #record(id: unknown, context: string, tab?: string, source?: string, parent?: unknown): void {
+  #record(
+    id: unknown,
+    context: string,
+    tab?: string,
+    source?: string,
+    parent?: unknown,
+    snapshotRevision?: number,
+  ): void {
     if (typeof id !== 'string' || !id) throw new Error('Invalid frame identity');
     const previous = this.frames.get(id);
     if (previous && (previous.context !== context || previous.tab !== tab))
@@ -41,7 +48,9 @@ export class BrowserRequestOwners {
       source,
       parent: typeof parent === 'string' ? parent : previous?.parent,
       live: true,
-      revision: ++this.#revision,
+      // Compatible tree snapshots can overlap (a page's OOPIF placeholder and
+      // that OOPIF's own tree). Only events invalidate in-flight snapshots.
+      revision: snapshotRevision ?? ++this.#revision,
       epoch: previous?.epoch ?? 0,
     });
   }
@@ -181,7 +190,7 @@ export class BrowserRequestOwners {
     const previous = this.frames.get(id);
     // Events newer than this snapshot, including detach tombstones, win.
     if (previous && previous.revision > revision) return;
-    this.#record(id, context, tab, source, tree.frame.parentId ?? parent);
+    this.#record(id, context, tab, source, tree.frame.parentId ?? parent, revision);
     for (const child of tree.childFrames ?? [])
       this.#tree(child, context, tab, source, revision, id, budget);
   }
@@ -246,13 +255,14 @@ export class BrowserRequestOwners {
     const foreign = targetInfos.filter((info: Message) => {
       this.target(info);
       return (
-        info.type === 'page' &&
+        ['page', 'iframe'].includes(info.type) &&
         typeof info.targetId === 'string' &&
         (info.browserContextId === undefined || typeof info.browserContextId === 'string') &&
         info.browserContextId !== this.context
       );
     });
-    // Bound temporary attachments even if the browser has many other pages.
+    // Page trees can omit OOPIF subtrees. Probe positively foreign iframe roots
+    // too, with the same inventory, concurrency and attribution time bounds.
     for (let i = 0; i < foreign.length && this.live(); i += 8)
       await Promise.all(foreign.slice(i, i + 8).map((info: Message) => this.#foreignTree(info)));
   }

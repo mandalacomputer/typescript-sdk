@@ -91,6 +91,80 @@ it('a foreign title update does not invalidate children in a pending ownership s
   await expect(owners.resolve('live-child')).resolves.toMatchObject({ context: 'foreign-context' });
 });
 
+it.each([false, true])(
+  'composes foreign page/OOPIF snapshots while preserving newer detach events (detached: %s)',
+  async (detached) => {
+    let owners!: BrowserRequestOwners;
+    let pageDone!: () => void;
+    const pageSnapshotRecorded = new Promise<void>((resolve) => {
+      pageDone = resolve;
+    });
+    const send = vi.fn(async (method: string, params?: Record<string, any>, session?: string) => {
+      if (method === 'Target.getTargetInfo') throw new Error('No target for nested frame');
+      if (method === 'Target.getTargets')
+        return {
+          targetInfos: [
+            { targetId: 'foreign-page', type: 'page', browserContextId: 'foreign-context' },
+            { targetId: 'foreign-frame', type: 'iframe', browserContextId: 'foreign-context' },
+            { targetId: 'own-frame', type: 'iframe', browserContextId: 'ours' },
+            { targetId: 'foreign-worker', type: 'worker', browserContextId: 'foreign-context' },
+          ],
+        };
+      if (method === 'Target.attachToTarget') return { sessionId: `probe-${params!.targetId}` };
+      if (method === 'Page.getFrameTree') {
+        if (session === 'probe-foreign-page')
+          return {
+            frameTree: {
+              frame: { id: 'foreign-page' },
+              childFrames: [{ frame: { id: 'foreign-frame' } }],
+            },
+          };
+        expect(session).toBe('probe-foreign-frame');
+        // Both queries started, then the parent snapshot recorded only its
+        // OOPIF placeholder. It must not invalidate the deeper iframe tree.
+        await pageSnapshotRecorded;
+        if (detached) owners.removed('foreign-frame');
+        return {
+          frameTree: {
+            frame: { id: 'foreign-frame', parentId: 'foreign-page' },
+            childFrames: [{ frame: { id: 'nested-child' } }],
+          },
+        };
+      }
+      if (method === 'Target.detachFromTarget' && params!.sessionId === 'probe-foreign-page')
+        pageDone();
+      return {};
+    });
+    owners = new BrowserRequestOwners(
+      'ours',
+      send,
+      () => [],
+      () => true,
+    );
+    const owner = await owners.resolve('nested-child');
+    if (detached) {
+      expect(owner).toBeUndefined();
+      expect(owners.frames.get('foreign-frame')?.live).toBe(false);
+    } else {
+      expect(owner).toMatchObject({ context: 'foreign-context', parent: 'foreign-frame' });
+    }
+    expect(
+      send.mock.calls
+        .filter(([method]) => method === 'Target.attachToTarget')
+        .map(([, params]) => params!.targetId),
+    ).toEqual(['foreign-page', 'foreign-frame']);
+    expect(
+      send.mock.calls
+        .filter(([method]) => method === 'Target.detachFromTarget')
+        .map(([, params]) => params!.sessionId),
+    ).toEqual(['probe-foreign-page', 'probe-foreign-frame']);
+    expect(send.mock.calls.map(([method]) => method)).not.toContain('Page.enable');
+    expect(send.mock.calls.map(([method]) => method)).not.toContain(
+      'Runtime.runIfWaitingForDebugger',
+    );
+  },
+);
+
 it('failed metadata and snapshots never prove foreign ownership', async () => {
   const send = vi.fn(async () => {
     throw new Error('gone');
