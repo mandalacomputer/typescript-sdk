@@ -603,13 +603,16 @@ it.each([1, 300])(
   },
 );
 
-it('a request whose target already detached does not end the session', async () => {
+it('continues known-frame requests at the browser root when page-session commands are unavailable', async () => {
   const { backend, ws } = await started();
   try {
+    // Reject page-session commands without announcing a frame lifecycle change.
     ws.gone.add('session');
     paused(ws, 'session', 'r1', 'https://allowed.test/');
     await vi.waitFor(() => expect(named(ws, 'Fetch.continueRequest')).toHaveLength(1));
-    await new Promise((r) => setTimeout(r, 10));
+    const continuation = named(ws, 'Fetch.continueRequest')[0]!;
+    expect(continuation.params).toEqual({ requestId: 'r1' });
+    expect(continuation).not.toHaveProperty('sessionId');
     expect(backend.sessionStatus().state).toBe('active');
   } finally {
     await backend.close();
