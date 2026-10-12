@@ -6,6 +6,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   Client,
+  ConflictError,
   MandalaError,
   NotFoundError,
   PermissionDeniedError,
@@ -180,6 +181,25 @@ describe('client.workspaces', () => {
       const { client } = sdk(() => json(answer));
       await expect(client.workspaces.delete(WORKSPACE.id)).rejects.toBeInstanceOf(MandalaError);
     }
+  });
+
+  it('preserves an active-secret deletion conflict without retrying or deleting secrets', async () => {
+    const message =
+      'This workspace still holds 1 secret. Delete it first: a workspace that holds secrets cannot be deleted.';
+    const body = { error: message, reason: 'unsupported' };
+    const rec = recorder(() => json(body, { status: 409 }));
+    const client = new Client({
+      apiKey: 'com_test',
+      baseUrl: BASE,
+      fetch: rec.fetch,
+      retries: { idempotent: 2 },
+    });
+
+    const error = await client.workspaces.delete(WORKSPACE.id).catch((error: unknown) => error);
+    expect(error).toBeInstanceOf(ConflictError);
+    expect(error).toMatchObject({ status: 409, reason: 'unsupported', message, body });
+    expect(rec.routes()).toEqual([['DELETE', `workspaces/${WORKSPACE.id}`]]);
+    expect(rec.last().body).toBeUndefined();
   });
 
   it('maps a scoped key or a non-owner to PermissionDeniedError and a foreign id to NotFoundError', async () => {

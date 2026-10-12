@@ -3072,9 +3072,13 @@ Creating, renaming and deleting need an owner's account-wide key; a key confined
 to a workspace is refused them with a `PermissionDeniedError`. Deleting a
 workspace REVOKES every API key confined to it, whoever holds it, and
 `revokedKeys` says how many. Only an empty workspace can be deleted: one that
-still holds computers is refused with a `ConflictError` (409) saying how many,
-and nothing is deleted or revoked; delete those computers first. If the
-platform cannot confirm the workspace is empty, the answer is an
+still holds computers or active secrets is refused with a `ConflictError` (409)
+saying how many, and nothing is deleted or revoked. Move or delete the computers
+and explicitly delete the active secrets before retrying. An active-secret
+refusal has `reason: 'unsupported'` and is not retried automatically. Deleted
+secrets do not block workspace deletion, but still count toward the account's
+lifetime limit of 1000 secrets. If the platform cannot confirm the workspace is
+empty, the answer is an
 `UnavailableError` (503), also with nothing deleted; try again shortly.
 
 A key confined to a workspace lists that one workspace only, and any other id
@@ -3764,8 +3768,12 @@ platform's order. `--json` returns the full workspace objects as an array under
 `rename` and `rm` take a name or an id, as `get` does. `rm` does nothing
 without `--yes` (`confirmation_required`), because deleting a workspace revokes
 every API key confined to it; its answer's `revoked_keys` says how many. A
-workspace that still holds computers cannot be deleted: the platform refuses it
-(`conflict`, 409) saying how many, and nothing is deleted or revoked. An id the
+workspace that still holds computers or active secrets cannot be deleted: the
+platform refuses it (`conflict`, 409) saying how many, and nothing is deleted or
+revoked. Move or delete its computers and explicitly delete its active secrets
+first. A secret refusal preserves `reason: "unsupported"` in `--json` output and
+is not retried automatically. Deleted secrets do not block workspace deletion,
+but still count toward the account's lifetime limit of 1000 secrets. An id the
 key cannot see is `not_found`, the same as one that does not exist.
 
 #### A default workspace per profile
