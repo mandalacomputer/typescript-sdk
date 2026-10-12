@@ -1208,10 +1208,14 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
       path === 'computers idle-suspend' ? { idleSuspendMin: idleMinutes(args[1]!) } : undefined;
     if (idle) P.updateBody(idle);
     const relocation = { ramMb: n('ram-mb')!, cpu: n('cpu'), diskGb: n('disk-gb') };
+    const workspaceDestination = s('workspace') === 'unassigned' ? null : s('workspace');
     if (path === 'computers move') {
-      P.moveBody(relocation);
-      if (!b('wait') && (wait.timeoutMs !== undefined || wait.pollMs !== undefined))
-        throw new CliError('invalid_arguments', '--timeout-ms and --poll-ms go with --wait');
+      if (workspaceDestination !== undefined) P.workspaceMoveBody(workspaceDestination);
+      else {
+        P.moveBody(relocation);
+        if (!b('wait') && (wait.timeoutMs !== undefined || wait.pollMs !== undefined))
+          throw new CliError('invalid_arguments', '--timeout-ms and --poll-ms go with --wait');
+      }
     }
     const pid =
       path === 'computers exec-poll' || path === 'computers exec-kill'
@@ -1225,7 +1229,7 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
     if (path === 'workspaces rm' && !b('yes'))
       throw new CliError(
         'confirmation_required',
-        `deleting workspace ${target} revokes every API key confined to it; a workspace that still holds computers or active secrets cannot be deleted. Move its computers to another workspace in the dashboard or delete them, and explicitly delete its active secrets first. Pass --yes to delete it`,
+        `deleting workspace ${target} revokes every API key confined to it; a workspace that still holds computers or active secrets cannot be deleted. Move its computers with computers move COMPUTER --workspace ID or delete them, and explicitly delete its active secrets first. Pass --yes to delete it`,
       );
     if (path === 'files list') P.directoryQuery(args[1]!);
     if (path === 'computers secrets set' && !b('clear') && !bindings.length)
@@ -1644,6 +1648,8 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
       }
       case 'computers move': {
         const c = await computer();
+        if (workspaceDestination !== undefined)
+          return output.result(computerData(await c.moveToWorkspace(workspaceDestination, call)));
         const accepted = await c.relocate(relocation, keyed);
         if (!b('wait')) return output.result(moveData(accepted));
         const outcome = await c.waitForMove(accepted, wait);

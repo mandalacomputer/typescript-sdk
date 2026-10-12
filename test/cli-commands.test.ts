@@ -2072,7 +2072,7 @@ describe('snapshots', () => {
     const message: string = result.frames[0].error.message;
     expect(message).toContain('computers or active secrets cannot be deleted');
     expect(message).toContain(
-      'Move its computers to another workspace in the dashboard or delete them',
+      'Move its computers with computers move COMPUTER --workspace ID or delete them',
     );
     expect(message).toContain('explicitly delete its active secrets first');
     expect(message).not.toMatch(/kept|not touched/);
@@ -5320,6 +5320,142 @@ describe('background exec follow-up: exec-poll and exec-kill (OPL-5524)', () => 
     expect(result.err).toContain('<pid> must be the positive whole number');
     expect(h.rec.calls).toEqual([]);
   });
+});
+
+describe('computers move workspace mode', () => {
+  it.each([WORKSPACE.id, 'unassigned'])(
+    'moves explicitly to %s and prints the updated computer',
+    async (destination) => {
+      const workspaceId = destination === 'unassigned' ? null : destination;
+      const h = harness((call) =>
+        call.method === 'PUT' && call.path.endsWith('/workspace')
+          ? json({ computer: { ...COMPUTER, workspace_id: workspaceId } })
+          : anyRoute(call),
+      );
+      const result = await h.run(['computers', 'move', COMPUTER.name, '--workspace', destination]);
+      expect(result.code).toBe(0);
+      expect(result.frames[0].data).toMatchObject({ id: COMPUTER.id, workspace_id: workspaceId });
+      expect(result.frames[0].data).not.toHaveProperty('vnc');
+      expect(h.rec.calls.filter((c) => c.method !== 'GET')).toHaveLength(1);
+      expect(h.rec.last()).toMatchObject({
+        method: 'PUT',
+        path: `/computers/${COMPUTER.id}/workspace`,
+        body: { workspace_id: workspaceId },
+      });
+      expect(h.rec.last().headers).not.toHaveProperty('Idempotency-Key');
+      expect(h.rec.calls.some((c) => c.path === '/moves' || c.path.startsWith('/workspaces'))).toBe(
+        false,
+      );
+    },
+  );
+
+  it.each(['ram-mb', 'cpu', 'disk-gb', 'wait', 'timeout-ms', 'poll-ms', 'idempotency-key'])(
+    'refuses workspace mode mixed with --%s before any request',
+    async (flag) => {
+      const h = harness();
+      const result = await h.run([
+        'computers',
+        'move',
+        COMPUTER.name,
+        '--workspace',
+        WORKSPACE.id,
+        `--${flag}`,
+        ...(flag === 'wait' ? [] : [flag === 'idempotency-key' ? 'move-key' : '2']),
+      ]);
+      expect(result.code).toBe(2);
+      expect(result.frames[0].error.message).toContain(`conflicts with --${flag}`);
+      expect(h.rec.calls).toEqual([]);
+    },
+  );
+
+  it.each(['customers', 'wsp-0123456789AB', 'wsp-0123456789ab ', 'null'])(
+    'refuses invalid destination %s before resolving a computer',
+    async (destination) => {
+      const h = harness();
+      const result = await h.run(['computers', 'move', COMPUTER.name, '--workspace', destination]);
+      expect(result.code).toBe(1);
+      expect(h.rec.calls).toEqual([]);
+    },
+  );
+
+  it('never reads saved defaults to select a mutation destination', async () => {
+    const home = await tempDir();
+    fs.mkdirSync(join(home, '.mandala'), { mode: 0o700 });
+    const fixture = JSON.parse(
+      await readFile(new URL('./fixtures/credentials-v1.json', import.meta.url), 'utf8'),
+    );
+    fs.writeFileSync(
+      join(home, '.mandala', 'credentials.json'),
+      JSON.stringify(fixture.base_document),
+      { mode: 0o600 },
+    );
+    // An unreadable default must neither supply a destination nor obstruct an explicit one.
+    fs.writeFileSync(join(home, '.mandala', 'defaults.json'), 'not JSON', { mode: 0o600 });
+    const lookup = vi.spyOn(os, 'homedir').mockReturnValue(home);
+    try {
+      const h = harness(anyRoute, undefined, { MANDALA_API_KEY: undefined });
+      const bare = await h.run(['computers', 'move', COMPUTER.id, '--profile', 'Work']);
+      expect(bare.code).toBe(2);
+      expect(h.rec.calls).toEqual([]);
+      const explicit = harness(
+        (call) =>
+          call.path.endsWith('/workspace')
+            ? json({ computer: { ...COMPUTER, workspace_id: WORKSPACE.id } })
+            : anyRoute(call),
+        undefined,
+        { MANDALA_API_KEY: undefined },
+      );
+      const moved = await explicit.run([
+        'computers',
+        'move',
+        COMPUTER.id,
+        '--workspace',
+        WORKSPACE.id,
+        '--profile',
+        'Work',
+      ]);
+      expect(moved.code).toBe(0);
+      expect(explicit.rec.last().body).toEqual({ workspace_id: WORKSPACE.id });
+      const host = harness(anyRoute, undefined, { MANDALA_API_KEY: undefined });
+      expect(
+        (
+          await host.run([
+            'computers',
+            'move',
+            COMPUTER.id,
+            '--ram-mb',
+            '26000',
+            '--profile',
+            'Work',
+          ])
+        ).code,
+      ).toBe(0);
+      expect(host.rec.last().path).toBe(`/computers/${COMPUTER.id}/move`);
+    } finally {
+      lookup.mockRestore();
+    }
+  });
+
+  it.each([false, true])(
+    'preserves workspace refusals without cleanup (json=%s)',
+    async (jsonMode) => {
+      const body = { error: 'workspace move needs attention', reason: 'move_uncertain' };
+      const h = harness((call) =>
+        call.path.endsWith('/workspace') ? json(body, { status: 503 }) : anyRoute(call),
+      );
+      const result = await h.run(
+        ['computers', 'move', COMPUTER.id, '--workspace', WORKSPACE.id],
+        jsonMode,
+      );
+      expect(result.code).toBe(1);
+      if (jsonMode)
+        expect(result.frames[0].error).toMatchObject({ status: 503, reason: body.reason });
+      else expect(result.err).toContain(body.error);
+      expect(h.rec.calls.filter((c) => c.method !== 'GET').map((c) => c.path)).toEqual([
+        `/computers/${COMPUTER.id}/workspace`,
+      ]);
+    },
+  );
 });
 
 describe('computers move and moves list (OPL-5524)', () => {

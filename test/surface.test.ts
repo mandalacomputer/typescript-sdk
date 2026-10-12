@@ -37,6 +37,7 @@ import {
   anyRoute,
   BASE,
   type Call,
+  COMPUTER,
   EVENTS_HELLO,
   json,
   recorder,
@@ -52,6 +53,8 @@ const SURFACE = inventory();
 
 /** The new stable reads use their finite response contracts. */
 const executionRoutes = (call: Call): Response | Promise<Response> => {
+  if (call.path.endsWith('/workspace') && call.method === 'PUT')
+    return json({ computer: { ...COMPUTER, ...(call.body as { workspace_id: string | null }) } });
   if (call.path === '/account')
     return json({
       scope: 'account',
@@ -323,6 +326,8 @@ async function exerciseEverything(client: Client): Promise<void> {
   await c.restart();
   await c.clone('copy');
   await c.rename('renamed');
+  await c.moveToWorkspace('wsp-0123456789ab');
+  await c.moveToWorkspace(null);
   await c.update({ cpu: 4 });
   await c.update({ name: 'resized', ramMb: 8192, diskGb: 80, idleSuspendMin: 30 });
   await c.update({ browserProxy: { server: 'socks5://127.0.0.1:1080' } });

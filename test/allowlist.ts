@@ -55,6 +55,7 @@ export const ALLOWED: ReadonlySet<string> = new Set(
       // platform's decision: a per-computer read could not tell a computer with
       // no move from an id that does not exist.
       ['POST', 'computers/:id/move'],
+      ['PUT', 'computers/:id/workspace'],
       ['GET', 'moves'],
 
       // Computer use.
@@ -296,6 +297,7 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
     'POST computers/:id/move',
     ['body:cpu', 'body:ram_mb', 'body:disk_gb', 'header:Idempotency-Key'],
   ],
+  ['PUT computers/:id/workspace', ['body:workspace_id']],
   ['GET moves', []],
 
   // Computer use.

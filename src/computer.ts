@@ -2108,6 +2108,40 @@ export class Computer {
   }
 
   /**
+   * Move this computer into an account workspace, or pass null to leave it unassigned.
+   *
+   * Requires an account-wide credential with member or owner access. Workspace-confined
+   * credentials are refused even for their own workspace or an unchanged destination.
+   * The computer must be stopped with no snapshots, secret bindings or credentialed
+   * proxies. This call performs no automatic stop, session discard or cleanup.
+   *
+   * Returns this handle with the confirmed computer state. Refusals and uncertain
+   * responses leave its cached state unchanged; read the computer before retrying.
+   */
+  async moveToWorkspace(workspaceId: string | null, opts: CallOptions = {}): Promise<this> {
+    const body = P.workspaceMoveBody(workspaceId);
+    const id = this.id;
+    const path = P.computerAction(id, 'workspace');
+    let status: number | undefined;
+    const response = await this.#t.json('PUT', path, { body, signal: opts.signal }, (received) => {
+      status = received;
+    });
+    const data = P.isRecord(response) ? response.computer : undefined;
+    if (
+      status !== 200 ||
+      !P.isRecord(data) ||
+      data.id !== id ||
+      (workspaceId === null
+        ? data.workspace_id !== undefined && data.workspace_id !== null && data.workspace_id !== ''
+        : data.workspace_id !== workspaceId)
+    ) {
+      throw new MandalaError(`expected the updated computer and workspace from PUT ${path}`);
+    }
+    this.#data = { ...data };
+    return this;
+  }
+
+  /**
    * Destroy this computer and its disk.
    *
    * Its snapshots survive by default and become orphans, which can still be
