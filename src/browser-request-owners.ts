@@ -121,8 +121,8 @@ export class BrowserRequestOwners {
       }
   }
 
-  // Target metadata proves roots, including ordinary-profile background/UI
-  // targets. A missing context on those targets denotes the default profile.
+  // Target metadata proves roots. An absent context identifies the default
+  // profile only for page/iframe targets; others need an explicit context.
   target(info: Message): void {
     if (
       !info ||
