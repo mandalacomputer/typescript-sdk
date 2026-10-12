@@ -2032,12 +2032,18 @@ revokes its capability; it does not stop Chromium or delete the computer.
   Callbacks must finish promptly. This is **not network isolation**: use guest
   egress controls for DNS/IP containment, WebSockets, WebRTC, WebTransport and
   browser traffic outside those intercepted requests. Interception starts
-  before this toolset opens a page, so a sandboxed `srcdoc` frame's first
-  requests are covered even when it runs before the driver can attach.
+  before this toolset opens a page, so while the control connection is active,
+  a sandboxed `srcdoc` frame's first requests are covered even when it runs
+  before the driver can attach. If that connection is lost abruptly, or
+  context disposal fails, Chromium can resume a pending HTTP request before
+  removing the context, without the URL hook approving it. The SDK ends the
+  session and attempts cleanup, but cannot prevent this delivery after losing
+  control. Use independent guest egress enforcement when that guarantee is needed.
   Requests from other browser contexts are released without calling your
   policy after their ownership is established. Ownership checks and retained
   frame history are bounded: if ownership cannot be established, the driver
-  ends its own context before releasing uncertain traffic. This can end an
+  disposes its own context before releasing uncertain traffic while the
+  control connection and disposal remain available. This can end an
   otherwise healthy toolset when another context's frame disappears before
   the driver has observed it. Create a new toolset to continue.
 - Cross-site frames (which Chromium runs in their own process) run as part of

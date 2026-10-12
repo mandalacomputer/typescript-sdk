@@ -573,7 +573,8 @@ export class BrowserCDP {
     // Detaching an interceptor can release its paused requests. When the
     // transport is still usable, destroy only our context first; this command
     // bypasses event queues and is allowed even after the failure flag is set.
-    // A lost transport instead relies on the context's disposeOnDetach option.
+    // On a lost transport, disposeOnDetach is only context cleanup: Chromium
+    // may resume paused HTTP requests before it destroys that context.
     this.#ending = this.#dispose().finally(() => this.#ws?.terminate());
   }
 
@@ -585,7 +586,8 @@ export class BrowserCDP {
         await this.send('Target.disposeBrowserContext', { browserContextId: this.#context });
         this.#disposed = true;
       } catch {
-        /* disposeOnDetach is the final fallback for a lost connection. */
+        // Detachment still asks Chromium to remove the context, but can let
+        // a paused request proceed first. This is not an egress guarantee.
       }
     })();
     return this.#disposing;
@@ -1060,8 +1062,8 @@ export class BrowserCDP {
         if (!this.#ready.has(p.targetId) && this.#creating) await this.#creating.promise;
         this.#dropTab(p.targetId);
       } else if (method === 'Fetch.requestPaused') {
-        // Only the root interceptor is installed. No request is released while
-        // its ownership is unknown, including requests from vanished frames.
+        // Only the root interceptor is installed. The driver never explicitly
+        // releases a request whose ownership is unknown, including vanished frames.
         if (session !== undefined || !this.fileLive()) return;
         const owner = await this.#requestOwners?.resolve(p.frameId);
         if (!this.fileLive()) return;

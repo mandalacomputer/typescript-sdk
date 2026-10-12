@@ -38,8 +38,11 @@ export type MandalaBrowserToolsetOptions = Omit<
  * The URL policy checks navigation and intercepted HTTP(S) requests, including
  * those of frames and workers, at the browser before a page executes. It is
  * not network isolation: configure guest egress controls for that, including
- * non-HTTP transports. Unresolved request ownership ends this toolset's context
- * before uncertain traffic is released; an unobserved frame that disappears
+ * non-HTTP transports. Abrupt control-connection loss or failed context disposal
+ * can let Chromium resume a pending HTTP request without policy approval before
+ * removing the context. While the connection and disposal remain available,
+ * unresolved request ownership ends this toolset's context before uncertain
+ * traffic is released; an unobserved frame that disappears
  * from another context can trigger that conservative shutdown too. Dedicated
  * workers are unsupported: construction throws when the driver attached before
  * the frame ran, while an already-running frame can retain its constructor;
