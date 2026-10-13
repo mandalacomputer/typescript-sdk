@@ -166,12 +166,23 @@ function recoveryInfo(error: MandalaError): {
   };
 }
 
+/** A Retry-After delay as a person reads it: `30s`, `2m 5s`, `1h 2m`. */
+function retryAfterText(ms: number): string {
+  const seconds = Math.ceil(ms / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return seconds % 60 ? `${minutes}m ${seconds % 60}s` : `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  return minutes % 60 ? `${hours}h ${minutes % 60}m` : `${hours}h`;
+}
+
 export function errorInfo(error: unknown): {
   code: string;
   message: string;
   status?: number;
   reason?: string;
   api_code?: string;
+  retry_after_ms?: number;
   details?: unknown;
   usage?: string;
   idempotency_key?: string;
@@ -198,6 +209,10 @@ export function errorInfo(error: unknown): {
       // plan's limit), and automation should not have to read the prose to
       // tell them apart (Codex, round 7 on #256).
       ...(error.code === undefined ? {} : { api_code: error.code }),
+      // How long the platform asked for before another attempt, from its
+      // Retry-After (OPL-5973): the one number a script retrying a 429 or a
+      // 503 needs, which the error object had and this envelope dropped.
+      ...(error.retryAfterMs === undefined ? {} : { retry_after_ms: error.retryAfterMs }),
       // The billing link, where the agent's own error frame puts it, so a
       // refusal reads the same whether it was the response or a frame.
       ...(error instanceof InsufficientCreditsError && error.topUpUrl !== undefined
@@ -286,7 +301,20 @@ export class Output {
       // platform error or a name another party chose, and a line break in it
       // would let one start a forged `mandala:` line. diagnostic() escapes it,
       // after redacting: a secret escaped first no longer matches itself.
-      this.diagnostic(`mandala: ${info.message}`, { keepNewlines: false });
+      // The status and the API's own code beside the sentence, as `(HTTP 409,
+      // LABEL_TAKEN)`: two refusals with one status can want different fixes,
+      // and a person reading this should not need --json to tell them apart
+      // (OPL-5973).
+      const said =
+        info.status === undefined
+          ? ''
+          : ` (HTTP ${info.status}${info.api_code === undefined ? '' : `, ${info.api_code}`})`;
+      this.diagnostic(`mandala: ${info.message}${said}`, { keepNewlines: false });
+      if (info.retry_after_ms !== undefined)
+        this.diagnostic(
+          `mandala: the platform asked to wait ${retryAfterText(info.retry_after_ms)} before trying again`,
+          { keepNewlines: false },
+        );
       // How to learn how a call whose answer was lost ended.
       const recovery = [
         ...(info.operation_id === undefined ? [] : [`operation ${info.operation_id}`]),

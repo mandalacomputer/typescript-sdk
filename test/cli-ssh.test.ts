@@ -963,7 +963,7 @@ describe('mandala ssh --setup', () => {
     expect(r.code).toBe(1);
     expect(r.out).toBe('');
     expect(r.err).toBe(
-      'mandala: That key is already registered. A key can belong to one person only.\n',
+      'mandala: That key is already registered. A key can belong to one person only. (HTTP 409)\n',
     );
     expect(writes(r)).toEqual([['POST', 'ssh-keys']]);
   });
@@ -1197,7 +1197,7 @@ describe('mandala ssh-key, ssh-access, ssh-config', () => {
     const human = await cli(['ssh-key', 'rm', 'sshk-2'], { respond });
     expect(human.code).toBe(1);
     expect(human.out).toBe('');
-    expect(human.err).toBe(`mandala: ${message}\nmandala: request id req-1\n`);
+    expect(human.err).toBe(`mandala: ${message} (HTTP 404)\nmandala: request id req-1\n`);
     const asJson = await cli(['ssh-key', 'rm', 'sshk-2', '--json'], { respond });
     expect(asJson.code).toBe(1);
     expect(JSON.parse(asJson.out)).toEqual({

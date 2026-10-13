@@ -7,6 +7,12 @@ export type Flag = {
   required?: boolean;
   /** Any of these explicitly supplied flags satisfies this flag's requirement. */
   required_unless?: readonly string[];
+  /**
+   * A required confirmation (`--yes`): the command refuses its absence itself,
+   * as `confirmation_required` with what the flag agrees to, rather than the
+   * parser refusing it as a usage error.
+   */
+  confirms?: boolean;
   repeatable?: boolean;
   choices?: readonly string[];
   conflicts?: readonly string[];
@@ -44,6 +50,8 @@ const bool = (name: string, description: string, opts: Partial<Flag> = {}): Flag
 const num = (name: string, description: string, opts: Partial<Flag> = {}): Flag =>
   flag(name, description, { type: 'number', ...opts });
 const name = flag('name', 'Name for the new resource');
+/** `--yes` on a command that refuses to run without it (OPL-5973). */
+const confirm: Partial<Flag> = { required: true, confirms: true };
 const partial = bool(
   'allow-partial',
   'Allow incomplete listings; output retains incomplete status',
@@ -524,7 +532,7 @@ export const COMMANDS: readonly Command[] = [
     [],
     [
       partial,
-      flag('computer', 'Filter by computer ID'),
+      flag('computer', 'Filter by computer name or ID'),
       bool('include-unfinished', 'Include unfinished deletions'),
     ],
   ),
@@ -699,7 +707,7 @@ export const COMMANDS: readonly Command[] = [
     'workspaces rm',
     "Delete a workspace, by name or ID, REVOKING every API key confined to it (it must hold no computers or active secrets); needs an owner's account-wide key",
     ['workspace'],
-    [bool('yes', 'Confirm the deletion and the key revocation (required)')],
+    [bool('yes', 'Confirm the deletion and the key revocation', confirm)],
   ),
   command(
     'workspaces use',
@@ -759,7 +767,7 @@ export const COMMANDS: readonly Command[] = [
     'artifacts rm',
     'Delete an artifact; it cannot be read or downloaded again',
     ['computer', 'artifact'],
-    [bool('yes', 'Confirm the deletion (required)')],
+    [bool('yes', 'Confirm the deletion', confirm)],
   ),
   command(
     'agent run',
@@ -1235,6 +1243,7 @@ function readArgs(argv: string[], parsed: Parsed): Parsed {
   for (const f of c.flags) {
     if (
       f.required &&
+      !f.confirms &&
       parsed.flags[f.name] === undefined &&
       !f.required_unless?.some((name) => parsed.flags[name] !== undefined)
     )
@@ -1289,5 +1298,5 @@ function usageError(
 export function help(path = ''): string {
   const matches = COMMANDS.filter((c) => !path || c.path === path || c.path.startsWith(`${path} `));
   const exact = matches.length === 1 ? matches[0] : undefined;
-  return `mandala — cloud computers from your terminal\n\n${matches.map((c) => `  ${usage(c)}\n    ${c.description}`).join('\n')}\n\n${[...GLOBAL_FLAGS, ...(exact?.flags ?? [])].map((f) => `  --${f.name}${f.alias ? `, -${f.alias}` : ''}${f.type === 'boolean' ? '' : ` <${f.type}>`}${f.required ? (f.required_unless?.length ? ` (required unless ${f.required_unless.map((name) => `--${name}`).join(' or ')})` : ' (required)') : ''}  ${f.description}`).join('\n')}\n\nMANDALA_API_KEY authenticates requests; MANDALA_BASE_URL optionally selects a server.\nMANDALA_MODEL_KEY is your own model key for agent run; unset, the run spends the account's AI credits. No credentials are needed for help, version, manifest, completion or logout.\n${path.startsWith('ssh') ? `\nmandala ssh: our options go before <computer> (with --setup, --key and --json may follow it);\neverything after it goes to ssh unchanged. It never falls back to mandala terminal.\nMANDALA_SSH_GATEWAY=host[:port] (default ssh.mandala.computer:2222) and\nMANDALA_SSH_GATEWAY_KNOWN_HOSTS (a known_hosts line, or file, pinning that gateway's key)\npoint the SSH commands at another gateway.\n` : ''}`;
+  return `mandala — cloud computers from your terminal\n\n${matches.map((c) => `  ${usage(c)}\n    ${c.description}`).join('\n')}\n\n${[...GLOBAL_FLAGS, ...(exact?.flags ?? [])].map((f) => `  --${f.name}${f.alias ? `, -${f.alias}` : ''}${f.type === 'boolean' ? '' : ` <${f.type}>`}${f.required ? (f.required_unless?.length ? ` (required unless ${f.required_unless.map((name) => `--${name}`).join(' or ')})` : ' (required)') : ''}  ${f.description}`).join('\n')}\n\nMANDALA_API_KEY authenticates requests; MANDALA_BASE_URL optionally selects a server.\nMANDALA_MODEL_KEY is your own model key for agent run; unset, the run spends the account's AI credits. No credentials are needed for help, version, manifest, completion, login or logout.\n${path.startsWith('ssh') ? `\nmandala ssh: our options go before <computer> (with --setup, --key and --json may follow it);\neverything after it goes to ssh unchanged. It never falls back to mandala terminal.\nMANDALA_SSH_GATEWAY=host[:port] (default ssh.mandala.computer:2222) and\nMANDALA_SSH_GATEWAY_KNOWN_HOSTS (a known_hosts line, or file, pinning that gateway's key)\npoint the SSH commands at another gateway.\n` : ''}`;
 }

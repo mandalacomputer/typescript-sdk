@@ -1582,14 +1582,26 @@ describe('exec preserves bytes, input and result semantics', () => {
     expect((await h.run(['computers', 'exec', COMPUTER.id, '-c', 'work'])).code).toBe(code);
   });
 
-  it.each([
-    [['computers', 'exec', 'vm', '-c', 'echo hi'], 'piped input'],
-    [['computers', 'exec', 'vm'], ''],
-  ])('rejects conflicting or empty input before requests', async (args, input) => {
-    const h = harness(anyRoute, input as string);
-    const result = await h.run(args as string[]);
+  it('rejects empty input before requests', async () => {
+    const h = harness(anyRoute, '');
+    const result = await h.run(['computers', 'exec', 'vm']);
     expect(result.code).toBe(1);
     expect(h.rec.calls).toEqual([]);
+  });
+
+  // OPL-5973: with -c, stdin was still read to its end when it was not a
+  // terminal, so a CI step whose stdin stays open hung before sending anything.
+  it('never reads stdin when -c gives the command', async () => {
+    const h = harness();
+    const stdin = Object.assign(new Readable({ read() {} }), { isTTY: false });
+    const read = vi.spyOn(stdin, 'read');
+    h.io.stdin = stdin;
+    const result = await h.run(['computers', 'exec', COMPUTER.id, '-c', 'echo hi']);
+    expect(result.code).toBe(0);
+    expect(read).not.toHaveBeenCalled();
+    expect(h.rec.calls.find((c) => c.path.endsWith('/exec'))?.body).toMatchObject({
+      command: 'echo hi',
+    });
   });
 });
 
@@ -1802,9 +1814,14 @@ describe('templates', () => {
 });
 
 describe('snapshots', () => {
+  const snapshotRows =
+    (rows: unknown[], headers: Record<string, string> = {}): Responder =>
+    (call) =>
+      call.path === '/snapshots' ? json(rows, { headers }) : anyRoute(call);
+
   it('lists with filters, unfinished rows and partial status', async () => {
     const unrelated = { ...SNAPSHOT, id: 'snapshot-other', computer_id: 'vm-other' };
-    const h = harness(() => json([SNAPSHOT, unrelated], { headers: { 'X-GC-Incomplete': '1' } }));
+    const h = harness(snapshotRows([SNAPSHOT, unrelated], { 'X-GC-Incomplete': '1' }));
     const result = await h.run([
       'snapshots',
       'list',
@@ -1813,9 +1830,32 @@ describe('snapshots', () => {
       '--include-unfinished',
       '--allow-partial',
     ]);
-    expect(h.rec.routes()).toEqual([['GET', 'snapshots']]);
+    expect(h.rec.routes()).toEqual([
+      ['GET', 'computers'],
+      ['GET', 'snapshots'],
+    ]);
     expect(h.rec.last().query).toEqual({ include: 'unfinished', allow_partial: '1' });
     expect(result.frames[0].data).toEqual({ items: [SNAPSHOT], incomplete: 1 });
+  });
+
+  // OPL-5973: --computer compared ids, so a name matched no row and the list
+  // came back empty, saying nothing. A name is resolved, as moves list does.
+  it('resolves --computer by name, and keeps an unknown one as an id for a deleted computer', async () => {
+    const unrelated = { ...SNAPSHOT, id: 'snapshot-other', computer_id: 'vm-other' };
+    const h = harness(snapshotRows([SNAPSHOT, unrelated]));
+    const named = await h.run(['snapshots', 'list', '--computer', COMPUTER.name]);
+    expect(named.code).toBe(0);
+    expect(named.frames[0].data).toEqual({ items: [SNAPSHOT], incomplete: null });
+    const gone = { ...SNAPSHOT, id: 'snapshot-gone', computer_id: 'vm-gone' };
+    const g = harness((call) =>
+      call.path === '/computers/vm-gone'
+        ? json({ error: 'no such computer' }, { status: 404 })
+        : snapshotRows([SNAPSHOT, gone])(call),
+    );
+    const deleted = await g.run(['snapshots', 'list', '--computer', 'vm-gone']);
+    expect(deleted.code).toBe(0);
+    expect(deleted.frames[0].data).toEqual({ items: [gone], incomplete: null });
+    expect(deleted.err).toContain('listing the snapshots recorded under the id vm-gone');
   });
 
   it('captures with the requested name and memory without waiting', async () => {
@@ -2675,6 +2715,9 @@ describe('legacy JSON modes', () => {
     const result = await h.run(['terminal', 'desktop']);
     expect(result.frames[0]).toMatchObject({ ok: false, error: { code: 'unsupported_mode' } });
     expect(h.rec.calls).toEqual([]);
+    // A usage mistake, exit 2, as ssh --json refuses the same (OPL-5973).
+    expect(result.code).toBe(2);
+    expect(result.frames[0].exit_code).toBe(2);
   });
 
   it('refuses ssh --json with an error envelope before creating a client', async () => {

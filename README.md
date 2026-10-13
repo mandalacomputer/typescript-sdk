@@ -3564,7 +3564,8 @@ Nested run reasons never grant replay permission. Stream error frames keep their
 full evidence in `raw`; thrown stream errors expose their request ID without
 turning frame reasons or the successful stream's headers into retry advice.
 The CLI JSON error envelope is `{code, message, status}`, plus `reason` and
-`api_code` (the API's own code, e.g. `LABEL_TAKEN`) when the API sent them, and
+`api_code` (the API's own code, e.g. `LABEL_TAKEN`) when the API sent them,
+`retry_after_ms` when it sent a `Retry-After`, and
 `request_id`, `idempotency_key` and `operation_id` when the failed call has them; the CLI's
 Operations section below says how to use them to find out how a keyed call ended.
 
@@ -3788,12 +3789,16 @@ unknown flags, and conflicting arguments fail instead of being ignored.
 `mandala manifest` prints a JSON command tree by default. Its `schema_version` is
 `2`; each entry in `commands` describes the command's `path` array, its
 `arguments` (each marked `required` or not), `flags` with types and constraints,
-`json_mode` (`finite`, `ndjson`, or `unsupported`) and `requires_credentials`. `ssh` also carries
+`json_mode` (`finite`, `ndjson`, or `unsupported`) and `requires_credentials`
+(false for `login`, which obtains them, and for the commands that work
+offline). A flag the command cannot run without is marked `required`, `--yes`
+on `workspaces rm` and `artifacts rm` included. `ssh` also carries
 `passthrough`: everything after its computer goes to `ssh` unless `--setup` came first. Flags with aliases, choices, repetition, or conflicts
 carry those properties. Conditional SDK requirements also appear in command help
 and the sections below. The manifest reports `terminal` and `ssh` as unsupported in
-JSON mode: `terminal --json` and `ssh --json` return an error before resolving a
-computer or connecting (`ssh --setup --json` is a finite result).
+JSON mode: `terminal --json` and `ssh --json` return an error, with exit status
+2, before resolving a computer or connecting (`ssh --setup --json` is a finite
+result).
 `mandala manifest --json` wraps the tree in the finite result envelope below.
 
 Shell completion scripts come from the same command inventory:
@@ -4170,9 +4175,10 @@ rule.
 only with the original nonempty `--template`; see [Your own templates](#your-own-templates)
 for how to handle a preparation refusal.
 
-Exec accepts either `-c`/`--command` text or piped stdin. It preserves that command
-text, rejects empty input, and rejects a command combined with nonempty stdin.
-It does not prompt on a terminal. `--timeout` is a foreground execution limit in
+Exec takes `-c`/`--command` text, or else reads the command from piped stdin.
+With `-c`, stdin is never read, so a pipeline or CI step whose stdin stays open
+does not hang. It preserves the command text and rejects empty input. It does
+not prompt on a terminal. `--timeout` is a foreground execution limit in
 **seconds**, defaults to 30, and accepts integers from 1 through 600. It cannot
 be combined with `--background`. `--cwd`, repeatable `--env NAME=VALUE`, and
 `--desktop` apply to either execution mode.
@@ -4273,7 +4279,7 @@ mandala templates schema > mandala-v1.schema.json   # point an editor at the fil
 mandala builds list --allow-partial
 mandala builds get bld-example
 mandala builds progress bld-example                 # step by step, read once
-mandala snapshots list --computer vm-example --include-unfinished --json
+mandala snapshots list --computer workbench --include-unfinished --json   # a name or an id
 mandala snapshots create workbench --name before-upgrade
 mandala snapshots schedule set workbench --hour 4 --minute 30 --tz UTC
 mandala webhooks create https://hooks.example.com/mandala --event computer.ready --json
@@ -4372,7 +4378,7 @@ has this version 2 envelope:
 A request or CLI error uses `error` instead of `data`:
 
 ```json
-{"schema_version":2,"command":"terminal","ok":false,"error":{"code":"unsupported_mode","message":"Interactive terminal does not support --json; use computers exec for machine-readable output"},"exit_code":1}
+{"schema_version":2,"command":"terminal","ok":false,"error":{"code":"unsupported_mode","message":"Interactive terminal does not support --json; use computers exec for machine-readable output"},"exit_code":2}
 ```
 
 **Every key is snake_case**, the envelope's own included, which is what version
@@ -4382,8 +4388,15 @@ in `account`, `usage`, `exec` and agent results.
 `command` is the space-separated command path, without operands. It is empty
 when argument parsing fails before an invocation is established. `error` always
 has string `code` and `message` fields, and may include numeric HTTP `status`,
-the platform's own `reason` word, command-specific `details`, or — for a
-mistyped command — its full `usage`, which human output prints under the message.
+the platform's own `reason` word, `api_code` (the API's own code, such as
+`LABEL_TAKEN` or `PUBLIC_URL_LIMIT`, which tells apart two refusals with one
+status), `retry_after_ms` (the platform's `Retry-After`, in milliseconds),
+`request_id` (to quote when asking about the failure), `idempotency_key` and
+`operation_id` (on a call whose outcome is unknown; see Operations below),
+command-specific `details`, or — for a mistyped command — its full `usage`,
+which human output prints under the message. Human output puts the status and
+the API's code after the message, as `(HTTP 409, LABEL_TAKEN)`, and says the
+`Retry-After` wait on a line of its own.
 An unknown command word shows the help of the group it was typed under (the
 whole command list for an unknown first word), and under `secrets` the word
 itself is not repeated, as it may be a secret value.

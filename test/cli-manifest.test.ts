@@ -351,6 +351,28 @@ describe('offline discovery', () => {
     expect(result.err).toBe('');
   });
 
+  // OPL-5973: the manifest said login needed credentials, which is what it
+  // obtains, and did not say --yes was required where the command refuses to
+  // run without it.
+  it('says login needs no credentials, and that --yes is required where it is', () => {
+    const commands = manifest().commands;
+    const at = (path: string) => commands.find((c) => c.path.join(' ') === path);
+    expect(at('login')?.requires_credentials).toBe(false);
+    expect(at('logout')?.requires_credentials).toBe(false);
+    expect(at('computers list')?.requires_credentials).toBe(true);
+    for (const [path, operands] of [
+      ['workspaces rm', ['ws']],
+      ['artifacts rm', ['vm-1', 'art-1']],
+    ] as const) {
+      const yes = at(path)?.flags.find((f) => f.name === 'yes');
+      expect(yes, path).toMatchObject({ type: 'boolean', required: true });
+      expect(help(path)).toContain('--yes (required)');
+      // Still refused by the command, as confirmation_required with what --yes
+      // agrees to, not by the parser as a usage error.
+      expect(() => parseArgs([...path.split(' '), ...operands])).not.toThrow();
+    }
+  });
+
   it('prints machine-readable manifest by default and an envelope with --json', async () => {
     const plain = await offline(['manifest']);
     const wrapped = await offline(['manifest', '--json']);
