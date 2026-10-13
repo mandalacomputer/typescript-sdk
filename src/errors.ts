@@ -310,7 +310,7 @@ const REASON_CLEARS: ReadonlySet<string> = new Set(['contention', 'starting']);
  * was written, and the same request answers the same way until whatever is there
  * is moved or the caller agrees to replace it — so it is permanent, and has to be
  * said: without it this would be an ordinary {@link ConflictError}, which
- * {@link isTransient} calls worth sending again. {@link FileExistsError} is the
+ * {@link isTransient} used to call worth sending again. {@link FileExistsError} is the
  * class it arrives as.
  */
 /**
@@ -319,8 +319,9 @@ const REASON_CLEARS: ReadonlySet<string> = new Set(['contention', 'starting']);
  * kept apart from it for that reason: nothing clears either by waiting and both
  * are fixed by an action on the computer, but the action is the opposite one.
  * Stopping the computer is the fix. Without it here this would be an ordinary
- * {@link ConflictError}, which {@link isTransient} calls worth sending again, and
- * a caller looping on that would resend the same resize until it gave up.
+ * {@link ConflictError}, which {@link isTransient} used to call worth sending
+ * again, and a caller looping on that would resend the same resize until it
+ * gave up.
  */
 /**
  * `name_taken` and `stale_revision` are the secret store's 409s: a secret
@@ -345,6 +346,29 @@ const REASON_PERMANENT: ReadonlySet<string> = new Set([
   'name_taken',
   'stale_revision',
   'stale_capture',
+]);
+
+/**
+ * The 409 `code`s that clear on their own when the refusal carries no `reason`
+ * (OPL-5973). Every other 409 without a transient `reason` is final to
+ * {@link isTransient}: the platform says an absent `reason` is no
+ * classification, and that a client treating 409 as uniformly transient loops
+ * forever on the ones that are decisions — a label that is taken, a plan's
+ * limit reached, a duplicate key.
+ *
+ * - `idempotency_in_progress`: the first call under this key is still being
+ *   carried out; sending it again is how its answer is collected. The platform
+ *   sends it with `reason: "contention"` as well.
+ * - `WORKSPACE_MOVING`: a change of the computer's workspace that has not
+ *   settled; the same call works once the move has finished. The platform
+ *   sends `reason: "contention"` while it is settling and
+ *   `reason: "unsupported"` when it needs a person, and the word wins.
+ *
+ * The same list in mandala-computer-python and mandala-computer-mcp.
+ */
+const CONFLICT_CODES_CLEAR: ReadonlySet<string> = new Set([
+  'idempotency_in_progress',
+  'WORKSPACE_MOVING',
 ]);
 
 /**
@@ -731,11 +755,11 @@ export class MethodNotAllowedError extends APIError {
 }
 
 /**
- * 409 — the request was fine; the moment was not.
+ * 409 — refused for the state something is in.
  *
- * Nearly every one of these clears itself without anybody doing anything, so
- * the answer is to wait and try again rather than to change the request. It
- * means something is in flight that this operation cannot run alongside:
+ * Many of these clear without anybody doing anything, and then the answer is to
+ * wait and try again rather than to change the request: something is in flight
+ * that this operation cannot run alongside:
  *
  * - the computer's disk is still being copied from a snapshot or another
  *   computer (see {@link Computer.waitUntilBuilt})
@@ -771,9 +795,15 @@ export class MethodNotAllowedError extends APIError {
  * refusal on several routes: a guest call against a computer that is not
  * running. {@link APIError.reason} is how those are told apart now — the word
  * the platform added for the purpose, and the one its reference says to switch
- * on rather than the sentence, which is prose and is rewritten. Where no word
- * was sent this class means what it always did, and that fallback is the
- * contract rather than a gap.
+ * on rather than the sentence, which is prose and is rewritten.
+ *
+ * And the rest are decisions: a public URL label that is taken, a plan's limit
+ * reached, a webhook that is disabled, an SSH key already registered. None of
+ * those carries a word, and the platform says an absent word is no
+ * classification rather than "passing", so {@link isTransient} calls a 409
+ * without a transient `reason` final unless its {@link APIError.code} is one
+ * that clears by itself (`idempotency_in_progress`, `WORKSPACE_MOVING`) —
+ * OPL-5973. Read {@link APIError.code} to tell the decisions apart.
  */
 export class ConflictError extends APIError {
   override name = 'ConflictError';
@@ -1524,9 +1554,12 @@ function withoutRefusalReason(body: unknown): unknown {
  * widening it had a right answer for one of them and a wrong answer for the
  * other.
  *
- * A status alone is not enough to answer this. Most 409s are a passing moment,
- * but a move offer needs a decision, and `template_image_preparing` requires
- * the caller to continue explicitly with the returned token and original body.
+ * A status alone is not enough to answer this. Some 409s are a passing moment,
+ * but a move offer needs a decision, `template_image_preparing` requires the
+ * caller to continue explicitly with the returned token and original body, and
+ * a taken label or a reached limit answers the same forever. So a 409 is
+ * transient only on a `reason` that says it clears, or a `code` known to
+ * (OPL-5973); one with neither is final.
  *
  * One 409 could be given no class and could not be seen from here at all: a
  * clipboard read or write against a computer that is STOPPED does not clear on
@@ -1536,7 +1569,8 @@ function withoutRefusalReason(body: unknown): unknown {
  * matching OPL-3724 got three clients out of. The platform now says which kind
  * it is, so {@link APIError.reason} is consulted BEFORE the types below, and an
  * absent word — or one this version does not know — leaves the type answer
- * standing unchanged (platform OPL-3898).
+ * standing (platform OPL-3898), which for a 409 is "final" unless its code is
+ * one that clears by itself.
  *
  * **AUTHORIZATION IS NOT SETTLED AT THE START OF A LONG CALL.** An
  * {@link AuthenticationError} or a {@link PermissionDeniedError} can arrive
@@ -1592,7 +1626,7 @@ export function isTransient(err: unknown): boolean {
   )
     return false;
   // A keyed call the platform never heard end (platform OPL-5127). A 409 with
-  // no `reason`, so the ConflictError branch below would call it worth sending
+  // no `reason`, which the ConflictError branch below once called worth sending
   // again — and the same key answers the same thing forever: the computer is
   // what says whether it happened. Its sibling `idempotency_in_progress`
   // carries `reason: "contention"` and IS worth sending again, which is the
@@ -1611,8 +1645,8 @@ export function isTransient(err: unknown): boolean {
   // that would otherwise say yes.
   if (err instanceof MoveRequiredError) return false;
   // By class as well as by word: a create-only upload whose 409 carried no
-  // usable reason has no `reason` at all, and would otherwise fall through to the
-  // ConflictError branch below and be called worth sending again.
+  // usable reason has no `reason` at all, and once fell through to the
+  // ConflictError branch below and was called worth sending again.
   if (
     err instanceof FileExistsError ||
     err instanceof CreateOnlyConflictError ||
@@ -1668,8 +1702,12 @@ export function isTransient(err: unknown): boolean {
   if (err instanceof UnavailableError && err.method !== undefined) {
     return err.method === 'GET' || err.method === 'HEAD';
   }
+  // A 409 that reached here carried no word this version recognises, which the
+  // platform calls no classification: final, unless its `code` is one that
+  // clears by itself (OPL-5973). A transient word returned true above.
+  if (err instanceof ConflictError)
+    return err.code !== undefined && CONFLICT_CODES_CLEAR.has(err.code);
   return (
-    err instanceof ConflictError ||
     err instanceof RateLimitError ||
     err instanceof UnavailableError ||
     err instanceof ConnectionError

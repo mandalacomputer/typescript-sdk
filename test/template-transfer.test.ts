@@ -138,7 +138,11 @@ describe('template preparation conflicts', () => {
       ),
     ).toBe(false);
     for (const code of [undefined, null, {}, 'another_conflict']) {
-      expect(isTransient(new ConflictError('Conflict', 409, { code }))).toBe(true);
+      expect(isTransient(new ConflictError('Conflict', 409, { code, reason: 'contention' }))).toBe(
+        true,
+      );
+      // No word is no classification, and final (OPL-5973).
+      expect(isTransient(new ConflictError('Conflict', 409, { code }))).toBe(false);
     }
   });
 

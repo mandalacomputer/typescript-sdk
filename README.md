@@ -780,8 +780,9 @@ rewritten.
 
 `isTransient()` reads it, so it no longer says `true` to the stopped computer —
 which is what it used to do, and what a blanket retry loop spun on until its
-deadline. An unclassified refusal falls back to the old type answer, so bound a
-loop that meets one.
+deadline. A 409 with no word, or one this version does not know, is final to
+`isTransient()` unless its `code` is one that clears by itself; see
+[Errors](#errors).
 
 A **400** is the other one to know, because it never clears: a computer whose
 image lacks its desktop's clipboard tool (`xclip` on X11, `wl-clipboard` on
@@ -3460,8 +3461,9 @@ import {
   PermissionDeniedError,//    403 — the key's role is too low
   NotFoundError,       //     404 — no such computer, snapshot, guest file, or route
   MethodNotAllowedError,//    405 — method unsupported; see err.allow
-  ConflictError,       //     409 — right request, wrong moment. `err.reason` says
-                       //           whether retrying it helps
+  ConflictError,       //     409 — refused for the state something is in.
+                       //           `err.reason` says whether retrying helps;
+                       //           `err.code` names the refusal (LABEL_TAKEN)
   MoveRequiredError,   //       409 — …except this one: the size needs a new host
   FileExistsError,     //       409 `exists` — a create-only upload's path is taken
   CreateOnlyConflictError,//    409 — a create-only upload refused, reason unreadable
@@ -3575,10 +3577,13 @@ coordinate is a mistake in your own code rather than something the platform
 said. Nothing was sent when you get one. Catching `TypeError` still works and
 always did — the class is exported so the narrower catch can be written too.
 
-`ConflictError` is the one that usually clears itself: a guest still booting, a
-disk still being copied, another operation holding the guest agent. The
-platform's own message survives onto `err.message` — these are written to be
-acted on.
+`ConflictError` is refused for the state something is in. Some clear by
+themselves — a guest still booting, a disk still being copied, another operation
+holding the guest agent — and some are decisions that answer the same forever: a
+public URL label that is taken, a plan's limit reached, a disabled webhook, an
+SSH key already registered. The platform's own message survives onto
+`err.message` — these are written to be acted on — and `err.code`, where it sent
+one (`LABEL_TAKEN`, `PUBLIC_URL_LIMIT`), names which refusal it was.
 
 `err.reason` is what says which kind you have, where the platform sent a word
 for it, and it is the part a program is allowed to depend on — `err.message` is
@@ -3601,8 +3606,13 @@ whose outcome is unknown and which `isTransient` does not call transient.
 
 **Absent means no classification was given**, and so does a word you do not
 recognise — not every refusal has one, and the platform reserves the right to
-add classifications. Treat both as "no answer" and fall back to whatever you did before,
-which is exactly what `isTransient` does.
+add classifications. Treat both as "no answer". For a 409, `isTransient` then
+answers **false**: the platform warns that a client treating 409 as uniformly
+transient loops forever on the refusals that are decisions. Two codes clear by
+themselves even without a word, and `isTransient` says true to them:
+`idempotency_in_progress` (the first call under that key is still running) and
+`WORKSPACE_MOVING` (a workspace change still settling). A word beside either
+wins, so `WORKSPACE_MOVING` with `reason: "unsupported"` is final.
 
 `MoveRequiredError` is the exception, and it is a subclass so that code matching
 on the family keeps working. It means the size you asked for is more RAM than the

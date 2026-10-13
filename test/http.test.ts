@@ -277,8 +277,10 @@ describe('the client deadline', () => {
     expect(err).not.toBeInstanceOf(ConnectionError);
     expect(err.message).toBe('HTTP 409');
     // And the status is still the one a wait may poll on, which the connection
-    // class it was becoming is not.
-    expect(isTransient(err)).toBe(true);
+    // class it was becoming is not. Not transient to an embedder: a 409 whose
+    // body is lost says nothing about clearing (OPL-5973).
+    expect(isTransientForPoll(err)).toBe(true);
+    expect(isTransient(err)).toBe(false);
   });
 
   it('preserves the original network failure as the connection error cause', async () => {
@@ -431,7 +433,10 @@ describe('status mapping', () => {
   });
 
   it('knows which failures are worth retrying', () => {
-    expect(isTransient(new ConflictError('', 409))).toBe(true);
+    // A 409 with no word is no classification (OPL-5973); one that says it
+    // clears is worth sending again.
+    expect(isTransient(new ConflictError('', 409))).toBe(false);
+    expect(isTransient(new ConflictError('', 409, { reason: 'contention' }))).toBe(true);
     expect(isTransient(new RateLimitError('', 429))).toBe(true);
     expect(isTransient(new UnavailableError('', 503))).toBe(true);
     expect(isTransient(new ConnectionError('offline'))).toBe(true);
@@ -487,14 +492,15 @@ describe('status mapping', () => {
     expect([isTransient(underfoot), isTransient(windows)]).toEqual([false, false]);
   });
 
-  it('leaves a fifth word, and a malformed one, to the answer it had before', () => {
+  it('reads a fifth word, and a malformed one, as no classification', () => {
     // The platform states that an unrecognised value means "no classification
     // given", which is what makes a fifth word safe to add later. Both sets are
     // tested rather than one inferred from the other, so an unknown word falls
-    // through to the type instead of reading as permanent.
+    // through to the type — and for a 409 that is final (OPL-5973): the docs
+    // say a client treating 409 as uniformly transient loops forever.
     const fifth = errorForStatus(409, 'something new', { error: 'x', reason: 'wedged' });
     expect((fifth as APIError).reason).toBe('wedged');
-    expect(isTransient(fifth)).toBe(true);
+    expect(isTransient(fifth)).toBe(false);
     // Shape-checked like the move offer, and for its reason: this decides a
     // retry policy, so a `reason` that is not a string reads as nothing said.
     const wrongType = errorForStatus(409, 'x', { error: 'x', reason: 5 });
@@ -503,7 +509,7 @@ describe('status mapping', () => {
       undefined,
       undefined,
     ]);
-    expect([isTransient(wrongType), isTransient(unclassified)]).toEqual([true, true]);
+    expect([isTransient(wrongType), isTransient(unclassified)]).toEqual([false, false]);
   });
 
   it('publishes only what is safe to replay blind, and polls through the rest', () => {
