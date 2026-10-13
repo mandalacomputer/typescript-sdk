@@ -166,35 +166,69 @@ export async function resolveComputer(
 }
 
 /**
- * The computer a `computers urls` command is about: as every computer argument
- * resolves, and then among lost computers, which the default listing leaves
- * out and a direct read cannot reach once their host is gone. The platform
- * keeps a lost computer's URLs listable and deletable, so its labels can be
- * freed for a replacement (Codex, round 2 on #256). The same id-then-unique-
- * name rule, so a name shared by two lost computers is refused.
+ * The computer a `computers urls list|rm` command is about, among live AND lost
+ * computers: the platform keeps a lost computer's URLs listable and deletable,
+ * so its labels can be freed for a replacement, but the default listing leaves
+ * lost computers out and a direct read cannot reach one whose host is gone
+ * (Codex, rounds 2 and 3 on #256). So, in order:
+ *
+ * 1. an exact id in either listing, so a name never outranks an id;
+ * 2. the direct read by id, as every computer argument has;
+ * 3. a name, only from listings that are both complete, and unique across
+ *    live and lost together.
+ *
+ * Either listing may fail on its own: the lost one is the control plane's and
+ * answers through a fleet outage that fails the live one, which is when an id
+ * found there is still good. A name is never guessed from half a picture.
  */
 async function resolveUrlComputer(
   client: Client,
   target: string,
   signal: AbortSignal,
 ): Promise<Computer> {
+  P.computer(target);
+  const settle = (p: Promise<Listing<Computer>>) =>
+    p.then(
+      (listing) => ({ listing }),
+      (error: unknown) => ({ error }),
+    );
+  const [live, lost] = await Promise.all([
+    settle(client.computers.listWithStatus({ signal })),
+    settle(client.computers.listWithStatus({ state: 'lost', signal })),
+  ]);
+  signal.throwIfAborted();
+  const liveList = 'listing' in live ? live.listing : undefined;
+  const lostList = 'listing' in lost ? lost.listing : undefined;
+  const byId =
+    liveList?.items.find((c) => c.id === target) ?? lostList?.items.find((c) => c.id === target);
+  if (byId) return byId;
+  let direct: unknown;
   try {
-    return await resolveComputer(client, target, signal);
+    const one = await client.computers.get(target, { signal });
+    if (one.id !== target) {
+      throw new CliError('unexpected_computer', 'The computer ID lookup returned a different ID');
+    }
+    return one;
   } catch (error) {
     signal.throwIfAborted();
-    if (!(error instanceof NotFoundError)) throw error;
-    const lost = await client.computers.list({ state: 'lost', signal });
-    const byId = lost.find((c) => c.id === target);
-    if (byId) return byId;
-    const named = lost.filter((c) => c.name === target);
-    if (named.length === 1) return named[0]!;
-    if (named.length)
-      throw new CliError(
-        'ambiguous_computer',
-        `${target} names ${named.length} lost computers — use an id: ${named.map((c) => c.id).join(', ')}`,
-      );
-    throw error;
+    if (error instanceof CliError) throw error;
+    direct = error;
   }
+  if (!liveList || !lostList || liveList.incomplete !== null || lostList.incomplete !== null) {
+    if (!(direct instanceof NotFoundError)) throw direct;
+    throw new CliError(
+      'incomplete_listing',
+      'Cannot resolve a name without complete listings of live and lost computers; use an ID',
+    );
+  }
+  const named = [...liveList.items, ...lostList.items].filter((c) => c.name === target);
+  if (named.length === 1) return named[0]!;
+  if (named.length)
+    throw new CliError(
+      'ambiguous_computer',
+      `${target} names ${named.length} computers, live or lost — use an id: ${named.map((c) => c.id).join(', ')}`,
+    );
+  throw direct;
 }
 
 /**

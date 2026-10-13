@@ -56,10 +56,13 @@ describe('computers urls', () => {
     const h = harness();
     const result = await h.run(['computers', 'urls', 'list', 'vm-1']);
     expect(result.code).toBe(0);
+    // The live listing and the lost one, then the URLs.
     expect(h.rec.routes()).toEqual([
+      ['GET', 'computers'],
       ['GET', 'computers'],
       ['GET', 'computers/vm-1/public-urls'],
     ]);
+    expect(h.rec.calls[1]!.query.state).toBe('lost');
     expect(result.frame.data).toEqual(PUBLIC_URL_LIST);
   });
 
@@ -250,6 +253,7 @@ describe('computers urls', () => {
     expect(result.code).toBe(0);
     expect(h.rec.routes()).toEqual([
       ['GET', 'computers'],
+      ['GET', 'computers'],
       ['DELETE', 'computers/vm-1/public-urls/pu-0123456789abcdef'],
     ]);
   });
@@ -286,6 +290,75 @@ describe('computers urls', () => {
     expect((await h.run(['computers', 'urls', 'rm', ref, 'cool-thing'])).code).toBe(0);
     expect(h.rec.last().method).toBe('DELETE');
     expect(h.rec.last().path).toBe('/computers/vm-lost/public-urls/pu-0123456789abcdef');
+  });
+
+  // Codex, round 3 on #256: an id is never outranked by a name.
+  it('takes a lost computer’s exact id over a live computer of that name', async () => {
+    const shadow: Responder = (call) => {
+      if (call.method === 'GET' && call.path === '/computers')
+        return json(
+          call.query.state === 'lost' ? [LOST] : [{ ...COMPUTER, id: 'vm-live', name: 'vm-lost' }],
+        );
+      if (call.method === 'GET' && call.path === '/computers/vm-lost')
+        return errorJson(404, 'no such computer ID');
+      return anyRoute(call);
+    };
+    const h = harness(shadow);
+    const result = await h.run(['computers', 'urls', 'rm', 'vm-lost', 'cool-thing']);
+    expect(result.code).toBe(0);
+    expect(h.rec.last().path).toBe('/computers/vm-lost/public-urls/pu-0123456789abcdef');
+    expect(h.rec.calls.some((c) => c.path.startsWith('/computers/vm-live'))).toBe(false);
+  });
+
+  // Codex, round 3 on #256: the lost listing is the control plane's, and
+  // answers through a fleet outage that fails the live one.
+  const outage =
+    (direct: number): Responder =>
+    (call) => {
+      if (call.method === 'GET' && call.path === '/computers')
+        return call.query.state === 'lost' ? json([LOST]) : errorJson(503, 'a host did not answer');
+      if (call.method === 'GET' && /^\/computers\/[^/]+$/.test(call.path))
+        return errorJson(direct, direct === 404 ? 'no such computer ID' : 'a host did not answer');
+      return anyRoute(call);
+    };
+
+  it('removes a lost computer’s URL by ids through a fleet outage', async () => {
+    const h = harness(outage(503));
+    const result = await h.run([
+      'computers',
+      'urls',
+      'rm',
+      'vm-lost',
+      'pu-0123456789abcdef',
+      '--id',
+    ]);
+    expect(result.code).toBe(0);
+    expect(h.rec.last().method).toBe('DELETE');
+    expect(h.rec.last().path).toBe('/computers/vm-lost/public-urls/pu-0123456789abcdef');
+  });
+
+  it.each([404, 503])(
+    'but never guesses a name from half a picture (direct read %i)',
+    async (status) => {
+      const h = harness(outage(status));
+      const result = await h.run(['computers', 'urls', 'rm', 'gone', 'cool-thing']);
+      expect(result.code).not.toBe(0);
+      expect(h.rec.calls.some((c) => c.method === 'DELETE')).toBe(false);
+    },
+  );
+
+  it('refuses a name shared by a live and a lost computer', async () => {
+    const both: Responder = (call) => {
+      if (call.method === 'GET' && call.path === '/computers')
+        return json(call.query.state === 'lost' ? [LOST] : [{ ...COMPUTER, name: 'gone' }]);
+      if (call.method === 'GET' && call.path === '/computers/gone')
+        return errorJson(404, 'no such computer ID');
+      return anyRoute(call);
+    };
+    const h = harness(both);
+    const result = await h.run(['computers', 'urls', 'list', 'gone']);
+    expect(result.code).not.toBe(0);
+    expect(result.frame.error.code).toBe('ambiguous_computer');
   });
 
   it('still refuses a computer that is nowhere, lost or not', async () => {
