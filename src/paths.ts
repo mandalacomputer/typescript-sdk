@@ -214,6 +214,7 @@ type ComputerAction =
   | 'snapshots'
   | 'schedule'
   | 'ssh'
+  | 'public-urls'
   | 'secrets'
   | 'activities'
   | 'signals'
@@ -3009,6 +3010,134 @@ export function sshAccessBody(enabled: boolean): Json {
     throw new ValidationError(`enabled must be a boolean (got ${typeof enabled})`);
   }
   return { enabled };
+}
+
+// --- public URLs ----------------------------------------------------------
+
+/**
+ * Who may open a public URL: `public`, anyone with the link, or `private`,
+ * only a request carrying an API key of the account as `Authorization:
+ * Bearer`, which never reaches the app.
+ */
+export type PublicUrlAccess = 'public' | 'private';
+export const PUBLIC_URL_ACCESS: readonly PublicUrlAccess[] = ['public', 'private'];
+/** A label's length, in characters: the platform's own bounds. */
+export const PUBLIC_URL_LABEL_MIN = 3;
+export const PUBLIC_URL_LABEL_MAX = 40;
+/** The one port a public URL may not serve: the computer's own SSH. */
+export const PUBLIC_URL_RESERVED_PORT = 22;
+
+/** What a public URL is made with (`POST computers/:id/public-urls`). */
+export type PublicUrlCreateArgs = {
+  /**
+   * The port inside the computer to serve, 1 to 65535 except 22. The app must
+   * listen on `0.0.0.0`, not `127.0.0.1`.
+   */
+  port: number;
+  /**
+   * The name before the domain: 3 to 40 letters, digits and hyphens, a letter
+   * or digit at each end; the platform lowercases it. Omit to have one picked
+   * (`brave-otter-3f2a`). Names that read as the platform's or another
+   * company's own address are refused by the platform.
+   */
+  label?: string;
+  /** `public` (the platform's default) or `private`. */
+  access?: PublicUrlAccess;
+};
+
+/**
+ * What a PATCH may change: the port, who may open it, or both. The label is
+ * the URL and does not change; make a new URL for a new name.
+ */
+export type PublicUrlUpdateArgs = {
+  port?: number;
+  access?: PublicUrlAccess;
+};
+
+/** A computer's public URLs: `computers/:id/public-urls`. */
+export const publicUrls = (id: string): string => computerAction(id, 'public-urls');
+/** One of them, by its id (`pu-` and sixteen hex characters). */
+export const publicUrl = (id: string, urlId: string): string =>
+  `${publicUrls(id)}/${pathId(urlId, 'public URL id')}`;
+
+/** A port the platform would take: an integer from 1 to 65535, and not the computer's SSH. */
+function publicUrlPort(v: unknown): number {
+  if (typeof v !== 'number' || !Number.isInteger(v) || v < 1 || v > 65535) {
+    throw new ValidationError(
+      `port must be an integer from 1 to 65535 (got ${typeof v === 'number' ? v : typeof v})`,
+    );
+  }
+  if (v === PUBLIC_URL_RESERVED_PORT) {
+    throw new ValidationError(
+      'port 22 belongs to the computer (SSH); serve your app on another port',
+    );
+  }
+  return v;
+}
+
+function publicUrlAccess(v: unknown): PublicUrlAccess {
+  if (v !== 'public' && v !== 'private') {
+    throw new ValidationError(
+      `access must be "public" or "private" (got ${typeof v === 'string' ? JSON.stringify(v) : typeof v})`,
+    );
+  }
+  return v;
+}
+
+/**
+ * A label's shape, as far as it is knowable here: its length and its
+ * characters, after the trim the platform makes. Sent as given, since the
+ * platform's lowercasing is what a label becomes. Which names are reserved is
+ * the platform's to answer, and it does (`INVALID_LABEL`).
+ */
+function publicUrlLabel(v: unknown): string {
+  const text = requireString(v, 'label');
+  const trimmed = text.trim();
+  if (trimmed.length < PUBLIC_URL_LABEL_MIN || trimmed.length > PUBLIC_URL_LABEL_MAX) {
+    throw new ValidationError(
+      `label must be ${PUBLIC_URL_LABEL_MIN} to ${PUBLIC_URL_LABEL_MAX} characters (got ${trimmed.length})`,
+    );
+  }
+  if (!/^[A-Za-z0-9][A-Za-z0-9-]*[A-Za-z0-9]$/.test(trimmed)) {
+    throw new ValidationError(
+      'label may use letters, digits and hyphens, and must start and end with a letter or digit',
+    );
+  }
+  return text;
+}
+
+/** The body for `POST computers/:id/public-urls`. */
+export function publicUrlCreateBody(args: PublicUrlCreateArgs): Json {
+  if (!isRecord(args)) {
+    throw new ValidationError(
+      `public URL arguments must be an object with a port (got ${typeof args})`,
+    );
+  }
+  if (args.port === undefined) throw new ValidationError('port is required');
+  return omitUndefined({
+    port: publicUrlPort(args.port),
+    label: args.label === undefined ? undefined : publicUrlLabel(args.label),
+    access: args.access === undefined ? undefined : publicUrlAccess(args.access),
+  });
+}
+
+/**
+ * The body for `PATCH computers/:id/public-urls/:urlId`. An empty patch is
+ * refused here, as the platform refuses it: one naming neither field can only
+ * be arguments built from something that turned out empty.
+ */
+export function publicUrlUpdateBody(args: PublicUrlUpdateArgs): Json {
+  if (!isRecord(args)) {
+    throw new ValidationError(`public URL arguments must be an object (got ${typeof args})`);
+  }
+  const body = omitUndefined({
+    port: args.port === undefined ? undefined : publicUrlPort(args.port),
+    access: args.access === undefined ? undefined : publicUrlAccess(args.access),
+  });
+  if (!Object.keys(body).length) {
+    throw new ValidationError('nothing to update: give a port, an access, or both');
+  }
+  return body;
 }
 
 // --- the secret store -----------------------------------------------------

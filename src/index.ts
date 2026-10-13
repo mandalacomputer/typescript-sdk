@@ -27,6 +27,7 @@ import {
   Credits,
   Moves,
   Operations,
+  PublicUrls,
   Secrets,
   Sizes,
   Snapshots,
@@ -58,6 +59,7 @@ export class Client {
   readonly operations: Operations;
   readonly secrets: Secrets;
   readonly snapshots: Snapshots;
+  readonly publicUrls: PublicUrls;
   readonly sshKeys: SshKeys;
   readonly templates: Templates;
   readonly sizes: Sizes;
@@ -81,6 +83,7 @@ export class Client {
     this.operations = new Operations(this.#t);
     this.secrets = new Secrets(this.#t);
     this.snapshots = new Snapshots(this.#t);
+    this.publicUrls = new PublicUrls(this.#t);
     this.sshKeys = new SshKeys(this.#t);
     this.templates = new Templates(this.#t);
     this.sizes = new Sizes(this.#t);
@@ -227,6 +230,8 @@ export type {
   PlatformSignal,
   PlatformSignalGap,
   Point,
+  PublicUrl,
+  PublicUrlList,
   PublishedTemplate,
   Retention,
   RetiredTemplates,
@@ -275,6 +280,9 @@ export type {
   OpenAIComputerAction,
   OperationListArgs,
   PasteShortcut,
+  PublicUrlAccess,
+  PublicUrlCreateArgs,
+  PublicUrlUpdateArgs,
   ScreenshotFormat,
   ScreenshotRegion,
   ScreenshotShape,
@@ -326,6 +334,7 @@ export {
   Credits,
   Moves,
   Operations,
+  PublicUrls,
   Secrets,
   Sizes,
   Snapshots,

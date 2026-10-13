@@ -94,6 +94,8 @@ import type {
   InputContext,
   Move,
   Point,
+  PublicUrl,
+  PublicUrlList,
   Schedule,
   ScreenshotInfo,
   SecretBinding,
@@ -130,6 +132,8 @@ import {
   toInputBatchResult,
   toInputContext,
   toMove,
+  toPublicUrl,
+  toPublicUrlList,
   toSchedule,
   toSecretBinding,
   toSecretBindings,
@@ -5965,6 +5969,79 @@ export class Computer {
       throw new MandalaError(`expected an SSH setting from PUT ${path}`);
     }
     return toSshAccess(data);
+  }
+
+  // --- public URLs -----------------------------------------------------
+
+  /**
+   * This computer's public URLs, and whether they can answer at all.
+   *
+   * A public URL serves a port inside the computer at
+   * `https://<label>.<base domain>` (e.g. `mandala.dev`), on port 443 with no
+   * port in the address. Check {@link PublicUrlList.enabled}: `false`, with a
+   * `reason`, where public URLs are off here or the plan has none. The URLs are
+   * listed either way, so you can see and delete what you made.
+   */
+  async publicUrls(opts: CallOptions = {}): Promise<PublicUrlList> {
+    const path = P.publicUrls(this.id);
+    const data = await this.#t.json('GET', path, { signal: opts.signal });
+    if (!P.isRecord(data)) throw new MandalaError(`expected a public URL list from GET ${path}`);
+    return toPublicUrlList(data);
+  }
+
+  /**
+   * Serve a port inside this computer on the internet.
+   *
+   * The app must listen on `0.0.0.0:<port>`, not `127.0.0.1`. `public` (the
+   * default) is anyone with the link. `private` answers only a request carrying
+   * an API key of this account as `Authorization: Bearer`, and the key never
+   * reaches the app; neither does a Mandala key sent to a public URL. Without a
+   * `label` one is picked.
+   *
+   * ```ts
+   * const site = await computer.createPublicUrl({ port: 3000 });
+   * console.log(site.url); // https://brave-otter-3f2a.mandala.dev
+   * ```
+   *
+   * The platform refuses a label that is taken, reserved, or reads as its own
+   * or another company's address, a computer past its plan's limit, and too
+   * many made in a day; see the errors in the API reference.
+   */
+  async createPublicUrl(args: P.PublicUrlCreateArgs, opts: CallOptions = {}): Promise<PublicUrl> {
+    const path = P.publicUrls(this.id);
+    const data = await this.#t.json('POST', path, {
+      body: P.publicUrlCreateBody(args),
+      signal: opts.signal,
+    });
+    if (!P.isRecord(data)) throw new MandalaError(`expected a public URL from POST ${path}`);
+    return toPublicUrl(data);
+  }
+
+  /**
+   * Point a public URL at another port, change who may open it, or both. The
+   * label is the URL and does not change.
+   */
+  async updatePublicUrl(
+    urlId: string,
+    args: P.PublicUrlUpdateArgs,
+    opts: CallOptions = {},
+  ): Promise<PublicUrl> {
+    const path = P.publicUrl(this.id, urlId);
+    const data = await this.#t.json('PATCH', path, {
+      body: P.publicUrlUpdateBody(args),
+      signal: opts.signal,
+    });
+    if (!P.isRecord(data)) throw new MandalaError(`expected a public URL from PATCH ${path}`);
+    return toPublicUrl(data);
+  }
+
+  /**
+   * Remove a public URL. It stops answering at once; the app inside the
+   * computer keeps running. Its label stays this account's: you may make it
+   * again later, and no other account can ever take it.
+   */
+  async deletePublicUrl(urlId: string, opts: CallOptions = {}): Promise<void> {
+    await this.#t.json('DELETE', P.publicUrl(this.id, urlId), { signal: opts.signal });
   }
 
   // --- secret bindings -------------------------------------------------

@@ -927,6 +927,27 @@ export const SSH_ACCESS = {
   error: null,
 };
 
+/** One public URL, as a create, an update and each row of a listing answer it (platform OPL-3753). */
+export const PUBLIC_URL = {
+  id: 'pu-0123456789abcdef',
+  url: 'https://cool-thing.mandala.dev',
+  hostname: 'cool-thing.mandala.dev',
+  label: 'cool-thing',
+  port: 3000,
+  access: 'public',
+  disabled: false,
+  created_at: '2026-10-12T00:00:00.000Z',
+  updated_at: '2026-10-12T00:00:00.000Z',
+};
+
+/** `GET computers/:id/public-urls`: an envelope, not a bare list. */
+export const PUBLIC_URL_LIST = {
+  enabled: true,
+  base_domain: 'mandala.dev',
+  limit: 2,
+  public_urls: [PUBLIC_URL],
+};
+
 /** One secret in the account's store, as `GET secrets/:id` answers it: never a value (OPL-4984). */
 export const SECRET = {
   id: 'csec-0123456789abcdef',
@@ -1150,6 +1171,11 @@ export const anyRoute: Responder = (call) => {
   if (path === '/ssh-keys') return json(get ? [SSH_KEY] : SSH_KEY, get ? {} : { status: 201 });
   if (/^\/ssh-keys\/[^/]+$/.test(path)) return new Response(null, { status: 204 });
   if (path.endsWith('/ssh')) return json(SSH_ACCESS);
+  // The listing is an envelope and the create a 201 of one URL; the delete an ack.
+  if (path.endsWith('/public-urls'))
+    return json(get ? PUBLIC_URL_LIST : PUBLIC_URL, get ? {} : { status: 201 });
+  if (/\/public-urls\/[^/]+$/.test(path))
+    return json(method === 'DELETE' ? { ok: true } : PUBLIC_URL);
   // The account's store and a computer's bindings share a last segment, and
   // answer different shapes: a store listing is an envelope, a create a 201.
   if (path === '/secrets') return json(get ? SECRET_LIST : SECRET, get ? {} : { status: 201 });

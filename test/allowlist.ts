@@ -202,12 +202,6 @@ export const UNIMPLEMENTED: ReadonlySet<string> = new Set([
   // here, and a second, worse OpenAI client inside this SDK would be a
   // maintenance obligation with no user.
   'POST chat/completions',
-  // Public URLs (platform OPL-3753), behind a flag on the platform until its
-  // edge exists. Wrapped in the release that follows it there.
-  'GET computers/:id/public-urls',
-  'POST computers/:id/public-urls',
-  'PATCH computers/:id/public-urls/:urlId',
-  'DELETE computers/:id/public-urls/:urlId',
 ]);
 
 /**

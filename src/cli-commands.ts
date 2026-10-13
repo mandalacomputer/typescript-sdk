@@ -165,6 +165,78 @@ export async function resolveComputer(
   throw idLookupError;
 }
 
+/** The platform's computer id: `vm-` and twelve hex characters. */
+const COMPUTER_ID = /^vm-[0-9a-f]{12}$/;
+
+/**
+ * The computer id a `computers urls` command acts on.
+ *
+ * A reference shaped like a computer id IS that id: no listing, no read, and
+ * never a name match. The public URL routes are the control plane's, so they
+ * answer for a computer whose host is down, a lost one and one mid-move, and
+ * they refuse an id that is not the caller's themselves (`404`, or `409`
+ * `WORKSPACE_MOVING`), which is passed on as it came. Resolving it first is
+ * what kept letting a computer NAMED like another's id be acted on instead,
+ * through one listing state after another (Codex, rounds 1 to 6 on #256).
+ *
+ * Anything else is a name, found in one complete listing: an incomplete one,
+ * or a name two computers share, is refused with a request for the id.
+ */
+async function urlComputerId(client: Client, ref: string, signal: AbortSignal): Promise<string> {
+  if (COMPUTER_ID.test(ref)) return ref;
+  const listing = await client.computers.listWithStatus({ signal });
+  if (listing.incomplete !== null)
+    throw new CliError(
+      'incomplete_listing',
+      `cannot find a computer named ${terminalSafe(ref)} while some hosts are not answering; pass the computer id (vm-…)`,
+    );
+  const named = listing.items.filter((c) => c.name === ref);
+  if (named.length === 1) return named[0]!.id;
+  if (named.length)
+    throw new CliError(
+      'ambiguous_computer',
+      `${terminalSafe(ref)} names ${named.length} computers; pass the computer id: ${named.map((c) => c.id).join(', ')}`,
+    );
+  throw new CliError(
+    'not_found',
+    `no computer is named ${terminalSafe(ref)}; pass a computer name or id (vm-…)`,
+  );
+}
+
+/**
+ * `computers urls update|rm COMPUTER URL`: the URL by its id, its label, its
+ * hostname or its address, found in that computer's own list. Always the list,
+ * even for something shaped like a URL id: a label may be shaped like one too,
+ * and taking it on its shape alone changed or deleted another URL than the one
+ * meant (Codex, round 1 on #256). Every match is collected, and more than one
+ * refuses before anything is changed; a hostname always names exactly one.
+ * `--id` is how a caller says the argument is the id, sent without the lookup.
+ */
+export async function publicUrlId(
+  client: Client,
+  computerId: string,
+  ref: string,
+  signal: AbortSignal,
+): Promise<string> {
+  const exact = ref.trim();
+  const wanted = exact.toLowerCase().replace(/\/+$/, '');
+  const host = wanted.replace(/^https?:\/\//, '');
+  const list = await client.publicUrls.list(computerId, { signal });
+  const matches = list.publicUrls.filter(
+    (u) => u.id === exact || u.label === wanted || u.hostname.toLowerCase() === host,
+  );
+  if (matches.length === 1) return matches[0]!.id;
+  if (matches.length > 1)
+    throw new CliError(
+      'ambiguous_public_url',
+      `${terminalSafe(ref)} matches ${matches.length} public URLs on ${terminalSafe(computerId)}; give the hostname of the one you mean: ${matches.map((u) => terminalSafe(u.hostname)).join(', ')}`,
+    );
+  throw new CliError(
+    'not_found',
+    `no public URL ${terminalSafe(ref)} on ${terminalSafe(computerId)}; give its id, label, hostname or address (computers urls list shows them)`,
+  );
+}
+
 /**
  * `operations list --computer`: a computer by name or id, as every other
  * computer argument is. A value that is neither a live computer's id nor its
@@ -1348,6 +1420,14 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
     };
     if (path === 'webhooks create') P.webhookCreateBody({ ...hook, url: target });
     if (path === 'webhooks update') P.webhookUpdateBody(hook);
+    // The parser has already held --access to its two choices.
+    const urlArgs = {
+      port: n('port'),
+      label: s('label'),
+      access: s('access') as P.PublicUrlAccess | undefined,
+    };
+    if (path === 'computers urls create') P.publicUrlCreateBody(urlArgs as P.PublicUrlCreateArgs);
+    if (path === 'computers urls update') P.publicUrlUpdateBody(urlArgs);
     if (path === 'scp' || path === 'files upload' || path === 'files download') {
       const overwrite = { overwrite: !b('no-overwrite') };
       // Only when asked: absent is the default, which resumes a suspended
@@ -1716,6 +1796,26 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
         return await computerSecretsSet(client, await computer(), bindings, output, signal, {
           keepRevision: b('keep-revision') === true,
         });
+      case 'computers urls list':
+        return output.result(
+          (await client.publicUrls.list(await urlComputerId(client, target, signal), call)).raw,
+        );
+      case 'computers urls create': {
+        const id = await urlComputerId(client, target, signal);
+        return output.result(
+          (await client.publicUrls.create(id, urlArgs as P.PublicUrlCreateArgs, call)).raw,
+        );
+      }
+      case 'computers urls update':
+      case 'computers urls rm': {
+        const id = await urlComputerId(client, target, signal);
+        const urlId = b('id') ? args[1]! : await publicUrlId(client, id, args[1]!, signal);
+        if (path === 'computers urls rm') {
+          await client.publicUrls.delete(id, urlId, call);
+          return output.result({ id: urlId, deleted: true });
+        }
+        return output.result((await client.publicUrls.update(id, urlId, urlArgs, call)).raw);
+      }
       case 'computers view': {
         const c = await computer();
         const url = dashboardUrl(client.baseUrl, c.id);

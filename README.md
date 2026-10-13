@@ -2596,6 +2596,55 @@ rename resent under the same `idempotencyKey` gets the first call's answer back
 (`Idempotent-Replayed: true`) with its desktop credentials stripped, so
 `refresh()` there too.
 
+### Public URLs
+
+Serve a port inside the computer on the internet, at
+`https://<label>.<base domain>` (e.g. `mandala.dev`), on port 443 with no port
+in the address. The app must listen on `0.0.0.0`, not `127.0.0.1`:
+
+```ts
+await c.exec({ command: 'python3 -m http.server 3000', background: true });
+const site = await c.createPublicUrl({ port: 3000 });
+console.log(site.url); // https://brave-otter-3f2a.mandala.dev
+```
+
+| | who may open it |
+|---|---|
+| `access: 'public'` (the default) | anyone with the link |
+| `access: 'private'` | only a request carrying an API key of this account as `Authorization: Bearer`; the key never reaches the app |
+
+Pass a `label` to choose the name (3 to 40 letters, digits and hyphens; the
+platform refuses names that are taken, reserved, or read as its own or another
+company's address). `updatePublicUrl(id, { port, access })` points one at
+another port or changes who may open it, and `deletePublicUrl(id)` removes it
+at once; the app keeps running. A label stays with the account that first used
+it: you may make it again after a delete, and no other account can take it. `publicUrls()` lists them, with `enabled` and a
+`reason` where they cannot answer (the feature is off here, or the plan has
+none) and the plan's `limit` per computer.
+
+From the CLI:
+
+```sh
+mandala computers urls create my-computer --port 3000 --access private
+mandala computers urls list my-computer
+mandala computers urls update my-computer brave-otter-3f2a --port 8000
+mandala computers urls rm my-computer brave-otter-3f2a
+```
+
+The computer is a name or an id. An id (`vm-` and twelve hex characters) is
+used as given, with no lookup; a name is looked up and refused when the listing
+is incomplete or two computers share it, so pass the id then. A URL is named by
+its id, label, hostname or address, found in the computer's list; a reference
+that matches two (one URL's id and another's label) is refused, and the
+hostname names exactly one. `--id` on `update` and `rm` sends the URL id without
+the lookup, for when the list cannot be read (a workspace move that has not
+settled still takes a delete).
+
+`client.publicUrls` has the same four calls by the computer's id, for when you
+have the id and no handle: `client.publicUrls.delete(computerId, urlId)`. They
+are answered by the control plane, so they work while the computer's host is
+down, and on a lost computer whose labels you want back.
+
 ### Readiness
 
 ```ts
@@ -3508,8 +3557,9 @@ run. No 401, 402, 403, 404 or 405 is transient, even with a contradictory reason
 Nested run reasons never grant replay permission. Stream error frames keep their
 full evidence in `raw`; thrown stream errors expose their request ID without
 turning frame reasons or the successful stream's headers into retry advice.
-The CLI JSON error envelope is `{code, message, status}`, plus `request_id`,
-`idempotency_key` and `operation_id` when the failed call has them; the CLI's
+The CLI JSON error envelope is `{code, message, status}`, plus `reason` and
+`api_code` (the API's own code, e.g. `LABEL_TAKEN`) when the API sent them, and
+`request_id`, `idempotency_key` and `operation_id` when the failed call has them; the CLI's
 Operations section below says how to use them to find out how a keyed call ended.
 
 **Read `isTransient` rather than the comments above when it matters.** Three
@@ -3698,7 +3748,7 @@ network access and never prompt for input; `logout` needs no network.
 
 | Command group | Available commands |
 | --- | --- |
-| `computers` | `list`, `create`, `get`, `start`, `stop`, `suspend`, `restart`, `delete`, `clone`, `rename`, `resize`, `move`, `idle-suspend`, `browser-proxy set`, `browser-proxy clear`, `egress-proxy set`, `egress-proxy clear`, `secrets get`, `secrets set`, `view`, `screenshot`, `exec`, `exec-poll`, `exec-kill`, `wait` |
+| `computers` | `list`, `create`, `get`, `start`, `stop`, `suspend`, `restart`, `delete`, `clone`, `rename`, `resize`, `move`, `idle-suspend`, `browser-proxy set`, `browser-proxy clear`, `egress-proxy set`, `egress-proxy clear`, `urls list`, `urls create`, `urls update`, `urls rm`, `secrets get`, `secrets set`, `view`, `screenshot`, `exec`, `exec-poll`, `exec-kill`, `wait` |
 | `sizes` | `list` |
 | `templates` | `list`, `get`, `validate`, `publish`, `build`, `watch`, `retire`, `schema` |
 | `builds` | `list`, `get`, `progress` |

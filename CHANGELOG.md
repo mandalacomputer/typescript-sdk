@@ -9,6 +9,22 @@ This is the summary you read to decide whether to upgrade.
 
 ## [Unreleased]
 
+### Added
+
+- **Public URLs.** Serve a port inside a computer at
+  `https://<label>.<base domain>` (e.g. `mandala.dev`), on port 443:
+  `computer.publicUrls()` lists them with whether they can answer and the
+  plan's limit, `createPublicUrl({ port, label?, access? })` makes one
+  (`public`, the default, is anyone with the link; `private` answers only this
+  account's API keys, which never reach the app), `updatePublicUrl(id, {
+  port?, access? })` changes one, and `deletePublicUrl(id)` removes it. The
+  `client.publicUrls` has the same four calls by the computer's id, with no
+  handle. The `mandala` CLI has the same as `computers urls
+  list|create|update|rm`: a computer id is used as given and a name looked
+  up, and a URL is found by its id, label, hostname or address (`--id` sends a
+  URL id unlooked-up). Needs a platform with public URLs enabled for the
+  account.
+
 ## [0.12.0] — 2026-10-11
 
 ### Added
