@@ -23,6 +23,8 @@ import type {
   Move,
   Operation,
   OperationPage,
+  PublicUrl,
+  PublicUrlList,
   PublishedTemplate,
   Retention,
   RetiredTemplates,
@@ -59,6 +61,8 @@ import {
   toMove,
   toOperation,
   toOperationPage,
+  toPublicUrl,
+  toPublicUrlList,
   toPublishedTemplate,
   toRetention,
   toRetiredTemplates,
@@ -2261,6 +2265,70 @@ export class Webhooks {
  * client removes only keys whose reach is `this_account`; any other key is a
  * `NotFoundError` to {@link remove}, and is removed from the dashboard.
  */
+/**
+ * A computer's public URLs, by the computer's id: the same four calls as
+ * {@link Computer.publicUrls} and its siblings, for when you have the id and
+ * no handle. They are answered by the control plane, not the computer's host,
+ * so they work for a computer whose host is down, a lost one (whose labels you
+ * may want back for a replacement) and, for the delete, one mid-move.
+ *
+ * ```ts
+ * await client.publicUrls.delete('vm-0123456789ab', 'pu-0123456789abcdef');
+ * ```
+ */
+export class PublicUrls {
+  #t: Transport;
+
+  /** @internal */
+  constructor(transport: Transport) {
+    this.#t = transport;
+  }
+
+  /** The computer's public URLs, and whether they can answer. See {@link Computer.publicUrls}. */
+  async list(computerId: string, opts: CallOptions = {}): Promise<PublicUrlList> {
+    const path = P.publicUrls(computerId);
+    const data = await this.#t.json('GET', path, { signal: opts.signal });
+    if (!P.isRecord(data)) throw new MandalaError(`expected a public URL list from GET ${path}`);
+    return toPublicUrlList(data);
+  }
+
+  /** Serve a port inside the computer. See {@link Computer.createPublicUrl}. */
+  async create(
+    computerId: string,
+    args: P.PublicUrlCreateArgs,
+    opts: CallOptions = {},
+  ): Promise<PublicUrl> {
+    const path = P.publicUrls(computerId);
+    const data = await this.#t.json('POST', path, {
+      body: P.publicUrlCreateBody(args),
+      signal: opts.signal,
+    });
+    if (!P.isRecord(data)) throw new MandalaError(`expected a public URL from POST ${path}`);
+    return toPublicUrl(data);
+  }
+
+  /** Change one's port or access. See {@link Computer.updatePublicUrl}. */
+  async update(
+    computerId: string,
+    urlId: string,
+    args: P.PublicUrlUpdateArgs,
+    opts: CallOptions = {},
+  ): Promise<PublicUrl> {
+    const path = P.publicUrl(computerId, urlId);
+    const data = await this.#t.json('PATCH', path, {
+      body: P.publicUrlUpdateBody(args),
+      signal: opts.signal,
+    });
+    if (!P.isRecord(data)) throw new MandalaError(`expected a public URL from PATCH ${path}`);
+    return toPublicUrl(data);
+  }
+
+  /** Remove one. See {@link Computer.deletePublicUrl}. */
+  async delete(computerId: string, urlId: string, opts: CallOptions = {}): Promise<void> {
+    await this.#t.json('DELETE', P.publicUrl(computerId, urlId), { signal: opts.signal });
+  }
+}
+
 export class SshKeys {
   #t: Transport;
 

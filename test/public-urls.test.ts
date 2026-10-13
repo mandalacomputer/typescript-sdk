@@ -188,3 +188,40 @@ describe('changing and removing one', () => {
     expect(rec.calls).toHaveLength(1);
   });
 });
+
+describe('by the computer’s id, with no handle', () => {
+  it('lists, makes, changes and removes, reading nothing about the computer', async () => {
+    const rec = recorder(anyRoute);
+    const client = new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: rec.fetch });
+    const list = await client.publicUrls.list('vm-0123456789ab');
+    expect(list.publicUrls[0]!.id).toBe('pu-0123456789abcdef');
+    await client.publicUrls.create('vm-0123456789ab', { port: 3000, access: 'private' });
+    expect(rec.last().body).toEqual({ port: 3000, access: 'private' });
+    await client.publicUrls.update('vm-0123456789ab', 'pu-0123456789abcdef', { port: 8000 });
+    expect(rec.last().body).toEqual({ port: 8000 });
+    await client.publicUrls.delete('vm-0123456789ab', 'pu-0123456789abcdef');
+    expect(rec.routes()).toEqual([
+      ['GET', 'computers/vm-0123456789ab/public-urls'],
+      ['POST', 'computers/vm-0123456789ab/public-urls'],
+      ['PATCH', 'computers/vm-0123456789ab/public-urls/pu-0123456789abcdef'],
+      ['DELETE', 'computers/vm-0123456789ab/public-urls/pu-0123456789abcdef'],
+    ]);
+  });
+
+  it('validates as the handle’s methods do, and refuses an id that is not one path segment', async () => {
+    const rec = recorder(anyRoute);
+    const client = new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: rec.fetch });
+    await expect(client.publicUrls.create('vm-0123456789ab', { port: 22 })).rejects.toThrow(
+      ValidationError,
+    );
+    await expect(client.publicUrls.list('..')).rejects.toThrow(ValidationError);
+    await expect(client.publicUrls.delete('vm-0123456789ab', '')).rejects.toThrow(ValidationError);
+    expect(rec.calls).toHaveLength(0);
+  });
+
+  it('refuses an answer it cannot read', async () => {
+    const rec = recorder(urls({ ...PUBLIC_URL_LIST, enabled: 'yes' }));
+    const client = new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: rec.fetch });
+    await expect(client.publicUrls.list('vm-0123456789ab')).rejects.toThrow(MandalaError);
+  });
+});

@@ -377,6 +377,7 @@ export const COMMANDS: readonly Command[] = [
     ['computer', 'url'],
     [
       num('port', 'The port inside the computer: 1-65535, not 22'),
+      bool('id', 'URL is the public URL id; send it without looking it up'),
       flag(
         'access',
         "Who may open it: public, anyone with the link, or private, only this account's API keys as Authorization: Bearer (never passed to the app)",
@@ -391,7 +392,7 @@ export const COMMANDS: readonly Command[] = [
     [
       bool(
         'id',
-        'URL is the public URL id; delete it without looking it up (works while a workspace move is unsettled)',
+        'URL is the public URL id; send it without looking it up (works while a workspace move is unsettled)',
       ),
     ],
   ),

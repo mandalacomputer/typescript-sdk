@@ -2630,12 +2630,19 @@ mandala computers urls update my-computer brave-otter-3f2a --port 8000
 mandala computers urls rm my-computer brave-otter-3f2a
 ```
 
-A URL is named by its id, label, hostname or address, found in the computer's
-list; a reference that matches two (one URL's id and another's label) is
-refused, and the hostname names exactly one. `rm --id` deletes by id without
-the lookup, for when the list cannot be read but a delete is allowed (a
-workspace move that has not settled). A lost computer's URLs can be listed and
-removed too, so its labels are free for a replacement.
+The computer is a name or an id. An id (`vm-` and twelve hex characters) is
+used as given, with no lookup; a name is looked up and refused when the listing
+is incomplete or two computers share it, so pass the id then. A URL is named by
+its id, label, hostname or address, found in the computer's list; a reference
+that matches two (one URL's id and another's label) is refused, and the
+hostname names exactly one. `--id` on `update` and `rm` sends the URL id without
+the lookup, for when the list cannot be read (a workspace move that has not
+settled still takes a delete).
+
+`client.publicUrls` has the same four calls by the computer's id, for when you
+have the id and no handle: `client.publicUrls.delete(computerId, urlId)`. They
+are answered by the control plane, so they work while the computer's host is
+down, and on a lost computer whose labels you want back.
 
 ### Readiness
 

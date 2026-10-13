@@ -165,117 +165,63 @@ export async function resolveComputer(
   throw idLookupError;
 }
 
+/** The platform's computer id: `vm-` and twelve hex characters. */
+const COMPUTER_ID = /^vm-[0-9a-f]{12}$/;
+
 /**
- * The computer a `computers urls list|rm` command is about, among live AND lost
- * computers: the platform keeps a lost computer's URLs listable and deletable,
- * so its labels can be freed for a replacement, but the default listing leaves
- * lost computers out and a direct read cannot reach one whose host is gone
- * (Codex, rounds 2 and 3 on #256). So, in order:
+ * The computer id a `computers urls` command acts on.
  *
- * 1. an exact id in either listing, so a name never outranks an id;
- * 2. the direct read by id, as every computer argument has;
- * 3. a name, only from listings that are both complete, and unique across
- *    live and lost together.
+ * A reference shaped like a computer id IS that id: no listing, no read, and
+ * never a name match. The public URL routes are the control plane's, so they
+ * answer for a computer whose host is down, a lost one and one mid-move, and
+ * they refuse an id that is not the caller's themselves (`404`, or `409`
+ * `WORKSPACE_MOVING`), which is passed on as it came. Resolving it first is
+ * what kept letting a computer NAMED like another's id be acted on instead,
+ * through one listing state after another (Codex, rounds 1 to 6 on #256).
  *
- * Either listing may fail on its own: the lost one is the control plane's and
- * answers through a fleet outage that fails the live one, which is when an id
- * found there is still good. The live one is asked for partially, so a
- * computer whose host is down is found by its id too. A name is never guessed
- * from half a picture.
+ * Anything else is a name, found in one complete listing: an incomplete one,
+ * or a name two computers share, is refused with a request for the id.
  */
-async function resolveUrlComputer(
-  client: Client,
-  target: string,
-  signal: AbortSignal,
-): Promise<Computer> {
-  P.computer(target);
-  const settle = (p: Promise<Listing<Computer>>) =>
-    p.then(
-      (listing) => ({ listing }),
-      (error: unknown) => ({ error }),
-    );
-  const [live, lost] = await Promise.all([
-    // Partial: a computer whose host is down but not yet lost is a row of a
-    // partial listing and of no complete one, and its URLs are still the
-    // control plane's to delete (Codex, round 5 on #256). Its id is good from
-    // a partial listing; a name is not (below).
-    settle(client.computers.listWithStatus({ allowPartial: true, signal })),
-    settle(client.computers.listWithStatus({ state: 'lost', signal })),
-  ]);
-  signal.throwIfAborted();
-  const liveList = 'listing' in live ? live.listing : undefined;
-  const lostList = 'listing' in lost ? lost.listing : undefined;
-  const byId =
-    liveList?.items.find((c) => c.id === target) ?? lostList?.items.find((c) => c.id === target);
-  if (byId) return byId;
-  let direct: unknown;
-  try {
-    const one = await client.computers.get(target, { signal });
-    if (one.id !== target) {
-      throw new CliError('unexpected_computer', 'The computer ID lookup returned a different ID');
-    }
-    return one;
-  } catch (error) {
-    signal.throwIfAborted();
-    if (error instanceof CliError) throw error;
-    direct = error;
-  }
-  if (!liveList || !lostList || liveList.incomplete !== null || lostList.incomplete !== null) {
-    if (!(direct instanceof NotFoundError)) throw direct;
+async function urlComputerId(client: Client, ref: string, signal: AbortSignal): Promise<string> {
+  if (COMPUTER_ID.test(ref)) return ref;
+  const listing = await client.computers.listWithStatus({ signal });
+  if (listing.incomplete !== null)
     throw new CliError(
       'incomplete_listing',
-      'Cannot resolve a name without complete listings of live and lost computers; use an ID',
+      `cannot find a computer named ${terminalSafe(ref)} while some hosts are not answering; pass the computer id (vm-…)`,
     );
-  }
-  const named = [...liveList.items, ...lostList.items].filter((c) => c.name === target);
-  if (named.length === 1) return named[0]!;
+  const named = listing.items.filter((c) => c.name === ref);
+  if (named.length === 1) return named[0]!.id;
   if (named.length)
     throw new CliError(
       'ambiguous_computer',
-      `${target} names ${named.length} computers, live or lost — use an id: ${named.map((c) => c.id).join(', ')}`,
+      `${terminalSafe(ref)} names ${named.length} computers; pass the computer id: ${named.map((c) => c.id).join(', ')}`,
     );
-  throw direct;
-}
-
-/**
- * The computer `computers urls create|update` acts on: found exactly as list
- * and rm find it, so an id is never outranked by a name, and then refused if
- * it is lost, whose URLs can be listed and removed but not made or changed.
- * The general resolver looks only at live computers, so a lost computer's id
- * that a live computer happens to use as its name picked that live computer,
- * and served ITS port to the internet (Codex, round 4 on #256).
- */
-async function liveUrlComputer(
-  client: Client,
-  target: string,
-  signal: AbortSignal,
-): Promise<Computer> {
-  const c = await resolveUrlComputer(client, target, signal);
-  if (c.state === 'lost')
-    throw new CliError(
-      'computer_lost',
-      `${terminalSafe(target)} is a lost computer: its public URLs can be listed and removed, not made or changed`,
-    );
-  return c;
+  throw new CliError(
+    'not_found',
+    `no computer is named ${terminalSafe(ref)}; pass a computer name or id (vm-…)`,
+  );
 }
 
 /**
  * `computers urls update|rm COMPUTER URL`: the URL by its id, its label, its
- * hostname or its address, found in the computer's own list. Always the list,
- * even for something shaped like an id: a label may be shaped like one too, and
- * taking it on its shape alone changed or deleted another URL than the one
+ * hostname or its address, found in that computer's own list. Always the list,
+ * even for something shaped like a URL id: a label may be shaped like one too,
+ * and taking it on its shape alone changed or deleted another URL than the one
  * meant (Codex, round 1 on #256). Every match is collected, and more than one
  * refuses before anything is changed; a hostname always names exactly one.
+ * `--id` is how a caller says the argument is the id, sent without the lookup.
  */
 export async function publicUrlId(
-  computer: Computer,
+  client: Client,
+  computerId: string,
   ref: string,
   signal: AbortSignal,
 ): Promise<string> {
   const exact = ref.trim();
   const wanted = exact.toLowerCase().replace(/\/+$/, '');
   const host = wanted.replace(/^https?:\/\//, '');
-  const list = await computer.publicUrls({ signal });
+  const list = await client.publicUrls.list(computerId, { signal });
   const matches = list.publicUrls.filter(
     (u) => u.id === exact || u.label === wanted || u.hostname.toLowerCase() === host,
   );
@@ -283,11 +229,11 @@ export async function publicUrlId(
   if (matches.length > 1)
     throw new CliError(
       'ambiguous_public_url',
-      `${terminalSafe(ref)} matches ${matches.length} public URLs on ${terminalSafe(computer.id)}; give the hostname of the one you mean: ${matches.map((u) => terminalSafe(u.hostname)).join(', ')}`,
+      `${terminalSafe(ref)} matches ${matches.length} public URLs on ${terminalSafe(computerId)}; give the hostname of the one you mean: ${matches.map((u) => terminalSafe(u.hostname)).join(', ')}`,
     );
   throw new CliError(
     'not_found',
-    `no public URL ${terminalSafe(ref)} on ${terminalSafe(computer.id)}; give its id, label, hostname or address (computers urls list shows them)`,
+    `no public URL ${terminalSafe(ref)} on ${terminalSafe(computerId)}; give its id, label, hostname or address (computers urls list shows them)`,
   );
 }
 
@@ -1852,30 +1798,23 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
         });
       case 'computers urls list':
         return output.result(
-          (await (await resolveUrlComputer(client, target, signal)).publicUrls(call)).raw,
+          (await client.publicUrls.list(await urlComputerId(client, target, signal), call)).raw,
         );
-      case 'computers urls create':
+      case 'computers urls create': {
+        const id = await urlComputerId(client, target, signal);
         return output.result(
-          (
-            await (
-              await liveUrlComputer(client, target, signal)
-            ).createPublicUrl(urlArgs as P.PublicUrlCreateArgs, call)
-          ).raw,
+          (await client.publicUrls.create(id, urlArgs as P.PublicUrlCreateArgs, call)).raw,
         );
-      case 'computers urls update': {
-        const c = await liveUrlComputer(client, target, signal);
-        const id = await publicUrlId(c, args[1]!, signal);
-        return output.result((await c.updatePublicUrl(id, urlArgs, call)).raw);
       }
+      case 'computers urls update':
       case 'computers urls rm': {
-        const c = await resolveUrlComputer(client, target, signal);
-        // --id: the URL argument is its id, sent without looking it up, for
-        // when the list cannot be read but a delete is still allowed (an
-        // unsettled workspace move answers the list 409 and takes the
-        // delete). Said by the caller, never inferred from the id's shape.
-        const id = b('id') ? args[1]! : await publicUrlId(c, args[1]!, signal);
-        await c.deletePublicUrl(id, call);
-        return output.result({ id, deleted: true });
+        const id = await urlComputerId(client, target, signal);
+        const urlId = b('id') ? args[1]! : await publicUrlId(client, id, args[1]!, signal);
+        if (path === 'computers urls rm') {
+          await client.publicUrls.delete(id, urlId, call);
+          return output.result({ id: urlId, deleted: true });
+        }
+        return output.result((await client.publicUrls.update(id, urlId, urlArgs, call)).raw);
       }
       case 'computers view': {
         const c = await computer();
