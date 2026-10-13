@@ -11,6 +11,7 @@ import { Client } from '../src/index.js';
 import {
   anyRoute,
   BASE,
+  json,
   PUBLIC_URL,
   PUBLIC_URL_LIST,
   type Responder,
@@ -118,7 +119,7 @@ describe('computers urls', () => {
     expect(h.rec.last().body).toEqual({ port: 8000 });
   });
 
-  it('uses an id as given, without listing', async () => {
+  it('finds the URL by its id in the list too', async () => {
     const h = harness();
     const result = await h.run([
       'computers',
@@ -132,9 +133,75 @@ describe('computers urls', () => {
     expect(result.code).toBe(0);
     expect(h.rec.routes()).toEqual([
       ['GET', 'computers'],
+      ['GET', 'computers/vm-1/public-urls'],
       ['PATCH', 'computers/vm-1/public-urls/pu-0123456789abcdef'],
     ]);
     expect(h.rec.last().body).toEqual({ access: 'private' });
+  });
+
+  // Codex, round 1 on #256: a label may be shaped like an id.
+  const twoUrls: Responder = (call) =>
+    call.path.endsWith('/public-urls') && call.method === 'GET'
+      ? json({
+          ...PUBLIC_URL_LIST,
+          public_urls: [
+            PUBLIC_URL,
+            {
+              ...PUBLIC_URL,
+              id: 'pu-fedcba9876543210',
+              label: 'pu-0123456789abcdef',
+              hostname: 'pu-0123456789abcdef.mandala.dev',
+              url: 'https://pu-0123456789abcdef.mandala.dev',
+            },
+          ],
+        })
+      : anyRoute(call);
+
+  it('refuses a reference that is one URL’s id and another’s label, changing nothing', async () => {
+    const h = harness(twoUrls);
+    const result = await h.run(['computers', 'urls', 'rm', 'vm-1', 'pu-0123456789abcdef']);
+    expect(result.code).not.toBe(0);
+    expect(result.frame.error.code).toBe('ambiguous_public_url');
+    expect(result.frame.error.message).toContain('pu-0123456789abcdef.mandala.dev');
+    expect(result.frame.error.message).toContain('cool-thing.mandala.dev');
+    expect(h.rec.calls.some((c) => c.method === 'DELETE')).toBe(false);
+  });
+
+  it('and then takes the hostname of either', async () => {
+    const h = harness(twoUrls);
+    const result = await h.run([
+      'computers',
+      'urls',
+      'rm',
+      'vm-1',
+      'pu-0123456789abcdef.mandala.dev',
+    ]);
+    expect(result.code).toBe(0);
+    expect(h.rec.last().path).toBe('/computers/vm-1/public-urls/pu-fedcba9876543210');
+  });
+
+  it('finds an id-shaped label when no URL has that id', async () => {
+    const onlyLabel: Responder = (call) =>
+      call.path.endsWith('/public-urls') && call.method === 'GET'
+        ? json({
+            ...PUBLIC_URL_LIST,
+            public_urls: [
+              { ...PUBLIC_URL, id: 'pu-fedcba9876543210', label: 'pu-0123456789abcdef' },
+            ],
+          })
+        : anyRoute(call);
+    const h = harness(onlyLabel);
+    const result = await h.run([
+      'computers',
+      'urls',
+      'update',
+      'vm-1',
+      'pu-0123456789abcdef',
+      '--port',
+      '8000',
+    ]);
+    expect(result.code).toBe(0);
+    expect(h.rec.last().path).toBe('/computers/vm-1/public-urls/pu-fedcba9876543210');
   });
 
   it('refuses an update that changes nothing, before contacting anything', async () => {

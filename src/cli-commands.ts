@@ -165,32 +165,36 @@ export async function resolveComputer(
   throw idLookupError;
 }
 
-/** A public URL's id as the platform issues it: `pu-` and sixteen hex characters. */
-const PUBLIC_URL_ID = /^pu-[0-9a-f]{16}$/;
-
 /**
- * `computers urls update|rm COMPUTER URL`: the URL by its id, or by what a
- * person has in hand — its label, its hostname or its address — found in the
- * computer's own list. An id is used as given, with no listing.
+ * `computers urls update|rm COMPUTER URL`: the URL by its id, its label, its
+ * hostname or its address, found in the computer's own list. Always the list,
+ * even for something shaped like an id: a label may be shaped like one too, and
+ * taking it on its shape alone changed or deleted another URL than the one
+ * meant (Codex, round 1 on #256). Every match is collected, and more than one
+ * refuses before anything is changed; a hostname always names exactly one.
  */
 export async function publicUrlId(
   computer: Computer,
   ref: string,
   signal: AbortSignal,
 ): Promise<string> {
-  if (PUBLIC_URL_ID.test(ref)) return ref;
-  const wanted = ref.trim().toLowerCase().replace(/\/+$/, '');
+  const exact = ref.trim();
+  const wanted = exact.toLowerCase().replace(/\/+$/, '');
   const host = wanted.replace(/^https?:\/\//, '');
   const list = await computer.publicUrls({ signal });
-  const found = list.publicUrls.find(
-    (u) => u.label === wanted || u.hostname.toLowerCase() === host,
+  const matches = list.publicUrls.filter(
+    (u) => u.id === exact || u.label === wanted || u.hostname.toLowerCase() === host,
   );
-  if (!found)
+  if (matches.length === 1) return matches[0]!.id;
+  if (matches.length > 1)
     throw new CliError(
-      'not_found',
-      `no public URL ${terminalSafe(ref)} on ${terminalSafe(computer.id)}; give its id, label, hostname or address (computers urls list shows them)`,
+      'ambiguous_public_url',
+      `${terminalSafe(ref)} matches ${matches.length} public URLs on ${terminalSafe(computer.id)}; give the hostname of the one you mean: ${matches.map((u) => terminalSafe(u.hostname)).join(', ')}`,
     );
-  return found.id;
+  throw new CliError(
+    'not_found',
+    `no public URL ${terminalSafe(ref)} on ${terminalSafe(computer.id)}; give its id, label, hostname or address (computers urls list shows them)`,
+  );
 }
 
 /**
