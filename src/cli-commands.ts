@@ -179,7 +179,9 @@ export async function resolveComputer(
  *
  * Either listing may fail on its own: the lost one is the control plane's and
  * answers through a fleet outage that fails the live one, which is when an id
- * found there is still good. A name is never guessed from half a picture.
+ * found there is still good. The live one is asked for partially, so a
+ * computer whose host is down is found by its id too. A name is never guessed
+ * from half a picture.
  */
 async function resolveUrlComputer(
   client: Client,
@@ -193,7 +195,11 @@ async function resolveUrlComputer(
       (error: unknown) => ({ error }),
     );
   const [live, lost] = await Promise.all([
-    settle(client.computers.listWithStatus({ signal })),
+    // Partial: a computer whose host is down but not yet lost is a row of a
+    // partial listing and of no complete one, and its URLs are still the
+    // control plane's to delete (Codex, round 5 on #256). Its id is good from
+    // a partial listing; a name is not (below).
+    settle(client.computers.listWithStatus({ allowPartial: true, signal })),
     settle(client.computers.listWithStatus({ state: 'lost', signal })),
   ]);
   signal.throwIfAborted();

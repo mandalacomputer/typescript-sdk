@@ -366,6 +366,42 @@ describe('computers urls', () => {
     expect(h.rec.last().path).toBe('/computers/vm-lost/public-urls/pu-0123456789abcdef');
   });
 
+  // Codex, round 5 on #256: a host down but its computer not yet lost.
+  const UNREACHABLE = { ...COMPUTER, id: 'vm-down', name: 'down', state: 'unreachable' };
+  const hostDown: Responder = (call) => {
+    if (call.method === 'GET' && call.path === '/computers') {
+      if (call.query.state === 'lost') return json([]);
+      return call.query.allow_partial === '1'
+        ? json([UNREACHABLE], { headers: { 'X-GC-Incomplete': '1' } })
+        : errorJson(503, 'a host did not answer');
+    }
+    if (call.method === 'GET' && /^\/computers\/[^/]+$/.test(call.path))
+      return errorJson(503, 'a host did not answer');
+    return anyRoute(call);
+  };
+
+  it('removes a URL by ids from a computer whose host is down, before it is lost', async () => {
+    const h = harness(hostDown);
+    const result = await h.run([
+      'computers',
+      'urls',
+      'rm',
+      'vm-down',
+      'pu-0123456789abcdef',
+      '--id',
+    ]);
+    expect(result.code).toBe(0);
+    expect(h.rec.last().method).toBe('DELETE');
+    expect(h.rec.last().path).toBe('/computers/vm-down/public-urls/pu-0123456789abcdef');
+  });
+
+  it('but not by its name, which a partial listing cannot vouch for', async () => {
+    const h = harness(hostDown);
+    const result = await h.run(['computers', 'urls', 'rm', 'down', 'pu-0123456789abcdef', '--id']);
+    expect(result.code).not.toBe(0);
+    expect(h.rec.calls.some((c) => c.method === 'DELETE')).toBe(false);
+  });
+
   it.each([404, 503])(
     'but never guesses a name from half a picture (direct read %i)',
     async (status) => {
