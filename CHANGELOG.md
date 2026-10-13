@@ -143,6 +143,12 @@ This is the summary you read to decide whether to upgrade.
   without looking it up, as `snapshots list --computer` does. A deleted
   computer's id fell through to a live computer named like it, and that
   computer's moves or operations came back instead (OPL-5976).
+- A `mandala` computer operand shaped like a computer id (`vm-` and twelve
+  lowercase hex digits) never falls back to a name: when its own route answers
+  404, the command fails with that 404 (OPL-5980). The platform lets a computer
+  be named like another's id, so a command meant for a deleted computer,
+  `computers delete` included, went to a live computer named after it. Names
+  resolve as before.
 
 ## [0.12.0] — 2026-10-11
 

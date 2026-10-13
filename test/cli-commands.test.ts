@@ -1471,6 +1471,65 @@ describe('computer ID precedence and lookup uncertainty', () => {
     ]);
   });
 
+  // OPL-5980: the platform lets a computer be named like another's id, and the
+  // name fallback after a 404 sent a command meant for a deleted computer to
+  // the live computer named after it.
+  describe('an id-shaped operand', () => {
+    const deletedId = 'vm-0123456789ab';
+    const namesake = { ...COMPUTER, id: 'vm-bbbbbbbbbbbb', name: deletedId };
+
+    it.each([
+      [['computers', 'delete', deletedId]],
+      [['computers', 'stop', deletedId]],
+      [['computers', 'rename', deletedId, 'other']],
+      [['computers', 'get', deletedId]],
+    ])('never falls back to a computer named like it: %j', async (args) => {
+      const h = harness((call) =>
+        call.path === '/computers'
+          ? json([namesake])
+          : call.method === 'GET' && call.path === `/computers/${deletedId}`
+            ? json({ error: 'no such computer' }, { status: 404 })
+            : json({ ok: true, snapshots_deleted: 0 }),
+      );
+      const result = await h.run(args);
+      expect(result.code).toBe(1);
+      expect(result.frames[0].error.code).toBe('not_found');
+      expect(result.frames[0].error.status).toBe(404);
+      expect(h.rec.routes()).toEqual([
+        ['GET', 'computers'],
+        ['GET', `computers/${deletedId}`],
+      ]);
+    });
+
+    it('answers its 404 even when the listing failed or was incomplete', async () => {
+      for (const listing of [
+        () => json({ error: 'unavailable' }, { status: 503 }),
+        () => json([namesake], { headers: { 'X-GC-Incomplete': '0' } }),
+      ]) {
+        const h = harness((call) =>
+          call.path === '/computers'
+            ? listing()
+            : json({ error: 'no such computer' }, { status: 404 }),
+        );
+        const result = await h.run(['computers', 'delete', deletedId]);
+        expect(result.frames[0].error.code).toBe('not_found');
+        expect(h.rec.calls.every((call) => call.method === 'GET')).toBe(true);
+      }
+    });
+
+    it('still finds the id when the listing omits it', async () => {
+      const real = { ...COMPUTER, id: deletedId, name: 'archived desktop', state: 'lost' };
+      const h = harness((call) => {
+        if (call.path === '/computers') return json([namesake]);
+        if (call.method === 'GET') return json(real);
+        return json({ ok: true, snapshots_deleted: 0 });
+      });
+      const result = await h.run(['computers', 'delete', deletedId]);
+      expect(result.code).toBe(0);
+      expect(h.rec.routes().at(-1)).toEqual(['DELETE', `computers/${deletedId}`]);
+    });
+  });
+
   it('refuses a mismatched computer returned by the direct ID endpoint', async () => {
     const h = harness((call) =>
       call.path === '/computers' ? json([other]) : json({ ...lost, id: 'different-id' }),
