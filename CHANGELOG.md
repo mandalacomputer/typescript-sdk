@@ -9,6 +9,8 @@ This is the summary you read to decide whether to upgrade.
 
 ## [Unreleased]
 
+## [0.13.0] — 2026-10-13
+
 ### Added
 
 - **Public URLs.** Serve a port inside a computer at
@@ -41,11 +43,14 @@ This is the summary you read to decide whether to upgrade.
   for a plan seat and cannot act on the account, independent of `suspended`;
   `undefined` from a server that does not send it. `members()` lists accepted
   members, including those waiting for a seat.
-- **The API's own error code and its `Retry-After` in CLI errors.** The
-  `--json` error envelope carries `api_code` (such as `LABEL_TAKEN`, which tells
-  apart two refusals with one status) and `retry_after_ms`. Text output ends the
-  message with `(HTTP 409, LABEL_TAKEN)` and says the `Retry-After` wait on a
-  line of its own (OPL-5963, OPL-5973).
+- **The platform's error `code` in CLI errors, as `api_code`** (OPL-5963,
+  OPL-5973). `mandala --json` failures carry it as `api_code` beside the CLI's
+  own `code`, so two refusals with one status, such as `LABEL_TAKEN` and
+  `PUBLIC_URL_LIMIT`, can be told apart without reading the sentence. Without
+  `--json`, a refusal from the platform ends its line with `(HTTP <status>,
+  <code>)`, or `(HTTP <status>)` when there is no code. The platform's
+  `Retry-After` is kept as well: `retry_after_ms` in the `--json` envelope, and
+  a line of its own saying how long to wait in text.
 - **`snapshots list --computer` takes a name** as well as an id, as `moves
   list` does. A name used to match nothing and return an empty list without a
   word; one that names no computer now is kept as an id, for a deleted
@@ -53,32 +58,41 @@ This is the summary you read to decide whether to upgrade.
 
 ### Changed
 
-- **`isTransient()` calls a 409 without a transient `reason` final**
-  (OPL-5973). The platform documents an absent `reason` as no classification,
-  and a client treating 409 as uniformly transient loops forever on the
-  refusals that are decisions: a taken public URL label (`LABEL_TAKEN`), a
-  computer at its URL limit (`PUBLIC_URL_LIMIT`), a webhook past the
-  subscription cap, a test of a disabled webhook, a duplicate or over-limit SSH
-  key. A 409 is now transient only with `reason` `contention` or `starting`, or
-  with `code` `idempotency_in_progress` or `WORKSPACE_MOVING` and no word that
-  says otherwise (`WORKSPACE_MOVING` with `reason: "unsupported"` is final).
-  An unknown word is no answer, and final too. Code that retried every 409
-  through `isTransient()` stops retrying the reasonless ones; the waits, which
-  poll reads under a deadline, are unchanged.
-- **Input coordinates are whole pixels** (OPL-5973). The platform reads `x`
-  and `y` as integers and answered a fraction with a 400; `click`, the other
-  clicks, `move`, `drag`, `mouseDown`, `mouseUp` and `scroll` now refuse a
-  fractional coordinate with a `ValidationError` before sending it, as the
-  Python SDK and the MCP server do. Round a computed position, such as a page
-  element's centre. A window `move` takes whole `x` and `y` from -32768 to
-  32767, and a `resize` a width and height from 1 to 32767.
+- **A 409 the platform did not classify is final: `isTransient()` answers
+  `false`** (OPL-5973). The platform documents a 409 without a `reason` as
+  unclassified, and a client treating 409 as uniformly transient loops forever
+  on the refusals that are decisions: a public URL label that is taken
+  (`LABEL_TAKEN`), a computer at its public URL limit (`PUBLIC_URL_LIMIT`), a
+  webhook past the subscription cap, a test of a disabled webhook, an SSH key
+  already registered, the SSH key limit, the cap of sixteen background
+  commands. A 409 is now transient only with `reason` `contention` or
+  `starting`, or with `code` `idempotency_in_progress` or `WORKSPACE_MOVING`
+  and no word saying otherwise (`WORKSPACE_MOVING` with `reason:
+  "unsupported"` is final). A word this version does not know is no answer, so
+  on its own it leaves the 409 final. The TypeScript SDK, the Python SDK and
+  the MCP server classify every 409 the same way. Code that retried every 409
+  through `isTransient()` stops retrying the reasonless ones, and should retry
+  a conflict it knows clears itself, bounded, after reading the error; the
+  waits, which poll reads under a deadline, are unchanged.
+- **Input coordinates and window geometry are whole pixels, checked before
+  sending** (OPL-5973). The platform reads `x` and `y` as integers and answered
+  a fraction with a 400; `click`, the other clicks, `move`, `drag`,
+  `mouseDown`, `mouseUp` and `scroll` now refuse a fractional coordinate with a
+  `ValidationError`. Round a computed position, such as a page element's
+  centre. A window `move` takes whole `x` and `y` from -32768 to 32767, and a
+  `resize` a whole width and height from 1 to 32767. The Python SDK and the MCP
+  server check the same.
 - **A create refuses `secrets[].revisionId`** (OPL-5973), which the platform
   always refused there with a 400: a create binds each secret's latest
   revision. The field is for a rebind with `setSecrets()`.
-- **Webhook and SSH key listings decode strictly** (OPL-5973).
-  `webhooks.list()`, `webhooks.deliveries()` and `sshKeys.list()` fail on a row
-  that is not an object or has no `id`, rather than dropping it, and a
-  webhook's unreadable `enabled` fails the call rather than reading as false.
+- **Webhook, webhook delivery and SSH key listings fail on a malformed row**
+  (OPL-5973). `webhooks.list()`, `webhooks.deliveries()` and `sshKeys.list()`
+  throw `MandalaError` for a row that is not an object, which used to be
+  dropped, or has no `id`, which used to be kept with an empty one, and for a
+  webhook whose `enabled` is absent or not a boolean, which used to read as
+  false. A single webhook, delivery or key is read the same way. A row left
+  out was a subscription or a key that may be live, missing from the answer
+  read to find out. The Python SDK and the MCP server fail on these rows too.
 - **Activity history decodes strictly** (OPL-5979), as the Python SDK reads
   it. `ActivityPage.health` is now optional: `undefined` when the platform
   sends no `health` or `null`, where it used to be filled in as an untruncated
@@ -1538,7 +1552,8 @@ No effect on the published surface, listed because it is most of the window.
 - Several parser fixes landed before that scanner was retired, each ported
   to and from the MCP server's byte-identical copy.
 
-[Unreleased]: https://github.com/mandalacomputer/typescript-sdk/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/mandalacomputer/typescript-sdk/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/mandalacomputer/typescript-sdk/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/mandalacomputer/typescript-sdk/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/mandalacomputer/typescript-sdk/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/mandalacomputer/typescript-sdk/compare/v0.9.0...v0.10.0
