@@ -232,6 +232,28 @@ async function resolveUrlComputer(
 }
 
 /**
+ * The computer `computers urls create|update` acts on: found exactly as list
+ * and rm find it, so an id is never outranked by a name, and then refused if
+ * it is lost, whose URLs can be listed and removed but not made or changed.
+ * The general resolver looks only at live computers, so a lost computer's id
+ * that a live computer happens to use as its name picked that live computer,
+ * and served ITS port to the internet (Codex, round 4 on #256).
+ */
+async function liveUrlComputer(
+  client: Client,
+  target: string,
+  signal: AbortSignal,
+): Promise<Computer> {
+  const c = await resolveUrlComputer(client, target, signal);
+  if (c.state === 'lost')
+    throw new CliError(
+      'computer_lost',
+      `${terminalSafe(target)} is a lost computer: its public URLs can be listed and removed, not made or changed`,
+    );
+  return c;
+}
+
+/**
  * `computers urls update|rm COMPUTER URL`: the URL by its id, its label, its
  * hostname or its address, found in the computer's own list. Always the list,
  * even for something shaped like an id: a label may be shaped like one too, and
@@ -1828,10 +1850,14 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
         );
       case 'computers urls create':
         return output.result(
-          (await (await computer()).createPublicUrl(urlArgs as P.PublicUrlCreateArgs, call)).raw,
+          (
+            await (
+              await liveUrlComputer(client, target, signal)
+            ).createPublicUrl(urlArgs as P.PublicUrlCreateArgs, call)
+          ).raw,
         );
       case 'computers urls update': {
-        const c = await computer();
+        const c = await liveUrlComputer(client, target, signal);
         const id = await publicUrlId(c, args[1]!, signal);
         return output.result((await c.updatePublicUrl(id, urlArgs, call)).raw);
       }

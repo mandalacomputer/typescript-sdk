@@ -118,6 +118,7 @@ describe('computers urls', () => {
     expect(result.code).toBe(0);
     expect(h.rec.routes()).toEqual([
       ['GET', 'computers'],
+      ['GET', 'computers'],
       ['GET', 'computers/vm-1/public-urls'],
       ['PATCH', 'computers/vm-1/public-urls/pu-0123456789abcdef'],
     ]);
@@ -137,6 +138,7 @@ describe('computers urls', () => {
     ]);
     expect(result.code).toBe(0);
     expect(h.rec.routes()).toEqual([
+      ['GET', 'computers'],
       ['GET', 'computers'],
       ['GET', 'computers/vm-1/public-urls'],
       ['PATCH', 'computers/vm-1/public-urls/pu-0123456789abcdef'],
@@ -309,6 +311,33 @@ describe('computers urls', () => {
     expect(h.rec.last().path).toBe('/computers/vm-lost/public-urls/pu-0123456789abcdef');
     expect(h.rec.calls.some((c) => c.path.startsWith('/computers/vm-live'))).toBe(false);
   });
+
+  // Codex, round 4 on #256: the same shadowing on a create would have served
+  // the live computer's port to the internet.
+  it.each([
+    ['create', ['--port', '3000']],
+    ['update', ['cool-thing', '--port', '8000']],
+  ])(
+    'refuses to %s a URL on a lost computer, rather than on a live one of that name',
+    async (verb, rest) => {
+      const shadow: Responder = (call) => {
+        if (call.method === 'GET' && call.path === '/computers')
+          return json(
+            call.query.state === 'lost'
+              ? [LOST]
+              : [{ ...COMPUTER, id: 'vm-live', name: 'vm-lost' }],
+          );
+        if (call.method === 'GET' && call.path === '/computers/vm-lost')
+          return errorJson(404, 'no such computer ID');
+        return anyRoute(call);
+      };
+      const h = harness(shadow);
+      const result = await h.run(['computers', 'urls', verb, 'vm-lost', ...rest]);
+      expect(result.code).not.toBe(0);
+      expect(result.frame.error.code).toBe('computer_lost');
+      expect(h.rec.calls.some((c) => c.method === 'POST' || c.method === 'PATCH')).toBe(false);
+    },
+  );
 
   // Codex, round 3 on #256: the lost listing is the control plane's, and
   // answers through a fleet outage that fails the live one.
