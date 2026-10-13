@@ -165,6 +165,34 @@ export async function resolveComputer(
   throw idLookupError;
 }
 
+/** A public URL's id as the platform issues it: `pu-` and sixteen hex characters. */
+const PUBLIC_URL_ID = /^pu-[0-9a-f]{16}$/;
+
+/**
+ * `computers urls update|rm COMPUTER URL`: the URL by its id, or by what a
+ * person has in hand — its label, its hostname or its address — found in the
+ * computer's own list. An id is used as given, with no listing.
+ */
+export async function publicUrlId(
+  computer: Computer,
+  ref: string,
+  signal: AbortSignal,
+): Promise<string> {
+  if (PUBLIC_URL_ID.test(ref)) return ref;
+  const wanted = ref.trim().toLowerCase().replace(/\/+$/, '');
+  const host = wanted.replace(/^https?:\/\//, '');
+  const list = await computer.publicUrls({ signal });
+  const found = list.publicUrls.find(
+    (u) => u.label === wanted || u.hostname.toLowerCase() === host,
+  );
+  if (!found)
+    throw new CliError(
+      'not_found',
+      `no public URL ${terminalSafe(ref)} on ${terminalSafe(computer.id)}; give its id, label, hostname or address (computers urls list shows them)`,
+    );
+  return found.id;
+}
+
 /**
  * `operations list --computer`: a computer by name or id, as every other
  * computer argument is. A value that is neither a live computer's id nor its
@@ -1348,6 +1376,14 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
     };
     if (path === 'webhooks create') P.webhookCreateBody({ ...hook, url: target });
     if (path === 'webhooks update') P.webhookUpdateBody(hook);
+    // The parser has already held --access to its two choices.
+    const urlArgs = {
+      port: n('port'),
+      label: s('label'),
+      access: s('access') as P.PublicUrlAccess | undefined,
+    };
+    if (path === 'computers urls create') P.publicUrlCreateBody(urlArgs as P.PublicUrlCreateArgs);
+    if (path === 'computers urls update') P.publicUrlUpdateBody(urlArgs);
     if (path === 'scp' || path === 'files upload' || path === 'files download') {
       const overwrite = { overwrite: !b('no-overwrite') };
       // Only when asked: absent is the default, which resumes a suspended
@@ -1716,6 +1752,23 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
         return await computerSecretsSet(client, await computer(), bindings, output, signal, {
           keepRevision: b('keep-revision') === true,
         });
+      case 'computers urls list':
+        return output.result((await (await computer()).publicUrls(call)).raw);
+      case 'computers urls create':
+        return output.result(
+          (await (await computer()).createPublicUrl(urlArgs as P.PublicUrlCreateArgs, call)).raw,
+        );
+      case 'computers urls update': {
+        const c = await computer();
+        const id = await publicUrlId(c, args[1]!, signal);
+        return output.result((await c.updatePublicUrl(id, urlArgs, call)).raw);
+      }
+      case 'computers urls rm': {
+        const c = await computer();
+        const id = await publicUrlId(c, args[1]!, signal);
+        await c.deletePublicUrl(id, call);
+        return output.result({ id, deleted: true });
+      }
       case 'computers view': {
         const c = await computer();
         const url = dashboardUrl(client.baseUrl, c.id);

@@ -14,6 +14,7 @@ import {
   isExecutionId,
   isRecord,
   MOVES,
+  type PublicUrlAccess,
   SECRET_ENV,
   SECRET_FILE,
   SECRET_REVISION,
@@ -3430,6 +3431,116 @@ export function toSshAccess(d: Record<string, unknown>): SshAccess {
     keyCount: num(d.key_count),
     keysPushed: num(d.keys_pushed),
     error: d.error == null ? null : str(d.error),
+    raw: { ...d },
+  };
+}
+
+// --- public URLs ------------------------------------------------------------
+
+/**
+ * One public URL: a port inside a computer served at `url`
+ * (`https://<label>.<base domain>`, port 443, no port in it).
+ */
+export type PublicUrl = {
+  /** `pu-` and sixteen hex characters: what an update or a delete names. */
+  id: string;
+  /** The address to open. */
+  url: string;
+  /** `<label>.<base domain>`. */
+  hostname: string;
+  /** The name before the domain, lowercase. Fixed for the URL's life. */
+  label: string;
+  /** The port inside the computer it serves. */
+  port: number;
+  /** `public`: anyone with the link. `private`: only this account's API keys, as `Authorization: Bearer`. */
+  access: PublicUrlAccess;
+  /**
+   * `true` when the platform has turned this URL off, by its name, its
+   * computer or its account. It answers 404 until the platform turns it back
+   * on; deleting it and making it again does not.
+   */
+  disabled: boolean;
+  createdAt: string;
+  /** The last change to its port or access. */
+  updatedAt: string;
+  raw: Record<string, unknown>;
+};
+
+/** A computer's public URLs, and whether they can answer at all. */
+export type PublicUrlList = {
+  /**
+   * Whether this computer's URLs can answer here: `false` where the feature is
+   * off or the account's plan has none, with {@link reason} saying which. The
+   * URLs are listed either way, so you can see and delete what you made.
+   */
+  enabled: boolean;
+  /** Why {@link enabled} is false. Absent while it is true. */
+  reason?: string;
+  /** The domain every label sits under, e.g. `mandala.dev`. */
+  baseDomain: string;
+  /** How many public URLs this computer may have on the account's plan. */
+  limit: number;
+  /** Oldest first. */
+  publicUrls: PublicUrl[];
+  raw: Record<string, unknown>;
+};
+
+const nonEmpty = (v: unknown): v is string => typeof v === 'string' && v !== '';
+
+/**
+ * Strict on what decides who can reach the computer: the id a delete names,
+ * the port, the access and whether it is switched off. A row this client
+ * cannot read refuses the answer rather than vanish from it, since a URL left
+ * out of a listing is a port served to the internet that the caller never saw
+ * and so never deletes.
+ */
+export function toPublicUrl(d: unknown, at?: number): PublicUrl {
+  const which = at === undefined ? 'a public URL' : `public URL ${at}`;
+  if (!isRecord(d)) throw new MandalaError(`expected ${which} to be an object`);
+  if (!nonEmpty(d.id) || !nonEmpty(d.url) || !nonEmpty(d.hostname) || !nonEmpty(d.label)) {
+    throw new MandalaError(`expected ${which} to carry an id, url, hostname and label`);
+  }
+  const port = d.port;
+  if (typeof port !== 'number' || !Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new MandalaError(`expected ${which} to carry its port`);
+  }
+  if (d.access !== 'public' && d.access !== 'private') {
+    throw new MandalaError(`expected ${which} to say whether it is public or private`);
+  }
+  if (typeof d.disabled !== 'boolean') {
+    throw new MandalaError(`expected ${which} to say whether it is disabled`);
+  }
+  return {
+    id: d.id,
+    url: d.url,
+    hostname: d.hostname,
+    label: d.label,
+    port,
+    access: d.access,
+    disabled: d.disabled,
+    createdAt: str(d.created_at),
+    updatedAt: str(d.updated_at),
+    raw: { ...d },
+  };
+}
+
+export function toPublicUrlList(d: Record<string, unknown>): PublicUrlList {
+  if (!Array.isArray(d.public_urls)) throw new MandalaError('expected a list of public URLs');
+  // Strict, and unreadable is not "enabled": a caller deciding whether its URL
+  // answers must not be told yes on a field this client could not read.
+  if (typeof d.enabled !== 'boolean') {
+    throw new MandalaError('expected the public URL list to say whether URLs are enabled');
+  }
+  const limit = d.limit;
+  if (typeof limit !== 'number' || !Number.isInteger(limit) || limit < 0) {
+    throw new MandalaError('expected the public URL list to carry its limit');
+  }
+  return {
+    enabled: d.enabled,
+    ...(d.reason == null ? {} : { reason: str(d.reason) }),
+    baseDomain: str(d.base_domain),
+    limit,
+    publicUrls: d.public_urls.map((row, i) => toPublicUrl(row, i)),
     raw: { ...d },
   };
 }

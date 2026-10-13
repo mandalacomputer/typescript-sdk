@@ -2596,6 +2596,42 @@ rename resent under the same `idempotencyKey` gets the first call's answer back
 (`Idempotent-Replayed: true`) with its desktop credentials stripped, so
 `refresh()` there too.
 
+### Public URLs
+
+Serve a port inside the computer on the internet, at
+`https://<label>.<base domain>` (e.g. `mandala.dev`), on port 443 with no port
+in the address. The app must listen on `0.0.0.0`, not `127.0.0.1`:
+
+```ts
+await c.exec({ command: 'python3 -m http.server 3000', background: true });
+const site = await c.createPublicUrl({ port: 3000 });
+console.log(site.url); // https://brave-otter-3f2a.mandala.dev
+```
+
+| | who may open it |
+|---|---|
+| `access: 'public'` (the default) | anyone with the link |
+| `access: 'private'` | only a request carrying an API key of this account as `Authorization: Bearer`; the key never reaches the app |
+
+Pass a `label` to choose the name (3 to 40 letters, digits and hyphens; the
+platform refuses names that are taken, reserved, or read as its own or another
+company's address). `updatePublicUrl(id, { port, access })` points one at
+another port or changes who may open it, and `deletePublicUrl(id)` removes it
+at once; the app keeps running. `publicUrls()` lists them, with `enabled` and a
+`reason` where they cannot answer (the feature is off here, or the plan has
+none) and the plan's `limit` per computer.
+
+From the CLI:
+
+```sh
+mandala computers urls create my-computer --port 3000 --access private
+mandala computers urls list my-computer
+mandala computers urls update my-computer brave-otter-3f2a --port 8000
+mandala computers urls rm my-computer brave-otter-3f2a
+```
+
+A URL is named by its id, label, hostname or address.
+
 ### Readiness
 
 ```ts
@@ -3698,7 +3734,7 @@ network access and never prompt for input; `logout` needs no network.
 
 | Command group | Available commands |
 | --- | --- |
-| `computers` | `list`, `create`, `get`, `start`, `stop`, `suspend`, `restart`, `delete`, `clone`, `rename`, `resize`, `move`, `idle-suspend`, `browser-proxy set`, `browser-proxy clear`, `egress-proxy set`, `egress-proxy clear`, `secrets get`, `secrets set`, `view`, `screenshot`, `exec`, `exec-poll`, `exec-kill`, `wait` |
+| `computers` | `list`, `create`, `get`, `start`, `stop`, `suspend`, `restart`, `delete`, `clone`, `rename`, `resize`, `move`, `idle-suspend`, `browser-proxy set`, `browser-proxy clear`, `egress-proxy set`, `egress-proxy clear`, `urls list`, `urls create`, `urls update`, `urls rm`, `secrets get`, `secrets set`, `view`, `screenshot`, `exec`, `exec-poll`, `exec-kill`, `wait` |
 | `sizes` | `list` |
 | `templates` | `list`, `get`, `validate`, `publish`, `build`, `watch`, `retire`, `schema` |
 | `builds` | `list`, `get`, `progress` |

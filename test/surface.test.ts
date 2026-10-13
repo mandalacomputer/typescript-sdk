@@ -576,6 +576,13 @@ async function exerciseEverything(client: Client): Promise<void> {
   await c.sshAccess();
   await c.setSshAccess(true);
 
+  // Public URLs (platform OPL-3753): the list, a create with every field, an
+  // update with both, and the delete.
+  await c.publicUrls();
+  const site = await c.createPublicUrl({ port: 3000, label: 'cool-thing', access: 'private' });
+  await c.updatePublicUrl(site.id, { port: 8000, access: 'public' });
+  await c.deletePublicUrl(site.id);
+
   // A computer's secret bindings, read and replaced against the version read.
   const bound = await c.secrets();
   await c.setSecrets([{ secretId: 'csec-0123456789abcdef', env: 'API_TOKEN' }], {

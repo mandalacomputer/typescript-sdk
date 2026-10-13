@@ -351,6 +351,44 @@ export const COMMANDS: readonly Command[] = [
     ['computer'],
     keyed,
   ),
+  command('computers urls list', "List a computer's public URLs, and whether they can answer", [
+    'computer',
+  ]),
+  command(
+    'computers urls create',
+    'Serve a port inside a computer at https://<label>.<domain>; the app must listen on 0.0.0.0',
+    ['computer'],
+    [
+      num('port', 'The port inside the computer: 1-65535, not 22', { required: true }),
+      flag(
+        'label',
+        'The name before the domain: 3-40 letters, digits and hyphens (default: one is picked)',
+      ),
+      flag(
+        'access',
+        "Who may open it (default public): public, anyone with the link, or private, only this account's API keys as Authorization: Bearer (never passed to the app)",
+        { choices: ['public', 'private'] },
+      ),
+    ],
+  ),
+  command(
+    'computers urls update',
+    'Point a public URL at another port, or change who may open it; the label does not change',
+    ['computer', 'url'],
+    [
+      num('port', 'The port inside the computer: 1-65535, not 22'),
+      flag(
+        'access',
+        "Who may open it: public, anyone with the link, or private, only this account's API keys as Authorization: Bearer (never passed to the app)",
+        { choices: ['public', 'private'] },
+      ),
+    ],
+  ),
+  command(
+    'computers urls rm',
+    'Remove a public URL; it stops answering at once and the app keeps running',
+    ['computer', 'url'],
+  ),
   command(
     'computers secrets get',
     'Show the secrets a computer is bound to: secret ids, revisions and the variable or file each is bound as (never values)',
