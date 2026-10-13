@@ -1858,6 +1858,26 @@ describe('snapshots', () => {
     expect(deleted.err).toContain('listing the snapshots recorded under the id vm-gone');
   });
 
+  // Codex, round 1 on OPL-5973: a deleted computer's id fell through its 404 to
+  // a live computer NAMED like it, and that computer's snapshots came back.
+  it('takes an id-shaped --computer as that id, never as a name', async () => {
+    const deletedId = 'vm-0123456789ab';
+    const impostor = { ...COMPUTER, id: 'vm-bbbbbbbbbbbb', name: deletedId };
+    const theirs = { ...SNAPSHOT, id: 'snapshot-theirs', computer_id: impostor.id };
+    const mine = { ...SNAPSHOT, id: 'snapshot-mine', computer_id: deletedId };
+    const h = harness((call) =>
+      call.path === '/computers'
+        ? json([impostor])
+        : call.path === `/computers/${deletedId}`
+          ? json({ error: 'no such computer' }, { status: 404 })
+          : snapshotRows([theirs, mine])(call),
+    );
+    const result = await h.run(['snapshots', 'list', '--computer', deletedId]);
+    expect(result.code).toBe(0);
+    expect(result.frames[0].data).toEqual({ items: [mine], incomplete: null });
+    expect(h.rec.routes()).toEqual([['GET', 'snapshots']]);
+  });
+
   it('captures with the requested name and memory without waiting', async () => {
     const h = harness();
     const result = await h.run([

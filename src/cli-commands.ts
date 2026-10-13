@@ -2105,13 +2105,16 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
         // A name is resolved to its computer's id, as `moves list` and
         // `operations list` resolve theirs. The filter compares ids, so a name
         // matched nothing and the listing came back empty with no word said
-        // (OPL-5973). One that names no computer now is kept as an id, for the
-        // snapshots of a computer since deleted.
+        // (OPL-5973). A reference shaped like a computer id IS that id, never
+        // looked up: a deleted computer's id must not fall through to a live
+        // computer named like it, whose snapshots are somebody else's backups.
+        // A name that names no computer now is kept as an id, as before.
+        const only = s('computer');
         const listing = await client.snapshots.listWithStatus({
           computerId:
-            s('computer') === undefined
-              ? undefined
-              : await operationsComputer(client, s('computer')!, output, signal, 'snapshots'),
+            only === undefined || COMPUTER_ID.test(only)
+              ? only
+              : await operationsComputer(client, only, output, signal, 'snapshots'),
           includeUnfinished: b('include-unfinished'),
           allowPartial: b('allow-partial'),
           signal,
