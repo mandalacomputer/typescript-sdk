@@ -2335,7 +2335,11 @@ export class PublicUrls {
     return toPublicUrl(data);
   }
 
-  /** Remove one; its label stays this account's. See {@link Computer.deletePublicUrl}. */
+  /**
+   * Remove one. Its label stays with this account: no other account can ever
+   * take it, and this account may use it again unless the platform has blocked
+   * it. See {@link Computer.deletePublicUrl}.
+   */
   async delete(computerId: string, urlId: string, opts: CallOptions = {}): Promise<void> {
     await this.#t.json('DELETE', P.publicUrl(computerId, urlId), { signal: opts.signal });
   }

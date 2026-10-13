@@ -1,5 +1,6 @@
 /** Public URLs: a port inside a computer served at `https://<label>.<base domain>` (platform OPL-3753). */
 
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
   Client,
@@ -223,5 +224,40 @@ describe('by the computer’s id, with no handle', () => {
     const rec = recorder(urls({ ...PUBLIC_URL_LIST, enabled: 'yes' }));
     const client = new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: rec.fetch });
     await expect(client.publicUrls.list('vm-0123456789ab')).rejects.toThrow(MandalaError);
+  });
+});
+
+// OPL-5973: the README's example called exec({ command, background: true }),
+// which throws, and the docs said a deleted label was free to make again with
+// no word about a label the platform has blocked.
+describe('the public URL documentation', () => {
+  const readme = readFileSync(new URL('../README.md', import.meta.url), 'utf8');
+  const section = readme.slice(
+    readme.indexOf('\n### Public URLs\n'),
+    readme.indexOf('\n### Readiness\n'),
+  );
+
+  it('starts the server in its example with a call that exists', async () => {
+    expect(section.length).toBeGreaterThan(100);
+    expect(section).not.toMatch(/\.exec\(\s*\{/);
+    expect(section).toContain("await c.execBackground('python3 -m http.server 3000');");
+    // And the call it shows sends what the example means.
+    const rec = recorder(anyRoute);
+    const client = new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: rec.fetch });
+    const c = await client.computers.get('vm-1');
+    await c.execBackground('python3 -m http.server 3000');
+    expect(rec.last().body).toMatchObject({
+      command: 'python3 -m http.server 3000',
+      background: true,
+    });
+  });
+
+  it('says a deleted label stays with the account unless blocked, under the platform’s domain', () => {
+    const flat = section.replace(/\s+/g, ' ');
+    expect(flat).toContain('`https://<label>.<base_domain>`');
+    expect(flat).toContain('`baseDomain`');
+    expect(flat).toContain(
+      "A deleted URL's label stays with the account: no other account can ever take it, and the account may use it again unless the platform has blocked it.",
+    );
   });
 });

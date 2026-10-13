@@ -5977,8 +5977,9 @@ export class Computer {
    * This computer's public URLs, and whether they can answer at all.
    *
    * A public URL serves a port inside the computer at
-   * `https://<label>.<base domain>` (e.g. `mandala.dev`), on port 443 with no
-   * port in the address. Check {@link PublicUrlList.enabled}: `false`, with a
+   * `https://<label>.<base_domain>`, on port 443 with no port in the address;
+   * the base domain is {@link PublicUrlList.baseDomain} (`mandala.dev`, for
+   * example), so read it rather than writing one in. Check {@link PublicUrlList.enabled}: `false`, with a
    * `reason`, where public URLs are off here or the plan has none. The URLs are
    * listed either way, so you can see and delete what you made.
    */
@@ -6037,8 +6038,9 @@ export class Computer {
 
   /**
    * Remove a public URL. It stops answering at once; the app inside the
-   * computer keeps running. Its label stays this account's: you may make it
-   * again later, and no other account can ever take it.
+   * computer keeps running. Its label stays with this account: no other
+   * account can ever take it, and this account may use it again unless the
+   * platform has blocked it.
    */
   async deletePublicUrl(urlId: string, opts: CallOptions = {}): Promise<void> {
     await this.#t.json('DELETE', P.publicUrl(this.id, urlId), { signal: opts.signal });

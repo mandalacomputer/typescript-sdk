@@ -2601,11 +2601,14 @@ rename resent under the same `idempotencyKey` gets the first call's answer back
 ### Public URLs
 
 Serve a port inside the computer on the internet, at
-`https://<label>.<base domain>` (e.g. `mandala.dev`), on port 443 with no port
-in the address. The app must listen on `0.0.0.0`, not `127.0.0.1`:
+`https://<label>.<base_domain>`, on port 443 with no port in the address. The
+base domain is the platform's (`mandala.dev`, for example): read it from
+`publicUrls()`'s `baseDomain`, or use each URL's own `url` and `hostname`,
+rather than writing a domain in. The app must listen on `0.0.0.0`, not
+`127.0.0.1`:
 
 ```ts
-await c.exec({ command: 'python3 -m http.server 3000', background: true });
+await c.execBackground('python3 -m http.server 3000');
 const site = await c.createPublicUrl({ port: 3000 });
 console.log(site.url); // https://brave-otter-3f2a.mandala.dev
 ```
@@ -2619,10 +2622,14 @@ Pass a `label` to choose the name (3 to 40 letters, digits and hyphens; the
 platform refuses names that are taken, reserved, or read as its own or another
 company's address). `updatePublicUrl(id, { port, access })` points one at
 another port or changes who may open it, and `deletePublicUrl(id)` removes it
-at once; the app keeps running. A label stays with the account that first used
-it: you may make it again after a delete, and no other account can take it. `publicUrls()` lists them, with `enabled` and a
+at once; the app keeps running. A deleted URL's label stays with the account:
+no other account can ever take it, and the account may use it again unless the
+platform has blocked it. `publicUrls()` lists them, with `enabled` and a
 `reason` where they cannot answer (the feature is off here, or the plan has
-none) and the plan's `limit` per computer.
+none) and the plan's `limit` per computer. A URL whose `access` is neither
+`public` nor `private` fails the listing with a `MandalaError` rather than
+being shown: who may open a URL is the one thing this client will not guess,
+so a newer platform's access mode needs a newer client.
 
 From the CLI:
 

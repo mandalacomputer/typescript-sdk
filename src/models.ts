@@ -3474,14 +3474,14 @@ export function toSshAccess(d: Record<string, unknown>): SshAccess {
 
 /**
  * One public URL: a port inside a computer served at `url`
- * (`https://<label>.<base domain>`, port 443, no port in it).
+ * (`https://<label>.<base_domain>`, port 443, no port in it).
  */
 export type PublicUrl = {
   /** `pu-` and sixteen hex characters: what an update or a delete names. */
   id: string;
   /** The address to open. */
   url: string;
-  /** `<label>.<base domain>`. */
+  /** `<label>.<base_domain>`, the base domain being the list's {@link PublicUrlList.baseDomain}. */
   hostname: string;
   /** The name before the domain, lowercase. Fixed for the URL's life. */
   label: string;
@@ -3511,7 +3511,10 @@ export type PublicUrlList = {
   enabled: boolean;
   /** Why {@link enabled} is false. Absent while it is true. */
   reason?: string;
-  /** The domain every label sits under, e.g. `mandala.dev`. */
+  /**
+   * The domain every label sits under, e.g. `mandala.dev`: the platform's, so
+   * read it here rather than writing one in.
+   */
   baseDomain: string;
   /** How many public URLs this computer may have on the account's plan. */
   limit: number;

@@ -364,7 +364,7 @@ export const COMMANDS: readonly Command[] = [
   ]),
   command(
     'computers urls create',
-    'Serve a port inside a computer at https://<label>.<domain>; the app must listen on 0.0.0.0',
+    'Serve a port inside a computer at https://<label>.<base_domain>; the app must listen on 0.0.0.0',
     ['computer'],
     [
       num('port', 'The port inside the computer: 1-65535, not 22', { required: true }),
@@ -395,7 +395,7 @@ export const COMMANDS: readonly Command[] = [
   ),
   command(
     'computers urls rm',
-    'Remove a public URL; it stops answering at once and the app keeps running',
+    "Remove a public URL; it stops answering at once and the app keeps running. Its label stays this account's: no other account can take it, and this account may reuse it unless the platform has blocked it",
     ['computer', 'url'],
     [
       bool(
