@@ -342,8 +342,9 @@ describe('refusal words and the 503 on a change', () => {
     expect(on(403, 'revoked')).toBe(false);
     // A resize of a running computer: stopping it is the fix, never waiting.
     expect(on(409, 'running', 'PATCH')).toBe(false);
-    // A word this version does not know leaves the status answer standing.
-    expect(on(409, 'a-word-from-later')).toBe(true);
+    // A word this version does not know is no classification, which for a 409
+    // is final (OPL-5973).
+    expect(on(409, 'a-word-from-later')).toBe(false);
     // A guest agent silent past its boot window is a 502: an unknown outcome.
     expect(isTransient(errorForStatus(502, 'x', { error: 'x' }, { method: 'POST' }))).toBe(false);
   });
