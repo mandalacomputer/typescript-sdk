@@ -486,7 +486,9 @@ const at = await c.cursorPosition();          // undefined if nothing has placed
 No coordinate means "where the pointer already is", which is a real and different
 request from clicking (0, 0). Half a coordinate — `click(5)` — is refused rather
 than completed with a zero: it would succeed, at the wrong place, and nothing
-would say so. Modifiers are a positional on the clicks and an option on
+would say so. Coordinates are whole pixels: a fraction, such as a box's centre
+worked out as `x + width / 2`, is refused with a `ValidationError` before it is
+sent (the platform would answer it with a 400), so round a computed position. Modifiers are a positional on the clicks and an option on
 `scroll`, and the wrong spelling of either is refused rather than sent with
 nothing held down. A `drag` with no `from` starts where the pointer is, and is
 refused if nothing has placed it yet.
@@ -686,7 +688,9 @@ five windows, four of which are not applications — and
 
 The actions are `focus`, `raise`, `minimize`, `maximize`, `unmaximize`,
 `close`, `move` and `resize`; the geometry argument — `x`, `y`, `width`,
-`height` — is what `move` and `resize` read.
+`height` — is what `move` and `resize` read. They are whole pixels: `x` and `y`
+from -32768 to 32767, and `width` and `height` from 1 to 32767; anything else
+is refused before it is sent.
 
 `pid` is the process that owns the window, and is `undefined` where the guest
 did not say — never `0`, which is a pid a guest may genuinely advertise. It
