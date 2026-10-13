@@ -3430,8 +3430,11 @@ Backoff starts at 250 ms, doubles after each failure, and caps at 30 seconds.
 A valid `Retry-After` is a lower bound on that delay, including HTTP dates and
 zero. Very large valid delays never fall back to a shorter wait. Finite requests
 retain one composed deadline across every attempt and backoff; retries do not
-restart it. The caller's `signal` remains active throughout. Cancellation and
-timeout failures end the operation without another attempt.
+restart it. A wait that cannot end before that deadline is not started: the
+last answer is thrown instead, so a `503` whose `Retry-After` outlasts the
+deadline arrives as that `UnavailableError`, with its `retryAfterMs`, rather
+than as a timeout. The caller's `signal` remains active throughout.
+Cancellation and timeout failures end the operation without another attempt.
 
 Finite JSON, listings, files and retained downloads buffer each complete attempt
 before returning anything. An interrupted read discards its partial bytes and
