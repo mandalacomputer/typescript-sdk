@@ -2617,7 +2617,8 @@ Pass a `label` to choose the name (3 to 40 letters, digits and hyphens; the
 platform refuses names that are taken, reserved, or read as its own or another
 company's address). `updatePublicUrl(id, { port, access })` points one at
 another port or changes who may open it, and `deletePublicUrl(id)` removes it
-at once; the app keeps running. `publicUrls()` lists them, with `enabled` and a
+at once; the app keeps running. A label stays with the account that first used
+it: you may make it again after a delete, and no other account can take it. `publicUrls()` lists them, with `enabled` and a
 `reason` where they cannot answer (the feature is off here, or the plan has
 none) and the plan's `limit` per computer.
 
@@ -3556,8 +3557,9 @@ run. No 401, 402, 403, 404 or 405 is transient, even with a contradictory reason
 Nested run reasons never grant replay permission. Stream error frames keep their
 full evidence in `raw`; thrown stream errors expose their request ID without
 turning frame reasons or the successful stream's headers into retry advice.
-The CLI JSON error envelope is `{code, message, status}`, plus `request_id`,
-`idempotency_key` and `operation_id` when the failed call has them; the CLI's
+The CLI JSON error envelope is `{code, message, status}`, plus `reason` and
+`api_code` (the API's own code, e.g. `LABEL_TAKEN`) when the API sent them, and
+`request_id`, `idempotency_key` and `operation_id` when the failed call has them; the CLI's
 Operations section below says how to use them to find out how a keyed call ended.
 
 **Read `isTransient` rather than the comments above when it matters.** Three

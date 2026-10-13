@@ -171,6 +171,7 @@ export function errorInfo(error: unknown): {
   message: string;
   status?: number;
   reason?: string;
+  api_code?: string;
   details?: unknown;
   usage?: string;
   idempotency_key?: string;
@@ -192,6 +193,11 @@ export function errorInfo(error: unknown): {
       message: error.message,
       status: error.status,
       ...(error.reason === undefined ? {} : { reason: error.reason }),
+      // The API's own code, beside this CLI's word for the kind of failure:
+      // two 409s can want different fixes (another label, or room under the
+      // plan's limit), and automation should not have to read the prose to
+      // tell them apart (Codex, round 7 on #256).
+      ...(error.code === undefined ? {} : { api_code: error.code }),
       // The billing link, where the agent's own error frame puts it, so a
       // refusal reads the same whether it was the response or a frame.
       ...(error instanceof InsufficientCreditsError && error.topUpUrl !== undefined

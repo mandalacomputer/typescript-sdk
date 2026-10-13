@@ -117,6 +117,22 @@ describe('the computer: an id is that id, a name is looked up', () => {
     expect(h.rec.routes()).toEqual([['DELETE', `${URLS}/${URL_ID}`]]);
   });
 
+  // Codex, round 7 on #256: the API's code distinguishes two 409s.
+  it.each([
+    [409, 'WORKSPACE_MOVING', 'conflict'],
+    [409, 'LABEL_TAKEN', 'conflict'],
+    [409, 'PUBLIC_URL_LIMIT', 'conflict'],
+  ])('keeps the API’s code on a %i %s', async (status, apiCode, code) => {
+    const refusing: Responder = (call) =>
+      call.path.endsWith('/public-urls')
+        ? json({ error: 'refused', code: apiCode }, { status })
+        : anyRoute(call);
+    const h = harness(refusing);
+    const result = await h.run(['computers', 'urls', 'create', ID, '--port', '3000']);
+    expect(result.code).not.toBe(0);
+    expect(result.frame.error).toMatchObject({ code, api_code: apiCode, status });
+  });
+
   it('passes on the platform’s own refusal for an id', async () => {
     const moving: Responder = (call) =>
       call.path.endsWith('/public-urls')

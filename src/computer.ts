@@ -6036,8 +6036,9 @@ export class Computer {
   }
 
   /**
-   * Remove a public URL. It stops answering at once and its label is free for
-   * anyone; the app inside the computer keeps running.
+   * Remove a public URL. It stops answering at once; the app inside the
+   * computer keeps running. Its label stays this account's: you may make it
+   * again later, and no other account can ever take it.
    */
   async deletePublicUrl(urlId: string, opts: CallOptions = {}): Promise<void> {
     await this.#t.json('DELETE', P.publicUrl(this.id, urlId), { signal: opts.signal });
