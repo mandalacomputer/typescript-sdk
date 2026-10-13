@@ -1296,6 +1296,9 @@ describe('reconnecting', () => {
 });
 
 describe('explicit event stream cancellation', () => {
+  // Transpiles the whole source and runs a child process: about three seconds
+  // alone, and past vitest's five-second default under a loaded machine
+  // (OPL-5973), so it has a minute, and the child most of that.
   it('releases unread payloads while retaining a closed stream and its cursor', async () => {
     // Force GC in a separate process, where keeping the stream reachable must
     // not keep its discarded queue reachable. Compile the current source into
@@ -1394,7 +1397,7 @@ describe('explicit event stream cancellation', () => {
             console.log(JSON.stringify(results));
           `,
         ],
-        { cwd: dir, timeout: 10_000 },
+        { cwd: dir, timeout: 45_000 },
       );
       expect(JSON.parse(stdout)).toEqual(
         ['close', 'abort', 'return', 'onConnect'].map((ending) => ({
@@ -1407,7 +1410,7 @@ describe('explicit event stream cancellation', () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
-  });
+  }, 60_000);
 
   const promptly = async <T>(promise: Promise<T>): Promise<T | 'still pending'> => {
     let timer: ReturnType<typeof setTimeout> | undefined;

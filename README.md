@@ -486,7 +486,9 @@ const at = await c.cursorPosition();          // undefined if nothing has placed
 No coordinate means "where the pointer already is", which is a real and different
 request from clicking (0, 0). Half a coordinate — `click(5)` — is refused rather
 than completed with a zero: it would succeed, at the wrong place, and nothing
-would say so. Modifiers are a positional on the clicks and an option on
+would say so. Coordinates are whole pixels: a fraction, such as a box's centre
+worked out as `x + width / 2`, is refused with a `ValidationError` before it is
+sent (the platform would answer it with a 400), so round a computed position. Modifiers are a positional on the clicks and an option on
 `scroll`, and the wrong spelling of either is refused rather than sent with
 nothing held down. A `drag` with no `from` starts where the pointer is, and is
 refused if nothing has placed it yet.
@@ -617,8 +619,9 @@ const corner = await c.screenshot(undefined, {
 ```
 
 A cropped or scaled picture is in its own pixel space. To click on something in
-it, divide its position by the scale and add the region's `x` and `y`: (100, 50)
-in `corner` is (200, 100) on the screen. A region that reaches past the screen's
+it, divide its position by the scale, add the region's `x` and `y`, and round to
+a whole pixel, which is all `click()` takes: (100, 50) in `corner` is (200, 100)
+on the screen. A region that reaches past the screen's
 edge is refused with a 400 naming the screen size rather than clipped; the value
 checks (a scale out of range or beside a width, a quality on a PNG) throw a
 `ValidationError` before anything is sent.
@@ -685,7 +688,9 @@ five windows, four of which are not applications — and
 
 The actions are `focus`, `raise`, `minimize`, `maximize`, `unmaximize`,
 `close`, `move` and `resize`; the geometry argument — `x`, `y`, `width`,
-`height` — is what `move` and `resize` read.
+`height` — is what `move` and `resize` read. They are whole pixels: `x` and `y`
+from -32768 to 32767, and `width` and `height` from 1 to 32767; anything else
+is refused before it is sent.
 
 `pid` is the process that owns the window, and is `undefined` where the guest
 did not say — never `0`, which is a pid a guest may genuinely advertise. It
@@ -780,8 +785,9 @@ rewritten.
 
 `isTransient()` reads it, so it no longer says `true` to the stopped computer —
 which is what it used to do, and what a blanket retry loop spun on until its
-deadline. An unclassified refusal falls back to the old type answer, so bound a
-loop that meets one.
+deadline. A 409 with no word, or one this version does not know, is final to
+`isTransient()` unless its `code` is one that clears by itself; see
+[Errors](#errors).
 
 A **400** is the other one to know, because it never clears: a computer whose
 image lacks its desktop's clipboard tool (`xclip` on X11, `wl-clipboard` on
@@ -2599,11 +2605,14 @@ rename resent under the same `idempotencyKey` gets the first call's answer back
 ### Public URLs
 
 Serve a port inside the computer on the internet, at
-`https://<label>.<base domain>` (e.g. `mandala.dev`), on port 443 with no port
-in the address. The app must listen on `0.0.0.0`, not `127.0.0.1`:
+`https://<label>.<base_domain>`, on port 443 with no port in the address. The
+base domain is the platform's (`mandala.dev`, for example): read it from
+`publicUrls()`'s `baseDomain`, or use each URL's own `url` and `hostname`,
+rather than writing a domain in. The app must listen on `0.0.0.0`, not
+`127.0.0.1`:
 
 ```ts
-await c.exec({ command: 'python3 -m http.server 3000', background: true });
+await c.execBackground('python3 -m http.server 3000');
 const site = await c.createPublicUrl({ port: 3000 });
 console.log(site.url); // https://brave-otter-3f2a.mandala.dev
 ```
@@ -2617,10 +2626,14 @@ Pass a `label` to choose the name (3 to 40 letters, digits and hyphens; the
 platform refuses names that are taken, reserved, or read as its own or another
 company's address). `updatePublicUrl(id, { port, access })` points one at
 another port or changes who may open it, and `deletePublicUrl(id)` removes it
-at once; the app keeps running. A label stays with the account that first used
-it: you may make it again after a delete, and no other account can take it. `publicUrls()` lists them, with `enabled` and a
+at once; the app keeps running. A deleted URL's label stays with the account:
+no other account can ever take it, and the account may use it again unless the
+platform has blocked it. `publicUrls()` lists them, with `enabled` and a
 `reason` where they cannot answer (the feature is off here, or the plan has
-none) and the plan's `limit` per computer.
+none) and the plan's `limit` per computer. A URL whose `access` is neither
+`public` nor `private` fails the listing with a `MandalaError` rather than
+being shown: who may open a URL is the one thing this client will not guess,
+so a newer platform's access mode needs a newer client.
 
 From the CLI:
 
@@ -3428,8 +3441,11 @@ Backoff starts at 250 ms, doubles after each failure, and caps at 30 seconds.
 A valid `Retry-After` is a lower bound on that delay, including HTTP dates and
 zero. Very large valid delays never fall back to a shorter wait. Finite requests
 retain one composed deadline across every attempt and backoff; retries do not
-restart it. The caller's `signal` remains active throughout. Cancellation and
-timeout failures end the operation without another attempt.
+restart it. A wait that cannot end before that deadline is not started: the
+last answer is thrown instead, so a `503` whose `Retry-After` outlasts the
+deadline arrives as that `UnavailableError`, with its `retryAfterMs`, rather
+than as a timeout. The caller's `signal` remains active throughout.
+Cancellation and timeout failures end the operation without another attempt.
 
 Finite JSON, listings, files and retained downloads buffer each complete attempt
 before returning anything. An interrupted read discards its partial bytes and
@@ -3460,8 +3476,9 @@ import {
   PermissionDeniedError,//    403 — the key's role is too low
   NotFoundError,       //     404 — no such computer, snapshot, guest file, or route
   MethodNotAllowedError,//    405 — method unsupported; see err.allow
-  ConflictError,       //     409 — right request, wrong moment. `err.reason` says
-                       //           whether retrying it helps
+  ConflictError,       //     409 — refused for the state something is in.
+                       //           `err.reason` says whether retrying helps;
+                       //           `err.code` names the refusal (LABEL_TAKEN)
   MoveRequiredError,   //       409 — …except this one: the size needs a new host
   FileExistsError,     //       409 `exists` — a create-only upload's path is taken
   CreateOnlyConflictError,//    409 — a create-only upload refused, reason unreadable
@@ -3558,7 +3575,8 @@ Nested run reasons never grant replay permission. Stream error frames keep their
 full evidence in `raw`; thrown stream errors expose their request ID without
 turning frame reasons or the successful stream's headers into retry advice.
 The CLI JSON error envelope is `{code, message, status}`, plus `reason` and
-`api_code` (the API's own code, e.g. `LABEL_TAKEN`) when the API sent them, and
+`api_code` (the API's own code, e.g. `LABEL_TAKEN`) when the API sent them,
+`retry_after_ms` when it sent a `Retry-After`, and
 `request_id`, `idempotency_key` and `operation_id` when the failed call has them; the CLI's
 Operations section below says how to use them to find out how a keyed call ended.
 
@@ -3575,10 +3593,13 @@ coordinate is a mistake in your own code rather than something the platform
 said. Nothing was sent when you get one. Catching `TypeError` still works and
 always did — the class is exported so the narrower catch can be written too.
 
-`ConflictError` is the one that usually clears itself: a guest still booting, a
-disk still being copied, another operation holding the guest agent. The
-platform's own message survives onto `err.message` — these are written to be
-acted on.
+`ConflictError` is refused for the state something is in. Some clear by
+themselves — a guest still booting, a disk still being copied, another operation
+holding the guest agent — and some are decisions that answer the same forever: a
+public URL label that is taken, a plan's limit reached, a disabled webhook, an
+SSH key already registered. The platform's own message survives onto
+`err.message` — these are written to be acted on — and `err.code`, where it sent
+one (`LABEL_TAKEN`, `PUBLIC_URL_LIMIT`), names which refusal it was.
 
 `err.reason` is what says which kind you have, where the platform sent a word
 for it, and it is the part a program is allowed to depend on — `err.message` is
@@ -3601,8 +3622,13 @@ whose outcome is unknown and which `isTransient` does not call transient.
 
 **Absent means no classification was given**, and so does a word you do not
 recognise — not every refusal has one, and the platform reserves the right to
-add classifications. Treat both as "no answer" and fall back to whatever you did before,
-which is exactly what `isTransient` does.
+add classifications. Treat both as "no answer". For a 409, `isTransient` then
+answers **false**: the platform warns that a client treating 409 as uniformly
+transient loops forever on the refusals that are decisions. Two codes clear by
+themselves even without a word, and `isTransient` says true to them:
+`idempotency_in_progress` (the first call under that key is still running) and
+`WORKSPACE_MOVING` (a workspace change still settling). A word beside either
+wins, so `WORKSPACE_MOVING` with `reason: "unsupported"` is final.
 
 `MoveRequiredError` is the exception, and it is a subclass so that code matching
 on the family keeps working. It means the size you asked for is more RAM than the
@@ -3774,12 +3800,16 @@ unknown flags, and conflicting arguments fail instead of being ignored.
 `mandala manifest` prints a JSON command tree by default. Its `schema_version` is
 `2`; each entry in `commands` describes the command's `path` array, its
 `arguments` (each marked `required` or not), `flags` with types and constraints,
-`json_mode` (`finite`, `ndjson`, or `unsupported`) and `requires_credentials`. `ssh` also carries
+`json_mode` (`finite`, `ndjson`, or `unsupported`) and `requires_credentials`
+(false for `login`, which obtains them, and for the commands that work
+offline). A flag the command cannot run without is marked `required`, `--yes`
+on `workspaces rm` and `artifacts rm` included. `ssh` also carries
 `passthrough`: everything after its computer goes to `ssh` unless `--setup` came first. Flags with aliases, choices, repetition, or conflicts
 carry those properties. Conditional SDK requirements also appear in command help
 and the sections below. The manifest reports `terminal` and `ssh` as unsupported in
-JSON mode: `terminal --json` and `ssh --json` return an error before resolving a
-computer or connecting (`ssh --setup --json` is a finite result).
+JSON mode: `terminal --json` and `ssh --json` return an error, with exit status
+2, before resolving a computer or connecting (`ssh --setup --json` is a finite
+result).
 `mandala manifest --json` wraps the tree in the finite result envelope below.
 
 Shell completion scripts come from the same command inventory:
@@ -4156,9 +4186,10 @@ rule.
 only with the original nonempty `--template`; see [Your own templates](#your-own-templates)
 for how to handle a preparation refusal.
 
-Exec accepts either `-c`/`--command` text or piped stdin. It preserves that command
-text, rejects empty input, and rejects a command combined with nonempty stdin.
-It does not prompt on a terminal. `--timeout` is a foreground execution limit in
+Exec takes `-c`/`--command` text, or else reads the command from piped stdin.
+With `-c`, stdin is never read, so a pipeline or CI step whose stdin stays open
+does not hang. It preserves the command text and rejects empty input. It does
+not prompt on a terminal. `--timeout` is a foreground execution limit in
 **seconds**, defaults to 30, and accepts integers from 1 through 600. It cannot
 be combined with `--background`. `--cwd`, repeatable `--env NAME=VALUE`, and
 `--desktop` apply to either execution mode.
@@ -4259,7 +4290,7 @@ mandala templates schema > mandala-v1.schema.json   # point an editor at the fil
 mandala builds list --allow-partial
 mandala builds get bld-example
 mandala builds progress bld-example                 # step by step, read once
-mandala snapshots list --computer vm-example --include-unfinished --json
+mandala snapshots list --computer workbench --include-unfinished --json   # a name or an id
 mandala snapshots create workbench --name before-upgrade
 mandala snapshots schedule set workbench --hour 4 --minute 30 --tz UTC
 mandala webhooks create https://hooks.example.com/mandala --event computer.ready --json
@@ -4358,7 +4389,7 @@ has this version 2 envelope:
 A request or CLI error uses `error` instead of `data`:
 
 ```json
-{"schema_version":2,"command":"terminal","ok":false,"error":{"code":"unsupported_mode","message":"Interactive terminal does not support --json; use computers exec for machine-readable output"},"exit_code":1}
+{"schema_version":2,"command":"terminal","ok":false,"error":{"code":"unsupported_mode","message":"Interactive terminal does not support --json; use computers exec for machine-readable output"},"exit_code":2}
 ```
 
 **Every key is snake_case**, the envelope's own included, which is what version
@@ -4368,8 +4399,15 @@ in `account`, `usage`, `exec` and agent results.
 `command` is the space-separated command path, without operands. It is empty
 when argument parsing fails before an invocation is established. `error` always
 has string `code` and `message` fields, and may include numeric HTTP `status`,
-the platform's own `reason` word, command-specific `details`, or — for a
-mistyped command — its full `usage`, which human output prints under the message.
+the platform's own `reason` word, `api_code` (the API's own code, such as
+`LABEL_TAKEN` or `PUBLIC_URL_LIMIT`, which tells apart two refusals with one
+status), `retry_after_ms` (the platform's `Retry-After`, in milliseconds),
+`request_id` (to quote when asking about the failure), `idempotency_key` and
+`operation_id` (on a call whose outcome is unknown; see Operations below),
+command-specific `details`, or — for a mistyped command — its full `usage`,
+which human output prints under the message. Human output puts the status and
+the API's code after the message, as `(HTTP 409, LABEL_TAKEN)`, and says the
+`Retry-After` wait on a line of its own.
 An unknown command word shows the help of the group it was typed under (the
 whole command list for an unknown first word), and under `secrets` the word
 itself is not repeated, as it may be a secret value.

@@ -79,12 +79,16 @@ describe('the refusal that offers a move', () => {
     expect((err as MoveRequiredError).movePossible).toBe(false);
   });
 
-  it('is not retryable, while every other conflict still is', async () => {
+  it('is not retryable, while a conflict that says it clears still is', async () => {
     // The bug, as two lines. isTransient is what the wait helpers retry on and
     // what a caller wraps their own loop in; before this it said yes to a
     // refusal that answers the same way forever.
     expect(isTransient(new MoveRequiredError('needs a move', 409, {}, true))).toBe(false);
-    expect(isTransient(new ConflictError('the guest agent is not answering yet', 409))).toBe(true);
+    expect(
+      isTransient(
+        new ConflictError('the guest agent is not answering yet', 409, { reason: 'starting' }),
+      ),
+    ).toBe(true);
   });
 
   it('is still a ConflictError, so code matching the family keeps working', () => {
@@ -102,7 +106,8 @@ describe('the refusal that offers a move', () => {
     const err = await computer.update({ ramMb: 4096 }).catch((e) => e);
     expect(err).toBeInstanceOf(ConflictError);
     expect(err).not.toBeInstanceOf(MoveRequiredError);
-    expect(isTransient(err)).toBe(true);
+    // No word, so no classification, and final (OPL-5973).
+    expect(isTransient(err)).toBe(false);
   });
 
   it('is not fooled by a body with a move-shaped key that is not one', async () => {

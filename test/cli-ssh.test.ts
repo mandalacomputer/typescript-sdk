@@ -963,7 +963,7 @@ describe('mandala ssh --setup', () => {
     expect(r.code).toBe(1);
     expect(r.out).toBe('');
     expect(r.err).toBe(
-      'mandala: That key is already registered. A key can belong to one person only.\n',
+      'mandala: That key is already registered. A key can belong to one person only. (HTTP 409)\n',
     );
     expect(writes(r)).toEqual([['POST', 'ssh-keys']]);
   });
@@ -1197,7 +1197,7 @@ describe('mandala ssh-key, ssh-access, ssh-config', () => {
     const human = await cli(['ssh-key', 'rm', 'sshk-2'], { respond });
     expect(human.code).toBe(1);
     expect(human.out).toBe('');
-    expect(human.err).toBe(`mandala: ${message}\nmandala: request id req-1\n`);
+    expect(human.err).toBe(`mandala: ${message} (HTTP 404)\nmandala: request id req-1\n`);
     const asJson = await cli(['ssh-key', 'rm', 'sshk-2', '--json'], { respond });
     expect(asJson.code).toBe(1);
     expect(JSON.parse(asJson.out)).toEqual({
@@ -2222,6 +2222,23 @@ describe('SSH SDK methods', () => {
     const rec = recorder(respond);
     return { rec, client: new Client({ apiKey: 'k', baseUrl: BASE, fetch: rec.fetch }) };
   };
+
+  // OPL-5973: the listing dropped a row that was not an object and kept one
+  // with no id, so a key could vanish from the list a caller reads to decide
+  // what to remove.
+  it('fails a key listing with a row that is not an object, or has no id', async () => {
+    const rows: [unknown[], RegExp][] = [
+      [[SSH_KEY, null], /expected SSH key 1 to be an object/],
+      [[{ ...SSH_KEY, id: undefined }], /expected SSH key 0 to carry an id/],
+      [[{ ...SSH_KEY, id: 42 }], /expected SSH key 0 to carry an id/],
+    ];
+    for (const [listed, refusal] of rows) {
+      const { client: c } = client((call) =>
+        call.method === 'GET' && call.path === '/ssh-keys' ? json(listed) : anyRoute(call),
+      );
+      await expect(c.sshKeys.list()).rejects.toThrow(refusal);
+    }
+  });
 
   it('decode keys and settings, keeping nulls as nulls', async () => {
     const { client: c } = client(anyRoute);

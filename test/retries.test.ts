@@ -3,6 +3,8 @@ import {
   APIError,
   ConnectionError,
   ConnectionInterruptedError,
+  isTransient,
+  UnavailableError,
   ValidationError,
 } from '../src/errors.js';
 import { Client } from '../src/index.js';
@@ -272,11 +274,29 @@ it('doubles backoff to the documented cap', async () => {
     times.push(Date.now());
     return new Response(null, { status: 503 });
   });
+  // No deadline: the nine waits add up to more than the default one, which
+  // would end the retries before the cap is reached (OPL-5973).
   await expect(
-    settle(transport(fetch, { idempotent: 9 }).json('GET', '/computers')),
+    settle(transport(fetch, { idempotent: 9 }, { timeoutMs: 0 }).json('GET', '/computers')),
   ).rejects.toBeInstanceOf(APIError);
   expect(times.slice(1).map((time, i) => time - (times[i] ?? 0))).toEqual([
     250, 500, 1000, 2000, 4000, 8000, 16000, 30000, 30000,
+  ]);
+});
+
+it('stops retrying with the last answer once the next wait would pass the deadline', async () => {
+  const times: number[] = [];
+  const fetch = vi.fn<typeof globalThis.fetch>(async () => {
+    times.push(Date.now());
+    return new Response(null, { status: 503 });
+  });
+  const error = await settle(transport(fetch, { idempotent: 9 }).json('GET', '/computers')).catch(
+    (e) => e,
+  );
+  expect(error).toBeInstanceOf(UnavailableError);
+  // 31.75s spent, and the next 30s wait would pass the default 60s deadline.
+  expect(times.slice(1).map((time, i) => time - (times[i] ?? 0))).toEqual([
+    250, 500, 1000, 2000, 4000, 8000, 16000,
   ]);
 });
 
@@ -348,11 +368,52 @@ it('uses one deadline across fetch, finite body and backoff', async () => {
   const fetch = vi
     .fn<typeof globalThis.fetch>()
     .mockImplementation(async () => new Response(null, { status: 503 }));
-  await expect(
-    settle(transport(fetch, { idempotent: 4 }, { timeoutMs: 600 }).json('GET', '/computers')),
-  ).rejects.toBeInstanceOf(ConnectionInterruptedError);
+  // 250ms, then a 500ms backoff that cannot fit in the 350ms left: the 503 is
+  // the answer, not a timeout (OPL-5973).
+  const error = await settle(
+    transport(fetch, { idempotent: 4 }, { timeoutMs: 600 }).json('GET', '/computers'),
+  ).catch((e) => e);
+  expect(error).toBeInstanceOf(UnavailableError);
+  expect(error).not.toBeInstanceOf(ConnectionInterruptedError);
   expect(fetch).toHaveBeenCalledTimes(2);
   expect(AbortSignal.timeout).toHaveBeenCalledTimes(1);
+});
+
+// OPL-5973: a 503 whose Retry-After outlasts the deadline became a
+// ConnectionInterruptedError — a lost answer, which isTransient calls unsafe
+// to replay — in place of the 503 and its Retry-After the platform sent.
+it('throws the 503 itself when its Retry-After outlasts the deadline, without waiting', async () => {
+  const fetch = vi
+    .fn<typeof globalThis.fetch>()
+    .mockImplementation(
+      async () => new Response(null, { status: 503, headers: { 'Retry-After': '30' } }),
+    );
+  const pending = transport(fetch, { idempotent: 3 }, { timeoutMs: 10_000 })
+    .json('GET', '/computers')
+    .catch((e) => e);
+  await vi.advanceTimersByTimeAsync(0);
+  const error = await pending;
+  expect(error).toBeInstanceOf(UnavailableError);
+  expect((error as UnavailableError).retryAfterMs).toBe(30_000);
+  expect(isTransient(error)).toBe(true);
+  expect(fetch).toHaveBeenCalledTimes(1);
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+it('still waits out a Retry-After that fits before the deadline', async () => {
+  let calls = 0;
+  const fetch = vi
+    .fn<typeof globalThis.fetch>()
+    .mockImplementation(async () =>
+      calls++ === 0
+        ? new Response(null, { status: 503, headers: { 'Retry-After': '2' } })
+        : new Response('[]', { headers: { 'content-type': 'application/json' } }),
+    );
+  const result = await settle(
+    transport(fetch, { idempotent: 3 }, { timeoutMs: 10_000 }).json('GET', '/computers'),
+  );
+  expect(result).toEqual([]);
+  expect(fetch).toHaveBeenCalledTimes(2);
 });
 
 it.each(['json', 'bytes', 'boundedBytes'] as const)(

@@ -1116,10 +1116,14 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
       return code;
     }
     if (path === 'terminal') {
+      // Exit 2, a usage mistake, as `ssh --json` refuses the same thing; the
+      // two used to exit 1 and 2 for one refusal (OPL-5973).
       if (json)
         throw new CliError(
           'unsupported_mode',
           'Interactive terminal does not support --json; use computers exec for machine-readable output',
+          undefined,
+          2,
         );
       return await legacy.terminal(args[0]!, (f.session as string | undefined) ?? 'main', io);
     }
@@ -1362,10 +1366,11 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
           throw new CliError('invalid_arguments', `duplicate --env ${key}`);
         execEnv[key] = assignment.slice(index + 1);
       }
-      const input = io.stdin.isTTY ? '' : await readInput(io, signal);
-      if (s('command') !== undefined && input.length)
-        throw new CliError('invalid_arguments', 'choose -c command or stdin, not both');
-      commandText = s('command') ?? input;
+      // Stdin is the command only when -c is not given, and is not read at
+      // all otherwise: a CI step or a pipeline whose stdin is open but never
+      // closed would wait on it forever before sending a -c command
+      // (OPL-5973). Stdin stays the guest command's own business, unread.
+      commandText = s('command') ?? (io.stdin.isTTY ? '' : await readInput(io, signal));
       if (!commandText.trim())
         throw new CliError('invalid_arguments', 'provide a nonempty -c command or piped stdin');
       P.execBody({
@@ -2097,8 +2102,19 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
         return code;
       }
       case 'snapshots list': {
+        // A name is resolved to its computer's id, as `moves list` and
+        // `operations list` resolve theirs. The filter compares ids, so a name
+        // matched nothing and the listing came back empty with no word said
+        // (OPL-5973). A reference shaped like a computer id IS that id, never
+        // looked up: a deleted computer's id must not fall through to a live
+        // computer named like it, whose snapshots are somebody else's backups.
+        // A name that names no computer now is kept as an id, as before.
+        const only = s('computer');
         const listing = await client.snapshots.listWithStatus({
-          computerId: s('computer'),
+          computerId:
+            only === undefined || COMPUTER_ID.test(only)
+              ? only
+              : await operationsComputer(client, only, output, signal, 'snapshots'),
           includeUnfinished: b('include-unfinished'),
           allowPartial: b('allow-partial'),
           signal,

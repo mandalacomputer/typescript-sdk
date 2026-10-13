@@ -666,13 +666,46 @@ describe('webhooks: the subscriptions', () => {
     expect(w.lastSuccessAt).toBe('2026-09-01T12:00:00.000Z');
   });
 
-  it('reads an unreadable enabled as false', async () => {
-    // The safe direction: an `enabled` this client cannot read is not one it
-    // should report as delivering.
-    const { client: c } = client((call) =>
-      call.path === '/webhooks/whk-1' ? json({ ...WEBHOOK, enabled: 'yes' }) : anyRoute(call),
-    );
-    expect((await c.webhooks.get('whk-1')).enabled).toBe(false);
+  // OPL-5973: an unreadable `enabled` used to read as false, which reported a
+  // delivering subscription as off. It fails the answer instead, as every
+  // other strict decoder here does.
+  it('refuses an unreadable enabled rather than reading it as false', async () => {
+    for (const enabled of ['yes', null, 2, undefined]) {
+      const { client: c } = client((call) =>
+        call.path === '/webhooks/whk-1' ? json({ ...WEBHOOK, enabled }) : anyRoute(call),
+      );
+      await expect(c.webhooks.get('whk-1'), String(enabled)).rejects.toThrow(
+        /expected a webhook to say whether it is enabled/,
+      );
+    }
+  });
+
+  // OPL-5973: the listings dropped a row that was not an object, and kept one
+  // with no id, so a subscription could vanish from the list a caller reads to
+  // decide what to delete.
+  it('fails a listing with a row that is not an object, or has no id', async () => {
+    const rows: [unknown[], RegExp][] = [
+      [[WEBHOOK, 'not a row'], /expected webhook 1 to be an object/],
+      [[{ ...WEBHOOK, id: undefined }], /expected webhook 0 to carry an id/],
+      [[{ ...WEBHOOK, id: '' }], /expected webhook 0 to carry an id/],
+      [[{ ...WEBHOOK, enabled: 'on' }], /expected webhook 0 to say whether it is enabled/],
+    ];
+    for (const [listed, refusal] of rows) {
+      const { client: c } = client((call) =>
+        call.method === 'GET' && call.path === '/webhooks' ? json(listed) : anyRoute(call),
+      );
+      await expect(c.webhooks.list()).rejects.toThrow(refusal);
+    }
+    const deliveries: [unknown[], RegExp][] = [
+      [[WEBHOOK_DELIVERY, 7], /expected webhook delivery 1 to be an object/],
+      [[{ ...WEBHOOK_DELIVERY, id: null }], /expected webhook delivery 0 to carry an id/],
+    ];
+    for (const [listed, refusal] of deliveries) {
+      const { client: c } = client((call) =>
+        call.path.endsWith('/deliveries') ? json(listed) : anyRoute(call),
+      );
+      await expect(c.webhooks.deliveries('whk-1')).rejects.toThrow(refusal);
+    }
   });
 
   it('keeps only the strings in an id list', async () => {

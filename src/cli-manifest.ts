@@ -20,8 +20,8 @@ export function manifest() {
         fields: ['schema_version', 'command', 'type', 'timestamp', 'data'],
         terminal_types: ['done', 'error'],
       },
-      terminal: '--json returns unsupported_mode before connecting',
-      ssh: "--json returns unsupported_mode before connecting; with --setup it returns one finite result. Arguments after the computer are passed to ssh unchanged; the process exit is ssh's own (127 when no ssh client is found)",
+      terminal: '--json returns unsupported_mode, exit 2, before connecting',
+      ssh: "--json returns unsupported_mode, exit 2, before connecting; with --setup it returns one finite result. Arguments after the computer are passed to ssh unchanged; the process exit is ssh's own (127 when no ssh client is found)",
       scp: 'One finite result with source, destination, and transfer byte accounting',
       screenshot: 'Writes exact image bytes to --output; JSON data contains path and bytes',
       exec: 'JSON data contains base64 stdout/stderr, decoded text, exit_code and completion flags; process exit follows the remote status (124 on timeout, 1 if unknown)',
@@ -44,7 +44,10 @@ export function manifest() {
       ...(c.passthrough ? { passthrough: { unless: c.passthrough.unless } } : {}),
       flags: [...GLOBAL_FLAGS, ...c.flags],
       json_mode: c.jsonMode ?? 'finite',
-      requires_credentials: !['manifest', 'completion', 'version', 'logout'].includes(c.path),
+      // `login` is how credentials are obtained, so it cannot need them first.
+      requires_credentials: !['manifest', 'completion', 'version', 'login', 'logout'].includes(
+        c.path,
+      ),
     })),
   };
 }

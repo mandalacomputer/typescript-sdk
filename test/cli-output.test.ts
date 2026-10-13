@@ -6,6 +6,7 @@ import {
   AuthenticationError,
   ConflictError,
   ConnectionInterruptedError,
+  RateLimitError,
   UnavailableError,
   ValidationError,
 } from '../src/errors.js';
@@ -151,7 +152,7 @@ describe('versioned output contract', () => {
     const w = writer(false);
     w.output.error(lost);
     expect(w.read().stderr).toBe(
-      'mandala: upstream failed\n' +
+      'mandala: upstream failed (HTTP 503)\n' +
         'mandala: operation op_1; idempotency key k-1; request id req-9 ' +
         '(read it with: mandala operations get op_1)\n',
     );
@@ -170,6 +171,46 @@ describe('versioned output contract', () => {
     expect(plain).not.toHaveProperty('idempotency_key');
     expect(plain).not.toHaveProperty('operation_id');
     expect(plain).not.toHaveProperty('request_id');
+  });
+
+  // OPL-5973: every surface shows the API's code. Text output said only the
+  // sentence, and neither form carried the Retry-After the error had.
+  it('shows the status and the API code in text, and the Retry-After in both forms', () => {
+    const taken = new ConflictError('The label "x" is taken; choose another.', 409, {
+      error: 'The label "x" is taken; choose another.',
+      code: 'LABEL_TAKEN',
+    });
+    const t = writer(false);
+    t.output.error(taken);
+    expect(t.read().stderr).toBe(
+      'mandala: The label "x" is taken; choose another. (HTTP 409, LABEL_TAKEN)\n',
+    );
+    const limited = new RateLimitError('too many', 429, { error: 'too many' }, 90_000);
+    expect(errorInfo(limited)).toMatchObject({
+      code: 'rate_limited',
+      status: 429,
+      retry_after_ms: 90_000,
+    });
+    const r = writer(false);
+    r.output.error(limited);
+    expect(r.read().stderr).toBe(
+      'mandala: too many (HTTP 429)\nmandala: the platform asked to wait 1m 30s before trying again\n',
+    );
+    const j = writer();
+    j.output.error(limited);
+    expect(JSON.parse(j.read().stdout).error).toEqual({
+      code: 'rate_limited',
+      message: 'too many',
+      status: 429,
+      retry_after_ms: 90_000,
+    });
+    // Nothing added where the error has neither.
+    expect(errorInfo(new ConflictError('busy', 409, { error: 'busy' }))).not.toHaveProperty(
+      'retry_after_ms',
+    );
+    const plain = writer(false);
+    plain.output.error(new ConflictError('busy', 409, { error: 'busy' }));
+    expect(plain.read().stderr).toBe('mandala: busy (HTTP 409)\n');
   });
 
   it('sends human errors only to stderr without color escapes', () => {

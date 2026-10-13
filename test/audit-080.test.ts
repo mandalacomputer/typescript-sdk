@@ -308,14 +308,22 @@ describe('templates.publish() conflicts', () => {
     expect(isTransient(err)).toBe(false);
   });
 
-  it('leave a conflict from any other route transient, as it was', async () => {
+  it('leave a conflict from any other route to its own word', async () => {
     const { client: c } = client((call) =>
       call.path.endsWith('/start') ? json({ error: 'busy' }, { status: 409 }) : anyRoute(call),
     );
     const err = await (await c.computers.get('vm-1')).start().catch((e) => e);
     expect(err).toBeInstanceOf(ConflictError);
     expect((err as APIError).reason).toBeUndefined();
-    expect(isTransient(err)).toBe(true);
+    // No word is no classification, and final (OPL-5973).
+    expect(isTransient(err)).toBe(false);
+    const { client: d } = client((call) =>
+      call.path.endsWith('/start')
+        ? json({ error: 'busy', reason: 'contention' }, { status: 409 })
+        : anyRoute(call),
+    );
+    const passing = await (await d.computers.get('vm-1')).start().catch((e) => e);
+    expect(isTransient(passing)).toBe(true);
   });
 });
 

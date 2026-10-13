@@ -928,6 +928,45 @@ describe('finite numbers', () => {
     expect(() => P.dragBody(1, 2, 3, Number.NaN)).toThrow(/finite number/);
   });
 
+  // The platform reads x and y as whole pixels and answers a fraction with a
+  // 400 (OPL-5973); the Python SDK and the MCP server refuse the same values.
+  it('refuses a fractional coordinate on every pointer action, before sending it', () => {
+    expect(() => P.pointerBody('move', 100.5, 200)).toThrow(ValidationError);
+    expect(() => P.pointerBody('move', 100, 200.25)).toThrow(/whole number of pixels/);
+    expect(() => P.clickBody('left_click', 100.5, 200)).toThrow(/whole number of pixels/);
+    expect(() => P.buttonBody('left_mouse_up', 1, 0.5)).toThrow(/whole number of pixels/);
+    expect(() => P.dragBody(10.5, 5)).toThrow(/whole number of pixels/);
+    expect(() => P.dragBody(10, 5, 1.5, 2)).toThrow(/whole number of pixels/);
+    expect(() => P.scrollBody({ direction: 'down', amount: 1, x: 3.5, y: 4 })).toThrow(
+      /whole number of pixels/,
+    );
+    // Whole numbers, negative ones included, go through unchanged.
+    expect(P.pointerBody('move', -5, 0)).toEqual({ action: 'move', x: -5, y: 0 });
+    expect(P.clickBody('left_click', 100, 200)).toEqual({ action: 'left_click', x: 100, y: 200 });
+  });
+
+  it('refuses a fractional or out-of-range window move or resize', () => {
+    expect(() => P.windowBody({ action: 'move', x: 1.5, y: 2 })).toThrow(/whole number of pixels/);
+    expect(() => P.windowBody({ action: 'move', x: 1, y: 32768 })).toThrow(/-32768 to 32767/);
+    expect(() => P.windowBody({ action: 'move', x: -32769, y: 0 })).toThrow(/-32768 to 32767/);
+    expect(() => P.windowBody({ action: 'resize', width: 32768, height: 10 })).toThrow(
+      /1 to 32767/,
+    );
+    expect(() => P.windowBody({ action: 'resize', width: 10.5, height: 10 })).toThrow(
+      /positive integer/,
+    );
+    expect(P.windowBody({ action: 'move', x: -32768, y: 32767 })).toEqual({
+      action: 'move',
+      x: -32768,
+      y: 32767,
+    });
+    expect(P.windowBody({ action: 'resize', width: 32767, height: 1 })).toEqual({
+      action: 'resize',
+      width: 32767,
+      height: 1,
+    });
+  });
+
   it('refuses a NaN amount, max_steps, timeout or window geometry', () => {
     expect(() => P.scrollBody({ direction: 'down', amount: Number.NaN })).toThrow(/finite number/);
     expect(() => P.agentBody({ prompt: 'go', stream: true, maxSteps: Number.NaN })).toThrow(

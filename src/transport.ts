@@ -454,7 +454,8 @@ export type TransportOptions = {
   timeoutMs?: number;
   /** Additional safe GET/HEAD attempts on connection failures or 502/503/504. Default: 0.
    * Backoff starts at 250ms and doubles to 30s; Retry-After is a lower bound.
-   * One deadline covers all attempts. Legacy consuming execution polls are excluded.
+   * One deadline covers all attempts, and a wait that cannot end before it is
+   * not started: the last answer is thrown. Legacy consuming execution polls are excluded.
    */
   retries?: { idempotent: number };
   /** Swap in a fetch implementation. Defaults to the global one. */
@@ -859,6 +860,7 @@ export class Transport {
   ): Promise<T> {
     const timeoutMs = this.#deadlineMs(opts);
     const operation = { timeoutMs, signal: this.#signal(opts.signal, timeoutMs) };
+    const started = Date.now();
     for (let attempt = 0; ; attempt++) {
       try {
         const sent = await this.#fetchRaw(method, path, opts, operation);
@@ -867,17 +869,19 @@ export class Transport {
         if (operation.signal?.aborted) throw withIdempotencyKey(error, opts);
         const delay = this.#retryDelay(method, path, error, attempt);
         if (delay === undefined) throw withIdempotencyKey(error, opts);
+        // A wait that cannot end before the deadline would spend the rest of
+        // it and then report a timeout in place of the answer the platform
+        // gave — a 503 and its Retry-After, which say more and which a caller
+        // may still act on (OPL-5973). So the answer is thrown now.
+        if (timeoutMs && Date.now() - started + delay >= timeoutMs)
+          throw withIdempotencyKey(error, opts);
         try {
           await retrySleep(delay, operation.signal);
-        } catch (cause) {
+        } catch {
           if (opts.signal?.aborted) throw opts.signal.reason;
-          throw withIdempotencyKey(
-            new ConnectionInterruptedError(
-              `${method} ${path} timed out after ${timeoutMs}ms while waiting to retry.`,
-              { cause },
-            ),
-            opts,
-          );
+          // The deadline, firing inside a wait the check above expected to
+          // fit: still the platform's answer, for the same reason.
+          throw withIdempotencyKey(error, opts);
         }
       }
     }

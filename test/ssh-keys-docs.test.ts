@@ -30,3 +30,24 @@ describe('SshKeys.add documentation', () => {
     expect(doc).toMatch(/separate key/);
   });
 });
+
+/** The docblock directly above a declaration, or '' when something else is between. */
+function classDoc(declaration: string): string {
+  const at = source.indexOf(declaration);
+  expect(at).toBeGreaterThan(0);
+  const close = source.lastIndexOf('*/', at);
+  if (source.slice(close + 2, at).trim() !== '') return '';
+  return source.slice(source.lastIndexOf('/**', close), close);
+}
+
+// OPL-5973: the PublicUrls class was inserted between the SshKeys docblock and
+// its class, so SshKeys shipped with no documentation and PublicUrls with two
+// blocks above it.
+describe('class documentation', () => {
+  it('keeps each class under its own docblock', () => {
+    expect(classDoc('export class SshKeys {')).toMatch(/The caller's SSH public keys/);
+    const publicUrls = classDoc('export class PublicUrls {');
+    expect(publicUrls).toMatch(/A computer's public URLs, by the computer's id/);
+    expect(publicUrls).not.toMatch(/SSH/);
+  });
+});

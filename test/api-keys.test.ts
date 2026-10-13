@@ -443,7 +443,7 @@ describe('mandala api-keys', () => {
     const r = await h.run(args);
     expect(r.code).toBe(1);
     expect(r.out).toBe('');
-    expect(r.err).toBe(`mandala: ${NO_PERMISSION}\nmandala: request id r1\n`);
+    expect(r.err).toBe(`mandala: ${NO_PERMISSION} (HTTP 403)\nmandala: request id r1\n`);
     const j = await h.run([...args, '--json']);
     expect(j.json).toMatchObject({
       ok: false,
@@ -454,7 +454,7 @@ describe('mandala api-keys', () => {
   it('prints the escalation refusal as it came', async () => {
     const h = cli(() => json({ error: NO_ESCALATION }, { status: 403 }));
     const r = await h.run(['api-keys', 'create']);
-    expect(r.err).toBe(`mandala: ${NO_ESCALATION}\n`);
+    expect(r.err).toBe(`mandala: ${NO_ESCALATION} (HTTP 403)\n`);
   });
 
   it.each(RAW_KEY_SHAPES)(
@@ -602,7 +602,7 @@ describe('names others chose reach the terminal escaped', () => {
       json({ error: 'refused\nmandala: key created after all' }, { status: 403 }),
     ).run(['api-keys', 'create']);
     expect(r.code).not.toBe(0);
-    expect(r.err).toBe('mandala: refused\\u000amandala: key created after all\n');
+    expect(r.err).toBe('mandala: refused\\u000amandala: key created after all (HTTP 403)\n');
   });
 });
 
