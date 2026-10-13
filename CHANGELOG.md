@@ -138,6 +138,11 @@ This is the summary you read to decide whether to upgrade.
   `moveToWorkspace()` or `computers move --workspace` (OPL-5918, OPL-5932).
 - `SshKeys` has its documentation back: the `PublicUrls` class had been
   inserted between the two (OPL-5973).
+- `moves list --computer` and `operations list --computer` take a reference
+  shaped like a computer id (`vm-` and twelve lowercase hex digits) as that id,
+  without looking it up, as `snapshots list --computer` does. A deleted
+  computer's id fell through to a live computer named like it, and that
+  computer's moves or operations came back instead (OPL-5976).
 
 ## [0.12.0] — 2026-10-11
 

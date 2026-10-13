@@ -238,21 +238,27 @@ export async function publicUrlId(
 }
 
 /**
- * `operations list --computer`: a computer by name or id, as every other
- * computer argument is. A value that is neither a live computer's id nor its
- * name is sent as typed, because an operation outlives its computer: the id of
- * one since deleted (a create that would not boot, a clone that failed) is
- * still how its operations are found. Said on stderr when that happens, so the
- * empty page a mistyped name gets is not read as "no operations".
+ * `operations list`, `moves list` and `snapshots list --computer`: a computer
+ * by name or id. A reference shaped like a computer id IS that id, used as
+ * given and never looked up: resolving it first fell through a deleted
+ * computer's 404 to a live computer NAMED like that id, and listed that
+ * computer's rows instead (OPL-5973, OPL-5976).
+ *
+ * Anything else is resolved as a name. One that names no computer now is sent
+ * as typed, because an operation outlives its computer: the id of one since
+ * deleted (a create that would not boot, a clone that failed) is still how its
+ * operations are found. Said on stderr when that happens, so the empty page a
+ * mistyped name gets is not read as "no operations".
  */
 async function operationsComputer(
   client: Client,
   target: string,
   output: Output,
   signal: AbortSignal,
-  /** What is listed, for the note: `operations`, or `moves`. */
+  /** What is listed, for the note: `operations`, `moves` or `snapshots`. */
   listed = 'operations',
 ): Promise<string> {
+  if (COMPUTER_ID.test(target)) return target;
   try {
     return (await resolveComputer(client, target, signal)).id;
   } catch (error) {
@@ -1530,7 +1536,8 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
         return output.result(raw(await client.operations.get(target, call)));
       case 'moves list': {
         // The platform lists the account's moves, one row per computer at
-        // most; the filter is applied here, to the id a name resolves to.
+        // most; the filter is applied here, to the id a name resolves to. An
+        // id-shaped reference is that id, never resolved (OPL-5976).
         const only =
           s('computer') === undefined
             ? undefined
@@ -2112,8 +2119,8 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
         const only = s('computer');
         const listing = await client.snapshots.listWithStatus({
           computerId:
-            only === undefined || COMPUTER_ID.test(only)
-              ? only
+            only === undefined
+              ? undefined
               : await operationsComputer(client, only, output, signal, 'snapshots'),
           includeUnfinished: b('include-unfinished'),
           allowPartial: b('allow-partial'),

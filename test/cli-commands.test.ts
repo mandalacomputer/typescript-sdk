@@ -5658,6 +5658,67 @@ describe('computers move and moves list (OPL-5524)', () => {
       ],
     });
   });
+
+  // OPL-5976: a deleted computer's id fell through its 404 to a live computer
+  // NAMED like it, and that computer's move came back, as snapshots list did.
+  it('takes an id-shaped --computer as that id, never as a name', async () => {
+    const deletedId = 'vm-0123456789ab';
+    const impostor = { ...COMPUTER, id: 'vm-bbbbbbbbbbbb', name: deletedId };
+    const theirs = { ...MOVE_DONE, computer_id: impostor.id };
+    const mine = { ...MOVE_DONE, computer_id: deletedId };
+    const h = harness((call) =>
+      call.path === '/computers'
+        ? json([impostor])
+        : call.path === `/computers/${deletedId}`
+          ? json({ error: 'no such computer' }, { status: 404 })
+          : call.path === '/moves'
+            ? json({ moves: [theirs, mine] })
+            : anyRoute(call),
+    );
+    const result = await h.run(['moves', 'list', '--computer', deletedId]);
+    expect(result.code).toBe(0);
+    expect(result.frames[0].data.moves.map((m: { computer_id: string }) => m.computer_id)).toEqual([
+      deletedId,
+    ]);
+    expect(h.rec.routes()).toEqual([['GET', 'moves']]);
+  });
+});
+
+describe('operations list --computer (OPL-5976)', () => {
+  it('takes an id-shaped --computer as that id, never as a name', async () => {
+    const deletedId = 'vm-0123456789ab';
+    const impostor = { ...COMPUTER, id: 'vm-bbbbbbbbbbbb', name: deletedId };
+    const h = harness((call) =>
+      call.path === '/computers'
+        ? json([impostor])
+        : call.path === `/computers/${deletedId}`
+          ? json({ error: 'no such computer' }, { status: 404 })
+          : json({ operations: [{ ...OPERATION, computer_id: deletedId }], next_cursor: null }),
+    );
+    const result = await h.run(['operations', 'list', '--computer', deletedId]);
+    expect(result.code).toBe(0);
+    expect(h.rec.routes()).toEqual([['GET', 'operations']]);
+    expect(h.rec.last().query).toEqual({ computer_id: deletedId });
+    expect(result.err).toBe('');
+  });
+
+  it('still resolves a name, and keeps one that names nothing as an id', async () => {
+    const h = harness((call) =>
+      call.path === '/operations' ? json({ operations: [], next_cursor: null }) : anyRoute(call),
+    );
+    expect((await h.run(['operations', 'list', '--computer', COMPUTER.name])).code).toBe(0);
+    expect(h.rec.last().query).toEqual({ computer_id: COMPUTER.id });
+    const g = harness((call) =>
+      call.path === '/computers/vm-gone'
+        ? json({ error: 'no such computer' }, { status: 404 })
+        : call.path === '/operations'
+          ? json({ operations: [], next_cursor: null })
+          : anyRoute(call),
+    );
+    const gone = await g.run(['operations', 'list', '--computer', 'vm-gone']);
+    expect(g.rec.last().query).toEqual({ computer_id: 'vm-gone' });
+    expect(gone.err).toContain('listing the operations recorded under the id vm-gone');
+  });
 });
 
 describe('computers idle-suspend (OPL-5524)', () => {
