@@ -120,6 +120,27 @@ describe('binding secrets at create', () => {
     });
     expect(rec.calls.filter((x) => x.method === 'POST' && x.path === '/computers')).toHaveLength(1);
   });
+
+  // A create has no current binding for a revision to keep, so the platform
+  // refuses every revision_id there with a 400 (OPL-5973). Refused here, with
+  // nothing sent, naming the rebind it belongs to.
+  it('refuses a revisionId, which only a rebind can use', async () => {
+    const { rec, client: c } = client(everything);
+    await expect(
+      c.computers.create({
+        template: 'base',
+        secrets: [{ secretId: A, env: 'X', revisionId: 'csr-ffffffffffffffffffffffff' }],
+      }),
+    ).rejects.toThrow(/secrets\[0\]\.revisionId is for a rebind \(setSecrets\)/);
+    expect(rec.calls.filter((x) => x.method === 'POST')).toEqual([]);
+    // The rebind still sends it.
+    const computer = await c.computers.get('vm-1');
+    await computer.setSecrets([{ secretId: A, env: 'X', revisionId: 'csr-1' }]);
+    const put = rec.calls.find((x) => x.method === 'PUT');
+    expect(put?.body).toMatchObject({
+      secrets: [{ secret_id: A, env: 'X', revision_id: 'csr-1' }],
+    });
+  });
 });
 
 describe('a computer’s bindings', () => {

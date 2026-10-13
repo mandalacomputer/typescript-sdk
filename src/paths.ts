@@ -650,7 +650,10 @@ export type CreateArgs = {
    * Secrets from the account (`client.secrets`) to deliver into the desktop
    * session each time the computer starts: each as an environment variable
    * (`env`) or as a file under `/run/mandala-secrets/user/files` (`file`).
-   * Linux only, and only on a template whose image can receive them.
+   * Linux only, and only on a template whose image can receive them. A create
+   * always binds each secret's latest revision, so a binding naming a
+   * `revisionId` is refused here, as the platform refuses it; that field is
+   * for a rebind with {@link Computer.setSecrets}.
    */
   secrets?: SecretBindingArgs[];
   /**
@@ -787,7 +790,15 @@ const SECRET_BINDING_KEYS = ['secretId', 'env', 'file', 'revisionId'];
  * A binding list as the wire takes it, checked for what the platform would
  * refuse anyway, so the mistake is named here rather than as a 400 later.
  */
-export function secretBindingsBody(list: SecretBindingArgs[], what = 'secrets'): Json[] {
+export function secretBindingsBody(
+  list: SecretBindingArgs[],
+  what = 'secrets',
+  /**
+   * `false` for a create, which has no current binding for a revision to keep:
+   * the platform refuses every `revision_id` there (OPL-5973).
+   */
+  revisions = true,
+): Json[] {
   if (!Array.isArray(list)) {
     throw new ValidationError(`${what} must be a list of {secretId, env} or {secretId, file}`);
   }
@@ -839,6 +850,12 @@ export function secretBindingsBody(list: SecretBindingArgs[], what = 'secrets'):
         throw new ValidationError(`${what}[${i}].file ${b.file} is bound twice`);
       }
       files.add(b.file as string);
+    }
+    if (b.revisionId !== undefined && !revisions) {
+      throw new ValidationError(
+        `${what}[${i}].revisionId is for a rebind (setSecrets); a create binds each secret's ` +
+          'latest revision, so omit it',
+      );
     }
     if (b.revisionId !== undefined) {
       const rev = requireString(b.revisionId, `${what}[${i}].revisionId`);
@@ -931,7 +948,7 @@ export function createBody(args: CreateArgs): Json {
       ram_mb: ramMb,
       disk_gb: diskGb,
       resolution,
-      secrets: secrets === undefined ? undefined : secretBindingsBody(secrets),
+      secrets: secrets === undefined ? undefined : secretBindingsBody(secrets, 'secrets', false),
       // `null` is sent: it is how a create from a template with a default
       // proxy asks for none, where leaving the field out inherits it.
       browser_proxy:
