@@ -617,8 +617,9 @@ const corner = await c.screenshot(undefined, {
 ```
 
 A cropped or scaled picture is in its own pixel space. To click on something in
-it, divide its position by the scale and add the region's `x` and `y`: (100, 50)
-in `corner` is (200, 100) on the screen. A region that reaches past the screen's
+it, divide its position by the scale, add the region's `x` and `y`, and round to
+a whole pixel, which is all `click()` takes: (100, 50) in `corner` is (200, 100)
+on the screen. A region that reaches past the screen's
 edge is refused with a 400 naming the screen size rather than clipped; the value
 checks (a scale out of range or beside a width, a quality on a PNG) throw a
 `ValidationError` before anything is sent.

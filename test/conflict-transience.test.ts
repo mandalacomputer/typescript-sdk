@@ -24,7 +24,11 @@ const refusing =
       ? json(body, { status: 409 })
       : anyRoute(call);
 
-const caught = async (p: Promise<unknown>): Promise<unknown> => p.then(() => undefined, (e) => e);
+const caught = async (p: Promise<unknown>): Promise<unknown> =>
+  p.then(
+    () => undefined,
+    (e) => e,
+  );
 
 describe('the permanent 409s an embedder used to be told to retry', () => {
   it.each([
@@ -35,7 +39,8 @@ describe('the permanent 409s an embedder used to be told to retry', () => {
     [
       'a computer at its plan’s public URL limit',
       {
-        error: 'This computer already has 2 of the 2 public URLs its plan allows; delete one first.',
+        error:
+          'This computer already has 2 of the 2 public URLs its plan allows; delete one first.',
         code: 'PUBLIC_URL_LIMIT',
       },
     ],
@@ -88,9 +93,9 @@ describe('the permanent 409s an embedder used to be told to retry', () => {
   });
 
   it('an unrecognised reason is no answer either', () => {
-    expect(isTransient(new ConflictError('x', 409, { error: 'x', reason: 'pending_new_word' }))).toBe(
-      false,
-    );
+    expect(
+      isTransient(new ConflictError('x', 409, { error: 'x', reason: 'pending_new_word' })),
+    ).toBe(false);
   });
 });
 

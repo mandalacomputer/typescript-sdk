@@ -21,6 +21,32 @@ const inputAnswers =
   (call) =>
     call.path.endsWith('/input') ? json(answer) : anyRoute(call);
 
+// The platform reads whole pixels and answers `click(100.5, 200)` with a 400
+// (OPL-5973). Refused here instead, with nothing sent.
+describe('fractional coordinates', () => {
+  it('are refused by every pointer method and a window move, before any request', async () => {
+    const { client: c, rec } = client(anyRoute);
+    const computer = await c.computers.get('vm-1');
+    rec.calls.length = 0;
+    const attempts: (() => Promise<unknown>)[] = [
+      () => computer.click(100.5, 200),
+      () => computer.doubleClick(1, 2.5),
+      () => computer.move(0.5, 0),
+      () => computer.drag(10.25, 10),
+      () => computer.drag(10, 10, { x: 1.5, y: 1 }),
+      () => computer.mouseDown(3.5, 4),
+      () => computer.scroll(1.5, 2),
+      () => computer.windowAction('0x1', 'move', { x: 12.5, y: 3 }),
+    ];
+    for (const attempt of attempts) {
+      await expect(attempt()).rejects.toThrow(ValidationError);
+    }
+    expect(rec.calls).toEqual([]);
+    await computer.click(100, 200);
+    expect(rec.last().body).toEqual({ action: 'left_click', x: 100, y: 200 });
+  });
+});
+
 describe('click count', () => {
   it('sends count on the three single clicks, and nothing when it is left out', async () => {
     const { client: c, rec } = client(anyRoute);

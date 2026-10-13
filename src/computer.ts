@@ -3655,9 +3655,9 @@ export class Computer {
    * ```
    *
    * A cropped or scaled picture is in its OWN pixel space. To click on
-   * something in it, divide its position by the scale and add the region's `x`
-   * and `y`: in the example above, (100, 50) in the picture is (200, 100) on the
-   * screen. `region` is in screen pixels, before any scaling, and has to lie
+   * something in it, divide its position by the scale, add the region's `x`
+   * and `y`, and round to a whole pixel — {@link click} takes nothing else: in
+   * the example above, (100, 50) in the picture is (200, 100) on the screen. `region` is in screen pixels, before any scaling, and has to lie
    * inside the screen; `scale` is greater than 0 and at most 1 and is not
    * given with `width`; `quality` is 1 to 100 and only for a JPEG. The value
    * checks are made here, before anything is sent, and throw a

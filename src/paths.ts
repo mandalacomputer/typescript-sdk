@@ -163,15 +163,34 @@ function finite(v: number, what: string): number {
   return v;
 }
 
-/** {@link finite}, for the coordinates and sizes a caller may legitimately omit. */
-function finiteIf(v: number | undefined, what: string): void {
-  if (v !== undefined) finite(v, what);
+/**
+ * A screen coordinate, refused when it is not a whole number of pixels.
+ *
+ * The platform reads `x` and `y` as integers and answers a fraction with a 400
+ * (OPL-5973), so `click(100.5, 200)` used to be a round trip that could only
+ * fail. A position worked out from a box or a scaled picture is the usual way
+ * to get one: round it first. The Python SDK and the MCP server refuse the same
+ * values.
+ */
+function coordinate(v: number, what: string): number {
+  finite(v, what);
+  if (!Number.isInteger(v)) {
+    throw new ValidationError(
+      `${what} must be a whole number of pixels (got ${v}); round a computed position, e.g. Math.round(${what})`,
+    );
+  }
+  return v;
+}
+
+/** {@link coordinate}, for a point a caller may legitimately omit. */
+function coordinateIf(v: number | undefined, what: string): void {
+  if (v !== undefined) coordinate(v, what);
 }
 
 /**
  * A shape field, refused when it is not a positive integer.
  *
- * {@link finiteIf} only stops a NaN becoming JSON `null`. A negative or a
+ * {@link finite} only stops a NaN becoming JSON `null`. A negative or a
  * fraction is equally knowable without a round trip, and the same class of
  * mistake this file exists to name: `cpu: -1` is not a computer the platform
  * can build, and learning that from a 400 is a trip that never had to happen.
@@ -1923,8 +1942,8 @@ export function inputBatchBody(actions: readonly OpenAIComputerAction[]): Json[]
 
 export const pointerBody = (action: string, x: number, y: number): Json => ({
   action,
-  x: finite(x, 'x'),
-  y: finite(y, 'y'),
+  x: coordinate(x, 'x'),
+  y: coordinate(y, 'y'),
 });
 
 /**
@@ -1940,9 +1959,10 @@ function wholePoint(x?: number, y?: number): void {
   }
   // For the same reason, one line down: a NaN coordinate is serialized as
   // `null` and read as 0, which is the same click at the corner of the screen
-  // that half a point would have produced.
-  finiteIf(x, 'x');
-  finiteIf(y, 'y');
+  // that half a point would have produced. And a fraction is a 400 from the
+  // platform, which reads whole pixels only.
+  coordinateIf(x, 'x');
+  coordinateIf(y, 'y');
 }
 
 /**
@@ -2060,11 +2080,11 @@ export function dragBody(
   if ((fromX === undefined) !== (fromY === undefined)) {
     throw new ValidationError('give both fromX and fromY, or neither');
   }
-  finiteIf(fromX, 'fromX');
-  finiteIf(fromY, 'fromY');
+  coordinateIf(fromX, 'fromX');
+  coordinateIf(fromY, 'fromY');
   const body: Json = {
     action: 'left_click_drag',
-    coordinate: [finite(toX, 'toX'), finite(toY, 'toY')],
+    coordinate: [coordinate(toX, 'toX'), coordinate(toY, 'toY')],
   };
   if (fromX !== undefined && fromY !== undefined) body.start_coordinate = [fromX, fromY];
   // Held for the drag the way clickBody and scrollBody send them (OPL-5051).
@@ -2599,6 +2619,14 @@ export type WindowAction = (typeof WINDOW_ACTIONS)[number];
  */
 const WINDOW_BODY_KEYS: readonly string[] = ['action', 'x', 'y', 'width', 'height'];
 
+/**
+ * The range a window's position and size take: X11's signed 16-bit
+ * coordinates, as the platform bounds a move and a resize. A position runs
+ * down to -32768; a size starts at 1.
+ */
+export const WINDOW_GEOMETRY_MAX = 32767;
+export const WINDOW_POSITION_MIN = -32768;
+
 export function windowBody(args: {
   action: WindowAction;
   x?: number;
@@ -2627,15 +2655,30 @@ export function windowBody(args: {
       );
     }
   }
-  // x and y stay on finiteIf because a negative one is ordinary: a second
-  // monitor left of the primary puts its windows at a negative origin, and
-  // refusing that would refuse a correct move. A size cannot be negative, or
-  // zero, or a fraction — a window 0 pixels wide is not a window — so those
-  // two take the same check every other shape field on this surface takes.
-  finiteIf(args.x, 'x');
-  finiteIf(args.y, 'y');
+  // x and y may be negative, because that is ordinary: a second monitor left
+  // of the primary puts its windows at a negative origin, and refusing that
+  // would refuse a correct move. They are whole pixels, as the platform reads
+  // them, inside the signed 16-bit range a window position has. A size cannot
+  // be negative, or zero, or a fraction — a window 0 pixels wide is not a
+  // window — and is bounded by the same range (OPL-5973).
+  coordinateIf(args.x, 'x');
+  coordinateIf(args.y, 'y');
   positiveIntIf(args.width, 'width');
   positiveIntIf(args.height, 'height');
+  for (const key of ['x', 'y'] as const) {
+    const v = args[key];
+    if (v !== undefined && (v < WINDOW_POSITION_MIN || v > WINDOW_GEOMETRY_MAX)) {
+      throw new ValidationError(
+        `${key} must be from ${WINDOW_POSITION_MIN} to ${WINDOW_GEOMETRY_MAX} (got ${v})`,
+      );
+    }
+  }
+  for (const key of ['width', 'height'] as const) {
+    const v = args[key];
+    if (v !== undefined && v > WINDOW_GEOMETRY_MAX) {
+      throw new ValidationError(`${key} must be from 1 to ${WINDOW_GEOMETRY_MAX} (got ${v})`);
+    }
+  }
   return omitUndefined({ ...args });
 }
 

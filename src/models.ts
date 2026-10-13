@@ -3930,7 +3930,8 @@ export type PageContext = {
 /**
  * One interactive element, with the visible part of its box in SCREEN pixels —
  * the coordinates {@link Computer.click} takes. Click its centre:
- * `x + width / 2`, `y + height / 2`.
+ * `Math.round(x + width / 2)`, `Math.round(y + height / 2)` — a click takes
+ * whole pixels only.
  */
 export type PageElement = {
   /** The lower-case tag name: `a`, `button`, `input`. */
