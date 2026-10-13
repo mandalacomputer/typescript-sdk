@@ -12,18 +12,124 @@ This is the summary you read to decide whether to upgrade.
 ### Added
 
 - **Public URLs.** Serve a port inside a computer at
-  `https://<label>.<base domain>` (e.g. `mandala.dev`), on port 443:
+  `https://<label>.<base_domain>`, on port 443; the base domain is the
+  platform's (`mandala.dev`, for example), read from the list's `baseDomain`:
   `computer.publicUrls()` lists them with whether they can answer and the
   plan's limit, `createPublicUrl({ port, label?, access? })` makes one
   (`public`, the default, is anyone with the link; `private` answers only this
   account's API keys, which never reach the app), `updatePublicUrl(id, {
-  port?, access? })` changes one, and `deletePublicUrl(id)` removes it. The
-  `client.publicUrls` has the same four calls by the computer's id, with no
-  handle. The `mandala` CLI has the same as `computers urls
+  port?, access? })` changes one, and `deletePublicUrl(id)` removes it. A
+  deleted URL's label stays with the account: no other account can ever take
+  it, and the account may use it again unless the platform has blocked it.
+  The `client.publicUrls` has the same four calls by the computer's id, with
+  no handle. The `mandala` CLI has the same as `computers urls
   list|create|update|rm`: a computer id is used as given and a name looked
   up, and a URL is found by its id, label, hostname or address (`--id` sends a
-  URL id unlooked-up). Needs a platform with public URLs enabled for the
-  account.
+  URL id unlooked-up). A URL whose `access` is neither `public` nor `private`
+  fails the listing rather than being shown, deliberately: who may open a URL
+  is the one thing this client will not guess. Needs a platform with public
+  URLs enabled for the account.
+- **Move a computer to another workspace.** `computer.moveToWorkspace(id)`, or
+  `null` to leave it in none, and `mandala computers move COMPUTER --workspace
+  ID|unassigned` (OPL-5932). It needs an account-wide credential of a member or
+  owner, and a stopped computer with no snapshots, secret bindings or
+  credentialed proxies; nothing is stopped or cleaned up for you. The CLI
+  refuses `--ram-mb`, `--cpu`, `--disk-gb`, `--wait`, `--timeout-ms`,
+  `--poll-ms` and `--idempotency-key` in this mode, and never uses the
+  profile's default workspace as the destination.
+- **`WorkspaceMember.seatSuspended`** (OPL-5919): `true` while a member waits
+  for a plan seat and cannot act on the account, independent of `suspended`;
+  `undefined` from a server that does not send it. `members()` lists accepted
+  members, including those waiting for a seat.
+- **The API's own error code and its `Retry-After` in CLI errors.** The
+  `--json` error envelope carries `api_code` (such as `LABEL_TAKEN`, which tells
+  apart two refusals with one status) and `retry_after_ms`. Text output ends the
+  message with `(HTTP 409, LABEL_TAKEN)` and says the `Retry-After` wait on a
+  line of its own (OPL-5963, OPL-5973).
+- **`snapshots list --computer` takes a name** as well as an id, as `moves
+  list` does. A name used to match nothing and return an empty list without a
+  word; one that names no computer now is kept as an id, for a deleted
+  computer's snapshots (OPL-5973).
+
+### Changed
+
+- **`isTransient()` calls a 409 without a transient `reason` final**
+  (OPL-5973). The platform documents an absent `reason` as no classification,
+  and a client treating 409 as uniformly transient loops forever on the
+  refusals that are decisions: a taken public URL label (`LABEL_TAKEN`), a
+  computer at its URL limit (`PUBLIC_URL_LIMIT`), a webhook past the
+  subscription cap, a test of a disabled webhook, a duplicate or over-limit SSH
+  key. A 409 is now transient only with `reason` `contention` or `starting`, or
+  with `code` `idempotency_in_progress` or `WORKSPACE_MOVING` and no word that
+  says otherwise (`WORKSPACE_MOVING` with `reason: "unsupported"` is final).
+  An unknown word is no answer, and final too. Code that retried every 409
+  through `isTransient()` stops retrying the reasonless ones; the waits, which
+  poll reads under a deadline, are unchanged.
+- **Input coordinates are whole pixels** (OPL-5973). The platform reads `x`
+  and `y` as integers and answered a fraction with a 400; `click`, the other
+  clicks, `move`, `drag`, `mouseDown`, `mouseUp` and `scroll` now refuse a
+  fractional coordinate with a `ValidationError` before sending it, as the
+  Python SDK and the MCP server do. Round a computed position, such as a page
+  element's centre. A window `move` takes whole `x` and `y` from -32768 to
+  32767, and a `resize` a width and height from 1 to 32767.
+- **A create refuses `secrets[].revisionId`** (OPL-5973), which the platform
+  always refused there with a 400: a create binds each secret's latest
+  revision. The field is for a rebind with `setSecrets()`.
+- **Webhook and SSH key listings decode strictly** (OPL-5973).
+  `webhooks.list()`, `webhooks.deliveries()` and `sshKeys.list()` fail on a row
+  that is not an object or has no `id`, rather than dropping it, and a
+  webhook's unreadable `enabled` fails the call rather than reading as false.
+- **A build stream's refusal frame is thrown as its status's error**
+  (OPL-5973). When the caller's authority ends while `builds.events()` is open
+  (a revoked key, a removed member), the platform ends the stream with the
+  status, `reason` and request id the refusal would have had. That arrives as an
+  `AuthenticationError` or `PermissionDeniedError` with `reason` and
+  `requestId`, rather than a `MandalaError` advising a poll that would be
+  refused the same way.
+- **A retry wait that cannot fit the deadline is not started** (OPL-5973).
+  With `retries` on, a 503 whose `Retry-After` outlasted the client deadline
+  slept until the deadline and threw `ConnectionInterruptedError`. The 503
+  itself is now thrown at once, with its `retryAfterMs`.
+- **`computers list`, `workspaces list` and `operations list` print tables**
+  without `--json` (OPL-5936), with an incomplete computer listing said on
+  stderr. **This breaks scripts that parsed the old human output**; parse
+  `--json`, whose output is unchanged.
+- **`computers exec -c` never reads stdin** (OPL-5973). Stdin was read to its
+  end whenever it was not a terminal, so a CI step whose stdin stayed open hung
+  before sending the command; `-c` with piped input is no longer refused, and
+  the input is left unread.
+- **`terminal --json` exits 2**, a usage mistake, as `ssh --json` already did
+  for the same refusal; it exited 1 (OPL-5973).
+- **The CLI manifest** says `login` needs no credentials, and marks `--yes`
+  `required` on `workspaces rm` and `artifacts rm`; both still refuse without
+  it as `confirmation_required` (OPL-5973).
+- **The browser toolset intercepts HTTP(S) at the browser root**, so the URL
+  policy sees the requests of frames and their workers, including requests sent
+  before the driver attaches (OPL-5912, OPL-5952). This supersedes the limits
+  stated in 0.12.0's cross-site frame and dedicated worker entries: a sandboxed
+  `srcdoc` frame's first requests, and workers started by a frame that ran
+  before the driver could attach, are now covered while the control connection
+  is active. A new failure mode comes with it: when the owner of a request
+  cannot be established, the driver disposes its own context before releasing
+  uncertain traffic, which can end an otherwise healthy toolset; create a new
+  one to continue. On an unguarded connection, abrupt loss of browser control
+  can still let Chromium resume a pending request without the policy approving
+  it; a backend advertising `context_guard_version: 1` guards the SDK's and the
+  daemon's disconnects. The URL policy is still not network isolation.
+
+### Fixed
+
+- `waitForDesktop()` reads the reasonless 409 a computer gives before its
+  desktop session exists as an ordinary "not yet" and keeps its short ramp,
+  rather than waiting a full `pollMs` between those polls (OPL-5931).
+- The README's public URL example started its server with
+  `exec({ command, background: true })`, which throws; it uses
+  `execBackground()` (OPL-5973).
+- The docs say a workspace still holding active secrets cannot be deleted
+  (409, `reason: "unsupported"`), and that its computers are moved with
+  `moveToWorkspace()` or `computers move --workspace` (OPL-5918, OPL-5932).
+- `SshKeys` has its documentation back: the `PublicUrls` class had been
+  inserted between the two (OPL-5973).
 
 ## [0.12.0] — 2026-10-11
 
@@ -1413,6 +1519,7 @@ No effect on the published surface, listed because it is most of the window.
 - Several parser fixes landed before that scanner was retired, each ported
   to and from the MCP server's byte-identical copy.
 
+[Unreleased]: https://github.com/mandalacomputer/typescript-sdk/compare/v0.12.0...HEAD
 [0.12.0]: https://github.com/mandalacomputer/typescript-sdk/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/mandalacomputer/typescript-sdk/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/mandalacomputer/typescript-sdk/compare/v0.9.0...v0.10.0
