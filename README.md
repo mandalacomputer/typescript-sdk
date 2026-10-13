@@ -4032,8 +4032,11 @@ Computer operands accept an ID or a unique name. An exact ID takes precedence,
 including IDs absent from the default inventory. When no listed ID matches,
 the CLI checks the direct ID endpoint before accepting a name. Only a 404 from
 that lookup permits name fallback, and the inventory must be complete. Other
-lookup failures stop the command. Ambiguous names fail with the matching IDs so
-you can select one explicitly.
+lookup failures stop the command. A value shaped like a computer ID (`vm-` and
+twelve lowercase hex digits) never falls back to a name: its 404 is the answer,
+so a command meant for a deleted computer cannot reach another computer named
+after its ID. Ambiguous names fail with the matching IDs so you can select one
+explicitly.
 The `--computer` filter of `operations list`, `moves list` and `snapshots list`
 takes a name or an ID. A value shaped like a computer ID (`vm-` and twelve
 lowercase hex digits) is that ID, never looked up or matched against names, so a

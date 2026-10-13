@@ -115,6 +115,20 @@ export type LegacyCommands = {
   ) => Promise<CopyResult>;
 };
 
+/** The platform's computer id: `vm-` and twelve lowercase hex digits. */
+const COMPUTER_ID = /^vm-[0-9a-f]{12}$/;
+
+/**
+ * The computer a CLI operand names: an exact id, or a unique name.
+ *
+ * An id is found in the listing or read from its own route, which also finds
+ * one the default listing omits. A reference shaped like a computer id IS that
+ * id: when its own route answers 404 that is the answer, and it is never
+ * matched against names. The platform lets a computer be named like another's
+ * id, so falling back to names sent a command meant for a deleted computer,
+ * a delete included, to a live computer named after it (OPL-5980). Anything
+ * else falls back to a unique name in a complete listing, after that 404 only.
+ */
 export async function resolveComputer(
   client: Client,
   target: string,
@@ -149,6 +163,7 @@ export async function resolveComputer(
     if (!(error instanceof NotFoundError)) throw error;
     idLookupError = error;
   }
+  if (COMPUTER_ID.test(target)) throw idLookupError;
   if (!listing) throw listingError;
   if (listing.incomplete !== null)
     throw new CliError(
@@ -164,9 +179,6 @@ export async function resolveComputer(
     );
   throw idLookupError;
 }
-
-/** The platform's computer id: `vm-` and twelve hex characters. */
-const COMPUTER_ID = /^vm-[0-9a-f]{12}$/;
 
 /**
  * The computer id a `computers urls` command acts on.
