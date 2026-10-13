@@ -1,7 +1,17 @@
 /** The template store and the builds that compile documents into images. */
 
 import { describe, expect, it } from 'vitest';
-import { Client, MandalaError, NotFoundError, type Template, TimeoutError } from '../src/index.js';
+import {
+  APIError,
+  AuthenticationError,
+  Client,
+  isTransient,
+  MandalaError,
+  NotFoundError,
+  PermissionDeniedError,
+  type Template,
+  TimeoutError,
+} from '../src/index.js';
 import { isDeadlineAbort } from '../src/wait.js';
 
 import {
@@ -482,6 +492,46 @@ describe('watching a build', () => {
     expect((err as Error).message).toContain('host went away');
     expect((err as Error).message).toContain('says nothing about the build itself');
   });
+
+  // A frame with a status is the caller's authority ending part-way: the
+  // platform sends the sentence, status, reason and request id the refusal
+  // would have carried as a response (OPL-5973).
+  it.each([
+    [401, AuthenticationError],
+    [403, PermissionDeniedError],
+  ])(
+    'throws a %i refusal frame as that status, with its reason and request id',
+    async (status, Cls) => {
+      const frame = {
+        request_id: 'req-7',
+        error: 'This API key has been revoked.',
+        status,
+        reason: 'revoked',
+      };
+      const { client: c } = client((call) =>
+        call.path.endsWith('/events')
+          ? new Response(`event: error\ndata: ${JSON.stringify(frame)}\n\n`, {
+              status: 200,
+              headers: { 'content-type': 'text/event-stream' },
+            })
+          : anyRoute(call),
+      );
+      const read = async () => {
+        for await (const _ of c.builds.events('bld-1')) break;
+      };
+      const err = await read().catch((e) => e);
+      expect(err).toBeInstanceOf(Cls);
+      expect(err).toBeInstanceOf(APIError);
+      expect((err as APIError).status).toBe(status);
+      expect((err as APIError).reason).toBe('revoked');
+      expect((err as APIError).requestId).toBe('req-7');
+      expect((err as APIError).method).toBe('GET');
+      expect((err as Error).message).toContain('This API key has been revoked.');
+      // Polling would be refused the same way, so it is not the advice.
+      expect((err as Error).message).not.toContain('builds.progress');
+      expect(isTransient(err)).toBe(false);
+    },
+  );
 
   it('throws MandalaError, not TypeError, when an error frame cannot be stringified', async () => {
     // OPL-3850 leftover: `String()` throws on `{"toString":"x"}`, and this

@@ -3,7 +3,9 @@
 import { Computer, EphemeralComputer, strandedText } from './computer.js';
 import {
   type APIError,
+  type AuthenticationError,
   ConflictError,
+  errorForEventStatus,
   type isTransient,
   MandalaError,
   NotFoundError,
@@ -1672,7 +1674,11 @@ export class Builds {
    *
    * An `error` event means the STREAM could not go on and says nothing about the
    * build; it is thrown, because a caller who kept reading would be told nothing
-   * more and a build they still care about needs {@link progress}. Attaching to
+   * more and a build they still care about needs {@link progress}. One that
+   * carries a status is the caller's authority ending while the stream was open
+   * — a revoked key, a removed member — and is thrown as that status's error
+   * ({@link AuthenticationError}, {@link PermissionDeniedError}), with its
+   * `reason` and `requestId`, the refusal a new request would get. Attaching to
    * a build that has already finished is not an error — one `progress` and one
    * `done` arrive immediately.
    *
@@ -1699,7 +1705,30 @@ export class Builds {
         // The stream's own failure, not the build's. Named as such, because a
         // caller told "the build failed" would go and read a document that is
         // fine.
-        const detail = P.isRecord(ev.data) ? str(ev.data.error) : str(ev.data);
+        const frame = P.isRecord(ev.data) ? ev.data : undefined;
+        const detail = frame ? str(frame.error) : str(ev.data);
+        // A frame with a status is a refusal the platform would have answered
+        // as a response, had the stream not already been open: the caller's
+        // authority ended part-way (a revoked key, a removed member). It is
+        // thrown as that status's error, with its reason and request id, as
+        // the agent stream throws its own; and polling builds.progress would
+        // be refused the same way, so it is not the advice (OPL-5973).
+        const status = frame?.status;
+        if (
+          typeof status === 'number' &&
+          Number.isInteger(status) &&
+          status >= 400 &&
+          status < 600
+        ) {
+          throw errorForEventStatus(
+            status,
+            `the build event stream for ${id} was refused: ${detail || 'no reason given'} ` +
+              '(the build itself is not affected)',
+            frame,
+            { method: 'GET' },
+            { keepReason: true },
+          );
+        }
         throw new MandalaError(
           `the build event stream for ${id} ended: ${detail || 'no reason given'} ` +
             `(this says nothing about the build itself — read builds.progress(${JSON.stringify(id)}))`,

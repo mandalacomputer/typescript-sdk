@@ -1494,8 +1494,15 @@ export function errorForEventStatus(
   message: string,
   body?: unknown,
   metadata: ErrorMetadata = {},
+  /**
+   * Keep the frame's `reason`. For a stream that only WATCHES — a build's
+   * events — where nothing the caller asked for has half-happened, so the word
+   * is the same advice it would be on a response: `revoked` there says the
+   * caller's authority ended, exactly as it would have refusing the request.
+   */
+  { keepReason = false }: { keepReason?: boolean } = {},
 ): APIError {
-  const carried = withoutRefusalReason(body);
+  const carried = keepReason ? body : withoutRefusalReason(body);
   if (status === 429) return new RateLimitError(message, status, carried, undefined, metadata);
   const Cls = BY_STATUS[status] ?? APIError;
   if (DESCRIBES_THIS_CONNECTION.has(Cls))
