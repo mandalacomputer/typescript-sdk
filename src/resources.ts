@@ -53,6 +53,7 @@ import {
   expectMoves,
   isBuildTerminal,
   isUnreachableStub,
+  listRow,
   str,
   toAccountQuota,
   toApiKey,
@@ -2151,7 +2152,7 @@ export class Webhooks {
    */
   async list(opts: CallOptions = {}): Promise<Webhook[]> {
     const data = await this.#t.jsonArray('GET', P.WEBHOOKS, { signal: opts.signal });
-    return data.filter(P.isRecord).map(toWebhook);
+    return data.map((row, i) => listRow(row, i, 'webhook', toWebhook));
   }
 
   /**
@@ -2272,28 +2273,10 @@ export class Webhooks {
   async deliveries(webhookId: string, opts: CallOptions = {}): Promise<WebhookDelivery[]> {
     const path = P.webhookAction(webhookId, 'deliveries');
     const data = await this.#t.jsonArray('GET', path, { signal: opts.signal });
-    return data.filter(P.isRecord).map(toWebhookDelivery);
+    return data.map((row, i) => listRow(row, i, 'webhook delivery', toWebhookDelivery));
   }
 }
 
-/**
- * The caller's SSH public keys.
- *
- * Keys belong to the person the credential belongs to, not to a computer, and
- * {@link list} shows all of them whichever account the credential acts on. A
- * key added here, with an API key or a connected app, is bound to the account
- * that credential acts on and to the credential itself: it opens the
- * computers of that account only, on each where SSH is switched on
- * ({@link Computer.setSshAccess}), and it is removed when the credential is
- * revoked. A key added from the dashboard instead opens every computer the
- * person can reach, on every account where they are an owner or member. Each
- * listed key's {@link SshKey.reach} says which of those it is, from the account
- * this credential acts on. A key is registered once across the platform, so
- * registering one somebody else holds, or one you already hold on any account,
- * is a `ConflictError`, as is a person's key past the per-person limit. This
- * client removes only keys whose reach is `this_account`; any other key is a
- * `NotFoundError` to {@link remove}, and is removed from the dashboard.
- */
 /**
  * A computer's public URLs, by the computer's id: the same four calls as
  * {@link Computer.publicUrls} and its siblings, for when you have the id and
@@ -2358,6 +2341,24 @@ export class PublicUrls {
   }
 }
 
+/**
+ * The caller's SSH public keys.
+ *
+ * Keys belong to the person the credential belongs to, not to a computer, and
+ * {@link list} shows all of them whichever account the credential acts on. A
+ * key added here, with an API key or a connected app, is bound to the account
+ * that credential acts on and to the credential itself: it opens the
+ * computers of that account only, on each where SSH is switched on
+ * ({@link Computer.setSshAccess}), and it is removed when the credential is
+ * revoked. A key added from the dashboard instead opens every computer the
+ * person can reach, on every account where they are an owner or member. Each
+ * listed key's {@link SshKey.reach} says which of those it is, from the account
+ * this credential acts on. A key is registered once across the platform, so
+ * registering one somebody else holds, or one you already hold on any account,
+ * is a `ConflictError`, as is a person's key past the per-person limit. This
+ * client removes only keys whose reach is `this_account`; any other key is a
+ * `NotFoundError` to {@link remove}, and is removed from the dashboard.
+ */
 export class SshKeys {
   #t: Transport;
 
@@ -2369,7 +2370,7 @@ export class SshKeys {
   /** Every key registered to the caller. */
   async list(opts: CallOptions = {}): Promise<SshKey[]> {
     const data = await this.#t.jsonArray('GET', P.SSH_KEYS, { signal: opts.signal });
-    return data.filter(P.isRecord).map(toSshKey);
+    return data.map((row, i) => listRow(row, i, 'SSH key', toSshKey));
   }
 
   /**

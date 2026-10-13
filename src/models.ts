@@ -3207,7 +3207,40 @@ export type WebhookCreated = Webhook & {
 const strings = (v: unknown): string[] =>
   Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
 
-export function toWebhook(d: Record<string, unknown>): Webhook {
+/**
+ * A row's `id`, refused when it is missing or empty (OPL-5973). The id is what
+ * every later call on the row names, so a row without one cannot be acted on,
+ * and a listing that kept it would hand back something no call can reach.
+ */
+function rowId(d: Record<string, unknown>, which: string): string {
+  if (typeof d.id !== 'string' || !d.id) throw new MandalaError(`expected ${which} to carry an id`);
+  return d.id;
+}
+
+/**
+ * One row of a listing, refused when it is not an object rather than dropped:
+ * a subscription or a key left out of a listing is one the caller never sees
+ * and so never deletes (OPL-5973).
+ */
+export function listRow<T>(
+  row: unknown,
+  at: number,
+  what: string,
+  decode: (d: Record<string, unknown>, which: string) => T,
+): T {
+  const which = `${what} ${at}`;
+  if (!isRecord(row)) throw new MandalaError(`expected ${which} to be an object`);
+  return decode(row, which);
+}
+
+export function toWebhook(d: Record<string, unknown>, which = 'a webhook'): Webhook {
+  const id = rowId(d, which);
+  // Strict: an `enabled` this client cannot read fails the answer rather than
+  // reading as false, which would report a delivering subscription as off.
+  const enabled = wire(d.enabled);
+  if (enabled !== WIRE.TRUE && enabled !== WIRE.FALSE) {
+    throw new MandalaError(`expected ${which} to say whether it is enabled`);
+  }
   // `count`, not `num`, and the key omitted rather than set: the field's whole
   // job is to be able to say the newest attempt got no answer, and `num`'s
   // fallback is 0 — which is not an HTTP status but reads as one, so a caller
@@ -3219,14 +3252,12 @@ export function toWebhook(d: Record<string, unknown>): Webhook {
   const lastSuccessAt = stamp(d.last_success_at);
   const lastFailureAt = stamp(d.last_failure_at);
   return {
-    id: str(d.id),
+    id,
     url: str(d.url),
     description: str(d.description),
     events: strings(d.events),
     computers: strings(d.computers),
-    // Read strictly, and unreadable is FALSE: an `enabled` this client cannot
-    // read is not one it should report as delivering.
-    enabled: said(d.enabled),
+    enabled: enabled === WIRE.TRUE,
     ...(d.disabled_reason == null ? {} : { disabledReason: str(d.disabled_reason) }),
     ...(disabledAt === undefined ? {} : { disabledAt }),
     ...(lastSuccessAt === undefined ? {} : { lastSuccessAt }),
@@ -3307,7 +3338,11 @@ export type WebhookDelivery = {
   raw: Record<string, unknown>;
 };
 
-export function toWebhookDelivery(d: Record<string, unknown>): WebhookDelivery {
+export function toWebhookDelivery(
+  d: Record<string, unknown>,
+  which = 'a webhook delivery',
+): WebhookDelivery {
+  const id = rowId(d, which);
   // As on {@link toWebhook}, and it matters more here: this is the row a
   // caller reads to decide whether the endpoint refused the delivery or never
   // saw it, and `num`'s 0 answers that question wrongly in the one direction.
@@ -3316,7 +3351,7 @@ export function toWebhookDelivery(d: Record<string, unknown>): WebhookDelivery {
   const attemptedAt = stamp(d.attempted_at);
   const deliveredAt = stamp(d.delivered_at);
   return {
-    id: str(d.id),
+    id,
     eventType: str(d.event_type),
     computer: str(d.computer),
     cursor: str(d.cursor),
@@ -3377,9 +3412,9 @@ export type SshKey = {
   raw: Record<string, unknown>;
 };
 
-export function toSshKey(d: Record<string, unknown>): SshKey {
+export function toSshKey(d: Record<string, unknown>, which = 'an SSH key'): SshKey {
   return {
-    id: str(d.id),
+    id: rowId(d, which),
     name: str(d.name),
     publicKey: str(d.public_key),
     fingerprint: str(d.fingerprint),
