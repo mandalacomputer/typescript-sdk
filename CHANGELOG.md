@@ -79,6 +79,14 @@ This is the summary you read to decide whether to upgrade.
   `webhooks.list()`, `webhooks.deliveries()` and `sshKeys.list()` fail on a row
   that is not an object or has no `id`, rather than dropping it, and a
   webhook's unreadable `enabled` fails the call rather than reading as false.
+- **Activity history decodes strictly** (OPL-5979), as the Python SDK reads
+  it. `ActivityPage.health` is now optional: `undefined` when the platform
+  sends no `health` or `null`, where it used to be filled in as an untruncated
+  history, so code reading `page.health.countTruncated` must check for it
+  first. A `health` that is not an object, or whose `count_truncated` or
+  `age_truncated` is not a boolean, fails the call, and so does an
+  `activityResults()` `more` or an activity's `has_results` that is not one.
+  `1`/`0` and the text `true`/`false` read as booleans, as in Python.
 - **A build stream's refusal frame is thrown as its status's error**
   (OPL-5973). When the caller's authority ends while `builds.events()` is open
   (a revoked key, a removed member), the platform ends the stream with the
@@ -130,6 +138,11 @@ This is the summary you read to decide whether to upgrade.
   `moveToWorkspace()` or `computers move --workspace` (OPL-5918, OPL-5932).
 - `SshKeys` has its documentation back: the `PublicUrls` class had been
   inserted between the two (OPL-5973).
+- `moves list --computer` and `operations list --computer` take a reference
+  shaped like a computer id (`vm-` and twelve lowercase hex digits) as that id,
+  without looking it up, as `snapshots list --computer` does. A deleted
+  computer's id fell through to a live computer named like it, and that
+  computer's moves or operations came back instead (OPL-5976).
 
 ## [0.12.0] — 2026-10-11
 

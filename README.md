@@ -4034,7 +4034,12 @@ the CLI checks the direct ID endpoint before accepting a name. Only a 404 from
 that lookup permits name fallback, and the inventory must be complete. Other
 lookup failures stop the command. Ambiguous names fail with the matching IDs so
 you can select one explicitly.
-Listing filters and webhook filters that say `--computer` take IDs.
+The `--computer` filter of `operations list`, `moves list` and `snapshots list`
+takes a name or an ID. A value shaped like a computer ID (`vm-` and twelve
+lowercase hex digits) is that ID, never looked up or matched against names, so a
+deleted computer's rows are found by its ID; a name that matches no computer is
+sent as typed, with a note on stderr. Webhook filters that say `--computer` take
+IDs.
 
 `computers list` shows ids, names, host status, lifecycle state, configured CPU,
 RAM (MiB), disk (GiB), and workspace ids in a table. Missing values appear as

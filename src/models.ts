@@ -4291,7 +4291,12 @@ export type ActivityPage = {
   changesCursor: string;
   /** The change cursor could not be honoured: refresh history rather than trusting a replay. */
   gap: boolean;
-  health: ActivityHealth;
+  /**
+   * How complete the history is. Absent when the platform did not say (no
+   * `health`, or `null`): that is no claim either way, never an untruncated
+   * history.
+   */
+  health?: ActivityHealth;
   raw: Record<string, unknown>;
 };
 
@@ -4321,6 +4326,54 @@ const nullableStamp = (v: unknown): string | null => (typeof v === 'string' ? v 
 const optionalCount = (v: unknown): number | undefined =>
   typeof v === 'number' && Number.isFinite(v) ? v : undefined;
 
+/**
+ * A flag a page is read by: true or false as {@link wire} reads them, and a
+ * refusal for anything else, absent and `null` included. `more` read as false
+ * hides result versions that exist, and a truncation flag read as false
+ * reports a history as whole when it is not, so an answer that cannot say
+ * plainly is refused rather than read as the reassuring half. The Python SDK
+ * accepts and refuses exactly the same values (OPL-5979).
+ */
+const pageFlag = (d: Record<string, unknown>, key: string, where: string): boolean => {
+  const said = wire(d[key]);
+  if (said === WIRE.TRUE) return true;
+  if (said === WIRE.FALSE) return false;
+  throw new MandalaError(`expected ${where} to carry ${key} as a boolean`);
+};
+
+/**
+ * An optional flag on a row: `undefined` when absent or `null`, and a refusal
+ * when present as anything {@link wire} cannot read, rather than reading it as
+ * not said (OPL-5979).
+ */
+const rowFlag = (d: Record<string, unknown>, key: string, what: string): boolean | undefined => {
+  const said = wire(d[key]);
+  if (said === WIRE.MALFORMED) throw new MandalaError(`expected ${key} on ${what} to be a boolean`);
+  return said === WIRE.TRUE ? true : said === WIRE.FALSE ? false : undefined;
+};
+
+/**
+ * `undefined` for a page that says nothing about its health (absent or
+ * `null`), and a refusal for one that says something unreadable: a `health`
+ * that is not an object, or a truncation flag that is not a boolean. A history
+ * read as untruncated when it was is the misreading that matters (OPL-5979).
+ */
+function toActivityHealth(v: unknown, where: string): ActivityHealth | undefined {
+  if (v === undefined || v === null) return undefined;
+  const at = `the health from ${where}`;
+  if (!isRecord(v)) throw new MandalaError(`expected ${at} to be an object`);
+  return {
+    recordingStartedAt: str(v.recording_started_at),
+    earliestRetainedAt: nullableStamp(v.earliest_retained_at),
+    countTruncated: pageFlag(v, 'count_truncated', at),
+    ageTruncated: pageFlag(v, 'age_truncated', at),
+    capture: str(v.capture),
+    completeness: str(v.completeness),
+    gapAt: nullableStamp(v.gap_at),
+    recoveredAt: nullableStamp(v.recovered_at),
+  };
+}
+
 export function toActivity(d: unknown, what = 'an activity'): Activity {
   if (!isRecord(d) || typeof d.activity_id !== 'string' || !d.activity_id) {
     throw new MandalaError(`expected ${what} to carry its activity_id`);
@@ -4340,7 +4393,8 @@ export function toActivity(d: unknown, what = 'an activity'): Activity {
   };
   const revision = optionalCount(d.revision);
   if (revision !== undefined) out.revision = revision;
-  if (typeof d.has_results === 'boolean') out.hasResults = d.has_results;
+  const hasResults = rowFlag(d, 'has_results', what);
+  if (hasResults !== undefined) out.hasResults = hasResults;
   if (typeof d.dispatched_at === 'string') out.dispatchedAt = d.dispatched_at;
   const elapsed = optionalCount(d.elapsed_ms);
   if (elapsed !== undefined) out.elapsedMs = elapsed;
@@ -4361,7 +4415,7 @@ export function toActivity(d: unknown, what = 'an activity'): Activity {
 /**
  * A page, strict about what paging depends on: the rows, the cursors and the
  * gap flag. A page that cannot say whether it has a gap is refused rather than
- * read as one without.
+ * read as one without, and so is a `health` it sent that cannot be read.
  */
 export function toActivityPage(d: unknown, method: string, path: string): ActivityPage {
   const where = `${method} ${path}`;
@@ -4376,26 +4430,23 @@ export function toActivityPage(d: unknown, method: string, path: string): Activi
   if (typeof d.changes_cursor !== 'string') {
     throw new MandalaError(`expected ${where} to carry a changes_cursor`);
   }
-  const h = isRecord(d.health) ? d.health : {};
-  return {
+  const page: ActivityPage = {
     items: d.items.map((row, i) => toActivity(row, `activity ${i} from ${where}`)),
     nextCursor: d.next_cursor,
     changesCursor: d.changes_cursor,
     gap: d.gap,
-    health: {
-      recordingStartedAt: str(h.recording_started_at),
-      earliestRetainedAt: nullableStamp(h.earliest_retained_at),
-      countTruncated: h.count_truncated === true,
-      ageTruncated: h.age_truncated === true,
-      capture: str(h.capture),
-      completeness: str(h.completeness),
-      gapAt: nullableStamp(h.gap_at),
-      recoveredAt: nullableStamp(h.recovered_at),
-    },
     raw: { ...d },
   };
+  const health = toActivityHealth(d.health, where);
+  if (health !== undefined) page.health = health;
+  return page;
 }
 
+/**
+ * Refuses an answer without its item list, an item that is not an object or
+ * has no `id`, and a `more` that is not a boolean, which read as false would
+ * hide result versions that exist (OPL-5979).
+ */
 export function toActivityResults(d: unknown, method: string, path: string): ActivityResults {
   const where = `${method} ${path}`;
   if (!isRecord(d) || !Array.isArray(d.items)) {
@@ -4404,7 +4455,7 @@ export function toActivityResults(d: unknown, method: string, path: string): Act
   return {
     activityId: str(d.activity_id),
     revision: num(d.revision),
-    more: d.more === true,
+    more: pageFlag(d, 'more', where),
     items: d.items.map((row, i) => {
       if (!isRecord(row) || typeof row.id !== 'string' || !row.id) {
         throw new MandalaError(`expected result ${i} from ${where} to carry its id`);
