@@ -166,6 +166,38 @@ export async function resolveComputer(
 }
 
 /**
+ * The computer a `computers urls` command is about: as every computer argument
+ * resolves, and then among lost computers, which the default listing leaves
+ * out and a direct read cannot reach once their host is gone. The platform
+ * keeps a lost computer's URLs listable and deletable, so its labels can be
+ * freed for a replacement (Codex, round 2 on #256). The same id-then-unique-
+ * name rule, so a name shared by two lost computers is refused.
+ */
+async function resolveUrlComputer(
+  client: Client,
+  target: string,
+  signal: AbortSignal,
+): Promise<Computer> {
+  try {
+    return await resolveComputer(client, target, signal);
+  } catch (error) {
+    signal.throwIfAborted();
+    if (!(error instanceof NotFoundError)) throw error;
+    const lost = await client.computers.list({ state: 'lost', signal });
+    const byId = lost.find((c) => c.id === target);
+    if (byId) return byId;
+    const named = lost.filter((c) => c.name === target);
+    if (named.length === 1) return named[0]!;
+    if (named.length)
+      throw new CliError(
+        'ambiguous_computer',
+        `${target} names ${named.length} lost computers — use an id: ${named.map((c) => c.id).join(', ')}`,
+      );
+    throw error;
+  }
+}
+
+/**
  * `computers urls update|rm COMPUTER URL`: the URL by its id, its label, its
  * hostname or its address, found in the computer's own list. Always the list,
  * even for something shaped like an id: a label may be shaped like one too, and
@@ -1757,7 +1789,9 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
           keepRevision: b('keep-revision') === true,
         });
       case 'computers urls list':
-        return output.result((await (await computer()).publicUrls(call)).raw);
+        return output.result(
+          (await (await resolveUrlComputer(client, target, signal)).publicUrls(call)).raw,
+        );
       case 'computers urls create':
         return output.result(
           (await (await computer()).createPublicUrl(urlArgs as P.PublicUrlCreateArgs, call)).raw,
@@ -1768,8 +1802,12 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
         return output.result((await c.updatePublicUrl(id, urlArgs, call)).raw);
       }
       case 'computers urls rm': {
-        const c = await computer();
-        const id = await publicUrlId(c, args[1]!, signal);
+        const c = await resolveUrlComputer(client, target, signal);
+        // --id: the URL argument is its id, sent without looking it up, for
+        // when the list cannot be read but a delete is still allowed (an
+        // unsettled workspace move answers the list 409 and takes the
+        // delete). Said by the caller, never inferred from the id's shape.
+        const id = b('id') ? args[1]! : await publicUrlId(c, args[1]!, signal);
         await c.deletePublicUrl(id, call);
         return output.result({ id, deleted: true });
       }

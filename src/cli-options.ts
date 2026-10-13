@@ -388,6 +388,12 @@ export const COMMANDS: readonly Command[] = [
     'computers urls rm',
     'Remove a public URL; it stops answering at once and the app keeps running',
     ['computer', 'url'],
+    [
+      bool(
+        'id',
+        'URL is the public URL id; delete it without looking it up (works while a workspace move is unsettled)',
+      ),
+    ],
   ),
   command(
     'computers secrets get',

@@ -2630,7 +2630,12 @@ mandala computers urls update my-computer brave-otter-3f2a --port 8000
 mandala computers urls rm my-computer brave-otter-3f2a
 ```
 
-A URL is named by its id, label, hostname or address.
+A URL is named by its id, label, hostname or address, found in the computer's
+list; a reference that matches two (one URL's id and another's label) is
+refused, and the hostname names exactly one. `rm --id` deletes by id without
+the lookup, for when the list cannot be read but a delete is allowed (a
+workspace move that has not settled). A lost computer's URLs can be listed and
+removed too, so its labels are free for a replacement.
 
 ### Readiness
 

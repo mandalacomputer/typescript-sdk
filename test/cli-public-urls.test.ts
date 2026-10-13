@@ -11,6 +11,8 @@ import { Client } from '../src/index.js';
 import {
   anyRoute,
   BASE,
+  COMPUTER,
+  errorJson,
   json,
   PUBLIC_URL,
   PUBLIC_URL_LIST,
@@ -227,6 +229,70 @@ describe('computers urls', () => {
     expect(result.code).not.toBe(0);
     expect(result.frame.error.code).toBe('not_found');
     expect(h.rec.calls.some((c) => c.method === 'DELETE')).toBe(false);
+  });
+
+  // Codex, round 2 on #256: a delete the platform allows while the list is refused.
+  it('removes one by --id without listing, while a workspace move refuses the list', async () => {
+    const moving: Responder = (call) =>
+      call.path.endsWith('/public-urls') && call.method === 'GET'
+        ? json(
+            { error: 'a workspace move is unsettled', code: 'WORKSPACE_MOVING' },
+            { status: 409 },
+          )
+        : anyRoute(call);
+    const listed = harness(moving);
+    expect(
+      (await listed.run(['computers', 'urls', 'rm', 'vm-1', 'pu-0123456789abcdef'])).code,
+    ).not.toBe(0);
+    expect(listed.rec.calls.some((c) => c.method === 'DELETE')).toBe(false);
+    const h = harness(moving);
+    const result = await h.run(['computers', 'urls', 'rm', 'vm-1', 'pu-0123456789abcdef', '--id']);
+    expect(result.code).toBe(0);
+    expect(h.rec.routes()).toEqual([
+      ['GET', 'computers'],
+      ['DELETE', 'computers/vm-1/public-urls/pu-0123456789abcdef'],
+    ]);
+  });
+
+  it('refuses --id with something that cannot be an id segment', async () => {
+    const h = harness();
+    const result = await h.run(['computers', 'urls', 'rm', 'vm-1', '..', '--id']);
+    expect(result.code).not.toBe(0);
+    expect(h.rec.calls.some((c) => c.method === 'DELETE')).toBe(false);
+  });
+
+  // Codex, round 2 on #256: a lost computer's URLs stay listable and deletable,
+  // so its labels can be freed, but the default listing leaves it out.
+  const LOST = { ...COMPUTER, id: 'vm-lost', name: 'gone', state: 'lost' };
+  const withLost: Responder = (call) => {
+    if (call.method === 'GET' && call.path === '/computers')
+      return json(call.query.state === 'lost' ? [LOST] : [COMPUTER]);
+    if (
+      call.method === 'GET' &&
+      ['/computers/vm-lost', '/computers/gone', '/computers/vm-nowhere'].includes(call.path)
+    )
+      return errorJson(404, 'no such computer ID');
+    return anyRoute(call);
+  };
+
+  it.each([
+    ['its id', 'vm-lost'],
+    ['its name', 'gone'],
+  ])('lists and removes a lost computer’s URLs, found by %s', async (_what, ref) => {
+    const listing = harness(withLost);
+    expect((await listing.run(['computers', 'urls', 'list', ref])).code).toBe(0);
+    expect(listing.rec.routes().at(-1)).toEqual(['GET', 'computers/vm-lost/public-urls']);
+    const h = harness(withLost);
+    expect((await h.run(['computers', 'urls', 'rm', ref, 'cool-thing'])).code).toBe(0);
+    expect(h.rec.last().method).toBe('DELETE');
+    expect(h.rec.last().path).toBe('/computers/vm-lost/public-urls/pu-0123456789abcdef');
+  });
+
+  it('still refuses a computer that is nowhere, lost or not', async () => {
+    const h = harness(withLost);
+    const result = await h.run(['computers', 'urls', 'list', 'vm-nowhere']);
+    expect(result.code).not.toBe(0);
+    expect(result.frame.error.code).toBe('not_found');
   });
 
   it('is in help, the manifest and completion', () => {
