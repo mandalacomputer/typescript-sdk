@@ -1,0 +1,34 @@
+name: Audit
+
+# npm audit over the whole lockfile, dev dependencies included. The MCP
+# server shipped 0.13.1 with eleven published advisories against its
+# dependencies and nothing in CI noticed (OPL-6036); this repo had four, all
+# in dev tooling. An advisory is published against code that has not
+# changed, so this also runs daily, not only when a pull request touches the
+# lockfile.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "17 13 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      # Reads package-lock.json against the advisory database; no install, so
+      # no dependency's install script runs in this job.
+      - run: npm audit
