@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import { afterEach, expect, it, vi } from 'vitest';
+import { afterEach, expect, it, type Mock, vi } from 'vitest';
 import { MandalaBrowserToolset } from '../src/anthropic-browser.js';
 import { BrowserCDP } from '../src/browser-cdp.js';
 import {
@@ -103,7 +103,9 @@ const connection = (policy?: BrowserSessionPolicy) =>
   );
 const policy = { leaseSeconds: 60, maxDurationSeconds: 120 };
 function setup(
-  renew = vi.fn(async () => snapshot(40, 100)),
+  renew: Mock<(id: string, signal: AbortSignal) => Promise<BrowserSessionLease>> = vi.fn(async () =>
+    snapshot(40, 100),
+  ),
   options: BrowserSessionPolicy = policy,
 ) {
   vi.useFakeTimers({ toFake: ['Date', 'performance', 'setTimeout', 'clearTimeout'] });

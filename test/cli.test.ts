@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Writable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, type MockInstance, vi } from 'vitest';
 import {
   download,
   finishInteraction,
@@ -303,7 +303,7 @@ describe('terminal receive/output pipeline', () => {
       stdin: { setRawMode: ReturnType<typeof vi.fn>; pause: ReturnType<typeof vi.fn> };
       diagnostic: string[];
       result: Promise<number>;
-      removed: ReturnType<typeof vi.spyOn>;
+      removed: MockInstance<(type: string, ...rest: unknown[]) => void>;
     }) => Promise<void>,
     stream?: Writable,
   ) => {
