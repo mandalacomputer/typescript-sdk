@@ -233,3 +233,42 @@ it('tags the abort reason even when the source throws a different error', async 
   ).rejects.toBe(reason);
   expect(reason).toMatchObject({ uploadId });
 });
+
+it('retains every recovery ID when uploads share an abort reason', async () => {
+  const controller = new AbortController();
+  const reason = new DOMException('cancelled together', 'AbortError');
+  const ids = [uploadId, 'b'.repeat(32)];
+  const { computer, rec } = await setup((call) =>
+    json({ ...receipt(0, 3, false), upload_id: call.query.upload_id }),
+  );
+  let readers = 0;
+  let release!: () => void;
+  const ready = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const outcomes = await Promise.allSettled(
+    ids.map((id) =>
+      computer.uploadFile(
+        path,
+        {
+          size: 3,
+          read: async () => {
+            if (++readers === 2) {
+              controller.abort(reason);
+              release();
+            }
+            await ready;
+            throw reason;
+          },
+        },
+        { uploadId: id, signal: controller.signal },
+      ),
+    ),
+  );
+  expect(
+    outcomes.every((outcome) => outcome.status === 'rejected' && outcome.reason === reason),
+  ).toBe(true);
+  expect(reason).toMatchObject({ uploadIds: expect.arrayContaining(ids) });
+  expect(ids).toContain((reason as Error & { uploadId?: string }).uploadId);
+  expect(rec.calls.every((call) => call.method === 'GET')).toBe(true);
+});

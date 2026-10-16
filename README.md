@@ -4921,7 +4921,7 @@ await computer.cancelFileUpload(done.path, done.upload_id); // removes receipt, 
 `mandala files upload COMPUTER LOCAL_FILE /absolute/guest/path` and upload-side `scp` automatically use resumable uploads above 64 MiB. Resume with `mandala files upload ... --upload-id ID` using the unchanged local file. The CLI attempts receipt cleanup without waking a suspended computer again; if cleanup is unconfirmed, JSON output includes `cleanup_upload_id` and human output prints a warning. Resume an interrupted `scp` with `files upload --upload-id`, too. `--no-overwrite` and `--no-wake` apply to both transfer modes.
 
 
-Supplied upload IDs must already exist: a missing receipt or unsupported host is a 404, never an implicit restart. Typed API refusals and local validation errors keep their classes; API/transport errors carry `uploadId`. Cancellation preserves the signal reason (with `uploadId` added when the reason is extensible). For guaranteed cancellation recovery, create an ID and stage the first chunk with `writeFileChunk`, then pass that ID to `uploadFile`.
+Supplied upload IDs must already exist: a missing receipt or unsupported host is a 404, never an implicit restart. Typed API refusals and local validation errors keep their classes; API/transport errors carry `uploadId`. Cancellation preserves the signal reason (with `uploadId` added when the reason is an extensible `Error`). If multiple uploads share that reason, `uploadId` retains the first ID and `uploadIds` collects all affected IDs; wait for all uploads to settle before reading that list. For guaranteed cancellation recovery, create an ID and stage the first chunk with `writeFileChunk`, then pass that ID to `uploadFile`.
 
 ## License
 

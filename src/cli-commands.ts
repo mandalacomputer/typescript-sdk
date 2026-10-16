@@ -2360,11 +2360,11 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
       if (error instanceof CliError && error.code === 'cancelled')
         return output.error(error, 130, watching);
       const id = [error, controller.signal.reason]
-        .map((value) =>
-          value && typeof value === 'object'
-            ? (value as { uploadId?: unknown }).uploadId
-            : undefined,
-        )
+        .flatMap((value) => {
+          if (!value || typeof value !== 'object') return [];
+          const recovery = value as { uploadId?: unknown; details?: { uploadId?: unknown } };
+          return [recovery.uploadId, recovery.details?.uploadId];
+        })
         .find(
           (value): value is string => typeof value === 'string' && /^[a-f0-9]{32}$/.test(value),
         );

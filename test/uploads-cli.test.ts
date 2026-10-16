@@ -4,6 +4,9 @@ import { join } from 'node:path';
 import { Writable } from 'node:stream';
 import { describe, expect, it } from 'vitest';
 import { main } from '../src/cli.js';
+import { type LegacyCommands, runCli } from '../src/cli-commands.js';
+import { CliError } from '../src/cli-options.js';
+import { runtime } from '../src/cli-runtime.js';
 import { Client } from '../src/index.js';
 import { BASE, COMPUTER, json, type Responder, recorder } from './harness.js';
 
@@ -138,4 +141,31 @@ it('distinguishes cancelled cleanup from an incomplete transfer', async () => {
   expect(result.code).toBe(130);
   expect(result.data.error.details).toMatchObject({ upload_id: id, upload_complete: true });
   expect(result.data.error.message).toContain('Upload complete');
+});
+
+it('retains the nested recovery ID if cancellation follows a create-only refusal', async () => {
+  const id = 'c'.repeat(32);
+  let stdout = '';
+  const code = await runCli(
+    ['files', 'upload', COMPUTER.id, 'source.bin', '/tmp/file', '--json'],
+    runtime({
+      env: { MANDALA_API_KEY: 'com_test' },
+      stdout: new Writable({
+        write(chunk, _encoding, done) {
+          stdout += chunk;
+          done();
+        },
+      }) as never,
+    }),
+    {
+      upload: async () => {
+        const failure = new CliError('exists', 'Destination exists', { uploadId: id });
+        // copyIn's async file-close can deliver SIGINT after wrapping the refusal.
+        process.emit('SIGINT');
+        throw failure;
+      },
+    } as unknown as LegacyCommands,
+  );
+  expect(code).toBe(130);
+  expect(JSON.parse(stdout).error.details.upload_id).toBe(id);
 });

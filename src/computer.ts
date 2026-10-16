@@ -5620,7 +5620,17 @@ export class Computer {
       const failure = opts.signal?.aborted ? opts.signal.reason : error;
       if (failure instanceof Error && Object.isExtensible(failure)) {
         try {
-          Object.assign(failure, { uploadId });
+          // One AbortController can cancel several uploads with the same Error.
+          // Keep every recovery handle instead of overwriting the previous one.
+          const prior = failure as Error & { uploadId?: string; uploadIds?: string[] };
+          const ids = [
+            ...new Set([
+              ...(prior.uploadIds ?? []),
+              ...(prior.uploadId ? [prior.uploadId] : []),
+              uploadId,
+            ]),
+          ];
+          Object.assign(failure, { uploadId: prior.uploadId ?? uploadId, uploadIds: ids });
         } catch {
           /* Preserve unusual immutable error properties. */
         }
