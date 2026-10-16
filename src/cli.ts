@@ -1039,18 +1039,46 @@ const copyIn: LegacyCommands['upload'] = async (
     const info = await fh.stat();
     // Streamed rather than `readFile`'d: a guest-bound copy of a large file is
     // the same 2 GB the download path already refuses to hold as one Buffer.
-    const body = Readable.toWeb(fh.createReadStream()) as ReadableStream<Uint8Array>;
     let written: number | undefined;
     try {
-      written = await computer.writeFile(path, body, {
-        timeoutMs: SCP_TRANSFER_TIMEOUT_MS,
-        contentLength: info.size,
-        // Only when asked: absent is the replace every platform version does.
-        ...(overwrite ? {} : { overwrite: false }),
-        // Only when asked: absent resumes a suspended computer for the copy.
-        ...(opts.noWake ? { noWake: true } : {}),
-        signal,
-      });
+      if (info.size > 64 * 1024 * 1024 || opts.uploadId) {
+        const progress = await computer.uploadFile(
+          path,
+          {
+            size: info.size,
+            read: async (offset, length) => {
+              const chunk = new Uint8Array(length);
+              let read = 0;
+              while (read < length) {
+                const result = await fh.read(chunk, read, length - read, offset + read);
+                if (result.bytesRead === 0) break;
+                read += result.bytesRead;
+              }
+              return chunk.subarray(0, read);
+            },
+          },
+          { uploadId: opts.uploadId, overwrite, noWake: opts.noWake, signal },
+        );
+        written = progress.offset;
+        await computer
+          .cancelFileUpload(path, progress.upload_id, { noWake: true, signal })
+          .catch(() => {
+            io.stderr.write(
+              `Upload complete; staging receipt ${progress.upload_id} remains in the guest.\n`,
+            );
+          });
+      } else {
+        const body = Readable.toWeb(fh.createReadStream()) as ReadableStream<Uint8Array>;
+        written = await computer.writeFile(path, body, {
+          timeoutMs: SCP_TRANSFER_TIMEOUT_MS,
+          contentLength: info.size,
+          // Only when asked: absent is the replace every platform version does.
+          ...(overwrite ? {} : { overwrite: false }),
+          // Only when asked: absent resumes a suspended computer for the copy.
+          ...(opts.noWake ? { noWake: true } : {}),
+          signal,
+        });
+      }
     } catch (error) {
       if (error instanceof FileExistsError) {
         // Only THIS upload is known to have written nothing: an earlier attempt

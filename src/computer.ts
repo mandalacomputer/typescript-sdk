@@ -1,3 +1,9 @@
+import {
+  type FileUpload,
+  parseFileUpload,
+  UploadInterruptedError,
+  type UploadSource,
+} from './uploads.js';
 /** The Computer handle — a cloud desktop and everything you can do to it. */
 
 import {
@@ -5455,6 +5461,142 @@ export class Computer {
         throw opts.noWake === true ? notRunningRefusal(err) : err;
       });
     return count(res?.bytes);
+  }
+
+  /** Linux resumable upload, one raw chunk (at most 8 MiB) of a file up to 2 GiB.
+   * Keep path, uploadId, size, overwrite and source contents unchanged. Read status
+   * after an error; the server may have accepted part or all of the chunk.
+   */
+  async writeFileChunk(
+    path: string,
+    data: Uint8Array,
+    opts: {
+      uploadId: string;
+      offset: number;
+      size: number;
+      overwrite?: boolean;
+      noWake?: boolean;
+    } & CallOptions,
+  ): Promise<FileUpload> {
+    const query = P.uploadQuery(path, opts.uploadId, opts.noWake);
+    if (
+      !(data instanceof Uint8Array) ||
+      data.byteLength > 8 * 1024 * 1024 ||
+      !Number.isSafeInteger(opts.size) ||
+      opts.size < 0 ||
+      opts.size > 2147483648 ||
+      !Number.isSafeInteger(opts.offset) ||
+      opts.offset < 0 ||
+      opts.offset > opts.size ||
+      data.byteLength > opts.size - opts.offset ||
+      (data.byteLength === 0 && opts.offset !== opts.size)
+    )
+      throw new ValidationError(
+        'Invalid upload chunk, offset or size (8 MiB per chunk, 2 GiB per file).',
+      );
+    if (opts.overwrite !== undefined && typeof opts.overwrite !== 'boolean')
+      throw new ValidationError('overwrite must be boolean');
+    const result = await this.#t.json<unknown>('PUT', P.computerAction(this.id, 'files/uploads'), {
+      query: {
+        ...query,
+        offset: opts.offset,
+        size: opts.size,
+        overwrite: String(opts.overwrite ?? true),
+      },
+      raw: data,
+      signal: opts.signal,
+      minTimeoutMs: 300_000,
+    });
+    const progress = parseFileUpload(result, path, opts.uploadId);
+    if (
+      progress.size !== opts.size ||
+      progress.offset !== opts.offset + data.byteLength ||
+      progress.complete !== (progress.offset === opts.size)
+    )
+      throw new Error(
+        'Upload progress does not confirm this chunk; read upload status before retrying.',
+      );
+    return progress;
+  }
+
+  /** Read the actual staged offset, including completion after a lost response. */
+  async fileUpload(
+    path: string,
+    uploadId: string,
+    opts: { noWake?: boolean } & CallOptions = {},
+  ): Promise<FileUpload> {
+    const result = await this.#t.json<unknown>('GET', P.computerAction(this.id, 'files/uploads'), {
+      query: P.uploadQuery(path, uploadId, opts.noWake),
+      signal: opts.signal,
+      minTimeoutMs: 300_000,
+    });
+    return parseFileUpload(result, path, uploadId);
+  }
+
+  /** Remove staging and its receipt; never deletes the published destination. */
+  async cancelFileUpload(
+    path: string,
+    uploadId: string,
+    opts: { noWake?: boolean } & CallOptions = {},
+  ): Promise<void> {
+    await this.#t.json('DELETE', P.computerAction(this.id, 'files/uploads'), {
+      query: P.uploadQuery(path, uploadId, opts.noWake),
+      signal: opts.signal,
+      minTimeoutMs: 300_000,
+    });
+  }
+
+  /** Upload a random-access source in bounded chunks. Supply a previous uploadId
+   * to resume; keep the source unchanged. Successful uploads retain a receipt
+   * until cancelFileUpload is called. No whole-file buffering or blind retries.
+   */
+  async uploadFile(
+    path: string,
+    source: UploadSource,
+    opts: {
+      uploadId?: string;
+      overwrite?: boolean;
+      noWake?: boolean;
+    } & CallOptions = {},
+  ): Promise<FileUpload> {
+    const uploadId = opts.uploadId ?? crypto.randomUUID().replaceAll('-', '');
+    P.uploadQuery(path, uploadId, opts.noWake);
+    if (!Number.isSafeInteger(source.size) || source.size < 0 || source.size > 2147483648)
+      throw new ValidationError('File size must be between 0 and 2 GiB.');
+    try {
+      let progress: FileUpload | undefined;
+      if (opts.uploadId) {
+        try {
+          progress = await this.fileUpload(path, uploadId, opts);
+        } catch (error) {
+          if (!(error instanceof NotFoundError)) throw error;
+        }
+      }
+      if (progress && progress.size !== source.size)
+        throw new ValidationError(
+          'Source size differs from the staged upload. Use the unchanged source or a new upload ID.',
+        );
+      if (progress?.complete) return progress;
+      let offset = progress?.offset ?? 0;
+      do {
+        const length = Math.min(4 * 1024 * 1024, source.size - offset);
+        const data = length === 0 ? new Uint8Array() : await source.read(offset, length);
+        if (!(data instanceof Uint8Array) || data.byteLength !== length)
+          throw new ValidationError(
+            'Source returned a short or oversized chunk; keep the source unchanged.',
+          );
+        progress = await this.writeFileChunk(path, data, {
+          ...opts,
+          uploadId,
+          offset,
+          size: source.size,
+        });
+        offset = progress.offset;
+      } while (!progress.complete);
+      return progress;
+    } catch (error) {
+      throw new UploadInterruptedError(uploadId, error);
+    }
   }
 
   // --- snapshots ------------------------------------------------------

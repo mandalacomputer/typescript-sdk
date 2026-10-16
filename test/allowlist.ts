@@ -102,6 +102,9 @@ export const ALLOWED: ReadonlySet<string> = new Set(
       ['PUT', 'computers/:id/files'],
       ['GET', 'computers/:id/files'],
       ['GET', 'computers/:id/files/list'],
+      ['PUT', 'computers/:id/files/uploads'],
+      ['GET', 'computers/:id/files/uploads'],
+      ['DELETE', 'computers/:id/files/uploads'],
 
       // Snapshots.
       ['GET', 'snapshots'],
@@ -428,6 +431,19 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
   ['PUT computers/:id/files', ['query:path', 'query:no_wake', 'query:overwrite']],
   ['GET computers/:id/files', ['query:path', 'query:no_wake', 'header:Range']],
   ['GET computers/:id/files/list', ['query:path']],
+  [
+    'PUT computers/:id/files/uploads',
+    [
+      'query:no_wake',
+      'query:offset',
+      'query:overwrite',
+      'query:path',
+      'query:size',
+      'query:upload_id',
+    ],
+  ],
+  ['GET computers/:id/files/uploads', ['query:no_wake', 'query:path', 'query:upload_id']],
+  ['DELETE computers/:id/files/uploads', ['query:no_wake', 'query:path', 'query:upload_id']],
 
   ['GET snapshots', ['query:allow_partial', 'query:include']],
   ['GET computers/:id/snapshots', []],

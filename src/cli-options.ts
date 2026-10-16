@@ -730,6 +730,10 @@ export const COMMANDS: readonly Command[] = [
     ['computer', 'file', 'path'],
     [
       bool('no-overwrite', 'Create the guest file, refusing if something is there'),
+      flag(
+        'upload-id',
+        'Resume a large Linux upload with this 32-character ID; keep the source unchanged',
+      ),
       bool('no-wake', 'Fail with not_running rather than resume a suspended computer for the copy'),
     ],
   ),

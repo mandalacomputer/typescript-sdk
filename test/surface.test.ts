@@ -462,6 +462,16 @@ async function exerciseEverything(client: Client): Promise<void> {
   await c.readFile('/home/user/out.txt', { noWake: true });
   await c.writeFile('/home/user/in.txt', 'hello', { noWake: true });
   await c.listDirectory('/home/user/Desktop');
+  await c.writeFileChunk('/tmp/large', new Uint8Array(3), {
+    uploadId: 'a'.repeat(32),
+    offset: 0,
+    size: 3,
+    overwrite: false,
+    noWake: true,
+  });
+  await c.fileUpload('/tmp/large', 'a'.repeat(32), { noWake: true });
+  await c.cancelFileUpload('/tmp/large', 'a'.repeat(32), { noWake: true });
+  await c.uploadFile('/tmp/large', { size: 3, read: async () => new Uint8Array(3) });
   // Retained history, both pagings, and the passive signals.
   await c.activities();
   await c.activities({ cursor: 'chg-1', changes: true });

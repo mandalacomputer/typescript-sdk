@@ -4906,3 +4906,20 @@ found `windows()` broken against the live platform on its first run.
 ## License
 
 MIT
+
+### Large resumable uploads
+
+On Linux with Python 3, `computer.uploadFile(path, source, options)` uploads up to 2 GiB in 4 MiB chunks. The random-access source has a `size` and an async `read(offset, length)` returning exactly that many bytes. A browser `File` can be read with `new Uint8Array(await file.slice(offset, offset + length).arrayBuffer())`. Keep the source unchanged throughout.
+
+```ts
+const done = await computer.uploadFile('/tmp/dataset.bin', {
+  size: file.size,
+  read: async (offset, length) => new Uint8Array(
+    await file.slice(offset, offset + length).arrayBuffer()),
+}, { overwrite: false });
+await computer.cancelFileUpload(done.path, done.upload_id); // removes receipt, not destination
+```
+
+`UploadInterruptedError.uploadId` identifies an interrupted transfer. Pass it as `uploadId` with the same source to resume from server status. `writeFileChunk`, `fileUpload`, and `cancelFileUpload` expose the underlying protocol; each chunk is at most 8 MiB. Staging and completion receipts consume guest disk until cancelled and do not expire automatically. Older hosts refuse the dedicated endpoint, with no destructive fallback. Ordinary `writeFile` is unchanged.
+
+`mandala files upload COMPUTER LOCAL_FILE /absolute/guest/path` and upload-side `scp` automatically use resumable uploads above 64 MiB. Resume with `mandala files upload ... --upload-id ID` using the unchanged local file. The CLI removes the staging receipt after success. `--no-overwrite` and `--no-wake` apply to both transfer modes.

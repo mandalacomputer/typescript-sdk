@@ -102,7 +102,7 @@ export type LegacyCommands = {
     guestPath: string,
     io: CliIO,
     signal: AbortSignal,
-    opts?: { overwrite?: boolean; noWake?: boolean },
+    opts?: { overwrite?: boolean; noWake?: boolean; uploadId?: string },
   ) => Promise<CopyResult>;
   /** One guest file to a local path: scp's download half, with the computer named apart. */
   download: (
@@ -1460,7 +1460,11 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
         path === 'scp'
           ? await legacy.scp(target, args[1]!, io, signal, overwrite)
           : path === 'files upload'
-            ? await legacy.upload(target, args[1]!, args[2]!, io, signal, { ...overwrite, ...wake })
+            ? await legacy.upload(target, args[1]!, args[2]!, io, signal, {
+                ...overwrite,
+                ...wake,
+                ...(s('upload-id') ? { uploadId: s('upload-id') } : {}),
+              })
             : await legacy.download(target, args[1]!, args[2] ?? '.', io, signal, wake);
       if (json) return output.result(result);
       output.diagnostic(

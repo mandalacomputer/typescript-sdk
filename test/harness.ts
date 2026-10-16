@@ -1181,6 +1181,18 @@ export const anyRoute: Responder = (call) => {
   if (path === '/secrets') return json(get ? SECRET_LIST : SECRET, get ? {} : { status: 201 });
   if (/^\/secrets\/[^/]+$/.test(path)) return json(method === 'DELETE' ? { ok: true } : SECRET);
   if (path.endsWith('/secrets')) return json(SECRET_BINDINGS);
+  if (path.endsWith('/files/uploads'))
+    return json(
+      method === 'DELETE'
+        ? { ok: true }
+        : {
+            path: call.query.path,
+            upload_id: call.query.upload_id,
+            offset: Number(call.query.size ?? 3),
+            size: Number(call.query.size ?? 3),
+            complete: true,
+          },
+    );
   if (path.endsWith('/files/list')) return json(DIRECTORY);
   if (path.endsWith('/activities')) return json(ACTIVITY_PAGE);
   if (/\/activities\/[^/]+\/results$/.test(path)) return json(ACTIVITY_RESULTS);
