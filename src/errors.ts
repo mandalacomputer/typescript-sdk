@@ -44,6 +44,8 @@ export class ValidationError extends TypeError {
   override name = 'ValidationError';
   /** Existing upload to inspect or clean up after source validation fails. */
   uploadId?: string;
+  /** All recovery IDs if multiple uploads shared this error. */
+  uploadIds?: string[];
 }
 
 /** Base class for every error this SDK raises. */
@@ -51,6 +53,8 @@ export class MandalaError extends Error {
   override name = 'MandalaError';
   /** Resumable upload ID, when an upload failed. Read status before resending. */
   uploadId?: string;
+  /** All recovery IDs if multiple uploads shared this error. */
+  uploadIds?: string[];
   /**
    * The `Idempotency-Key` a lifecycle call was sent with, on an error that
    * leaves its outcome unknown: a request that may have been received before

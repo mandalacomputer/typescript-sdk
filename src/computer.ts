@@ -5625,12 +5625,17 @@ export class Computer {
           const prior = failure as Error & { uploadId?: string; uploadIds?: string[] };
           const ids = [
             ...new Set([
-              ...(prior.uploadIds ?? []),
-              ...(prior.uploadId ? [prior.uploadId] : []),
+              ...(Array.isArray(prior.uploadIds)
+                ? prior.uploadIds.filter((id) => typeof id === 'string')
+                : []),
+              ...(typeof prior.uploadId === 'string' ? [prior.uploadId] : []),
               uploadId,
             ]),
           ];
-          Object.assign(failure, { uploadId: prior.uploadId ?? uploadId, uploadIds: ids });
+          Object.assign(failure, {
+            uploadId: typeof prior.uploadId === 'string' ? prior.uploadId : uploadId,
+            uploadIds: ids,
+          });
         } catch {
           /* Preserve unusual immutable error properties. */
         }
