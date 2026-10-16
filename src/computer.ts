@@ -5496,17 +5496,25 @@ export class Computer {
       );
     if (opts.overwrite !== undefined && typeof opts.overwrite !== 'boolean')
       throw new ValidationError('overwrite must be boolean');
-    const result = await this.#t.json<unknown>('PUT', P.computerAction(this.id, 'files/uploads'), {
-      query: {
-        ...query,
-        offset: opts.offset,
-        size: opts.size,
-        overwrite: String(opts.overwrite ?? true),
-      },
-      raw: data,
-      signal: opts.signal,
-      minTimeoutMs: 300_000,
-    });
+    const result = await this.#t
+      .json<unknown>('PUT', P.computerAction(this.id, 'files/uploads'), {
+        query: {
+          ...query,
+          offset: opts.offset,
+          size: opts.size,
+          overwrite: String(opts.overwrite ?? true),
+        },
+        raw: data,
+        signal: opts.signal,
+        minTimeoutMs: 300_000,
+      })
+      .catch((error: unknown) => {
+        // Uploads also use reasonless 409 for an offset/metadata conflict.
+        // Only an explicit unavailable reason proves a no-wake refusal.
+        if (opts.noWake && error instanceof ConflictError && error.reason === 'unavailable')
+          throw notRunningRefusal(error);
+        throw opts.overwrite === false ? createOnlyRefusal(error) : error;
+      });
     const progress = parseFileUpload(result, path, opts.uploadId);
     if (
       progress.size !== opts.size ||
@@ -5525,11 +5533,19 @@ export class Computer {
     uploadId: string,
     opts: { noWake?: boolean } & CallOptions = {},
   ): Promise<FileUpload> {
-    const result = await this.#t.json<unknown>('GET', P.computerAction(this.id, 'files/uploads'), {
-      query: P.uploadQuery(path, uploadId, opts.noWake),
-      signal: opts.signal,
-      minTimeoutMs: 300_000,
-    });
+    const result = await this.#t
+      .json<unknown>('GET', P.computerAction(this.id, 'files/uploads'), {
+        query: P.uploadQuery(path, uploadId, opts.noWake),
+        signal: opts.signal,
+        minTimeoutMs: 300_000,
+      })
+      .catch((error: unknown) => {
+        // Uploads also use reasonless 409 for an offset/metadata conflict.
+        // Only an explicit unavailable reason proves a no-wake refusal.
+        if (opts.noWake && error instanceof ConflictError && error.reason === 'unavailable')
+          throw notRunningRefusal(error);
+        throw error;
+      });
     return parseFileUpload(result, path, uploadId);
   }
 
@@ -5539,11 +5555,19 @@ export class Computer {
     uploadId: string,
     opts: { noWake?: boolean } & CallOptions = {},
   ): Promise<void> {
-    await this.#t.json('DELETE', P.computerAction(this.id, 'files/uploads'), {
-      query: P.uploadQuery(path, uploadId, opts.noWake),
-      signal: opts.signal,
-      minTimeoutMs: 300_000,
-    });
+    await this.#t
+      .json('DELETE', P.computerAction(this.id, 'files/uploads'), {
+        query: P.uploadQuery(path, uploadId, opts.noWake),
+        signal: opts.signal,
+        minTimeoutMs: 300_000,
+      })
+      .catch((error: unknown) => {
+        // Uploads also use reasonless 409 for an offset/metadata conflict.
+        // Only an explicit unavailable reason proves a no-wake refusal.
+        if (opts.noWake && error instanceof ConflictError && error.reason === 'unavailable')
+          throw notRunningRefusal(error);
+        throw error;
+      });
   }
 
   /** Upload a random-access source in bounded chunks. Supply a previous uploadId
@@ -5566,11 +5590,7 @@ export class Computer {
     try {
       let progress: FileUpload | undefined;
       if (opts.uploadId) {
-        try {
-          progress = await this.fileUpload(path, uploadId, opts);
-        } catch (error) {
-          if (!(error instanceof NotFoundError)) throw error;
-        }
+        progress = await this.fileUpload(path, uploadId, opts);
       }
       if (progress && progress.size !== source.size)
         throw new ValidationError(
@@ -5595,6 +5615,11 @@ export class Computer {
       } while (!progress.complete);
       return progress;
     } catch (error) {
+      // Preserve cancellation identity, validation types and the SDK's typed
+      // API/transport refusals. Retain the ID for cleanup/reconciliation.
+      if (error instanceof Error && Object.isExtensible(error)) Object.assign(error, { uploadId });
+      if (opts.signal?.aborted) throw opts.signal.reason;
+      if (error instanceof MandalaError || error instanceof ValidationError) throw error;
       throw new UploadInterruptedError(uploadId, error);
     }
   }

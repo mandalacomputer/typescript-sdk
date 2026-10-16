@@ -1,5 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import { Client, UploadInterruptedError } from '../src/index.js';
+import {
+  Client,
+  ComputerNotRunningError,
+  ConflictError,
+  CreateOnlyConflictError,
+  FileExistsError,
+  NotFoundError,
+  UploadInterruptedError,
+  ValidationError,
+} from '../src/index.js';
 import { BASE, COMPUTER, json, type Responder, recorder } from './harness.js';
 
 const path = '/tmp/é & file';
@@ -97,7 +106,7 @@ describe('resumable uploads', () => {
   });
   it('retains the ID and does not claim success for an ambiguous response', async () => {
     const { computer } = await setup((call) =>
-      call.method === 'GET' ? json({ error: 'missing' }, { status: 404 }) : json({ offset: 3 }),
+      call.method === 'GET' ? json(receipt(0, 3, false)) : json({ offset: 3 }),
     );
     await expect(
       computer.uploadFile(path, { size: 3, read: async () => new Uint8Array(3) }, { uploadId }),
@@ -108,11 +117,99 @@ describe('resumable uploads', () => {
     const { computer, rec } = await setup(() => json(receipt(1, 3, false)));
     await expect(
       computer.uploadFile(path, { size: 4, read: async () => new Uint8Array(4) }, { uploadId }),
-    ).rejects.toThrow('Source size differs');
+    ).rejects.toBeInstanceOf(ValidationError);
     expect(rec.calls.map((c) => c.method)).toEqual(['GET']);
     await expect(
       computer.writeFileChunk(path, new Uint8Array(3), { uploadId, offset: 2, size: 3 }),
     ).rejects.toThrow('Invalid upload');
     expect(rec.calls).toHaveLength(1);
+  });
+});
+
+describe('upload error contracts', () => {
+  for (const [reason, kind] of [
+    ['exists', FileExistsError],
+    [undefined, CreateOnlyConflictError],
+    ['unavailable', ComputerNotRunningError],
+  ] as const) {
+    it(`preserves ${reason ?? 'reasonless create-only'} refusals with the upload ID`, async () => {
+      const { computer } = await setup((call) =>
+        call.method === 'GET'
+          ? json(receipt(0, 3, false))
+          : json({ error: 'refused', reason }, { status: 409 }),
+      );
+      let error: unknown;
+      try {
+        await computer.uploadFile(
+          path,
+          { size: 3, read: async () => new Uint8Array(3) },
+          { uploadId, overwrite: false, noWake: true },
+        );
+      } catch (e) {
+        error = e;
+      }
+      expect(error).toBeInstanceOf(kind);
+      expect(error).toMatchObject({ uploadId });
+    });
+  }
+  it('does not turn a missing receipt into a new upload', async () => {
+    const { computer, rec } = await setup(() => json({ error: 'missing' }, { status: 404 }));
+    await expect(
+      computer.uploadFile(path, { size: 3, read: async () => new Uint8Array(3) }, { uploadId }),
+    ).rejects.toBeInstanceOf(NotFoundError);
+    expect(rec.calls.map((c) => c.method)).toEqual(['GET']);
+  });
+  it('preserves the exact abort reason and its recovery ID', async () => {
+    const controller = new AbortController();
+    const reason = new DOMException('cancelled by user', 'AbortError');
+    const { computer } = await setup(() => json(receipt(0, 3, false)));
+    await expect(
+      computer.uploadFile(
+        path,
+        {
+          size: 3,
+          read: async () => {
+            controller.abort(reason);
+            throw reason;
+          },
+        },
+        { uploadId, signal: controller.signal },
+      ),
+    ).rejects.toBe(reason);
+    expect(reason).toMatchObject({ uploadId });
+  });
+  it('maps only explicit no-wake refusals on status and cleanup', async () => {
+    for (const reason of ['unavailable', undefined]) {
+      const { computer } = await setup(() => json({ error: 'conflict', reason }, { status: 409 }));
+      const kind = reason ? ComputerNotRunningError : ConflictError;
+      await expect(computer.fileUpload(path, uploadId, { noWake: true })).rejects.toBeInstanceOf(
+        kind,
+      );
+      await expect(
+        computer.cancelFileUpload(path, uploadId, { noWake: true }),
+      ).rejects.toBeInstanceOf(kind);
+    }
+  });
+  it('publishes an empty file without reading source bytes', async () => {
+    const { computer, rec } = await setup((call) =>
+      json({ ...receipt(0, 0), upload_id: call.query.upload_id }),
+    );
+    expect(
+      (
+        await computer.uploadFile(path, {
+          size: 0,
+          read: async () => {
+            throw new Error('unexpected read');
+          },
+        })
+      ).complete,
+    ).toBe(true);
+    expect(rec.last().raw).toHaveLength(0);
+  });
+  it('rejects a genuinely short source as validation, not a retry suggestion', async () => {
+    const { computer } = await setup(() => json(receipt(0, 3, false)));
+    await expect(
+      computer.uploadFile(path, { size: 3, read: async () => new Uint8Array(1) }, { uploadId }),
+    ).rejects.toBeInstanceOf(ValidationError);
   });
 });

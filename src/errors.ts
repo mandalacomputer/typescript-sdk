@@ -42,11 +42,15 @@ import type { InputBatchResult, Operation } from './models.js';
  */
 export class ValidationError extends TypeError {
   override name = 'ValidationError';
+  /** Existing upload to inspect or clean up after source validation fails. */
+  uploadId?: string;
 }
 
 /** Base class for every error this SDK raises. */
 export class MandalaError extends Error {
   override name = 'MandalaError';
+  /** Resumable upload ID, when an upload failed. Read status before resending. */
+  uploadId?: string;
   /**
    * The `Idempotency-Key` a lifecycle call was sent with, on an error that
    * leaves its outcome unknown: a request that may have been received before

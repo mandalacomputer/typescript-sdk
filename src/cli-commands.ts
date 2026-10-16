@@ -84,6 +84,7 @@ export type CopyResult = {
   bytes: number;
   confirmed: boolean;
   accounting?: string;
+  cleanup_upload_id?: string;
 };
 
 export type LegacyCommands = {
@@ -1467,6 +1468,10 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
               })
             : await legacy.download(target, args[1]!, args[2] ?? '.', io, signal, wake);
       if (json) return output.result(result);
+      if (result.cleanup_upload_id)
+        output.diagnostic(
+          `Upload complete; staging receipt ${result.cleanup_upload_id} remains in the guest. Remove it with cancelFileUpload when available.`,
+        );
       output.diagnostic(
         `${result.source} -> ${result.destination} (${result.accounting ?? `${result.bytes} bytes`})`,
       );

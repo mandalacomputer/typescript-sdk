@@ -1035,6 +1035,7 @@ const copyIn: LegacyCommands['upload'] = async (
   let size: string;
   let sent = 0;
   let confirmed = false;
+  let cleanup_upload_id: string | undefined;
   try {
     const info = await fh.stat();
     // Streamed rather than `readFile`'d: a guest-bound copy of a large file is
@@ -1063,9 +1064,8 @@ const copyIn: LegacyCommands['upload'] = async (
         await computer
           .cancelFileUpload(path, progress.upload_id, { noWake: true, signal })
           .catch(() => {
-            io.stderr.write(
-              `Upload complete; staging receipt ${progress.upload_id} remains in the guest.\n`,
-            );
+            if (signal.aborted) throw signal.reason;
+            cleanup_upload_id = progress.upload_id;
           });
       } else {
         const body = Readable.toWeb(fh.createReadStream()) as ReadableStream<Uint8Array>;
@@ -1087,8 +1087,11 @@ const copyIn: LegacyCommands['upload'] = async (
           'exists',
           `${remote.target}:${path} already exists; this upload wrote nothing. If an earlier ` +
             "attempt's outcome was unknown, the file may be yours: read it and compare before " +
-            'choosing another path or dropping --no-overwrite to replace it.',
-          { status: error.status, reason: error.reason },
+            'choosing another path or dropping --no-overwrite to replace it.' +
+            (error.uploadId
+              ? ` Read fileUpload for upload ID ${error.uploadId}; staging may need cleanup.`
+              : ''),
+          { status: error.status, reason: error.reason, uploadId: error.uploadId },
         );
       }
       if (error instanceof CreateOnlyConflictError) {
@@ -1100,8 +1103,11 @@ const copyIn: LegacyCommands['upload'] = async (
           `${remote.target}:${path}: the create-only upload was refused as a conflict, reason ` +
             'unknown; whether this upload wrote anything is unconfirmed. Do not send the same ' +
             'upload again blind: read the remote path to see what is there before choosing ' +
-            'another path or dropping --no-overwrite.',
-          { status: error.status, reason: error.reason },
+            'another path or dropping --no-overwrite.' +
+            (error.uploadId
+              ? ` Read fileUpload for upload ID ${error.uploadId}; staging may need cleanup.`
+              : ''),
+          { status: error.status, reason: error.reason, uploadId: error.uploadId },
         );
       }
       throw error;
@@ -1127,6 +1133,7 @@ const copyIn: LegacyCommands['upload'] = async (
     bytes: sent,
     confirmed,
     accounting: size,
+    ...(cleanup_upload_id ? { cleanup_upload_id } : {}),
   };
 };
 

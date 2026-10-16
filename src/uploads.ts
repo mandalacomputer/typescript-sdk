@@ -1,3 +1,5 @@
+import { MandalaError } from './errors.js';
+
 /** A random-access source; implementations must keep its contents unchanged. */
 export interface UploadSource {
   size: number;
@@ -11,10 +13,11 @@ export interface FileUpload {
   complete: boolean;
 }
 /** Retain uploadId and the unchanged source; uploadFile can resume from server status. */
-export class UploadInterruptedError extends Error {
+export class UploadInterruptedError extends MandalaError {
   override name = 'UploadInterruptedError';
+  readonly code = 'upload_interrupted';
   constructor(
-    readonly uploadId: string,
+    override readonly uploadId: string,
     cause: unknown,
   ) {
     super(
