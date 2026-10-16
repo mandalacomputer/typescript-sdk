@@ -230,6 +230,7 @@ type ComputerAction =
   | 'exec'
   | 'windows'
   | 'files'
+  | 'files/uploads'
   | 'snapshots'
   | 'schedule'
   | 'ssh'
@@ -3491,4 +3492,22 @@ export function operationsQuery(args: OperationListArgs = {}): Query {
     q.cursor = c;
   }
   return q;
+}
+
+/** Dedicated route: an older host must refuse, never truncate the destination. */
+export function uploadQuery(path: string, uploadId: string, noWake?: boolean): Query {
+  const query = filesQuery(path, noWake);
+  if (
+    !path.startsWith('/') ||
+    path === '/' ||
+    path.endsWith('/') ||
+    path
+      .split('/')
+      .slice(1)
+      .some((part) => part === '' || part === '.' || part === '..')
+  )
+    throw new ValidationError('Upload path must be a normalized absolute Linux file path.');
+  if (!/^[a-f0-9]{32}$/.test(uploadId))
+    throw new ValidationError('uploadId must be 32 lowercase hexadecimal characters.');
+  return { ...query, upload_id: uploadId };
 }

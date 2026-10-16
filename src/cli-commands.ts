@@ -84,6 +84,7 @@ export type CopyResult = {
   bytes: number;
   confirmed: boolean;
   accounting?: string;
+  cleanup_upload_id?: string;
 };
 
 export type LegacyCommands = {
@@ -102,7 +103,7 @@ export type LegacyCommands = {
     guestPath: string,
     io: CliIO,
     signal: AbortSignal,
-    opts?: { overwrite?: boolean; noWake?: boolean },
+    opts?: { overwrite?: boolean; noWake?: boolean; uploadId?: string },
   ) => Promise<CopyResult>;
   /** One guest file to a local path: scp's download half, with the computer named apart. */
   download: (
@@ -1460,9 +1461,17 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
         path === 'scp'
           ? await legacy.scp(target, args[1]!, io, signal, overwrite)
           : path === 'files upload'
-            ? await legacy.upload(target, args[1]!, args[2]!, io, signal, { ...overwrite, ...wake })
+            ? await legacy.upload(target, args[1]!, args[2]!, io, signal, {
+                ...overwrite,
+                ...wake,
+                ...(s('upload-id') ? { uploadId: s('upload-id') } : {}),
+              })
             : await legacy.download(target, args[1]!, args[2] ?? '.', io, signal, wake);
       if (json) return output.result(result);
+      if (result.cleanup_upload_id)
+        output.diagnostic(
+          `Upload complete; cleanup is unconfirmed for receipt ${result.cleanup_upload_id}. It may remain in the guest; inspect or remove it with cancelFileUpload.`,
+        );
       output.diagnostic(
         `${result.source} -> ${result.destination} (${result.accounting ?? `${result.bytes} bytes`})`,
       );
@@ -2347,8 +2356,30 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
     if (!parsed && error instanceof CliError && error.command !== undefined)
       output = new Output(io, error.command, options.includes('--json'));
     if (error instanceof CredentialSaveError && error.committed) return output.error(error);
-    if (controller.signal.aborted)
-      return output.error(new CliError('cancelled', 'Cancelled'), 130, watching);
+    if (controller.signal.aborted) {
+      if (error instanceof CliError && error.code === 'cancelled')
+        return output.error(error, 130, watching);
+      const id = [error, controller.signal.reason]
+        .flatMap((value) => {
+          if (!value || typeof value !== 'object') return [];
+          const recovery = value as { uploadId?: unknown; details?: { uploadId?: unknown } };
+          return [recovery.uploadId, recovery.details?.uploadId];
+        })
+        .find(
+          (value): value is string => typeof value === 'string' && /^[a-f0-9]{32}$/.test(value),
+        );
+      return output.error(
+        new CliError(
+          'cancelled',
+          id
+            ? `Cancelled. Retain upload ID ${id}; resume with files upload --upload-id and the unchanged source, or inspect/cancel staging with the SDK.`
+            : 'Cancelled',
+          id ? { uploadId: id } : undefined,
+        ),
+        130,
+        watching,
+      );
+    }
     // Preserve stacks for programming faults in the human CLI, including terminal DOMExceptions.
     if (
       !output.json &&

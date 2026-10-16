@@ -9,6 +9,8 @@ This is the summary you read to decide whether to upgrade.
 
 ## [Unreleased]
 
+- Add bounded Linux resumable uploads up to 2 GiB in the SDK and CLI, with status-based resume and explicit receipt cleanup.
+
 ## [0.13.0] — 2026-10-13
 
 ### Added

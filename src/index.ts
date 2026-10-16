@@ -379,5 +379,6 @@ export type {
   SynchronousResult,
   SynchronousResultPrefix,
 } from './results.js';
+export { type FileUpload, UploadInterruptedError, type UploadSource } from './uploads.js';
 /** Re-exported so a caller can build a URL against the same default. */
 export { DEFAULT_BASE_URL as BASE_URL };

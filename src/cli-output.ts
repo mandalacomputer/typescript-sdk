@@ -157,9 +157,11 @@ function recoveryInfo(error: MandalaError): {
   idempotency_key?: string;
   request_id?: string;
   operation_id?: string;
+  upload_id?: string;
 } {
   const api = error instanceof APIError ? error : undefined;
   return {
+    ...(error.uploadId === undefined ? {} : { upload_id: error.uploadId }),
     ...(error.idempotencyKey === undefined ? {} : { idempotency_key: error.idempotencyKey }),
     ...(api?.requestId === undefined ? {} : { request_id: api.requestId }),
     ...(api?.operationId === undefined ? {} : { operation_id: api.operationId }),
@@ -188,6 +190,7 @@ export function errorInfo(error: unknown): {
   idempotency_key?: string;
   request_id?: string;
   operation_id?: string;
+  upload_id?: string;
 } {
   if (error instanceof CliError)
     return {
@@ -197,7 +200,11 @@ export function errorInfo(error: unknown): {
       ...(error.usage === undefined ? {} : { usage: error.usage }),
     };
   if (error instanceof ValidationError)
-    return { code: 'invalid_arguments', message: error.message };
+    return {
+      code: 'invalid_arguments',
+      message: error.message,
+      ...(error.uploadId ? { upload_id: error.uploadId } : {}),
+    };
   if (error instanceof APIError)
     return {
       code: errorCode(error),
@@ -317,6 +324,11 @@ export class Output {
         );
       // How to learn how a call whose answer was lost ended.
       const recovery = [
+        ...(info.upload_id === undefined
+          ? []
+          : [
+              `upload ID ${info.upload_id}; inspect fileUpload before resuming with files upload --upload-id`,
+            ]),
         ...(info.operation_id === undefined ? [] : [`operation ${info.operation_id}`]),
         ...(info.idempotency_key === undefined ? [] : [`idempotency key ${info.idempotency_key}`]),
         ...(info.request_id === undefined ? [] : [`request id ${info.request_id}`]),

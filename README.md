@@ -4903,6 +4903,26 @@ They exist because a fixture written from the same reading of the reference that
 produced the code asserts a wrong reading rather than catching it. `smoke:events`
 found `windows()` broken against the live platform on its first run.
 
+## Large resumable uploads
+
+On Linux with Python 3, `computer.uploadFile(path, source, options)` uploads up to 2 GiB in 4 MiB chunks. The random-access source has a `size` and an async `read(offset, length)` returning exactly that many bytes. A browser `File` can be read with `new Uint8Array(await file.slice(offset, offset + length).arrayBuffer())`. Keep the source unchanged throughout.
+
+```ts
+const done = await computer.uploadFile('/tmp/dataset.bin', {
+  size: file.size,
+  read: async (offset, length) => new Uint8Array(
+    await file.slice(offset, offset + length).arrayBuffer()),
+}, { overwrite: false });
+await computer.cancelFileUpload(done.path, done.upload_id); // removes receipt, not destination
+```
+
+`MandalaError.uploadId` identifies an interrupted transfer. Pass it as `uploadId` with the same source to resume from server status. `writeFileChunk`, `fileUpload`, and `cancelFileUpload` expose the underlying protocol; each chunk is at most 8 MiB. Staging and completion receipts consume guest disk until cancelled and do not expire automatically. Older hosts refuse the dedicated endpoint, with no destructive fallback. Ordinary `writeFile` is unchanged.
+
+`mandala files upload COMPUTER LOCAL_FILE /absolute/guest/path` and upload-side `scp` automatically use resumable uploads above 64 MiB. Resume with `mandala files upload ... --upload-id ID` using the unchanged local file. The CLI attempts receipt cleanup without waking a suspended computer again; if cleanup is unconfirmed, JSON output includes `cleanup_upload_id` and human output prints a warning. Resume an interrupted `scp` with `files upload --upload-id`, too. `--no-overwrite` and `--no-wake` apply to both transfer modes.
+
+
+Supplied upload IDs must already exist: a missing receipt or unsupported host is a 404, never an implicit restart. Typed API refusals and local validation errors keep their classes; API/transport errors carry `uploadId`. Cancellation preserves the signal reason (with `uploadId` added when the reason is an extensible `Error`). If multiple uploads share that reason, `uploadId` retains the first ID and `uploadIds` collects all affected IDs; wait for all uploads to settle before reading that list. For guaranteed cancellation recovery, create an ID and stage the first chunk with `writeFileChunk`, then pass that ID to `uploadFile`.
+
 ## License
 
 MIT
