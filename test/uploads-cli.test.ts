@@ -14,7 +14,11 @@ async function run(size: number, respond: Responder, extra: string[] = []) {
   await handle.truncate(size);
   await handle.close();
   const rec = recorder((call) =>
-    call.path === `/computers/${COMPUTER.id}` ? json(COMPUTER) : respond(call),
+    call.path === '/computers'
+      ? json([COMPUTER])
+      : call.path === `/computers/${COMPUTER.id}`
+        ? json(COMPUTER)
+        : respond(call),
   );
   let stdout = '',
     stderr = '';
@@ -101,4 +105,37 @@ describe('large upload CLI', () => {
     expect(result.data.data.cleanup_upload_id).toBe(id);
     expect(result.stderr).toBe('');
   });
+});
+
+it('retains the generated upload ID when Ctrl-C interrupts a PUT', async () => {
+  let id = '';
+  const result = await run(64 * 1024 * 1024 + 1, (call) => {
+    id = String(call.query.upload_id);
+    process.emit('SIGINT');
+    throw new DOMException('interrupted', 'AbortError');
+  });
+  expect(result.code).toBe(130);
+  expect(result.data.error.code).toBe('cancelled');
+  expect(id, JSON.stringify({ data: result.data, routes: result.rec.routes() })).toMatch(
+    /^[a-f0-9]{32}$/,
+  );
+  expect(result.data.error.details?.upload_id, JSON.stringify(result.data)).toBe(id);
+  expect(result.data.error.message).toContain(id);
+});
+it('distinguishes cancelled cleanup from an incomplete transfer', async () => {
+  const id = 'b'.repeat(32);
+  const result = await run(
+    3,
+    (call) => {
+      if (call.method === 'DELETE') {
+        process.emit('SIGINT');
+        throw new DOMException('cancelled', 'AbortError');
+      }
+      return json({ path: '/tmp/file', upload_id: id, offset: 3, size: 3, complete: true });
+    },
+    ['--upload-id', id],
+  );
+  expect(result.code).toBe(130);
+  expect(result.data.error.details).toMatchObject({ upload_id: id, upload_complete: true });
+  expect(result.data.error.message).toContain('Upload complete');
 });

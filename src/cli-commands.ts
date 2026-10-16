@@ -1470,7 +1470,7 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
       if (json) return output.result(result);
       if (result.cleanup_upload_id)
         output.diagnostic(
-          `Upload complete; staging receipt ${result.cleanup_upload_id} remains in the guest. Remove it with cancelFileUpload when available.`,
+          `Upload complete; cleanup is unconfirmed for receipt ${result.cleanup_upload_id}. It may remain in the guest; inspect or remove it with cancelFileUpload.`,
         );
       output.diagnostic(
         `${result.source} -> ${result.destination} (${result.accounting ?? `${result.bytes} bytes`})`,
@@ -2356,8 +2356,30 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
     if (!parsed && error instanceof CliError && error.command !== undefined)
       output = new Output(io, error.command, options.includes('--json'));
     if (error instanceof CredentialSaveError && error.committed) return output.error(error);
-    if (controller.signal.aborted)
-      return output.error(new CliError('cancelled', 'Cancelled'), 130, watching);
+    if (controller.signal.aborted) {
+      if (error instanceof CliError && error.code === 'cancelled')
+        return output.error(error, 130, watching);
+      const id = [error, controller.signal.reason]
+        .map((value) =>
+          value && typeof value === 'object'
+            ? (value as { uploadId?: unknown }).uploadId
+            : undefined,
+        )
+        .find(
+          (value): value is string => typeof value === 'string' && /^[a-f0-9]{32}$/.test(value),
+        );
+      return output.error(
+        new CliError(
+          'cancelled',
+          id
+            ? `Cancelled. Retain upload ID ${id}; resume with files upload --upload-id and the unchanged source, or inspect/cancel staging with the SDK.`
+            : 'Cancelled',
+          id ? { uploadId: id } : undefined,
+        ),
+        130,
+        watching,
+      );
+    }
     // Preserve stacks for programming faults in the human CLI, including terminal DOMExceptions.
     if (
       !output.json &&

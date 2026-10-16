@@ -213,3 +213,23 @@ describe('upload error contracts', () => {
     ).rejects.toBeInstanceOf(ValidationError);
   });
 });
+
+it('tags the abort reason even when the source throws a different error', async () => {
+  const controller = new AbortController();
+  const reason = new DOMException('cancelled', 'AbortError');
+  const { computer } = await setup(() => json(receipt(0, 3, false)));
+  await expect(
+    computer.uploadFile(
+      path,
+      {
+        size: 3,
+        read: async () => {
+          controller.abort(reason);
+          throw new Error('different failure');
+        },
+      },
+      { uploadId, signal: controller.signal },
+    ),
+  ).rejects.toBe(reason);
+  expect(reason).toMatchObject({ uploadId });
+});

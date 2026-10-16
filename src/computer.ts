@@ -5617,8 +5617,15 @@ export class Computer {
     } catch (error) {
       // Preserve cancellation identity, validation types and the SDK's typed
       // API/transport refusals. Retain the ID for cleanup/reconciliation.
-      if (error instanceof Error && Object.isExtensible(error)) Object.assign(error, { uploadId });
-      if (opts.signal?.aborted) throw opts.signal.reason;
+      const failure = opts.signal?.aborted ? opts.signal.reason : error;
+      if (failure instanceof Error && Object.isExtensible(failure)) {
+        try {
+          Object.assign(failure, { uploadId });
+        } catch {
+          /* Preserve unusual immutable error properties. */
+        }
+      }
+      if (opts.signal?.aborted) throw failure;
       if (error instanceof MandalaError || error instanceof ValidationError) throw error;
       throw new UploadInterruptedError(uploadId, error);
     }

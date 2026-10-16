@@ -1064,7 +1064,12 @@ const copyIn: LegacyCommands['upload'] = async (
         await computer
           .cancelFileUpload(path, progress.upload_id, { noWake: true, signal })
           .catch(() => {
-            if (signal.aborted) throw signal.reason;
+            if (signal.aborted)
+              throw new CliError(
+                'cancelled',
+                `Upload complete; receipt cleanup was cancelled. Retain upload ID ${progress.upload_id} to inspect or remove the receipt.`,
+                { uploadId: progress.upload_id, uploadComplete: true },
+              );
             cleanup_upload_id = progress.upload_id;
           });
       } else {
