@@ -9,7 +9,34 @@ This is the summary you read to decide whether to upgrade.
 
 ## [Unreleased]
 
-- Add bounded Linux resumable uploads up to 2 GiB in the SDK and CLI, with status-based resume and explicit receipt cleanup.
+## [0.14.0] — 2026-10-16
+
+### Added
+
+- **Resumable uploads.** On a Linux computer with Python 3,
+  `computer.uploadFile(path, source, options)` uploads a file of up to 2 GiB
+  in 4 MiB chunks from a random-access source (`size` plus an async
+  `read(offset, length)`), and publishes it atomically when the last chunk
+  lands; `overwrite: false` refuses an occupied destination. An interrupted
+  upload throws with `uploadId` on the error (`UploadInterruptedError` when the
+  transfer itself broke): pass it back as `uploadId` with the unchanged source
+  and the upload resumes from the offset the computer reports. A supplied ID
+  must already exist — a missing one is a 404, never a silent restart.
+  `writeFileChunk` (at most 8 MiB), `fileUpload` and `cancelFileUpload` expose
+  the protocol directly. Staging and completion receipts use guest disk until
+  cancelled and do not expire. A host without the endpoint refuses it rather
+  than falling back to a truncating write, and `writeFile` is unchanged.
+- **The CLI uses it above 64 MiB.** `mandala files upload` and upload-side
+  `scp` switch to resumable uploads for larger files; resume either with
+  `mandala files upload … --upload-id ID` and the unchanged local file. The CLI
+  cleans up the receipt afterwards without waking a suspended computer again,
+  and says so when it could not (`cleanup_upload_id` in JSON output).
+  `--no-overwrite` and `--no-wake` apply to both transfer modes.
+
+### Changed
+
+- Development moves to vitest 4.1.12, and CI audits the dependency tree on
+  every pull request and daily.
 
 ## [0.13.0] — 2026-10-13
 
