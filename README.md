@@ -2052,20 +2052,48 @@ revokes its capability; it does not stop Chromium or delete the computer.
   control connection and disposal remain available. This can end an
   otherwise healthy toolset when another context's frame disappears before
   the driver has observed it. Create a new toolset to continue.
-- A backend advertising `context_guard_version: 1` through the root CDP
-  method `Mandala.getConnectionCapabilities` protects the advertised
-  `downstream` and `host_link` disconnects: loss of the SDK connection or the
-  daemon's link to the guardian. The guardian must remain alive and connected
-  to Chromium. This SDK already creates its context with `disposeOnDetach: true`,
-  so no SDK opt-in is needed on a backend with that capability. Before detaching
-  interception, the guardian disposes only those contexts created on that
-  connection with this flag. If disposal cannot be acknowledged, the guardian
-  retains the upstream connection and interception while cleanup remains
-  pending. This occupies a bounded connection slot and can stall other HTTP
-  requests intercepted at the same browser root; eventual cleanup is not
-  guaranteed. Guardian failure or loss of its connection to Chromium remains
-  outside this protection (OPL-5954): pending HTTP requests can still resume
-  without policy approval. The URL hook remains **not network isolation**.
+- **Disconnect protection depends on the deployed backend and this connection's
+  advertised capabilities.** The root CDP method
+  `Mandala.getConnectionCapabilities` reports `context_guard_version: 1` and a
+  `protected_disconnects` list. `downstream` and `host_link` cover loss of the
+  SDK connection or the host relay link while the connection guardian and its
+  Chromium connection remain alive. Pending requests remain intercepted until
+  this connection's temporary contexts are disposed. This SDK already requests
+  temporary contexts with `disposeOnDetach: true`; no SDK opt-in is needed.
+  Contexts belonging to other connections are not disposed. A successful
+  connection, SDK version, or `context_guard_version` alone does not establish
+  which failures are protected.
+- **Additional protection for public HTTP(S) destinations.** On supported Linux
+  computers, a connection that also advertises both `guardian_exit` and
+  `browser_link` prevents held HTTP(S) requests to public destinations from
+  being delivered without policy approval when the guardian dies or loses its
+  Chromium connection. This includes HTTPS requests on an already-established
+  connection. It applies to this toolset's temporary context, not persistent,
+  default, or other connections' contexts, nor a context configured with its own
+  proxy settings. A computer with `browser_proxy` or another managed browser
+  proxy policy does not advertise this additional protection. Legacy backends
+  and direct Chromium connections also lack it: losing browser control can
+  still release a held request before its context is removed. The SDK ends
+  its session and ignores late policy results, but cannot prevent delivery
+  outside the advertised protection.
+- **Remaining limits and compatibility.** Local IP addresses, localhost and
+  dotless hostnames bypass the additional protection, preserving Chromium's
+  local-network access checks. In a protected context, a hostname that resolves
+  to a non-public address is refused; using its local IP address does not gain
+  disconnect protection. Changing a browser proxy policy does not apply it to
+  an already-open protected context; close the toolset and create a new one.
+  A request can still escape if Chromium's network service restarts and browser
+  control is also lost before the context is disposed, or if a page or child
+  control session detaches while the main connection remains healthy.
+  Protected contexts use the computer's DNS resolver and TCP rather than
+  Chromium's secure DNS or QUIC/HTTP3. WebSockets and non-HTTP(S) traffic such as
+  WebRTC and WebTransport have no URL-hook disconnect guarantee. Use independent
+  guest egress controls for network containment; this is **not network isolation**.
+- **Cleanup can remain pending.** If context disposal cannot be confirmed, the
+  connection and interception are retained while cleanup is pending, even with
+  the additional protection. This occupies a connection slot and can stall
+  intercepted HTTP requests in other browser contexts. Eventual cleanup is not
+  guaranteed; the shared browser is not forcibly stopped as a fallback.
 - Cross-site frames (which Chromium runs in their own process) run as part of
   their tab. Chromium holds one that loads a URL until the driver has attached
   to it. Its HTTP(S) requests go through the same URL hook with that tab's
@@ -2105,8 +2133,9 @@ revokes its capability; it does not stop Chromium or delete the computer.
   held key and at most 100 key repeats. Coordinates outside the viewport and
   invalid crop rectangles are refused. Dialogs are dismissed and reported.
 
-The abrupt-loss limitation is tracked in OPL-5952 and was reproduced in Linux
-Chromium CI. To run the retained strict no-delivery diagnostic:
+The direct-Chromium abrupt-loss limitation has been reproduced in Linux
+Chromium CI. To run the retained strict no-delivery diagnostic against Chromium
+without a guardian:
 
 ```sh
 MANDALA_TEST_CHROMIUM=/path/to/chromium MANDALA_TEST_STRICT_CDP_LOSS=1 \
