@@ -2388,13 +2388,14 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
       case 'agent runs get':
         return await agentRunsGet(
           client,
+          io,
           output,
           target,
           { wait: b('wait') === true, ...wait },
           signal,
         );
       case 'agent runs cancel':
-        return await agentRunsCancel(client, output, target, signal);
+        return await agentRunsCancel(client, io, output, target, signal);
       case 'agent threads list':
         return await agentThreadsList(
           client,

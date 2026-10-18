@@ -50,6 +50,48 @@ function withoutRaw(value: unknown): unknown {
 }
 const shown = (value: unknown) => snakeKeys(withoutRaw(value)) as Record<string, unknown>;
 
+/** The shortest start of a key {@link redactCut} masks at the end of a text: a shorter one is no secret. */
+const CUT_KEY_MIN = 4;
+
+/**
+ * `text` redacted, as every output is, and then the end of it masked too
+ * where a key begins there and the text stops. The platform keeps only the
+ * start of some texts (a thread's title is the first 80 characters of a
+ * prompt, a run's prompt and a turn's text the first 32,000), so a key typed
+ * across that cut is kept in part, and a part no longer matches the key it
+ * came from: the title alone could print all of a key but its last character.
+ */
+function redactCut(io: CliIO, text: string): string {
+  const whole = redact(text, io.env, io.secrets) as string;
+  const keys = [...(io.secrets ?? []), io.env.MANDALA_API_KEY, io.env.MANDALA_MODEL_KEY].flatMap(
+    (key) => (key ? [key, key.trim()] : []),
+  );
+  for (const key of keys)
+    for (let n = Math.min(key.length - 1, whole.length); n >= CUT_KEY_MIN; n--)
+      if (whole.endsWith(key.slice(0, n))) return `${whole.slice(0, -n)}[REDACTED]`;
+  return whole;
+}
+
+/** A thread, its title and turns masked where the platform cut them (see {@link redactCut}). */
+function threadSafe<T extends AgentThreadSummary & { messages?: AgentThreadTurn[] }>(
+  io: CliIO,
+  thread: T,
+): T {
+  return {
+    ...thread,
+    title: redactCut(io, thread.title),
+    ...(thread.messages
+      ? { messages: thread.messages.map((turn) => ({ ...turn, text: redactCut(io, turn.text) })) }
+      : {}),
+  };
+}
+
+/** A run, its prompt masked where the platform cut it (see {@link redactCut}). */
+const runSafe = (io: CliIO, run: AgentRun): AgentRun => ({
+  ...run,
+  prompt: redactCut(io, run.prompt),
+});
+
 /** How one streamed run ended, for `agent run` and for each run of a session. */
 export type StreamedRun = {
   /** 0 only for a run that finished (`stop: end_turn`); 1 for any other ending. */
@@ -124,7 +166,10 @@ export async function agentRunBackground(
   // A background run is always kept, and is stopped by agent runs cancel
   // rather than by abandoning a request: the parser has refused --no-store.
   const { signal: _signal, store: _store, ...args } = agent;
-  const run = await client.agentRuns.start(computerId, args satisfies AgentRunArgs, { signal });
+  const run = runSafe(
+    io,
+    await client.agentRuns.start(computerId, args satisfies AgentRunArgs, { signal }),
+  );
   if (output.json) return output.result(shown(run));
   io.stdout.write(`${terminalSafe(run.id)}\n`);
   output.diagnostic(
@@ -169,16 +214,17 @@ export async function agentRunsList(
   signal: AbortSignal,
 ): Promise<number> {
   const page = await client.agentRuns.list(args, { signal });
+  const runs = page.runs.map((run) => runSafe(io, run));
   if (output.json)
     return output.result({
-      runs: page.runs.map(shown),
+      runs: runs.map(shown),
       has_more: page.hasMore,
       next_before: page.nextBefore,
     });
   listTable(
     io,
     ['ID', 'STATUS', 'COMPUTER', 'THREAD', 'STEPS', 'CREATED', 'PROMPT'],
-    page.runs.map((r) => [
+    runs.map((r) => [
       r.id,
       runStatus(r),
       r.computerId,
@@ -221,17 +267,18 @@ function runEnding(run: AgentRun): string {
  */
 export async function agentRunsGet(
   client: Client,
+  io: CliIO,
   output: Output,
   id: string,
   wait: { wait: boolean; timeoutMs?: number; pollMs?: number },
   signal: AbortSignal,
 ): Promise<number> {
-  if (!wait.wait) return output.result(shown(await client.agentRuns.get(id, { signal })));
-  const run = await client.agentRuns.wait(id, {
-    timeoutMs: wait.timeoutMs,
-    pollMs: wait.pollMs,
-    signal,
-  });
+  if (!wait.wait)
+    return output.result(shown(runSafe(io, await client.agentRuns.get(id, { signal }))));
+  const run = runSafe(
+    io,
+    await client.agentRuns.wait(id, { timeoutMs: wait.timeoutMs, pollMs: wait.pollMs, signal }),
+  );
   const code = run.finished ? 0 : 1;
   if (code && !output.json) output.diagnostic(runEnding(run), { keepNewlines: false });
   return output.result(shown(run), code);
@@ -240,11 +287,12 @@ export async function agentRunsGet(
 /** `agent runs cancel`: exit 0, also for a run that had already ended, which is answered as it is. */
 export async function agentRunsCancel(
   client: Client,
+  io: CliIO,
   output: Output,
   id: string,
   signal: AbortSignal,
 ): Promise<number> {
-  const run = await client.agentRuns.cancel(id, { signal });
+  const run = runSafe(io, await client.agentRuns.cancel(id, { signal }));
   if (!output.json && agentRunEnded(run) && run.status !== 'cancelled')
     output.diagnostic(
       `mandala: run ${run.id} had already ended (${run.status}); nothing was stopped`,
@@ -263,16 +311,17 @@ export async function agentThreadsList(
   signal: AbortSignal,
 ): Promise<number> {
   const page = await client.agentThreads.list(args, { signal });
+  const threads = page.threads.map((thread) => threadSafe(io, thread));
   if (output.json)
     return output.result({
-      threads: page.threads.map(shown),
+      threads: threads.map(shown),
       has_more: page.hasMore,
       next_before: page.nextBefore,
     });
   listTable(
     io,
     ['ID', 'COMPUTER', 'TURNS', 'LAST USED', 'TITLE'],
-    page.threads.map((t) => [t.id, t.computerId, t.turns, t.updatedAt, t.title]),
+    threads.map((t) => [t.id, t.computerId, t.turns, t.updatedAt, t.title]),
     'No agent threads on this page.',
   );
   morePages(output, page.nextBefore, 'threads');
@@ -330,7 +379,7 @@ export async function agentThreadsGet(
   id: string,
   signal: AbortSignal,
 ): Promise<number> {
-  const thread = await client.agentThreads.get(id, { signal });
+  const thread = threadSafe(io, await client.agentThreads.get(id, { signal }));
   if (output.json) return output.result(shown(thread));
   io.stdout.write(`${threadLine(io, thread)}\n\n${turnLines(io, thread.messages)}`);
   if (thread.messages.some((turn) => turn.stop !== undefined && UNSETTLED.has(turn.stop)))
@@ -349,6 +398,9 @@ export async function agentThreadsDelete(
   await client.agentThreads.delete(id, { signal });
   return output.result({ id, deleted: true });
 }
+
+/** How many lines a session reads ahead of the prompt that asks for them. */
+const QUEUED_LINES = 16;
 
 /** Said when Ctrl-C lands on the prompt rather than on a run. */
 const HOW_TO_LEAVE = '(Ctrl-D or /exit to leave)';
@@ -387,9 +439,21 @@ function lineReader(io: CliIO, interrupt: () => void) {
   });
   const lines: string[] = [];
   let closed = false;
+  // Held for a run at a terminal (see hold), or full of lines not asked for yet.
+  let held = false;
   let wake: (() => void) | undefined;
+  // Read only while there is room: a file or a producer that never stops
+  // waits in its pipe rather than in memory while a run goes. readline may
+  // still hand over the rest of a chunk already read, so this bounds the
+  // queue by a chunk, not exactly.
+  const flow = () => {
+    if (closed) return;
+    if (held || lines.length >= QUEUED_LINES) rl.pause();
+    else rl.resume();
+  };
   rl.on('line', (line) => {
     lines.push(line);
+    if (lines.length >= QUEUED_LINES) flow();
     wake?.();
   });
   rl.on('close', () => {
@@ -411,7 +475,11 @@ function lineReader(io: CliIO, interrupt: () => void) {
       }
       for (;;) {
         signal.throwIfAborted();
-        if (lines.length) return lines.shift();
+        if (lines.length) {
+          const line = lines.shift();
+          flow();
+          return line;
+        }
         if (closed) return undefined;
         await new Promise<void>((resolve, reject) => {
           const onAbort = () => {
@@ -442,14 +510,16 @@ function lineReader(io: CliIO, interrupt: () => void) {
     /** For a run: the terminal's own line mode, in which Ctrl-C is SIGINT. */
     hold(): void {
       if (!terminal) return;
-      rl.pause();
+      held = true;
+      flow();
       stdin.setRawMode!(false);
     },
     /** After a run: readline's raw mode again, for the next prompt. */
     release(): void {
       if (!terminal || closed) return;
       stdin.setRawMode!(true);
-      rl.resume();
+      held = false;
+      flow();
     },
     close: () => rl.close(),
   };
@@ -472,7 +542,7 @@ async function pickThread(
   signal: AbortSignal,
 ): Promise<string> {
   const page = await client.agentThreads.list({ limit: PICKER_THREADS }, { signal });
-  const threads = page.threads;
+  const threads = page.threads.map((thread) => threadSafe(io, thread));
   if (!threads.length)
     throw new CliError(
       'not_found',
@@ -571,7 +641,7 @@ export async function agentSession(
         threadId = await pickThread(client, io, reader, signal);
       }
       // The thread says where its runs go: it is continued only on its computer.
-      const thread = await client.agentThreads.get(threadId, { signal });
+      const thread = threadSafe(io, await client.agentThreads.get(threadId, { signal }));
       c = await client.computers.get(thread.computerId, { signal });
       if (chatty)
         io.stderr.write(

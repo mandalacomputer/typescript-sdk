@@ -921,6 +921,93 @@ describe('agent threads and runs redact before they cut', () => {
   });
 });
 
+describe('a key the platform cut', () => {
+  const KEY = 'sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789';
+  // A title is the first 80 characters of a prompt: this one ends 40
+  // characters into the key.
+  const title = `${'t'.repeat(40)}${KEY.slice(0, 40)}`;
+  const env = { MANDALA_MODEL_KEY: KEY };
+
+  it('is masked in a thread title, listed for a person or as JSON', async () => {
+    const respond = () => json({ threads: [{ ...AGENT_THREAD_SUMMARY, title }], has_more: false });
+    const person = await harness(respond, { env }).run(['agent', 'threads', 'list'], false);
+    const machine = await harness(respond, { env }).run(['agent', 'threads', 'list']);
+    for (const out of [person.out, machine.out]) {
+      expect(out).toContain(`${'t'.repeat(40)}[REDACTED]`);
+      expect(out).not.toContain(KEY.slice(0, 8));
+    }
+  });
+
+  it("is masked in a thread's title and in a turn the platform kept only the start of", async () => {
+    const text = `${'u'.repeat(31_980)}${KEY.slice(0, 20)}`;
+    const respond = () =>
+      json({ ...AGENT_THREAD, title, messages: [{ ...AGENT_THREAD.messages[0], text }] });
+    const person = await harness(respond, { env }).run(['agent', 'threads', 'get', THREAD], false);
+    const machine = await harness(respond, { env }).run(['agent', 'threads', 'get', THREAD]);
+    expect(machine.frames[0].data.title).toBe(`${'t'.repeat(40)}[REDACTED]`);
+    expect(machine.frames[0].data.messages[0].text).toBe(`${'u'.repeat(31_980)}[REDACTED]`);
+    for (const out of [person.out, machine.out]) expect(out).not.toContain(KEY.slice(0, 8));
+  });
+
+  it("is masked in a run's prompt", async () => {
+    const prompt = `${'r'.repeat(31_990)}${KEY.slice(0, 10)}`;
+    const result = await harness(() => json({ ...AGENT_RUN, prompt }), { env }).run([
+      'agent',
+      'runs',
+      'get',
+      RUN,
+    ]);
+    expect(result.frames[0].data.prompt).toBe(`${'r'.repeat(31_990)}[REDACTED]`);
+  });
+
+  it('leaves a text alone whose end begins a key by three characters or fewer', async () => {
+    const plain = `${'t'.repeat(40)}sk-`;
+    const result = await harness(
+      () => json({ threads: [{ ...AGENT_THREAD_SUMMARY, title: plain }], has_more: false }),
+      { env },
+    ).run(['agent', 'threads', 'list']);
+    expect(result.frames[0].data.threads[0].title).toBe(plain);
+  });
+});
+
+describe('piped input while a run goes', () => {
+  it('is read only a little ahead of the prompt that asks for it', async () => {
+    let pulled = 0;
+    const lines = function* () {
+      for (let i = 0; i < 300; i++) {
+        pulled++;
+        yield Buffer.from(`line ${i}\n`);
+      }
+    };
+    let release!: () => void;
+    const first = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let runs = 0;
+    const h = harness(
+      async (call) => {
+        if (!isAgentPost(call)) return anyRoute(call);
+        if (runs++ === 0) {
+          await first;
+          return done(THREAD);
+        }
+        return json({ error: 'busy', reason: 'contention' }, { status: 409 });
+      },
+      { stdin: Object.assign(Readable.from(lines()), { isTTY: false }) as Stdin },
+    );
+    const pending = h.run(['agent', 'resume', THREAD]);
+    await vi.waitFor(() => expect(h.agentBodies()).toHaveLength(1));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    // Without a bound, the whole file was read while the first run went.
+    expect(pulled).toBeLessThan(100);
+    release();
+    const result = await pending;
+    expect(h.agentBodies()).toHaveLength(300);
+    expect(h.agentBodies().at(-1)).toMatchObject({ prompt: 'line 299' });
+    expect(result.code).toBe(1);
+  });
+});
+
 describe('the agent commands in the manifest, help and completion', () => {
   it('describes each, with the exit status of the new modes', () => {
     const tree = manifest();
