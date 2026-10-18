@@ -1,6 +1,19 @@
 /** Resource collections hanging off the client. */
 
-import { Computer, EphemeralComputer, strandedText } from './computer.js';
+import {
+  type AgentResult,
+  type AgentRun,
+  type AgentRunArgs,
+  type AgentRunPage,
+  type AgentThread,
+  type AgentThreadPage,
+  agentRunEnded,
+  toAgentRun,
+  toAgentRunPage,
+  toAgentThread,
+  toAgentThreadPage,
+} from './agent.js';
+import { Computer, EphemeralComputer, postAgentRun, strandedText } from './computer.js';
 import {
   type APIError,
   type AuthenticationError,
@@ -2907,6 +2920,211 @@ export class Operations {
               'does not know; read operations.get for it',
           );
         }
+      } catch (err) {
+        if (signal?.aborted) throw err;
+        if (isDeadlineAbort(err)) continue;
+        if (!isTransientForPoll(err)) throw err;
+        observed = false;
+        delayMs = retryDelay(pollMs, err);
+      }
+    }
+  }
+}
+
+/**
+ * The conversations agent runs keep (OPL-6083).
+ *
+ * Unless a run is sent with `store: false`, one that acted on the desktop or
+ * finished with an answer is kept as an exchange — the prompt, and the run's
+ * closing text and how it ended — in a thread on its computer, and its id
+ * comes back as {@link AgentResult.threadId}. Pass that as `threadId` on the
+ * next run to continue the conversation. Runs through `chat/completions` keep
+ * threads too.
+ *
+ * Needs the `member` role or higher: a viewer is refused with a
+ * {@link PermissionDeniedError}, since a prompt is where private text ends up.
+ * A key confined to a workspace sees that workspace's threads only. An account
+ * keeps its 1000 most recently used threads, and a thread goes with its
+ * computer.
+ */
+export class AgentThreads {
+  #t: Transport;
+
+  /** @internal */
+  constructor(transport: Transport) {
+    this.#t = transport;
+  }
+
+  /**
+   * One page of threads, most recently used first. Pass the page's
+   * `nextBefore` back as `before` for the next; it is `null` on the last page.
+   *
+   * ```ts
+   * let before: string | undefined;
+   * do {
+   *   const page = await client.agentThreads.list({ computerId: 'vm-1', before });
+   *   for (const t of page.threads) console.log(t.id, t.title, t.turns);
+   *   before = page.nextBefore ?? undefined;
+   * } while (before);
+   * ```
+   */
+  async list(args: P.AgentThreadListArgs = {}, opts: CallOptions = {}): Promise<AgentThreadPage> {
+    const data = await this.#t.json('GET', P.AGENT_THREADS, {
+      query: P.agentThreadsQuery(args),
+      signal: opts.signal,
+    });
+    return toAgentThreadPage(data, 'GET', P.AGENT_THREADS);
+  }
+
+  /**
+   * One thread and every turn in it, oldest first: each `user` turn a prompt,
+   * and each `assistant` turn how the run answered it — its closing text,
+   * `stop`, `steps`, and `costUsd` on a funded run. A thread this key cannot
+   * see is a {@link NotFoundError}.
+   */
+  async get(threadId: string, opts: CallOptions = {}): Promise<AgentThread> {
+    const path = P.agentThread(threadId);
+    return toAgentThread(
+      await this.#t.json('GET', path, { signal: opts.signal }),
+      `the agent thread from GET ${path}`,
+    );
+  }
+
+  /**
+   * Delete a thread and its turns; its id can no longer be continued. What its
+   * runs did to the desktop stands. A thread this key cannot see is a
+   * {@link NotFoundError}.
+   */
+  async delete(threadId: string, opts: CallOptions = {}): Promise<void> {
+    await this.#t.json('DELETE', P.agentThread(threadId), { signal: opts.signal });
+  }
+}
+
+/**
+ * Background agent runs (OPL-6083): the agent loop started on a computer and
+ * then read back by id, rather than streamed.
+ *
+ * ```ts
+ * const run = await client.agentRuns.start('vm-1', { prompt: 'Tidy the desktop.' });
+ * const ended = await client.agentRuns.wait(run.id);
+ * if (ended.finished) console.log(ended.result?.text);
+ * else console.warn(ended.status, ended.error?.error ?? ended.result?.stop);
+ * ```
+ *
+ * Needs the `member` role or higher. A key confined to a workspace sees that
+ * workspace's runs only. An account keeps its 1000 newest runs that have
+ * ended, and every run still going.
+ */
+export class AgentRuns {
+  #t: Transport;
+
+  /** @internal */
+  constructor(transport: Transport) {
+    this.#t = transport;
+  }
+
+  /**
+   * Start one on a computer, which must already be running. See
+   * {@link Computer.startAgentRun}, which this is by the computer's id.
+   */
+  async start(computerId: string, args: AgentRunArgs, opts: CallOptions = {}): Promise<AgentRun> {
+    return postAgentRun(this.#t, computerId, args, opts, 'agentRuns.start()');
+  }
+
+  /**
+   * One run as it stands: its status, every step so far, its cost on a funded
+   * run, and once it has ended, its `result` (`completed`) or `error`
+   * (`failed`, `interrupted`). A run this key cannot see is a
+   * {@link NotFoundError}.
+   */
+  async get(runId: string, opts: CallOptions = {}): Promise<AgentRun> {
+    const path = P.agentRun(runId);
+    return toAgentRun(
+      await this.#t.json('GET', path, { signal: opts.signal }),
+      `the agent run from GET ${path}`,
+      this.#t.baseUrl,
+    );
+  }
+
+  /**
+   * One page of runs, newest first, each with an EMPTY `stepsTaken`: read a run
+   * by id for its steps. Pass the page's `nextBefore` back as `before` for the
+   * next; it is `null` on the last page.
+   */
+  async list(args: P.AgentRunListArgs = {}, opts: CallOptions = {}): Promise<AgentRunPage> {
+    const data = await this.#t.json('GET', P.AGENT_RUNS, {
+      query: P.agentRunsQuery(args),
+      signal: opts.signal,
+    });
+    return toAgentRunPage(data, 'GET', P.AGENT_RUNS, this.#t.baseUrl);
+  }
+
+  /**
+   * Stop a running run where it is: the model call in flight is abandoned and
+   * no further action is taken. What it already did to the desktop stands, and
+   * so does what it cost. Answers the run, `cancelled`; cancelling one that
+   * already ended answers it as it is, unchanged.
+   */
+  async cancel(runId: string, opts: CallOptions = {}): Promise<AgentRun> {
+    const path = P.agentRunCancel(runId);
+    return toAgentRun(
+      await this.#t.json('POST', path, { signal: opts.signal }),
+      `the agent run from POST ${path}`,
+      this.#t.baseUrl,
+    );
+  }
+
+  /**
+   * Poll a run until it has ended, and answer it.
+   *
+   * Resolves on EVERY ending — `completed`, `failed`, `cancelled`,
+   * `interrupted`, or a status this client does not know on a run whose
+   * `endedAt` is set — and throws on none of them: a run that failed has still
+   * taken real steps on the desktop, listed in `stepsTaken`, and an exception
+   * would be a worse place to find them. {@link AgentRun.finished} is the one
+   * check most callers want; `status`, `error` and `result.stop` say the rest.
+   *
+   * Polls every `pollMs` (default 3 seconds; a step takes at least that long)
+   * until `timeoutMs` (default 30 minutes) runs out, then throws
+   * {@link TimeoutError}. THE RUN IS NOT STOPPED BY THAT, only the waiting is:
+   * {@link cancel} stops it. A transient failure of a poll is ridden out, as
+   * every wait in this SDK does; a run this key cannot see is a
+   * {@link NotFoundError} at once. `signal` aborts the wait, not the run.
+   */
+  async wait(run: AgentRun | string, opts: WaitOptions = {}): Promise<AgentRun> {
+    const { timeoutMs = 1_800_000, pollMs = 3_000, signal } = opts;
+    checkWait(timeoutMs, pollMs);
+    const id = typeof run === 'string' ? run : run?.id;
+    if (typeof id !== 'string' || !id) {
+      throw new ValidationError('run id must be a non-empty string');
+    }
+    P.agentRun(id);
+    const deadline = Date.now() + timeoutMs;
+    let polled = false;
+    let delayMs = pollMs;
+    let last: AgentRun | undefined;
+    let observed = false;
+    for (;;) {
+      if (Date.now() >= deadline) {
+        throw new TimeoutError(
+          last && observed
+            ? `agent run ${id} was still ${last.status} after ${timeoutMs}ms; the run has not ` +
+                'stopped, only this wait has. Stop it with agentRuns.cancel().'
+            : last
+              ? `agent run ${id} could not be read for the last part of ${timeoutMs}ms; when it ` +
+                `last answered it was ${last.status}. Read agentRuns.get for where it got to.`
+              : `agent run ${id} could not be read within ${timeoutMs}ms`,
+        );
+      }
+      if (polled) await sleepUntilNextPoll(delayMs, deadline, signal);
+      polled = true;
+      delayMs = pollMs;
+      if (Date.now() >= deadline) continue;
+      try {
+        const now = await this.get(id, { signal: deadlineSignal(deadline - Date.now(), signal) });
+        last = now;
+        observed = true;
+        if (agentRunEnded(now)) return now;
       } catch (err) {
         if (signal?.aborted) throw err;
         if (isDeadlineAbort(err)) continue;

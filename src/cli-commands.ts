@@ -1427,7 +1427,7 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
       system: s('system'),
       signal,
     };
-    if (path === 'agent run') P.agentBody({ ...agent, stream: true });
+    if (path === 'agent run') P.agentBody(agent, { stream: true });
     const hook = {
       url: path === 'webhooks create' ? target : s('url'),
       description: s('description'),

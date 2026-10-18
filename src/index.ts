@@ -21,6 +21,8 @@
 
 import {
   Account,
+  AgentRuns,
+  AgentThreads,
   ApiKeys,
   Builds,
   Computers,
@@ -51,6 +53,10 @@ export type ClientOptions = TransportOptions;
  */
 export class Client {
   readonly account: Account;
+  /** Background agent runs: start one, read it back, cancel it, wait for its end. */
+  readonly agentRuns: AgentRuns;
+  /** The conversations agent runs keep, continued by passing `threadId`. */
+  readonly agentThreads: AgentThreads;
   readonly apiKeys: ApiKeys;
   readonly builds: Builds;
   readonly computers: Computers;
@@ -75,6 +81,8 @@ export class Client {
   constructor(opts: ClientOptions = {}) {
     this.#t = new Transport(opts, `mandala-computer-ts/${VERSION}`);
     this.account = new Account(this.#t);
+    this.agentRuns = new AgentRuns(this.#t);
+    this.agentThreads = new AgentThreads(this.#t);
     this.apiKeys = new ApiKeys(this.#t);
     this.builds = new Builds(this.#t);
     this.computers = new Computers(this.#t);
@@ -100,9 +108,20 @@ export class Client {
 export type {
   AgentArgs,
   AgentEvent,
+  AgentHistoryMessage,
   AgentResult,
+  AgentRun,
+  AgentRunArgs,
+  AgentRunError,
+  AgentRunPage,
+  AgentRunStatus,
   AgentStep,
   AgentStop,
+  AgentThread,
+  AgentThreadPage,
+  AgentThreadStop,
+  AgentThreadSummary,
+  AgentThreadTurn,
   AgentUsage,
 } from './agent.js';
 export type {
@@ -269,6 +288,8 @@ export type {
 } from './models.js';
 export type {
   ActivitiesArgs,
+  AgentRunListArgs,
+  AgentThreadListArgs,
   ApiKeyCreateArgs,
   BrowserProxyArgs,
   ComputerState,
@@ -300,6 +321,8 @@ export type {
   WindowAction,
 } from './paths.js';
 export {
+  AGENT_PAGE_MAX,
+  AGENT_RUN_STATUSES,
   COMPUTER_STATES,
   CREDITS_PAGE_MAX,
   INPUT_BATCH_MAX,
@@ -328,6 +351,8 @@ export type {
 } from './resources.js';
 export {
   Account,
+  AgentRuns,
+  AgentThreads,
   ApiKeys,
   Builds,
   Computers,

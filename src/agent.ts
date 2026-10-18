@@ -16,8 +16,14 @@
  * what that key is billed only loosely.
  */
 
-import { MandalaError, topUpLink } from './errors.js';
-import { num, str } from './models.js';
+import {
+  type APIError,
+  type ConflictError,
+  MandalaError,
+  type NotFoundError,
+  topUpLink,
+} from './errors.js';
+import { flag, num, objectRows, str } from './models.js';
 import { isRecord } from './paths.js';
 
 /** What the caller learns about one step. */
@@ -122,7 +128,24 @@ export type AgentResult = {
    * `step` event instead.
    */
   stepsTaken?: AgentStep[];
+  /**
+   * The thread this run's exchange was kept in (OPL-6083): pass it as
+   * {@link AgentArgs.threadId} to continue the conversation. Absent when the
+   * run kept nothing — sent with `store: false`, or ended before it acted with
+   * no answer — and on a background run's `result`, where the run carries it
+   * as {@link AgentRun.threadId}.
+   */
+  threadId?: string;
   raw: Record<string, unknown>;
+};
+
+/**
+ * One earlier turn of a conversation the caller keeps itself, for
+ * {@link AgentArgs.messages}: what was asked, or what was answered, as text.
+ */
+export type AgentHistoryMessage = {
+  role: 'user' | 'assistant';
+  content: string;
 };
 
 /** Events the streaming form emits, in the order they happen. */
@@ -160,6 +183,12 @@ export type AgentEvent =
        * resolved against the client's base URL when the platform sent a path.
        */
       topUpUrl?: string;
+      /**
+       * The thread the failed run was kept in (OPL-6083): when it acted on the
+       * desktop before it failed, or continued the thread you named. Absent
+       * when it kept nothing.
+       */
+      threadId?: string;
       /** The error frame as it arrived, for anything above that this SDK does not model. */
       raw: Record<string, unknown>;
     };
@@ -210,6 +239,34 @@ export type AgentArgs = {
   /** Override the model the platform would pick. */
   model?: string;
   /**
+   * A thread to continue (OPL-6083): the `threadId` of an earlier run on this
+   * computer. The model is given that thread's earlier turns as the
+   * conversation so far — the newest 64,000 characters of them — is told they
+   * are done, and acts only on this `prompt`; this run's exchange is added to
+   * the thread.
+   *
+   * A thread of another computer, or one already holding 100 turns, is a
+   * {@link ConflictError}; one this key cannot see is a
+   * {@link NotFoundError}. Cannot be sent with `store: false`, or with a
+   * non-empty `messages` — both refused before the call.
+   */
+  threadId?: string;
+  /**
+   * Whether to keep this run's exchange in a thread (OPL-6083). The platform's
+   * default is to keep it: a run that acted on the desktop, or finished with an
+   * answer, is kept in the thread named by `threadId` or a new one, and the id
+   * comes back as {@link AgentResult.threadId}. `false` keeps nothing.
+   */
+  store?: boolean;
+  /**
+   * The conversation so far, oldest first and without this `prompt`, for a
+   * caller that keeps its own history rather than a thread on the platform
+   * (OPL-6083). Given to the model as earlier turns it is told are done; a new
+   * thread, unless `store: false`, starts with them. Each turn is a role and
+   * its text, and only those two fields are sent.
+   */
+  messages?: readonly AgentHistoryMessage[];
+  /**
    * Cancels the run.
    *
    * Worth passing on anything long. Without it an abandoned run keeps spending:
@@ -244,6 +301,17 @@ export type AgentArgs = {
 /** A USD amount the platform sent: a finite number, nonnegative unless `signed`. */
 const usd = (v: unknown, signed = false): number | undefined =>
   typeof v === 'number' && Number.isFinite(v) && (signed || v >= 0) ? v : undefined;
+
+/**
+ * A `thread_id` the platform sent, or absent. Only a value that could be sent
+ * back as `threadId`: a non-empty string with no space around it, which is
+ * what {@link agentBody} accepts, so a run's own continuation id is never one
+ * the next call refuses. Anything else is absent rather than thrown, for the
+ * reason the money fields are: it is read inside the caller's `for await`, and
+ * a run that cannot name its thread has still run. `raw` keeps what was sent.
+ */
+const threadOf = (v: unknown): string | undefined =>
+  typeof v === 'string' && v && v === v.trim() ? v : undefined;
 
 export function toAgentUsage(d: unknown): AgentUsage {
   const u = isRecord(d) ? d : {};
@@ -296,6 +364,8 @@ export function toAgentResult(d: unknown): AgentResult {
   };
   const cost = usd(r.cost_usd);
   if (cost !== undefined) result.costUsd = cost;
+  const thread = threadOf(r.thread_id);
+  if (thread !== undefined) result.threadId = thread;
   // Present only when the answer carried a list: the non-streaming form sends
   // it and the streaming `done` frame does not, so absent is "not sent", never
   // "no steps".
@@ -363,9 +433,402 @@ export function toAgentEvent(
       if (cost !== undefined) failed.costUsd = cost;
       const topUp = topUpLink(e?.top_up_url, baseUrl);
       if (topUp !== undefined) failed.topUpUrl = topUp;
+      const thread = threadOf(e?.thread_id);
+      if (thread !== undefined) failed.threadId = thread;
       return failed;
     }
     default:
       return undefined;
   }
+}
+
+// --- threads ------------------------------------------------------------------
+
+/**
+ * One kept conversation, as `GET agent/threads` lists it (OPL-6083): its id,
+ * the computer its runs drove, and how much it holds — without the turns.
+ */
+export type AgentThreadSummary = {
+  /** `thr_` and twenty-four hex characters: what {@link AgentArgs.threadId} takes. */
+  id: string;
+  /** The computer its runs drove. A thread is continued only there. */
+  computerId: string;
+  /**
+   * The first line of the prompt of the first run kept in it, at most 80
+   * characters — not of any `messages` it was started with.
+   */
+  title: string;
+  /** How many turns it holds: a prompt and an answer per run, plus any history it started with. */
+  turns: number;
+  createdAt: string;
+  /** When a run last used it: kept an exchange in it, or began continuing it. */
+  updatedAt: string;
+  raw: Record<string, unknown>;
+};
+
+/**
+ * How an assistant turn's run ended: any {@link AgentStop}, or `error` (it
+ * failed), `aborted` (stopped part way), `running` (still going) or
+ * `interrupted` (the platform restarted before it finished). `running`,
+ * `aborted` and `interrupted` are runs that may have done more than they
+ * reported.
+ */
+export type AgentThreadStop = AgentStop | 'error' | 'aborted' | 'running' | 'interrupted';
+
+/** One turn of a thread: a prompt (`user`), or how a run answered it (`assistant`). */
+export type AgentThreadTurn = {
+  role: 'user' | 'assistant' | (string & {});
+  /** The prompt, or the run's closing text. At most 32,000 characters are kept. */
+  text: string;
+  /** Assistant turns: how the run ended. */
+  stop?: AgentThreadStop;
+  /** Assistant turns of a failed run: why it failed. */
+  error?: string;
+  /** Assistant turns: how many actions the run took. */
+  steps?: number;
+  /** Assistant turns of a funded run: what it cost, in USD. */
+  costUsd?: number;
+  createdAt: string;
+  raw: Record<string, unknown>;
+};
+
+/** One thread and every turn in it, oldest first: `client.agentThreads.get(id)`. */
+export type AgentThread = AgentThreadSummary & {
+  /** Every turn, oldest first. */
+  messages: AgentThreadTurn[];
+};
+
+/** One page of `client.agentThreads.list()`, most recently used first. */
+export type AgentThreadPage = {
+  threads: AgentThreadSummary[];
+  /** Whether another page follows. */
+  hasMore: boolean;
+  /**
+   * What to pass as `before` for the next page — the last thread's id — or
+   * `null` on the last page.
+   */
+  nextBefore: string | null;
+  raw: Record<string, unknown>;
+};
+
+/**
+ * The id a row is fetched, deleted or paged by, refused when it is not one:
+ * sent back as `[object Object]` or as an empty path segment, it would ask
+ * about something nobody named.
+ */
+const rowId = (d: Record<string, unknown>, what: string): string => {
+  if (typeof d.id !== 'string' || !d.id || d.id !== d.id.trim()) {
+    throw new MandalaError(`expected ${what} to carry its id`);
+  }
+  return d.id;
+};
+
+/**
+ * Where the next page starts: the last row's id when `has_more` says another
+ * page follows, `null` when it says none does. Refused when `has_more` is not
+ * true or false, and when it says more follow a page with no row to page from:
+ * either, read as the last page, would end a walk early and call the listing
+ * complete.
+ */
+const nextBefore = (
+  d: Record<string, unknown>,
+  rows: readonly { id: string }[],
+  where: string,
+): { hasMore: boolean; nextBefore: string | null } => {
+  const more = flag(d.has_more, `has_more from ${where}`, true);
+  if (!more) return { hasMore: false, nextBefore: null };
+  const last = rows[rows.length - 1];
+  if (!last) {
+    throw new MandalaError(`expected the page from ${where} that says more follow to have a row`);
+  }
+  return { hasMore: true, nextBefore: last.id };
+};
+
+export function toAgentThreadSummary(d: unknown, what = 'an agent thread'): AgentThreadSummary {
+  if (!isRecord(d)) throw new MandalaError(`expected ${what} to be an object`);
+  return {
+    id: rowId(d, what),
+    computerId: str(d.computer_id),
+    title: str(d.title),
+    turns: num(d.turns),
+    createdAt: str(d.created_at),
+    updatedAt: str(d.updated_at),
+    raw: { ...d },
+  };
+}
+
+export function toAgentThreadTurn(d: Record<string, unknown>): AgentThreadTurn {
+  const turn: AgentThreadTurn = {
+    role: str(d.role),
+    text: str(d.text),
+    createdAt: str(d.created_at),
+    raw: { ...d },
+  };
+  if (typeof d.stop === 'string') turn.stop = d.stop;
+  if (typeof d.error === 'string') turn.error = d.error;
+  if (typeof d.steps === 'number' && Number.isFinite(d.steps)) turn.steps = d.steps;
+  const cost = usd(d.cost_usd);
+  if (cost !== undefined) turn.costUsd = cost;
+  return turn;
+}
+
+/**
+ * Strict on the turns as a whole: a thread read by id always carries the list,
+ * so one without it is refused rather than read as a thread with nothing in
+ * it — which would show a thread of two turns as empty, and complete.
+ */
+export function toAgentThread(d: unknown, what = 'an agent thread'): AgentThread {
+  const summary = toAgentThreadSummary(d, what);
+  const turns = (d as Record<string, unknown>).messages;
+  if (!Array.isArray(turns)) throw new MandalaError(`expected ${what} to carry its messages`);
+  const rows = objectRows(turns, `${what}'s messages`);
+  return { ...summary, messages: rows.map(toAgentThreadTurn) };
+}
+
+export function toAgentThreadPage(d: unknown, method: string, path: string): AgentThreadPage {
+  const where = `${method} ${path}`;
+  if (!isRecord(d) || !Array.isArray(d.threads)) {
+    throw new MandalaError(`expected a list of agent threads from ${where}`);
+  }
+  const threads = d.threads.map((row, i) =>
+    toAgentThreadSummary(row, `agent thread ${i} from ${where}`),
+  );
+  return { threads, ...nextBefore(d, threads, where), raw: { ...d } };
+}
+
+// --- background runs -----------------------------------------------------------
+
+/**
+ * What a background run is started with: the {@link AgentArgs} of `agent()`,
+ * less the `signal` — a background run is stopped with
+ * `client.agentRuns.cancel()`, not by abandoning a request — and less
+ * `store: false`, which the platform refuses (and this SDK before it).
+ */
+export type AgentRunArgs = Omit<AgentArgs, 'signal' | 'store'> & {
+  /**
+   * A background run is always kept, so it can be read back: `true` is the
+   * platform's default and the only value it takes here. `false` is refused
+   * before the call.
+   */
+  store?: true;
+};
+
+/**
+ * Where a background run has got to. `running` is live; `completed`,
+ * `failed`, `cancelled` and `interrupted` are where it ended. Open, because
+ * the platform may add one; a run whose `endedAt` is set has ended whatever
+ * its status says.
+ *
+ * - `completed` — the loop ended on its own, and `result.stop` says how. Only
+ *   `end_turn` is a finished task: see {@link AgentRun.finished}.
+ * - `failed` — see `error`.
+ * - `cancelled` — stopped by `client.agentRuns.cancel()`.
+ * - `interrupted` — the platform restarted while it was going (`error.status`
+ *   503), or it stopped without its ending being recorded (`error.status`
+ *   500). It is not resumed: inspect the desktop before starting another.
+ */
+export type AgentRunStatus =
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+  | 'interrupted'
+  | (string & {});
+
+/** Why a background run failed or was interrupted. */
+export type AgentRunError = {
+  /** What went wrong, in a sentence. */
+  error: string;
+  /** The status the agent route would have answered it with. */
+  status: number;
+  /** The platform's one-word classification, where it sent one — see {@link APIError.reason}. */
+  reason?: string;
+  /**
+   * Where to add AI credits, when the run failed for want of them: an
+   * absolute link, resolved against the client's base URL.
+   */
+  topUpUrl?: string;
+};
+
+/**
+ * A background agent run (OPL-6083): the same loop as `agent()`, started with
+ * `client.agentRuns.start()` and read back by id while it goes and after it
+ * ends.
+ */
+export type AgentRun = {
+  /** `run_` and twenty-four hex characters. */
+  id: string;
+  computerId: string;
+  /**
+   * The thread the run is kept in, once it is: `null` until a new thread has
+   * something in it (a run that has not acted yet, or failed before it did),
+   * and when the thread was deleted. Continue it with
+   * {@link AgentArgs.threadId} on the next run.
+   */
+  threadId: string | null;
+  status: AgentRunStatus;
+  /** The prompt, at most 32,000 characters of it. */
+  prompt: string;
+  /** The model the run was started with. */
+  model: string;
+  maxSteps: number;
+  /** How many actions it has taken so far. */
+  steps: number;
+  /** A funded run's charge so far, in USD. Absent on a run on your own key. */
+  costUsd?: number;
+  /**
+   * How it ended, once `completed`: the run's {@link AgentResult}, without a
+   * `threadId` (the run carries its own).
+   */
+  result?: AgentResult;
+  /** Why it ended, once `failed` or `interrupted`. */
+  error?: AgentRunError;
+  /**
+   * Every action so far, in order. EMPTY IN A LISTING, whatever the run did:
+   * read the run by id for them.
+   */
+  stepsTaken: AgentStep[];
+  /**
+   * True only for a run that `completed` with `result.stop === 'end_turn'` —
+   * the one ending that means the task was finished.
+   */
+  finished: boolean;
+  createdAt: string;
+  /** When it last took a step or changed status. */
+  updatedAt: string;
+  /** When it ended; `null` while it is running. */
+  endedAt: string | null;
+  raw: Record<string, unknown>;
+};
+
+/** One page of `client.agentRuns.list()`, newest first. */
+export type AgentRunPage = {
+  /** The runs, each with an empty `stepsTaken`: read one by id for its steps. */
+  runs: AgentRun[];
+  /** Whether another page follows. */
+  hasMore: boolean;
+  /** What to pass as `before` for the next page — the last run's id — or `null` on the last page. */
+  nextBefore: string | null;
+  raw: Record<string, unknown>;
+};
+
+/** The statuses a background run ends in. */
+const RUN_ENDED: ReadonlySet<string> = new Set(['completed', 'failed', 'cancelled', 'interrupted']);
+
+/**
+ * Whether a background run has ended: one of the four statuses it ends in, or
+ * an `endedAt` the platform set — which covers a status added after this
+ * client was written.
+ */
+export const agentRunEnded = (run: AgentRun): boolean =>
+  RUN_ENDED.has(run.status) || run.endedAt !== null;
+
+/**
+ * A run's `thread_id`: `null`, or an id that could be sent back as `threadId`,
+ * and refused as anything else — it is what the next run continues.
+ */
+const runThread = (v: unknown, what: string): string | null => {
+  const id = textOrNull(v, `${what}'s thread_id`);
+  if (id !== null && threadOf(id) === undefined) {
+    throw new MandalaError(`expected ${what}'s thread_id to be a thread id or null`);
+  }
+  return id;
+};
+
+/**
+ * A run's `ended_at`: `null` while it is running, or when it ended. Refused
+ * when empty: a wait ends on any `endedAt` that is not `null`, and an empty
+ * string is no time at all.
+ */
+const runEnded = (v: unknown, what: string): string | null => {
+  const at = textOrNull(v, `${what}'s ended_at`);
+  if (at !== null && !at.trim()) {
+    throw new MandalaError(`expected ${what}'s ended_at to be a time or null`);
+  }
+  return at;
+};
+
+/** A text field the platform sends as a string or `null`, refused as anything else. */
+const textOrNull = (v: unknown, what: string): string | null => {
+  if (v === null || v === undefined) return null;
+  if (typeof v !== 'string') throw new MandalaError(`expected ${what} to be a string or null`);
+  return v;
+};
+
+/**
+ * Strict on what a wait or a caller decides on — the id it polls, the status
+ * and `ended_at` it ends on, the thread it continues, the shape of `result`
+ * and `error` — and permissive on the rest, as every decoder here is. A failed
+ * run whose reason this client silently dropped would be reported as a failure
+ * with nothing to say about why.
+ *
+ * `baseUrl` is the client's, and resolves an error's `top_up_url`.
+ */
+export function toAgentRun(d: unknown, what = 'an agent run', baseUrl?: string): AgentRun {
+  if (!isRecord(d)) throw new MandalaError(`expected ${what} to be an object`);
+  const id = rowId(d, what);
+  if (typeof d.status !== 'string' || !d.status) {
+    throw new MandalaError(`expected ${what} to carry its status`);
+  }
+  let result: AgentResult | undefined;
+  if (d.result != null) {
+    if (!isRecord(d.result) || typeof d.result.stop !== 'string') {
+      throw new MandalaError(`expected ${what}'s result to be an agent result`);
+    }
+    result = toAgentResult(d.result);
+  }
+  let error: AgentRunError | undefined;
+  if (d.error != null) {
+    const e = d.error;
+    if (!isRecord(e) || typeof e.error !== 'string') {
+      throw new MandalaError(`expected ${what}'s error to carry what went wrong`);
+    }
+    // The status is what tells an interrupted run's restart (503) from one
+    // whose ending was never recorded (500), so a missing one is refused rather
+    // than read as a 0 no route answers.
+    if (typeof e.status !== 'number' || !Number.isInteger(e.status)) {
+      throw new MandalaError(`expected ${what}'s error to carry its status`);
+    }
+    error = { error: e.error, status: e.status };
+    if (typeof e.reason === 'string') error.reason = e.reason;
+    const topUp = topUpLink(e.top_up_url, baseUrl);
+    if (topUp !== undefined) error.topUpUrl = topUp;
+  }
+  const run: AgentRun = {
+    id,
+    computerId: str(d.computer_id),
+    threadId: runThread(d.thread_id, what),
+    status: d.status,
+    prompt: str(d.prompt),
+    model: str(d.model),
+    maxSteps: num(d.max_steps),
+    steps: num(d.steps),
+    stepsTaken: objectRows(d.steps_taken, `${what}'s steps_taken`).map((s, i) =>
+      toAgentStep(s, i + 1),
+    ),
+    finished: d.status === 'completed' && result?.finished === true,
+    createdAt: str(d.created_at),
+    updatedAt: str(d.updated_at),
+    endedAt: runEnded(d.ended_at, what),
+    raw: { ...d },
+  };
+  const cost = usd(d.cost_usd);
+  if (cost !== undefined) run.costUsd = cost;
+  if (result !== undefined) run.result = result;
+  if (error !== undefined) run.error = error;
+  return run;
+}
+
+export function toAgentRunPage(
+  d: unknown,
+  method: string,
+  path: string,
+  baseUrl?: string,
+): AgentRunPage {
+  const where = `${method} ${path}`;
+  if (!isRecord(d) || !Array.isArray(d.runs)) {
+    throw new MandalaError(`expected a list of agent runs from ${where}`);
+  }
+  const runs = d.runs.map((row, i) => toAgentRun(row, `agent run ${i} from ${where}`, baseUrl));
+  return { runs, ...nextBefore(d, runs, where), raw: { ...d } };
 }

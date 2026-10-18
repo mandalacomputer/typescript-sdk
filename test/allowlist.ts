@@ -214,15 +214,6 @@ export const UNIMPLEMENTED: ReadonlySet<string> = new Set([
   // here, and a second, worse OpenAI client inside this SDK would be a
   // maintenance obligation with no user.
   'POST chat/completions',
-  // Agent threads and background runs. Not wrapped yet; until they are, call
-  // them over HTTP.
-  'GET agent/threads',
-  'GET agent/threads/:thread',
-  'DELETE agent/threads/:thread',
-  'POST computers/:id/agent/runs',
-  'GET agent/runs',
-  'GET agent/runs/:run',
-  'POST agent/runs/:run/cancel',
 ]);
 
 /**
@@ -591,11 +582,6 @@ export const UNIMPLEMENTED_PARAMETERS: ReadonlySet<string> = new Set([
   'POST computers/:id/input  body:key',
   // `amount` is sent instead. Same value, two names.
   'POST computers/:id/input  body:scroll_amount',
-  // Continuing a thread, opting out of keeping one, and sending a history the
-  // caller keeps itself. Not sent by agent() yet.
-  'POST computers/:id/agent  body:thread_id',
-  'POST computers/:id/agent  body:store',
-  'POST computers/:id/agent  body:messages',
 ]);
 
 /**

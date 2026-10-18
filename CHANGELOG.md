@@ -9,6 +9,34 @@ This is the summary you read to decide whether to upgrade.
 
 ## [Unreleased]
 
+### Added
+
+- **Agent threads.** `agent()`, `agentStream()` and `agentOnce()` take
+  `threadId`, to continue a conversation an earlier run kept: the model is
+  given the thread's earlier turns and acts only on the new prompt. `store:
+  false` keeps nothing, and `messages` (`[{ role, content }]`) brings a history
+  you keep yourself. `store: false` with `threadId`, a non-empty `messages`
+  with `threadId`, and a malformed `messages` are refused before the call. The
+  thread a run was kept in is `threadId` on `AgentResult`, on `agentStream()`'s
+  `error` event, and on the error a failed run throws (`err.threadId`; it was
+  only in `raw` or `body` before). `client.agentThreads.list({ computerId,
+  limit, before })`, `get(threadId)` and `delete(threadId)` read and remove
+  them; a page's `nextBefore` is the `before` for the next.
+- **Background agent runs.** `client.agentRuns.start(computerId, args)` and
+  `computer.startAgentRun(args)` start the agent loop and answer at once with
+  the run (`status: 'running'`), which goes on after the request ends.
+  `client.agentRuns.get(runId)`, `list({ computerId, status, limit, before })`
+  and `cancel(runId)` read and stop runs, and `wait(runId, { timeoutMs, pollMs,
+  signal })` polls until a run has ended and answers it whatever the ending.
+  `AgentRun.finished` is true only for a run that completed at `end_turn`.
+
+### Documentation
+
+- The section on pointing an OpenAI client at `chat/completions` no longer says
+  earlier messages are ignored: the user and assistant messages before the last
+  user message are the conversation so far, and those runs are kept in threads
+  (`agent.thread_id`) as the native route's are.
+
 ## [0.15.0] — 2026-10-18
 
 ### Changed

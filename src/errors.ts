@@ -104,6 +104,15 @@ export class MandalaError extends Error {
    * `operations.get(err.operationId)`.
    */
   idempotencyKey?: string;
+  /**
+   * The agent thread a failed agent run was kept in (OPL-6083), from the
+   * failure's `thread_id`: set when the run acted on the desktop before it
+   * failed, or continued a thread you named. Pass it as `threadId` to the
+   * next run to carry on from where this one stopped — after looking at the
+   * desktop, since the steps already taken stand. `undefined` on every other
+   * error, and on a run that kept nothing.
+   */
+  threadId?: string;
 }
 
 /**
@@ -274,6 +283,11 @@ export class APIError extends MandalaError {
     this.reason = refusalReason(body);
     this.code = nonblank(errorRecord(body)?.code);
     this.operationId = nonblank(errorRecord(body)?.operation_id);
+    // Only an id the next run could be sent with: non-empty, and with no space
+    // around it, which the agent methods refuse as a `threadId`.
+    const thread = errorRecord(body)?.thread_id;
+    this.threadId =
+      typeof thread === 'string' && thread && thread === thread.trim() ? thread : undefined;
     this.retryAfterMs = retryAfterMs;
     this.requestId = nonblank(metadata.requestId) ?? nonblank(errorRecord(body)?.request_id);
     this.allow = metadata.allow;
