@@ -1989,7 +1989,7 @@ export class Sizes {
    */
   async list(opts: CallOptions = {}): Promise<Size[]> {
     const data = await this.#t.jsonArray('GET', P.SIZES, { signal: opts.signal });
-    return data.filter(P.isRecord).map(toSize);
+    return data.map((row, i) => listRow(row, i, 'size', toSize));
   }
 }
 

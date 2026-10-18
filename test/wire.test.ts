@@ -108,11 +108,22 @@ describe('a claim needs the wire to have made it', () => {
     }
   });
 
-  it('does not grant a size the plan never said was allowed', async () => {
+  it('refuses a size whose permission, shape or id it cannot read (OPL-6079)', async () => {
+    const good = { id: 'big', label: 'Big', template: 'base', cpu: 4, ram_mb: 8192, disk_gb: 40 };
+    for (const rows of [
+      [{ ...good, allowed: 'maybe' }],
+      [{ ...good }],
+      [{ ...good, allowed: true, id: '' }],
+      [{ ...good, allowed: true, cpu: 'four' }],
+      [{ ...good, allowed: true }, null],
+    ]) {
+      const { client: c } = client((call) =>
+        call.path === '/sizes' ? json(rows) : anyRoute(call),
+      );
+      await expect(c.sizes.list()).rejects.toThrow(/expected (a size|size)/);
+    }
     const { client: c } = client((call) =>
-      call.path === '/sizes'
-        ? json([{ id: 'big', label: 'Big', template: 'base', allowed: 'maybe' }])
-        : anyRoute(call),
+      call.path === '/sizes' ? json([{ ...good, allowed: 'false' }]) : anyRoute(call),
     );
     expect((await c.sizes.list())[0]?.allowed).toBe(false);
   });
@@ -122,7 +133,7 @@ describe('a claim needs the wire to have made it', () => {
       if (call.path === '/usage') {
         return json({
           ...USAGE,
-          usage: { ...USAGE.usage, computers: [{ id: 'vm-1', name: 'demo', gone: 'maybe' }] },
+          usage: { ...USAGE.usage, computers: [{ id: 'vm-1', name: 'demo' }] },
         });
       }
       if (call.path === '/snapshots') return json([{ ...SNAPSHOT, orphaned: 'maybe', auto: {} }]);

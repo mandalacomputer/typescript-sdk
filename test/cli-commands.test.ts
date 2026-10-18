@@ -546,6 +546,7 @@ describe('account and historical usage commands', () => {
     return report;
   }
 
+  const USAGE_REFUSAL = /Invalid usage report:|expected usage computer/;
   async function expectUsageFailure(respond: Responder, jsonMode: boolean) {
     const h = harness(respond);
     const result = await h.run(['usage'], jsonMode);
@@ -558,13 +559,15 @@ describe('account and historical usage commands', () => {
         command: 'usage',
         ok: false,
         exit_code: 1,
-        error: { code: 'failed', message: expect.stringContaining('Invalid usage report:') },
+        // The CLI's own check, or the SDK's decoder refusing a breakdown row
+        // first (OPL-6079): either way nothing is displayed.
+        error: { code: 'failed', message: expect.stringMatching(USAGE_REFUSAL) },
       });
       expect(result.frames[0]).not.toHaveProperty('data');
       expect(result.err).toBe('');
     } else {
       expect(result.out).toBe('');
-      expect(result.err).toContain('mandala: Invalid usage report:');
+      expect(result.err).toMatch(new RegExp(`mandala: (${USAGE_REFUSAL.source})`));
     }
   }
 
