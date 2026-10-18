@@ -1415,8 +1415,11 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
       limit: n('limit'),
       before: s('before'),
     };
-    if (path === 'agent runs list') P.agentRunsQuery(agentPage);
-    if (path === 'agent threads list') P.agentThreadsQuery(agentPage);
+    // --computer as typed too, as operations list checks its own: one padded
+    // with spaces is refused before it is looked up.
+    if (path === 'agent runs list') P.agentRunsQuery({ ...agentPage, computerId: s('computer') });
+    if (path === 'agent threads list')
+      P.agentThreadsQuery({ ...agentPage, computerId: s('computer') });
     if (
       path === 'agent runs get' &&
       !b('wait') &&

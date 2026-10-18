@@ -376,6 +376,8 @@ describe('agent runs', () => {
     [2, ['agent', 'runs', 'list', '--status', 'done']],
     [1, ['agent', 'runs', 'list', '--limit', '101']],
     [2, ['agent', 'runs', 'list', '--before', ' ']],
+    [1, ['agent', 'runs', 'list', '--computer', ' vm-1 ']],
+    [1, ['agent', 'threads', 'list', '--computer', 'vm-1 ']],
     [1, ['agent', 'runs', 'list', '--limit', '0']],
     [2, ['agent', 'runs', 'get']],
     [1, ['agent', 'runs', 'get', RUN, '--timeout-ms', '10']],
