@@ -11,6 +11,42 @@ This is the summary you read to decide whether to upgrade.
 
 ### Changed
 
+- **Waits read a 409's word before polling again.** Every wait
+  (`waitUntilRunning`, `waitUntilBuilt`, `waitForGuest`, `waitForDesktop`,
+  `waitForSecrets`, the proxy waits, `waitForMove`, `launch`, `builds.wait`,
+  `operations.wait`, the snapshot capture and delete waits, and the event
+  stream's reconnect) used to poll through any 409. A 409 with a permanent
+  `reason` (`unavailable`, `unsupported`, `revoked`, `exists`, `running`,
+  `name_taken`, `stale_revision`, `stale_capture`) or the code
+  `template_image_preparing` or `idempotency_outcome_unknown` now ends the
+  wait at once with that error, rather than a timeout up to 30 minutes later.
+  `contention`, `starting` and the reasonless codes `idempotency_in_progress`
+  and `WORKSPACE_MOVING` keep polling. Any other 409 without a reason also ends
+  the wait, except in `waitForDesktop`, where it is the "no desktop session
+  yet" answer that wait exists for. `waitForGuest` rides out a booting guest's
+  `starting`, as before.
+- **`isTransient` calls a 503 with no recorded method final.** Every error this
+  SDK builds from a response records its method, and a 503 is transient only
+  for GET and HEAD. An `UnavailableError` built by hand, with no method, used
+  to be transient; it cannot be known to be a read, so it no longer is. The
+  Python SDK and the MCP server answer the same way.
+- **Unreadable rows fail the call instead of being dropped.** `sizes.list`
+  refuses a row that is not an object, a size with no id, unreadable
+  `cpu`/`ram_mb`/`disk_gb`, or an `allowed` that is neither true nor false
+  (it used to read as false). `usage.read` refuses a breakdown row that is not
+  an object, has no id or has an unreadable `gone`. Build progress refuses a
+  step that is not an object. A webhook refuses an `events` or `computers`
+  list containing anything but non-empty strings: dropping an unreadable id
+  could leave `computers: []`, which means every computer in scope.
+
+### Documentation
+
+- `uploadFile`'s 4 MiB chunk size is fixed. Each request body must arrive
+  within two minutes with no 60-second idle gap, so on a slow link use
+  `writeFileChunk` with smaller chunks under the same upload ID.
+- `inputBatch` coordinates are numbers, as OpenAI sends them. The platform
+  drops a fraction toward zero, while `click` and the other single-action
+  methods refuse a non-integer.
 - Clarify the browser URL policy's advertised disconnect protection for
   temporary contexts on supported remote Linux computers, including guardian
   loss and browser-connection loss for public HTTP(S) destinations. Document
@@ -1590,7 +1626,8 @@ No effect on the published surface, listed because it is most of the window.
 - Several parser fixes landed before that scanner was retired, each ported
   to and from the MCP server's byte-identical copy.
 
-[Unreleased]: https://github.com/mandalacomputer/typescript-sdk/compare/v0.13.0...HEAD
+[Unreleased]: https://github.com/mandalacomputer/typescript-sdk/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/mandalacomputer/typescript-sdk/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/mandalacomputer/typescript-sdk/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/mandalacomputer/typescript-sdk/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/mandalacomputer/typescript-sdk/compare/v0.10.0...v0.11.0
