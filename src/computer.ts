@@ -4413,6 +4413,12 @@ export class Computer {
    * `ok`: read the picture with {@link screenshot} afterwards. `{ context: true }`
    * adds the desktop after the batch, as {@link type} does.
    *
+   * Coordinates are numbers, as OpenAI sends them, and only checked to be
+   * finite here. The platform drops a fraction toward zero — `x: 100.7` clicks
+   * at 100 — where the single-action methods ({@link click} and the rest)
+   * refuse a non-integer with a {@link ValidationError}. Round them yourself if
+   * you want nearest-pixel.
+   *
    * A batch REFUSED before any action ran — a malformed one, a computer that is
    * not running, the input lane busy — throws the ordinary error for its status,
    * and nothing happened. The exception is a 503 (`UnavailableError`): the
@@ -5573,6 +5579,11 @@ export class Computer {
   /** Upload a random-access source in bounded chunks. Supply a previous uploadId
    * to resume; keep the source unchanged. Successful uploads retain a receipt
    * until cancelFileUpload is called. No whole-file buffering or blind retries.
+   *
+   * The chunk size is fixed at 4 MiB and is not configurable. Each request body
+   * must arrive within two minutes, with no 60-second idle gap, so on a link
+   * slower than about 34 KiB/s call {@link writeFileChunk} yourself with smaller
+   * chunks under the same uploadId.
    */
   async uploadFile(
     path: string,
