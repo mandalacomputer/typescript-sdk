@@ -3867,7 +3867,8 @@ cannot safely recommend replaying for an arbitrary operation.
 ## The `mandala` CLI
 
 The same package provides commands for computers, templates, snapshots, webhooks, secrets,
-account quota, historical usage, and agent runs. Some of the API has no command
+account quota, historical usage, and agent runs, with their threads and
+background runs. Some of the API has no command
 yet, and is in the SDK and the MCP server only:
 [desktop input](#driving-the-desktop) (clicks, typing, keys, scrolling,
 dragging, pasting), [windows](#windows) and the [clipboard](#clipboard);
@@ -3957,7 +3958,7 @@ network access and never prompt for input; `logout` needs no network.
 | `workspaces` | `list`, `get`, `members`, `create`, `rename`, `rm`, `use`, `current` |
 | `files` | `list`, `upload`, `download` |
 | `artifacts` | `get`, `export`, `download`, `rm` |
-| `agent` | `run` |
+| `agent` | `run`, `chat`, `resume`, `runs list`, `runs get`, `runs cancel`, `threads list`, `threads get`, `threads delete` |
 | `ssh-key` | `list`, `add`, `rm` |
 | Top-level commands | `login`, `logout`, `whoami`, `version`, `account`, `usage`, `billing`, `credits`, `ssh`, `ssh-access`, `ssh-config`, `terminal`, `scp`, `manifest`, `completion` |
 
@@ -3973,7 +3974,7 @@ unknown flags, and conflicting arguments fail instead of being ignored.
 `json_mode` (`finite`, `ndjson`, or `unsupported`) and `requires_credentials`
 (false for `login`, which obtains them, and for the commands that work
 offline). A flag the command cannot run without is marked `required`, `--yes`
-on `workspaces rm` and `artifacts rm` included. `ssh` also carries
+on `workspaces rm`, `artifacts rm` and `agent threads delete` included. `ssh` also carries
 `passthrough`: everything after its computer goes to `ssh` unless `--setup` came first. Flags with aliases, choices, repetition, or conflicts
 carry those properties. Conditional SDK requirements also appear in command help
 and the sections below. The manifest reports `terminal` and `ssh` as unsupported in
@@ -4554,6 +4555,99 @@ waiting and asks an active agent request to abort. It does not roll back actions
 delete a created computer, or prove that an accepted remote mutation stopped.
 An interactive `terminal` session passes Ctrl-C to the guest terminal instead.
 
+#### Threads: continuing a conversation
+
+A run that acted on the desktop, or finished with an answer, is kept in a
+thread on its computer, and its `done` frame names it as `thread_id` (a failed
+run that acted first names it in `data.error.details.thread_id`). Human output
+says which thread a run started. `--thread` continues one: the model is given
+the thread's earlier turns and acts only on the new prompt. Without
+`--computer`, the run goes to the thread's own computer, the only one it can be
+continued on. `--no-store` keeps nothing, and cannot go with `--thread`.
+
+```sh
+mandala agent run 'Open the settings' --computer workbench
+mandala agent run 'Now turn on dark mode' --thread thr_0123456789abcdef01234567
+
+mandala agent threads list --computer workbench    # most recently used first
+mandala agent threads get thr_0123456789abcdef01234567
+mandala agent threads delete thr_0123456789abcdef01234567 --yes
+```
+
+`agent threads list` takes `--computer` (a name or an id), `--limit` (1 to 100,
+default 20) and `--before`, and pages as `agent runs list` does below. `agent
+threads get` prints the turns as a transcript, oldest first, each answer with
+how its run ended; `--json` has the thread and its `messages`. An answer whose
+run is marked `running`, `aborted` or `interrupted` may have done more than it
+reported. `agent threads delete` refuses to run without `--yes`
+(`confirmation_required`, exit 1): a deleted thread cannot be continued, and
+what its runs did to the desktop stands.
+
+#### Interactive: `agent chat` and `agent resume`
+
+```sh
+mandala agent chat --computer workbench            # a new conversation
+mandala agent resume thr_0123456789abcdef01234567  # an existing one
+mandala agent resume                               # pick one of the 20 most recently used
+```
+
+Each line typed on stdin runs the agent, streamed exactly as `agent run`
+streams it, and every run continues the same thread: `agent resume` the one it
+was given, `agent chat` the one its first run started (until a run names one,
+each line starts afresh). The session ends at the end of the input (Ctrl-D) or
+a line reading `/exit`; blank lines are skipped. At a terminal the prompt line
+can be edited and recalled (up arrow), and takes a pasted prompt of any length.
+Ctrl-C stops the run in flight and the session goes on; at the prompt it drops
+the line and says how to leave. Both take
+`agent run`'s `--max-steps`, `--max-cost-usd`, `--provider`, `--model` and
+`--system`, for every run.
+
+`agent resume` with no thread lists the most recently used threads on stderr
+and asks for a number or a thread id; Enter alone chooses none (`cancelled`,
+exit 130). That needs a terminal: with stdin piped and no thread it is a usage
+error (exit 2). Piped, a session reads one prompt per line, so
+`printf 'open the editor\ntype hello\n' | mandala agent resume THREAD --json`
+runs two prompts on one thread and emits each run's frames in turn. A session
+exits 0 when every run in it finished, 1 when any did not (a run that failed,
+stopped short or was cancelled is reported as its `error` or `done` frame, and
+the next line still runs), and 130 when `SIGTERM` ended it, or Ctrl-C while it
+waited for piped input.
+
+#### Background runs
+
+```sh
+RUN=$(mandala agent run 'Tidy the desktop' --computer workbench --background)
+mandala agent runs get "$RUN"                # where it has got to: status, steps, cost
+mandala agent runs get "$RUN" --wait         # poll until it ends, then print it
+mandala agent runs cancel "$RUN"
+mandala agent runs list --status running
+```
+
+`--background` starts the run and exits 0 once it holds the computer, printing
+only its id (`--json`: the run itself, `status: "running"`, as one finite
+result rather than frames). It takes `agent run`'s other options, `--thread`
+included; it is always kept, so `--no-store` is refused. What refuses a run
+before it starts — an unknown computer, one not running or already driven, too
+few credits — fails the command as it would `agent run`.
+
+`agent runs get` reads a run as it stands and exits 0 whatever its status.
+With `--wait` it polls (every 3 seconds, or `--poll-ms`) until the run has
+ended and prints it then, and exits 0 only when it finished: `status:
+"completed"` with `result.stop` `end_turn`. Any other ending exits 1 — it
+completed at another stop, `failed` (see `error`), was `cancelled`, or was
+`interrupted` by a platform restart, which is not resumed — and human output
+says which on stderr. Past `--timeout-ms` (default 30 minutes) the wait fails
+with `timeout`, exit 1, and the run goes on; Ctrl-C stops the wait, not the run.
+`agent runs cancel` stops a run where it is, and exits 0 even for one that had
+already ended, which it prints unchanged; what a run did and cost stands.
+
+`agent runs list` is newest first and takes `--computer` (a name or an id),
+`--status` (`running`, `completed`, `failed`, `cancelled` or `interrupted`),
+`--limit` (1 to 100, default 20) and `--before`. `--json` answers `runs`,
+`has_more` and `next_before`; pass `next_before` back as `--before` for the
+next page, which human output also says on stderr. A listed run's `steps_taken`
+is empty: read the run by id for its steps.
+
 ### JSON results and exit status
 
 `--json` puts machine output on stdout and diagnostics on stderr. Finite commands
@@ -4618,7 +4712,8 @@ incomplete. Computer and snapshot lists accept `--allow-partial` to opt into a
 partial server response; the CLI preserves the shortfall instead of presenting
 it as a complete inventory.
 
-`agent run --json` and `templates watch --json` emit **NDJSON**: one JSON frame
+`agent run --json`, `agent chat --json`, `agent resume --json` and
+`templates watch --json` emit **NDJSON**: one JSON frame
 per line. Every frame has `schema_version`, `command`, `type`, an ISO-8601 UTC
 `timestamp` recorded by the CLI, and `data`. Agent frame types are `step`, `text`,
 `done`, and `error`; build frame types are `progress`, `done`, and `error`.
@@ -4634,6 +4729,9 @@ A terminal `done` frame includes `data.exit_code` and the final result. A termin
 and check its exit status; progress alone is not success. Argument parsing errors
 use the finite error envelope even for a requested streaming command. After
 successful parsing, streaming-command failures use an `error` frame.
+`agent chat` and `agent resume` end each run with its own terminal frame and
+go on to the next line, so read their frames until the process exits; `agent
+run --background` emits one finite result, not frames.
 
 `terminal --json` is deliberately unsupported and fails before connecting, keeping
 terminal traffic out of machine output. `scp --json` emits a finite copy result
@@ -4651,7 +4749,9 @@ options the command declares as conflicting, or an `--as`/`--path` not
 directly after the option it names); and 1 on other ordinary errors — a value
 or combination the CLI refuses after parsing, such as `--cpu 0` or
 `--browser-proxy-bypass` without `--browser-proxy`, included — invalid
-template validation, failed builds, or unfinished agent runs. Foreground exec preserves
+template validation, failed builds, or unfinished agent runs (`agent run`, a
+chat or resume session in which any run did not finish, and `agent runs get
+--wait` on a run that did not finish). Foreground exec preserves
 integer remote exit codes from 0 through 255, uses 124 for a timeout, and 1 when the
 reported code cannot be represented or is unknown. `terminal` exits with the
 shell's own status, 255 when it never read one, and 1 when its output could not

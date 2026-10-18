@@ -9,6 +9,26 @@ This is the summary you read to decide whether to upgrade.
 
 ## [Unreleased]
 
+### Added
+
+- **CLI: agent threads and background runs.** `mandala agent run` takes
+  `--thread` to continue a conversation an earlier run kept (without
+  `--computer`, on the thread's own computer), `--no-store` to keep nothing,
+  and `--background` to start a background run, print its id (with `--json`,
+  the run, as one finite result) and exit 0. `mandala agent runs list`, `get`
+  and `cancel` read and stop background runs; `get --wait` polls until the run
+  ends and exits 0 only when it finished. `mandala agent threads list`, `get`
+  and `delete` read and remove threads; `delete` needs `--yes`. Human output
+  says which thread a run started, and a failed run's error frame carries
+  `details.thread_id`.
+- **CLI: `mandala agent chat` and `mandala agent resume`.** A line-based
+  conversation: each line read on stdin runs the agent on one thread, streamed
+  as `agent run` streams it, until Ctrl-D or `/exit`; Ctrl-C stops the run in
+  flight, not the session. `agent chat --computer` starts a new thread, and
+  `agent resume [thread]` continues one, offering the most recently used to pick
+  from when no thread is given and stdin is a terminal. A session exits 0 when
+  every run in it finished and 1 when any did not.
+
 ## [0.16.0] — 2026-10-18
 
 ### Added

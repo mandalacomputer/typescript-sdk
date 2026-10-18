@@ -1,4 +1,6 @@
 /** Shared command inventory for parsing, help, manifest, and shell completions. */
+import { AGENT_RUN_STATUSES } from './paths.js';
+
 export type Flag = {
   name: string;
   alias?: string;
@@ -114,6 +116,19 @@ export const IDEMPOTENCY_KEY_FLAG = flag(
   'Send this Idempotency-Key (1-255 printable ASCII, no space) instead of a new one; resending a command under the key an error named does not carry it out twice',
 );
 const keyed = [IDEMPOTENCY_KEY_FLAG];
+/** What every run takes, from `agent run` and from each line of `agent chat` and `resume`. */
+const agentFlags = [
+  num('max-steps', 'Maximum desktop actions'),
+  num(
+    'max-cost-usd',
+    'A run on AI credits stops before a model call past this many USD, 0.25 to 20 (default 2); ignored with MANDALA_MODEL_KEY',
+  ),
+  flag('provider', 'Model provider (default: inferred from --model, else anthropic)', {
+    choices: ['anthropic', 'openai'],
+  }),
+  flag('model', 'Model override'),
+  flag('system', 'Standing instructions'),
+];
 const command = (
   path: string,
   description: string,
@@ -778,19 +793,89 @@ export const COMMANDS: readonly Command[] = [
     "Run an agent on MANDALA_MODEL_KEY, your own model key, or without it on the account's AI credits",
     ['prompt'],
     [
-      flag('computer', 'Target computer name or ID', { required: true }),
-      num('max-steps', 'Maximum desktop actions'),
-      num(
-        'max-cost-usd',
-        'A run on AI credits stops before a model call past this many USD, 0.25 to 20 (default 2); ignored with MANDALA_MODEL_KEY',
+      flag(
+        'computer',
+        "Target computer name or ID (default with --thread: the thread's computer)",
+        {
+          required: true,
+          required_unless: ['thread'],
+        },
       ),
-      flag('provider', 'Model provider (default: inferred from --model, else anthropic)', {
-        choices: ['anthropic', 'openai'],
+      ...agentFlags,
+      flag(
+        'thread',
+        'Continue this thread, the thread_id an earlier run on the computer was kept in: the model is given its earlier turns',
+        { conflicts: ['no-store'] },
+      ),
+      bool('no-store', 'Keep nothing: the run starts no thread and adds to none', {
+        conflicts: ['thread', 'background'],
       }),
-      flag('model', 'Model override'),
-      flag('system', 'Standing instructions'),
+      bool(
+        'background',
+        'Start the run in the background, print its id and exit 0; agent runs get --wait reads how it ended',
+        { conflicts: ['no-store'] },
+      ),
     ],
     'ndjson',
+  ),
+  command(
+    'agent chat',
+    'Start a conversation with the agent on a computer: each line typed on stdin runs it, streamed as agent run streams, and every run after the first continues the thread the first one started. Ends at Ctrl-D or /exit; Ctrl-C stops the run in flight',
+    [],
+    [flag('computer', 'Target computer name or ID', { required: true }), ...agentFlags],
+    'ndjson',
+  ),
+  command(
+    'agent resume',
+    'Continue a thread as agent chat does: each line typed on stdin runs the agent on it. With no thread, pick one of the most recently used (stdin must be a terminal)',
+    ['thread?'],
+    agentFlags,
+    'ndjson',
+  ),
+  command(
+    'agent runs list',
+    'List background agent runs, newest first; pass next_before back as --before for the next page',
+    [],
+    [
+      flag('computer', "Only this computer's runs, by name or ID; a deleted one by its ID"),
+      flag('status', 'Only runs in this status', { choices: AGENT_RUN_STATUSES }),
+      num('limit', 'Page size, 1 to 100 (default 20)'),
+      flag('before', 'The next_before of the page before'),
+    ],
+  ),
+  command(
+    'agent runs get',
+    'Read a background run: its status, steps, cost, and once it has ended its result or error. With --wait, exits 0 only when it finished (completed at end_turn)',
+    ['run'],
+    [
+      bool(
+        'wait',
+        'Poll until the run has ended, then print it (default deadline 30 minutes; the run goes on past it)',
+      ),
+      ...waits,
+    ],
+  ),
+  command(
+    'agent runs cancel',
+    'Stop a background run where it is; what it already did and cost stands. A run that has ended is answered unchanged',
+    ['run'],
+  ),
+  command(
+    'agent threads list',
+    'List the conversations agent runs keep, most recently used first; pass next_before back as --before for the next page',
+    [],
+    [
+      flag('computer', "Only this computer's threads, by name or ID"),
+      num('limit', 'Page size, 1 to 100 (default 20)'),
+      flag('before', 'The next_before of the page before'),
+    ],
+  ),
+  command('agent threads get', 'Read a thread and every turn in it, oldest first', ['thread']),
+  command(
+    'agent threads delete',
+    'Delete a thread and its turns; it cannot be continued again. What its runs did to the desktop stands',
+    ['thread'],
+    [bool('yes', 'Confirm the deletion', confirm)],
   ),
   {
     ...command(
@@ -1302,5 +1387,5 @@ function usageError(
 export function help(path = ''): string {
   const matches = COMMANDS.filter((c) => !path || c.path === path || c.path.startsWith(`${path} `));
   const exact = matches.length === 1 ? matches[0] : undefined;
-  return `mandala — cloud computers from your terminal\n\n${matches.map((c) => `  ${usage(c)}\n    ${c.description}`).join('\n')}\n\n${[...GLOBAL_FLAGS, ...(exact?.flags ?? [])].map((f) => `  --${f.name}${f.alias ? `, -${f.alias}` : ''}${f.type === 'boolean' ? '' : ` <${f.type}>`}${f.required ? (f.required_unless?.length ? ` (required unless ${f.required_unless.map((name) => `--${name}`).join(' or ')})` : ' (required)') : ''}  ${f.description}`).join('\n')}\n\nMANDALA_API_KEY authenticates requests; MANDALA_BASE_URL optionally selects a server.\nMANDALA_MODEL_KEY is your own model key for agent run; unset, the run spends the account's AI credits. No credentials are needed for help, version, manifest, completion, login or logout.\n${path.startsWith('ssh') ? `\nmandala ssh: our options go before <computer> (with --setup, --key and --json may follow it);\neverything after it goes to ssh unchanged. It never falls back to mandala terminal.\nMANDALA_SSH_GATEWAY=host[:port] (default ssh.mandala.computer:2222) and\nMANDALA_SSH_GATEWAY_KNOWN_HOSTS (a known_hosts line, or file, pinning that gateway's key)\npoint the SSH commands at another gateway.\n` : ''}`;
+  return `mandala — cloud computers from your terminal\n\n${matches.map((c) => `  ${usage(c)}\n    ${c.description}`).join('\n')}\n\n${[...GLOBAL_FLAGS, ...(exact?.flags ?? [])].map((f) => `  --${f.name}${f.alias ? `, -${f.alias}` : ''}${f.type === 'boolean' ? '' : ` <${f.type}>`}${f.required ? (f.required_unless?.length ? ` (required unless ${f.required_unless.map((name) => `--${name}`).join(' or ')})` : ' (required)') : ''}  ${f.description}`).join('\n')}\n\nMANDALA_API_KEY authenticates requests; MANDALA_BASE_URL optionally selects a server.\nMANDALA_MODEL_KEY is your own model key for agent run, chat and resume; unset, a run spends the account's AI credits. No credentials are needed for help, version, manifest, completion, login or logout.\n${path.startsWith('ssh') ? `\nmandala ssh: our options go before <computer> (with --setup, --key and --json may follow it);\neverything after it goes to ssh unchanged. It never falls back to mandala terminal.\nMANDALA_SSH_GATEWAY=host[:port] (default ssh.mandala.computer:2222) and\nMANDALA_SSH_GATEWAY_KNOWN_HOSTS (a known_hosts line, or file, pinning that gateway's key)\npoint the SSH commands at another gateway.\n` : ''}`;
 }
