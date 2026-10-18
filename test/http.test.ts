@@ -276,10 +276,12 @@ describe('the client deadline', () => {
     expect(err).toBeInstanceOf(ConflictError);
     expect(err).not.toBeInstanceOf(ConnectionError);
     expect(err.message).toBe('HTTP 409');
-    // And the status is still the one a wait may poll on, which the connection
-    // class it was becoming is not. Not transient to an embedder: a 409 whose
-    // body is lost says nothing about clearing (OPL-5973).
-    expect(isTransientForPoll(err)).toBe(true);
+    // And the status is still a 409, which a wait judges by its word rather than
+    // as the connection class it was becoming. A 409 whose body is lost says
+    // nothing about clearing (OPL-5973), so it polls again only on a route that
+    // documents a reasonless 409 as settling (OPL-6079).
+    expect(isTransientForPoll(err)).toBe(false);
+    expect(isTransientForPoll(err, { settling409: true })).toBe(true);
     expect(isTransient(err)).toBe(false);
   });
 
@@ -467,10 +469,12 @@ describe('status mapping', () => {
     expect((stopped as APIError).reason).toBe('unavailable');
     expect(isTransient(stopped)).toBe(false);
     expect(isTransient(taken)).toBe(true);
-    // A poll is the one caller for whom `unavailable` may still clear: a
-    // computer coming up passes through it, and a wait only ever replays a read
-    // under a deadline the caller set. The deliberate divergence of the two.
-    expect(isTransientForPoll(stopped)).toBe(true);
+    // A wait reads the word the same way (OPL-6079): `unavailable` ends it,
+    // even on a route that documents a reasonless 409 as settling, and
+    // `contention` polls again.
+    expect(isTransientForPoll(stopped)).toBe(false);
+    expect(isTransientForPoll(stopped, { settling409: true })).toBe(false);
+    expect(isTransientForPoll(taken)).toBe(true);
   });
 
   it('reads the word off a 400 as readily as off a 409', () => {
@@ -576,7 +580,11 @@ describe('status mapping', () => {
     expect(isTransientForPoll(new ValidationError('id must not be empty'))).toBe(false);
     // And a move offer, which is a 409 by status and a decision by nature.
     expect(isTransientForPoll(new MoveRequiredError('needs a move', 409, {}, true))).toBe(false);
-    expect(isTransientForPoll(new ConflictError('the agent is not up yet', 409))).toBe(true);
+    // A reasonless 409 is a decision unless the polled route says otherwise.
+    expect(isTransientForPoll(new ConflictError('the agent is not up yet', 409))).toBe(false);
+    expect(
+      isTransientForPoll(new ConflictError('no desktop session yet', 409), { settling409: true }),
+    ).toBe(true);
   });
 
   it('keeps the rate limit retry interval', async () => {

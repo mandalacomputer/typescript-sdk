@@ -2729,10 +2729,12 @@ export class Computer {
           // ending, and the check below is what names it.
           if (signal?.aborted) throw err;
           // Everything a booting guest legitimately answers is polled through: a
-          // 409 means the agent is not up yet, a 503 means its host could not be
-          // reached, and an agent that is merely slow answers 502 for the first
-          // seconds of a boot. A revoked key or a malformed request is not, and
-          // must not be disguised as three minutes of guest unavailability.
+          // 409 `starting` means the agent is not up yet and `contention` that it
+          // is busy, a 503 means its host could not be reached, and an agent that
+          // is merely slow answers 502 for the first seconds of a boot. A revoked
+          // key, a malformed request or a 409 whose word says waiting will not
+          // help (`unavailable`, `unsupported`, or none at all) is not, and must
+          // not be disguised as three minutes of guest unavailability.
           //
           // One predicate now, where this was `isPermanent` plus `isTransient`
           // plus an inline `|| status === 502` (OPL-3724). All three said the
@@ -2875,16 +2877,14 @@ export class Computer {
           if (res.ok) return this;
         } catch (err) {
           if (signal?.aborted) throw err;
-          // A computer that is not running will not grow a desktop by being
-          // asked again; start() is the fix, and three minutes of polling
-          // would hide it.
-          if (err instanceof APIError && err.status === 409 && err.reason === 'unavailable') {
-            throw err;
-          }
-          // The no-desktop 409 (no reason) is what this wait is for; a 5xx,
-          // a 429 or a `contention` 409 is the moment too. A 4xx about the
-          // request is not, and must not become a timeout.
-          if (!isDeadlineAbort(err) && !isTransientForPoll(err)) throw err;
+          // The no-desktop 409 (no reason) is what this wait is for, so this
+          // probe is the one that names a reasonless 409 as settling; a 5xx,
+          // a 429 or a `contention`/`starting` 409 is the moment too. A
+          // computer that is not running (`unavailable`) will not grow a
+          // desktop by being asked again, and like any other permanent word or
+          // a 4xx about the request it ends the wait rather than becoming a
+          // timeout.
+          if (!isDeadlineAbort(err) && !isTransientForPoll(err, { settling409: true })) throw err;
           // A reasonless no-desktop response is an ordinary "not yet" for
           // this probe. Keep the conservative retry delay for other failures.
           if (!(err instanceof APIError && err.status === 409 && err.reason === undefined)) {

@@ -555,7 +555,10 @@ describe('waiting', () => {
       if (call.path.endsWith('/exec')) {
         attempts += 1;
         return attempts < 3
-          ? errorJson(409, 'the guest agent is not answering yet')
+          ? json(
+              { error: 'the guest agent is not answering yet', reason: 'starting' },
+              { status: 409 },
+            )
           : json(EXEC_OK);
       }
       return anyRoute(call);
@@ -733,7 +736,9 @@ describe('waiting', () => {
     const { client: c } = client((call) => {
       if (call.path.endsWith('/exec')) {
         probes += 1;
-        return probes === 1 ? errorJson(409, 'the agent is not up yet') : json(EXEC_OK);
+        return probes === 1
+          ? json({ error: 'the agent is not up yet', reason: 'starting' }, { status: 409 })
+          : json(EXEC_OK);
       }
       if (call.method === 'GET' && call.path === '/computers/vm-1') {
         // The handle's own get() first; the rate limit is what the WAIT's
@@ -766,7 +771,7 @@ describe('waiting', () => {
     const { rec, client: c } = client((call) => {
       if (call.path.endsWith('/exec')) {
         probes += 1;
-        return errorJson(409, 'the agent is not up yet');
+        return json({ error: 'the agent is not up yet', reason: 'starting' }, { status: 409 });
       }
       if (call.method === 'GET' && call.path === '/computers/vm-1') {
         gets += 1;
@@ -805,7 +810,7 @@ describe('waiting', () => {
       if (call.path.endsWith('/exec')) {
         probes += 1;
         control.abort(new Error('the caller stopped waiting'));
-        return errorJson(409, 'the agent is not up yet');
+        return json({ error: 'the agent is not up yet', reason: 'starting' }, { status: 409 });
       }
       if (call.method === 'GET' && call.path === '/computers/vm-1') return json(COMPUTER);
       return anyRoute(call);
@@ -827,7 +832,9 @@ describe('waiting', () => {
     const { client: c } = client((call) => {
       if (call.path.endsWith('/exec')) {
         probes += 1;
-        return probes < 2 ? errorJson(409, 'the agent is not up yet') : json(EXEC_OK);
+        return probes < 2
+          ? json({ error: 'the agent is not up yet', reason: 'starting' }, { status: 409 })
+          : json(EXEC_OK);
       }
       if (call.method === 'GET' && call.path === '/computers/vm-1') {
         return json({ ...COMPUTER, status: 'stopped', running_ram_mb: COMPUTER.ram_mb });
@@ -859,7 +866,7 @@ describe('waiting', () => {
     const { rec, client: c } = client((call) => {
       if (call.path.endsWith('/exec')) {
         stopped = true;
-        return errorJson(409, 'the agent is not up yet');
+        return json({ error: 'the agent is not up yet', reason: 'starting' }, { status: 409 });
       }
       if (call.method === 'GET' && call.path === '/computers/vm-1') {
         return json({
