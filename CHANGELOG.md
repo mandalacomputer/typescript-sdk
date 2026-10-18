@@ -9,6 +9,8 @@ This is the summary you read to decide whether to upgrade.
 
 ## [Unreleased]
 
+## [0.15.0] — 2026-10-18
+
 ### Changed
 
 - **Waits read a 409's word before polling again.** Every wait
@@ -1628,7 +1630,8 @@ No effect on the published surface, listed because it is most of the window.
 - Several parser fixes landed before that scanner was retired, each ported
   to and from the MCP server's byte-identical copy.
 
-[Unreleased]: https://github.com/mandalacomputer/typescript-sdk/compare/v0.14.0...HEAD
+[Unreleased]: https://github.com/mandalacomputer/typescript-sdk/compare/v0.15.0...HEAD
+[0.15.0]: https://github.com/mandalacomputer/typescript-sdk/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/mandalacomputer/typescript-sdk/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/mandalacomputer/typescript-sdk/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/mandalacomputer/typescript-sdk/compare/v0.11.0...v0.12.0
