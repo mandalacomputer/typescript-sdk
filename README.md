@@ -3748,7 +3748,9 @@ as permanent request failures. A `409` is judged by its word: a permanent
 that error, while `contention`, `starting` and the reasonless codes
 `idempotency_in_progress` and `WORKSPACE_MOVING` keep it polling. Any other `409`
 without a reason ends the wait too, except in `waitForDesktop`, where it is the
-"no desktop session yet" answer the wait exists for. Two audiences, two predicates: the internal
+"no desktop session yet" answer the wait exists for. `waitForGuest` re-reads
+the computer after an `unavailable` probe and ends only if it is stopped with
+nothing admitted, so a start already on its way is waited out. Two audiences, two predicates: the internal
 `isTransientForPoll` can retry an uncertain read that the public `isTransient`
 cannot safely recommend replaying for an arbitrary operation.
 

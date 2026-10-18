@@ -24,7 +24,9 @@ This is the summary you read to decide whether to upgrade.
   and `WORKSPACE_MOVING` keep polling. Any other 409 without a reason also ends
   the wait, except in `waitForDesktop`, where it is the "no desktop session
   yet" answer that wait exists for. `waitForGuest` rides out a booting guest's
-  `starting`, as before.
+  `starting`, as before, and treats a probe's `unavailable` as a cue to re-read
+  the computer: it ends only when the computer reads stopped and holds
+  nothing, and keeps probing an admitted start.
 - **`isTransient` calls a 503 with no recorded method final.** Every error this
   SDK builds from a response records its method, and a 503 is transient only
   for GET and HEAD. An `UnavailableError` built by hand, with no method, used
