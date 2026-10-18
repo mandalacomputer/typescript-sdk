@@ -823,6 +823,69 @@ export const agentEvents = (): Response =>
     { status: 200, headers: { 'content-type': 'text/event-stream' } },
   );
 
+/** An agent thread as `GET agent/threads` lists it (OPL-6083). */
+export const AGENT_THREAD_SUMMARY = {
+  id: 'thr_0123456789abcdef01234567',
+  computer_id: 'vm-1',
+  title: 'Open the settings and turn on dark mode.',
+  turns: 2,
+  created_at: '2026-10-18T12:00:00.000Z',
+  updated_at: '2026-10-18T12:01:00.000Z',
+};
+
+/** The same thread read by id: its turns, oldest first. */
+export const AGENT_THREAD = {
+  ...AGENT_THREAD_SUMMARY,
+  messages: [
+    {
+      role: 'user',
+      text: 'Open the settings and turn on dark mode.',
+      created_at: '2026-10-18T12:00:00.000Z',
+    },
+    {
+      role: 'assistant',
+      text: 'Dark mode is on.',
+      stop: 'end_turn',
+      steps: 3,
+      created_at: '2026-10-18T12:01:00.000Z',
+    },
+  ],
+};
+
+/** A background run that has ended, as `GET agent/runs/:run` answers it (OPL-6083). */
+export const AGENT_RUN = {
+  id: 'run_0123456789abcdef01234567',
+  computer_id: 'vm-1',
+  thread_id: AGENT_THREAD_SUMMARY.id,
+  status: 'completed',
+  prompt: 'Open the settings and turn on dark mode.',
+  model: 'claude-sonnet-5-5',
+  max_steps: 20,
+  steps: 1,
+  result: {
+    steps: 1,
+    stop: 'end_turn',
+    text: 'Dark mode is on.',
+    usage: { input_tokens: 10, output_tokens: 5, cache_read_tokens: 0, cache_write_tokens: 0 },
+  },
+  steps_taken: [{ n: 1, tool: 'computer', action: 'left_click', detail: 'clicked (10, 20)' }],
+  created_at: '2026-10-18T12:00:00.000Z',
+  updated_at: '2026-10-18T12:01:00.000Z',
+  ended_at: '2026-10-18T12:01:00.000Z',
+};
+
+/** The same run as its start answers it: `running`, with nothing done and no thread yet. */
+export const AGENT_RUN_STARTED = {
+  ...AGENT_RUN,
+  thread_id: null,
+  status: 'running',
+  steps: 0,
+  result: undefined,
+  steps_taken: [],
+  updated_at: AGENT_RUN.created_at,
+  ended_at: null,
+};
+
 /** A registered SSH key, as the platform's reference illustrates one. */
 export const SSH_KEY = {
   id: 'sshk-a1b2c3d4e5f60718',
@@ -1205,6 +1268,18 @@ export const anyRoute: Responder = (call) => {
   if (/^\/workspaces\/[^/]+\/members$/.test(path)) return json([WORKSPACE_MEMBER]);
   if (/^\/workspaces\/[^/]+$/.test(path))
     return json(method === 'DELETE' ? WORKSPACE_DELETED : WORKSPACE);
+  // Agent threads and background runs (OPL-6083). A listing is a page; a
+  // thread's delete is an ack; a run's start is a 202 of a run still going,
+  // and a cancel answers the run as it ended.
+  if (path === '/agent/threads') return json({ threads: [AGENT_THREAD_SUMMARY], has_more: false });
+  if (/^\/agent\/threads\/[^/]+$/.test(path))
+    return json(method === 'DELETE' ? { ok: true } : AGENT_THREAD);
+  if (path === '/agent/runs')
+    return json({ runs: [{ ...AGENT_RUN, steps_taken: [] }], has_more: false });
+  if (/^\/agent\/runs\/[^/]+\/cancel$/.test(path))
+    return json({ ...AGENT_RUN, status: 'cancelled', result: undefined });
+  if (/^\/agent\/runs\/[^/]+$/.test(path)) return json(AGENT_RUN);
+  if (path.endsWith('/agent/runs')) return json(AGENT_RUN_STARTED, { status: 202 });
   if (path === '/operations') return json({ operations: [OPERATION], next_cursor: null });
   if (/^\/operations\/[^/]+$/.test(path)) return json(OPERATION);
   if (path === '/moves') return json({ moves: [MOVE_DONE] });

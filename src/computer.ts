@@ -10,9 +10,12 @@ import {
   type AgentArgs,
   type AgentEvent,
   type AgentResult,
+  type AgentRun,
+  type AgentRunArgs,
   type AgentStop,
   toAgentEvent,
   toAgentResult,
+  toAgentRun,
 } from './agent.js';
 import {
   ARTIFACT_MANIFEST_BYTES,
@@ -6489,13 +6492,18 @@ export class Computer {
         // caller's model key, never the plan: nothing inside a run answers 402
         // on the platform's behalf. A relayed 404/413/429 is the model
         // provider's too; see agentRouteError.
-        throw ev.status
-          ? agentRouteError(
-              errorForEventStatus(ev.status, message, ev.raw, { method: 'POST' }),
-              steps,
-              run,
-            )
-          : new MandalaError(message);
+        if (!ev.status) {
+          // No status to class it by, and still the thread it was kept in: the
+          // one way to carry on from what it did.
+          const failed = new MandalaError(message);
+          if (ev.threadId !== undefined) failed.threadId = ev.threadId;
+          throw failed;
+        }
+        throw agentRouteError(
+          errorForEventStatus(ev.status, message, ev.raw, { method: 'POST' }),
+          steps,
+          run,
+        );
       }
     }
     // UNREACHABLE, and it stays: the compiler cannot see that it is, and this
@@ -6578,15 +6586,10 @@ export class Computer {
     let steps = 0;
     try {
       for await (const raw of this.#t.sse('POST', P.computerAction(this.id, 'agent'), {
-        body: P.agentBody({
-          prompt: args.prompt,
-          stream: true,
-          system: args.system,
-          maxSteps: args.maxSteps,
-          maxCostUsd: args.maxCostUsd,
-          model: args.model,
-          provider: args.provider,
-        }),
+        // Every field the caller gave, read by name inside the builder: a list
+        // spelled out here once kept `threadId`, `store` and `messages` off the
+        // wire while the types said they were sent.
+        body: P.agentBody({ ...args, stream: true }),
         headers,
         signal: args.signal,
       })) {
@@ -6655,15 +6658,7 @@ export class Computer {
     const run = { funded: !(MODEL_KEY_HEADER in headers), baseUrl: this.#t.baseUrl };
     const data = await this.#t
       .json<Record<string, unknown>>('POST', P.computerAction(this.id, 'agent'), {
-        body: P.agentBody({
-          prompt: args.prompt,
-          stream: false,
-          system: args.system,
-          maxSteps: args.maxSteps,
-          maxCostUsd: args.maxCostUsd,
-          model: args.model,
-          provider: args.provider,
-        }),
+        body: P.agentBody({ ...args, stream: false }),
         headers,
         signal: args.signal,
         // One held request for a run that is minutes of clicking — the same
@@ -6686,6 +6681,74 @@ export class Computer {
     }
     return toAgentResult(data);
   }
+
+  /**
+   * Start the agent loop on this computer in the BACKGROUND, and answer at once
+   * with the run (OPL-6083): `client.agentRuns.start(this.id, args)`.
+   *
+   * ```ts
+   * const run = await c.startAgentRun({ prompt: 'Tidy the desktop.', maxSteps: 30 });
+   * const ended = await client.agentRuns.wait(run.id);
+   * if (!ended.finished) console.warn(`${ended.status}: ${ended.error?.error ?? ended.result?.stop}`);
+   * ```
+   *
+   * The same loop as {@link agent}, with the same arguments, and two
+   * differences. The run goes on when this request ends — it is not cut at
+   * the edge after 120 seconds the way {@link agentOnce} is — and it is
+   * always kept, so it can be read back: `store: false` is refused before the
+   * call. Read it with `client.agentRuns.get()`, wait for its end with
+   * `client.agentRuns.wait()`, and stop it with `client.agentRuns.cancel()`.
+   *
+   * Answers once the loop holds the computer, with `status: 'running'`. What
+   * refuses a run before that is thrown, and no run is recorded: an unknown
+   * computer ({@link NotFoundError}), one not running ({@link ConflictError}),
+   * one already driven or whose workspace is changing ({@link ConflictError}
+   * with `reason: 'contention'`), and a funded run the account's credits
+   * cannot start ({@link InsufficientCreditsError}). Everything after it, the
+   * model API's errors included, ends the run as `failed` with that `error`.
+   *
+   * `modelKey` is held in memory for the run's life and never stored. The run
+   * uses the API key that started it: deleting that key stops it at its next
+   * step. `signal` aborts this request only; a run that has started is
+   * stopped with `client.agentRuns.cancel()`.
+   */
+  async startAgentRun(args: AgentRunArgs, opts: CallOptions = {}): Promise<AgentRun> {
+    return postAgentRun(this.#t, this.id, args, opts, 'startAgentRun()');
+  }
+}
+
+/**
+ * `POST computers/:id/agent/runs`, for {@link Computer.startAgentRun} and
+ * `client.agentRuns.start()`: one implementation, so the two spellings refuse
+ * the same arguments and map the same refusals.
+ *
+ * The refusals are mapped as {@link Computer.agentOnce} maps them: a 402
+ * carrying `top_up_url` is {@link InsufficientCreditsError}, and any other 402
+ * is the model provider's billing refusal of `modelKey`
+ * ({@link ModelProviderError}), never a plan limit.
+ *
+ * @internal
+ */
+export async function postAgentRun(
+  t: Transport,
+  computerId: string,
+  args: AgentRunArgs,
+  opts: CallOptions,
+  what: string,
+): Promise<AgentRun> {
+  if (!P.isRecord(args)) {
+    throw new ValidationError(`${what}: options must be an object (got ${typeof args})`);
+  }
+  const headers = modelKeyHeaders(args.modelKey, what);
+  const body = P.agentRunBody(args);
+  const path = P.computerAction(computerId, 'agent/runs');
+  const run = { funded: !(MODEL_KEY_HEADER in headers), baseUrl: t.baseUrl };
+  const data = await t
+    .json('POST', path, { body, headers, signal: opts?.signal })
+    .catch((err: unknown) => {
+      throw err instanceof APIError ? agentRouteError(err, 0, run) : err;
+    });
+  return toAgentRun(data, `the agent run from POST ${path}`, t.baseUrl);
 }
 
 /**

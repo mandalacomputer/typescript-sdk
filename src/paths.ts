@@ -14,6 +14,7 @@
  * happen.
  */
 
+import type { AgentHistoryMessage, AgentRunStatus } from './agent.js';
 import { ValidationError } from './errors.js';
 import { LIMITS } from './limits.js';
 import type { Query } from './transport.js';
@@ -107,6 +108,17 @@ export const OPERATIONS = 'operations';
  * delete (platform OPL-5473), which need an owner's account-wide key.
  */
 export const WORKSPACES = 'workspaces';
+/**
+ * The conversations agent runs keep (OPL-6083): one per thread, continued by
+ * passing its id as `threadId` on the next run. Read and deleted only; a run
+ * is what makes one.
+ */
+export const AGENT_THREADS = 'agent/threads';
+/**
+ * Background agent runs (OPL-6083), read back and cancelled by id. Started on
+ * a computer, at `computers/:id/agent/runs`.
+ */
+export const AGENT_RUNS = 'agent/runs';
 
 /**
  * One id, in a path, refused when it is empty.
@@ -238,7 +250,8 @@ type ComputerAction =
   | 'secrets'
   | 'activities'
   | 'signals'
-  | 'agent';
+  | 'agent'
+  | 'agent/runs';
 
 export const computerAction = (id: string, action: ComputerAction): string =>
   `${computer(id)}/${action}`;
@@ -550,6 +563,11 @@ export const apiKey = (id: string): string => {
   return `${API_KEYS}/${pathId(id, 'API key id')}`;
 };
 export const operation = (id: string): string => `${OPERATIONS}/${pathId(id, 'operation id')}`;
+/** One agent thread, by its id (`thr_` and twenty-four hex characters). */
+export const agentThread = (id: string): string => `${AGENT_THREADS}/${pathId(id, 'thread id')}`;
+/** One background agent run, by its id (`run_` and twenty-four hex characters). */
+export const agentRun = (id: string): string => `${AGENT_RUNS}/${pathId(id, 'run id')}`;
+export const agentRunCancel = (id: string): string => `${agentRun(id)}/cancel`;
 export const workspace = (id: string): string => `${WORKSPACES}/${pathId(id, 'workspace id')}`;
 export const workspaceMembers = (id: string): string => `${workspace(id)}/members`;
 export const webhookAction = (id: string, action: 'rotate' | 'test' | 'deliveries'): string =>
@@ -2808,6 +2826,53 @@ export const MAX_AGENT_STEPS = LIMITS['agent.maxSteps'];
 export const MIN_AGENT_COST_USD = 0.25;
 export const MAX_AGENT_COST_USD = 20;
 
+/**
+ * The conversation so far, as the platform takes it: each turn a `user` or
+ * `assistant` role and its text, and nothing else. Copied field by field, so a
+ * turn carrying anything more (an id, a timestamp, a tool call) sends only
+ * what the platform reads.
+ */
+function agentMessages(v: unknown): AgentHistoryMessage[] {
+  const shape = 'a list of { role: "user" | "assistant", content: string }';
+  if (!Array.isArray(v)) {
+    throw new ValidationError(`messages must be ${shape} (got ${v === null ? 'null' : typeof v})`);
+  }
+  return v.map((m, i) => {
+    if (!isRecord(m)) {
+      throw new ValidationError(`messages[${i}] must be an object with a role and content`);
+    }
+    // Compared, never quoted: a role that is not a string is named by its type,
+    // and quoting one with `JSON.stringify` throws on a BigInt.
+    if (m.role !== 'user' && m.role !== 'assistant') {
+      throw new ValidationError(
+        `messages[${i}].role must be "user" or "assistant"` +
+          (typeof m.role === 'string' ? '' : ` (got ${m.role === null ? 'null' : typeof m.role})`),
+      );
+    }
+    if (typeof m.content !== 'string') {
+      throw new ValidationError(
+        `messages[${i}].content must be a string (got ${m.content === null ? 'null' : typeof m.content})`,
+      );
+    }
+    return { role: m.role, content: m.content };
+  });
+}
+
+/**
+ * The body of `POST computers/:id/agent`, and of a background run without
+ * `stream`.
+ *
+ * The thread fields (OPL-6083) are refused here on the platform's own rules,
+ * each of which it answers with a 400: `threadId` must be a string, `store` a
+ * boolean, `messages` a list of user and assistant turns; `store: false`
+ * cannot continue a thread, since it keeps nothing; and `messages` cannot be
+ * sent with `threadId`, since a thread already holds its conversation. An
+ * empty `messages` list says nothing, and goes with a `threadId` as the
+ * platform lets it. A thread id is otherwise left to the platform, which
+ * answers one it cannot find with a 404, except an empty one or one with space
+ * around it: no thread is called that, and a variable that was set but empty
+ * is a mistake to name rather than a thread to look up.
+ */
 export function agentBody(args: {
   prompt: string;
   maxSteps?: number;
@@ -2815,7 +2880,11 @@ export function agentBody(args: {
   system?: string;
   model?: string;
   provider?: 'anthropic' | 'openai';
-  stream: boolean;
+  threadId?: string;
+  store?: boolean;
+  messages?: readonly AgentHistoryMessage[];
+  /** Absent on a background run, which refuses it. */
+  stream?: boolean;
 }): Json {
   if (!requireString(args.prompt, 'prompt').trim()) {
     throw new ValidationError('prompt must not be empty');
@@ -2849,6 +2918,26 @@ export function agentBody(args: {
       `maxCostUsd must be a number from ${MIN_AGENT_COST_USD} to ${MAX_AGENT_COST_USD} (got ${String(args.maxCostUsd)})`,
     );
   }
+  if (args.threadId !== undefined) {
+    const id = requireString(args.threadId, 'threadId');
+    if (!id || id !== id.trim()) {
+      throw new ValidationError(
+        'threadId must be a thread id (thr_ and 24 hex characters), not empty and with no spaces around it',
+      );
+    }
+  }
+  const store = flag(args.store, 'store');
+  const messages = args.messages === undefined ? undefined : agentMessages(args.messages);
+  if (store === false && args.threadId !== undefined) {
+    throw new ValidationError(
+      'store: false keeps nothing, so it cannot continue a thread: leave out threadId or store',
+    );
+  }
+  if (messages?.length && args.threadId !== undefined) {
+    throw new ValidationError(
+      'send messages or threadId, not both: a thread already holds its conversation',
+    );
+  }
   return omitUndefined({
     prompt: args.prompt,
     max_steps: args.maxSteps,
@@ -2856,8 +2945,28 @@ export function agentBody(args: {
     system: args.system,
     model: args.model,
     provider: args.provider,
+    thread_id: args.threadId,
+    store,
+    messages,
     stream: args.stream,
   });
+}
+
+/**
+ * The body of `POST computers/:id/agent/runs` (OPL-6083): the agent route's,
+ * without `stream`, which the platform refuses there, and refusing
+ * `store: false` the way the platform does — a background run is kept so it
+ * can be read back. `store: true` is the default and is sent only when given.
+ */
+export function agentRunBody(args: Parameters<typeof agentBody>[0]): Json {
+  if (!isRecord(args)) throw new ValidationError(`options must be an object (got ${typeof args})`);
+  if (args.store === false) {
+    throw new ValidationError(
+      'a background run is always kept, so it can be read back: store: false is refused; ' +
+        'use agent() for a run that keeps nothing',
+    );
+  }
+  return agentBody({ ...args, stream: undefined });
 }
 
 // --- webhooks -------------------------------------------------------------
@@ -3490,6 +3599,105 @@ export function operationsQuery(args: OperationListArgs = {}): Query {
     if (!c)
       throw new ValidationError('cursor must be the nextCursor of the page before, not empty');
     q.cursor = c;
+  }
+  return q;
+}
+
+// --- agent threads and background runs ---------------------------------------
+
+/** The most one page of `GET agent/threads` or `GET agent/runs` holds; the platform refuses more. */
+export const AGENT_PAGE_MAX = 100;
+
+/** What one page of `GET agent/threads` asks for (OPL-6083). */
+export type AgentThreadListArgs = {
+  /** Only this computer's threads. */
+  computerId?: string;
+  /** At most this many, 1 to {@link AGENT_PAGE_MAX}. The platform's default is 20. */
+  limit?: number;
+  /**
+   * The id of the last thread of the page before, for the page after it: the
+   * page's `nextBefore`. One this key cannot see is a 400.
+   */
+  before?: string;
+};
+
+/**
+ * Where a background run has got to. `running` is live; the other four are
+ * where it ended. Closed, because it is only ever SENT here, as a filter the
+ * platform answers 400 for outside the set; what a run READS back is
+ * {@link AgentRunStatus}, which stays open.
+ */
+export const AGENT_RUN_STATUSES = [
+  'running',
+  'completed',
+  'failed',
+  'cancelled',
+  'interrupted',
+] as const;
+
+/** What one page of `GET agent/runs` asks for (OPL-6083). */
+export type AgentRunListArgs = AgentThreadListArgs & {
+  /** Only runs in this status. */
+  status?: (typeof AGENT_RUN_STATUSES)[number];
+};
+
+/**
+ * The three parameters both agent listings take, refused locally on the
+ * platform's own rules: a `computerId` or `before` that is empty or padded
+ * (an empty `computerId` dropped instead would list every computer's to a
+ * caller who asked about one), and a `limit` outside 1 to
+ * {@link AGENT_PAGE_MAX}.
+ */
+function agentPageQuery(args: AgentThreadListArgs): Query {
+  if (!isRecord(args)) throw new ValidationError(`options must be an object (got ${typeof args})`);
+  const q: Query = {};
+  if (args.computerId !== undefined) {
+    const id = requireString(args.computerId, 'computerId');
+    if (!id || id !== id.trim()) {
+      throw new ValidationError('computerId must be a computer id, with no spaces around it');
+    }
+    q.computer_id = id;
+  }
+  if (args.limit !== undefined) {
+    if (!Number.isInteger(args.limit) || args.limit < 1 || args.limit > AGENT_PAGE_MAX) {
+      throw new ValidationError(
+        `limit must be a whole number from 1 to ${AGENT_PAGE_MAX} (got ${args.limit})`,
+      );
+    }
+    q.limit = args.limit;
+  }
+  if (args.before !== undefined) {
+    const b = requireString(args.before, 'before');
+    if (!b || b !== b.trim()) {
+      throw new ValidationError(
+        'before must be the id of the last row of the page before (its nextBefore), not empty',
+      );
+    }
+    q.before = b;
+  }
+  return q;
+}
+
+/** The query for `GET agent/threads`. */
+export function agentThreadsQuery(args: AgentThreadListArgs = {}): Query {
+  return agentPageQuery(args);
+}
+
+/** The query for `GET agent/runs`, with its `status` held to the five there are. */
+export function agentRunsQuery(args: AgentRunListArgs = {}): Query {
+  const q = agentPageQuery(args);
+  if (args.status !== undefined) {
+    if (typeof args.status !== 'string') {
+      throw new ValidationError(
+        `status must be one of ${AGENT_RUN_STATUSES.join(', ')} (got ${args.status === null ? 'null' : typeof args.status})`,
+      );
+    }
+    if (!(AGENT_RUN_STATUSES as readonly string[]).includes(args.status)) {
+      throw new ValidationError(
+        `status must be one of ${AGENT_RUN_STATUSES.join(', ')} (got ${JSON.stringify(args.status)})`,
+      );
+    }
+    q.status = args.status;
   }
   return q;
 }

@@ -520,6 +520,60 @@ async function exerciseEverything(client: Client): Promise<void> {
   // A run on the account's AI credits: no key, and the cost cap that only a
   // funded run reads.
   await c.agentOnce({ prompt: 'do a thing', maxCostUsd: 1.5 });
+  // Threads (OPL-6083): continue one, and bring a history the caller keeps
+  // itself on a run that keeps nothing. The two cannot share a call.
+  await c.agent({
+    prompt: 'and now this',
+    modelKey: 'sk-test',
+    threadId: 'thr_0123456789abcdef01234567',
+    store: true,
+  });
+  await c.agentOnce({
+    prompt: 'do a thing',
+    store: false,
+    messages: [
+      { role: 'user', content: 'open the settings' },
+      { role: 'assistant', content: 'they are open' },
+    ],
+  });
+  await client.agentThreads.list();
+  await client.agentThreads.list({
+    computerId: 'vm-1',
+    limit: 5,
+    before: 'thr_0123456789abcdef01234567',
+  });
+  await client.agentThreads.get('thr_0123456789abcdef01234567');
+  await client.agentThreads.delete('thr_0123456789abcdef01234567');
+
+  // Background runs (OPL-6083): started from the handle and by id, every body
+  // field across the two starts by id, then read, listed, cancelled and waited
+  // on.
+  await c.startAgentRun({ prompt: 'do a thing' });
+  const bg = await client.agentRuns.start('vm-1', {
+    prompt: 'do a thing',
+    modelKey: 'sk-test',
+    system: 'be brief',
+    maxSteps: 5,
+    maxCostUsd: 1,
+    model: 'claude-opus-5',
+    provider: 'anthropic',
+    threadId: 'thr_0123456789abcdef01234567',
+    store: true,
+  });
+  await client.agentRuns.start('vm-1', {
+    prompt: 'do a thing',
+    messages: [{ role: 'user', content: 'open the settings' }],
+  });
+  await client.agentRuns.get(bg.id);
+  await client.agentRuns.list();
+  await client.agentRuns.list({
+    computerId: 'vm-1',
+    status: 'running',
+    limit: 5,
+    before: 'run_0123456789abcdef01234567',
+  });
+  await client.agentRuns.cancel(bg.id);
+  await client.agentRuns.wait(bg.id);
 
   await client.account.read();
   // The newest page, and an older one of a chosen size.

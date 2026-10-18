@@ -1806,6 +1806,111 @@ stopped part-way, and its usage and steps are not reported. Use `agent()` or
 result's `stepsTaken` lists every step the run took; the streaming `done` frame
 does not carry that list, since each step arrived as its own event.
 
+#### Continuing a conversation: threads
+
+A run is kept. Unless you send `store: false`, a run that acted on the desktop,
+or finished with an answer, is kept as one exchange — the prompt, and the run's
+closing text and how it ended — in a thread on that computer, and the result
+says which as `threadId`. Pass it back to continue: the model is given the
+thread's earlier turns as the conversation so far (the newest 64,000 characters
+of them), is told they are done, and acts only on the new prompt.
+
+```ts
+const first = await c.agent({ prompt: 'Open the settings.' });
+const next = await c.agent({
+  prompt: 'Now turn on dark mode.',
+  threadId: first.threadId, // undefined when the first run kept nothing
+});
+```
+
+A thread belongs to its computer: continuing one from another computer, or one
+already holding 100 turns, is a `ConflictError`, and one this key cannot see is
+a `NotFoundError`. A run refused before it acted keeps nothing and starts no
+thread.
+
+`store: false` keeps nothing at all. `messages` brings a history you keep
+yourself instead — `[{ role: 'user' | 'assistant', content }]`, oldest first and
+without this prompt — and a new thread, unless `store: false`, starts with
+those turns. `store: false` with `threadId`, and a non-empty `messages` with
+`threadId`, are refused before anything is sent, as the platform refuses them.
+
+A failed run that acted first, or that continued a thread you named, carries
+its thread too: `err.threadId` on the error `agent()` and `agentOnce()` throw,
+and `threadId` on `agentStream()`'s `error` event. The steps it took stand, so
+look at the desktop before you continue it.
+
+`client.agentThreads` reads and deletes them. A key needs the `member` role
+(a viewer is refused, since a prompt is where private text ends up), and a key
+confined to a workspace sees that workspace's threads. An account keeps its
+1000 most recently used threads, and a thread goes with its computer.
+
+```ts
+let before: string | undefined;
+do {
+  const page = await client.agentThreads.list({ computerId: c.id, limit: 50, before });
+  for (const t of page.threads) console.log(t.id, t.turns, t.title);
+  before = page.nextBefore ?? undefined; // the last thread's id, or null on the last page
+} while (before);
+
+const thread = await client.agentThreads.get(threadId);
+for (const turn of thread.messages) console.log(turn.role, turn.stop ?? '', turn.text);
+await client.agentThreads.delete(threadId); // what its runs did to the desktop stands
+```
+
+An assistant turn's `stop` is the run's `AgentResult.stop`, or `error` (it
+failed, with `error` saying why), `aborted` (stopped part way), `running`
+(still going) or `interrupted` (the platform restarted before it finished). The
+last three may have done more than they reported.
+
+#### Background runs
+
+`agent()` holds a connection for as long as the run goes. A background run does
+not: start it, and read it back by id while it goes and after it ends.
+
+```ts
+const run = await c.startAgentRun({ prompt: 'Tidy the desktop.', maxSteps: 40 });
+// or, with only the id: client.agentRuns.start('vm-1', { ... })
+
+const ended = await client.agentRuns.wait(run.id); // polls until it has ended
+if (ended.finished) console.log(ended.result?.text);
+else console.warn(ended.status, ended.error?.error ?? ended.result?.stop);
+```
+
+It takes `agent()`'s arguments, `threadId` and `messages` included, and runs the
+same loop. It is always kept, so it can be read back: `store: false` is refused
+before the call. The start answers once the loop holds the computer, with
+`status: 'running'`; what refuses a run before that is thrown as its own error
+and records no run — an unknown computer (`NotFoundError`), one not running
+(`ConflictError`), one already driven or whose workspace is changing
+(`ConflictError` with `reason: 'contention'`), and a funded run the account's
+credits cannot start (`InsufficientCreditsError`). Everything after it, the
+model API's errors included, ends the run as `failed` with that `error`.
+
+`modelKey` is held in memory for the run's life and never stored. The run uses
+the API key that started it, and deleting that key stops it at its next step.
+The `signal` you pass to the start aborts that request only.
+
+- `client.agentRuns.get(id)` — the run as it stands: `status`, every step so far
+  in `stepsTaken`, `costUsd` on a funded run, `threadId` once it is kept, and
+  once it has ended its `result` (`completed`) or `error` (`failed`,
+  `interrupted`).
+- `client.agentRuns.list({ computerId, status, limit, before })` — newest first,
+  paged by `nextBefore` like the threads. Each listed run's `stepsTaken` is
+  empty; read one by id for its steps.
+- `client.agentRuns.cancel(id)` — stops it where it is; what it did and cost
+  stands. Cancelling one that already ended answers it unchanged.
+- `client.agentRuns.wait(id, { timeoutMs, pollMs, signal })` — polls (every 3
+  seconds by default) until the run has ended, and answers it whatever the
+  ending: it does not throw for `failed`, `cancelled` or `interrupted`, whose
+  steps are on the desktop all the same. Past `timeoutMs` (30 minutes by
+  default) it throws `TimeoutError`, and the run goes on: cancel it to stop it.
+
+`finished` is true only for a run that `completed` with `result.stop ===
+'end_turn'`. `interrupted` is a run the platform was executing when it
+restarted (`error.status` 503), or one that stopped without its ending being
+recorded (500); it is not resumed, so look at the desktop before starting
+another.
+
 #### Using an OpenAI client with your own model key
 
 The same computer agent is available at
@@ -1832,7 +1937,10 @@ This external client does not read `~/.mandala/credentials.json`, so
 `mandala login` does not configure it. That file holds a Mandala credential,
 not your Anthropic key. Existing computer charges and API rate budgets apply;
 Anthropic bills model usage to your key. This endpoint provides no hosted
-inference, included model credits, or saved dashboard conversation.
+inference or included model credits. Its runs are kept in threads as the
+native route's are (see [threads](#continuing-a-conversation-threads)):
+`agent.thread_id` on the response, on the last chunk when streaming, names the
+thread, and `thread_id` and `store` are top-level body fields here too.
 
 The example below uses Anthropic. To select OpenAI inference, use
 `model: 'gpt-6.1-sol'` and `OPENAI_API_KEY` in `X-Model-Key`. Custom model names
@@ -1881,8 +1989,10 @@ model ran.
 request in a variable lets the TypeScript client send them without a cast.
 `max_steps` counts desktop actions, not tokens or a billing cap; completed
 actions remain real when the run stops early. Only the last user message
-supplies the task, and system messages are concatenated. Earlier user/assistant
-history is not replayed. This is limited chat-completions compatibility, with
+supplies the task, and system messages are concatenated. The user and assistant
+messages before it are given to the model as the conversation so far, unless
+the request names a `thread_id`, whose own turns are the conversation instead.
+This is limited chat-completions compatibility, with
 no general promise for developer messages, image parts, tool-call histories,
 or the Responses API.
 
