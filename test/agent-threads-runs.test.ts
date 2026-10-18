@@ -656,8 +656,15 @@ describe('client.agentRuns reads', () => {
       { ...AGENT_RUN, thread_id: '' },
       { ...AGENT_RUN, thread_id: ` ${THREAD}` },
       { ...AGENT_RUN, ended_at: 0 },
+      // Read as a time, an empty one would end a wait on a run still going.
+      { ...AGENT_RUN_STARTED, ended_at: '' },
+      { ...AGENT_RUN_STARTED, ended_at: '  ' },
       { ...AGENT_RUN, error: 'failed' },
       { ...AGENT_RUN, error: { status: 500 } },
+      // Without its status an interrupted run's restart (503) and its lost
+      // ending (500) cannot be told apart.
+      { ...AGENT_RUN, status: 'interrupted', error: { error: 'restarted' } },
+      { ...AGENT_RUN, status: 'interrupted', error: { error: 'restarted', status: '503' } },
       { ...AGENT_RUN, result: 'end_turn' },
       { ...AGENT_RUN, steps_taken: 'none' },
       { ...AGENT_RUN, steps_taken: [7] },

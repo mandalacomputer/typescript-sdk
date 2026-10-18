@@ -735,6 +735,19 @@ const runThread = (v: unknown, what: string): string | null => {
   return id;
 };
 
+/**
+ * A run's `ended_at`: `null` while it is running, or when it ended. Refused
+ * when empty: a wait ends on any `endedAt` that is not `null`, and an empty
+ * string is no time at all.
+ */
+const runEnded = (v: unknown, what: string): string | null => {
+  const at = textOrNull(v, `${what}'s ended_at`);
+  if (at !== null && !at.trim()) {
+    throw new MandalaError(`expected ${what}'s ended_at to be a time or null`);
+  }
+  return at;
+};
+
 /** A text field the platform sends as a string or `null`, refused as anything else. */
 const textOrNull = (v: unknown, what: string): string | null => {
   if (v === null || v === undefined) return null;
@@ -770,7 +783,13 @@ export function toAgentRun(d: unknown, what = 'an agent run', baseUrl?: string):
     if (!isRecord(e) || typeof e.error !== 'string') {
       throw new MandalaError(`expected ${what}'s error to carry what went wrong`);
     }
-    error = { error: e.error, status: num(e.status) };
+    // The status is what tells an interrupted run's restart (503) from one
+    // whose ending was never recorded (500), so a missing one is refused rather
+    // than read as a 0 no route answers.
+    if (typeof e.status !== 'number' || !Number.isInteger(e.status)) {
+      throw new MandalaError(`expected ${what}'s error to carry its status`);
+    }
+    error = { error: e.error, status: e.status };
     if (typeof e.reason === 'string') error.reason = e.reason;
     const topUp = topUpLink(e.top_up_url, baseUrl);
     if (topUp !== undefined) error.topUpUrl = topUp;
@@ -790,7 +809,7 @@ export function toAgentRun(d: unknown, what = 'an agent run', baseUrl?: string):
     finished: d.status === 'completed' && result?.finished === true,
     createdAt: str(d.created_at),
     updatedAt: str(d.updated_at),
-    endedAt: textOrNull(d.ended_at, `${what}'s ended_at`),
+    endedAt: runEnded(d.ended_at, what),
     raw: { ...d },
   };
   const cost = usd(d.cost_usd);
