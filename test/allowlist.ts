@@ -97,6 +97,15 @@ export const ALLOWED: ReadonlySet<string> = new Set(
       // The agent loop, and the same engine behind an OpenAI-shaped door.
       ['POST', 'computers/:id/agent'],
       ['POST', 'chat/completions'],
+      // Agent threads: the conversations agent runs keep, continued by id.
+      ['GET', 'agent/threads'],
+      ['GET', 'agent/threads/:thread'],
+      ['DELETE', 'agent/threads/:thread'],
+      // Background agent runs: started, then read back or cancelled by id.
+      ['POST', 'computers/:id/agent/runs'],
+      ['GET', 'agent/runs'],
+      ['GET', 'agent/runs/:run'],
+      ['POST', 'agent/runs/:run/cancel'],
 
       // Files in and out of the guest.
       ['PUT', 'computers/:id/files'],
@@ -205,6 +214,15 @@ export const UNIMPLEMENTED: ReadonlySet<string> = new Set([
   // here, and a second, worse OpenAI client inside this SDK would be a
   // maintenance obligation with no user.
   'POST chat/completions',
+  // Agent threads and background runs. Not wrapped yet; until they are, call
+  // them over HTTP.
+  'GET agent/threads',
+  'GET agent/threads/:thread',
+  'DELETE agent/threads/:thread',
+  'POST computers/:id/agent/runs',
+  'GET agent/runs',
+  'GET agent/runs/:run',
+  'POST agent/runs/:run/cancel',
 ]);
 
 /**
@@ -412,6 +430,9 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
       'body:model',
       'body:provider',
       'body:stream',
+      'body:thread_id',
+      'body:store',
+      'body:messages',
     ],
   ],
   [
@@ -424,8 +445,31 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
       'body:provider',
       'body:max_steps',
       'body:stream',
+      'body:thread_id',
+      'body:store',
     ],
   ],
+  ['GET agent/threads', ['query:computer_id', 'query:limit', 'query:before']],
+  ['GET agent/threads/:thread', []],
+  ['DELETE agent/threads/:thread', []],
+  [
+    'POST computers/:id/agent/runs',
+    [
+      'header:X-Model-Key',
+      'body:prompt',
+      'body:system',
+      'body:max_cost_usd',
+      'body:max_steps',
+      'body:model',
+      'body:provider',
+      'body:thread_id',
+      'body:store',
+      'body:messages',
+    ],
+  ],
+  ['GET agent/runs', ['query:computer_id', 'query:status', 'query:limit', 'query:before']],
+  ['GET agent/runs/:run', []],
+  ['POST agent/runs/:run/cancel', []],
 
   // The file body is the file, raw — there are no named fields to mirror.
   ['PUT computers/:id/files', ['query:path', 'query:no_wake', 'query:overwrite']],
@@ -547,6 +591,11 @@ export const UNIMPLEMENTED_PARAMETERS: ReadonlySet<string> = new Set([
   'POST computers/:id/input  body:key',
   // `amount` is sent instead. Same value, two names.
   'POST computers/:id/input  body:scroll_amount',
+  // Continuing a thread, opting out of keeping one, and sending a history the
+  // caller keeps itself. Not sent by agent() yet.
+  'POST computers/:id/agent  body:thread_id',
+  'POST computers/:id/agent  body:store',
+  'POST computers/:id/agent  body:messages',
 ]);
 
 /**
@@ -596,6 +645,10 @@ export function patternFor(path: string): string {
     else if (out.length === 3 && out[0] === 'computers' && prev === 'public-urls')
       out.push(':urlId');
     else if (prev === 'windows') out.push(':window');
+    // An agent thread's and a background run's id, second segment under
+    // `agent` only, as the platform pins them.
+    else if (out.length === 2 && out[0] === 'agent' && prev === 'threads') out.push(':thread');
+    else if (out.length === 2 && out[0] === 'agent' && prev === 'runs') out.push(':run');
     else out.push(seg);
   }
   // A template ref's two halves, pinned to a THREE-segment path under
@@ -627,4 +680,6 @@ const PATH_PARAMETERS: ReadonlySet<string> = new Set([
   ':activity',
   ':namespace',
   ':name',
+  ':thread',
+  ':run',
 ]);
