@@ -174,6 +174,18 @@ describe('check-internals', () => {
     expect(scanText(line, 'f.ts', new Set())).not.toHaveLength(0);
   });
 
+  it('catches the platform module directory on its own (OPL-6079)', () => {
+    expect(scanText('// see web/lib for the table', 'f.ts', new Set())).toHaveLength(1);
+    // And a module under it is still one finding, not two.
+    expect(scanText('// web/lib/projection.ts sets it', 'f.ts', new Set())).toHaveLength(1);
+  });
+
+  it('catches the daemon binary name, which no platform declaration carries (OPL-6079)', () => {
+    const found = scanText('// Run `gorillad -build-template` there', 'f.ts', new Set());
+    expect(found).toHaveLength(1);
+    expect(found[0]).toContain('names a platform identifier: gorillad');
+  });
+
   it('reports an identifier by name even though the list only holds its hash', () => {
     // The point of hashing: the list is not a map, but the message can still
     // name the token, because the token is already in the file being read.

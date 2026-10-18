@@ -2729,10 +2729,12 @@ export class Computer {
           // ending, and the check below is what names it.
           if (signal?.aborted) throw err;
           // Everything a booting guest legitimately answers is polled through: a
-          // 409 means the agent is not up yet, a 503 means its host could not be
-          // reached, and an agent that is merely slow answers 502 for the first
-          // seconds of a boot. A revoked key or a malformed request is not, and
-          // must not be disguised as three minutes of guest unavailability.
+          // 409 `starting` means the agent is not up yet and `contention` that it
+          // is busy, a 503 means its host could not be reached, and an agent that
+          // is merely slow answers 502 for the first seconds of a boot. A revoked
+          // key, a malformed request or a 409 whose word says waiting will not
+          // help (`unavailable`, `unsupported`, or none at all) is not, and must
+          // not be disguised as three minutes of guest unavailability.
           //
           // One predicate now, where this was `isPermanent` plus `isTransient`
           // plus an inline `|| status === 502` (OPL-3724). All three said the
@@ -2757,7 +2759,19 @@ export class Computer {
           // never heard of it must not be the thing asked. That race is
           // documented and deterministically tested for waitUntilRunning; this
           // loop was the one still exposed to it.
-          if (!isDeadlineAbort(err) && !isTransientForPoll(err)) throw err;
+          // One `unavailable` is the moment rather than the answer: a start
+          // the platform has admitted but whose process does not exist yet.
+          // The computer reads `stopped` (or `suspended`) with its memory
+          // held, and the probe is refused as not running until the process
+          // is there. The handle may be stale — another client can have
+          // stopped and started it — so the refresh below decides: a
+          // computer reading stopped and holding nothing is refused as
+          // stopped at once, and one with an admitted start, or one that
+          // reads running because its boot finished meanwhile, is probed
+          // again.
+          const unavailable =
+            err instanceof APIError && err.status === 409 && err.reason === 'unavailable';
+          if (!unavailable && !isDeadlineAbort(err) && !isTransientForPoll(err)) throw err;
           delayMs = retryDelay(pollMs, err);
           // A failed probe may also mean the cached lifecycle state is stale,
           // and this is the read that turns "the guest is quiet" into "it is
@@ -2875,16 +2889,14 @@ export class Computer {
           if (res.ok) return this;
         } catch (err) {
           if (signal?.aborted) throw err;
-          // A computer that is not running will not grow a desktop by being
-          // asked again; start() is the fix, and three minutes of polling
-          // would hide it.
-          if (err instanceof APIError && err.status === 409 && err.reason === 'unavailable') {
-            throw err;
-          }
-          // The no-desktop 409 (no reason) is what this wait is for; a 5xx,
-          // a 429 or a `contention` 409 is the moment too. A 4xx about the
-          // request is not, and must not become a timeout.
-          if (!isDeadlineAbort(err) && !isTransientForPoll(err)) throw err;
+          // The no-desktop 409 (no reason) is what this wait is for, so this
+          // probe is the one that names a reasonless 409 as settling; a 5xx,
+          // a 429 or a `contention`/`starting` 409 is the moment too. A
+          // computer that is not running (`unavailable`) will not grow a
+          // desktop by being asked again, and like any other permanent word or
+          // a 4xx about the request it ends the wait rather than becoming a
+          // timeout.
+          if (!isDeadlineAbort(err) && !isTransientForPoll(err, { settling409: true })) throw err;
           // A reasonless no-desktop response is an ordinary "not yet" for
           // this probe. Keep the conservative retry delay for other failures.
           if (!(err instanceof APIError && err.status === 409 && err.reason === undefined)) {
@@ -4413,6 +4425,12 @@ export class Computer {
    * `ok`: read the picture with {@link screenshot} afterwards. `{ context: true }`
    * adds the desktop after the batch, as {@link type} does.
    *
+   * Coordinates are numbers, as OpenAI sends them, and only checked to be
+   * finite here. The platform drops a fraction toward zero — `x: 100.7` clicks
+   * at 100 — where the single-action methods ({@link click} and the rest)
+   * refuse a non-integer with a {@link ValidationError}. Round them yourself if
+   * you want nearest-pixel.
+   *
    * A batch REFUSED before any action ran — a malformed one, a computer that is
    * not running, the input lane busy — throws the ordinary error for its status,
    * and nothing happened. The exception is a 503 (`UnavailableError`): the
@@ -5573,6 +5591,11 @@ export class Computer {
   /** Upload a random-access source in bounded chunks. Supply a previous uploadId
    * to resume; keep the source unchanged. Successful uploads retain a receipt
    * until cancelFileUpload is called. No whole-file buffering or blind retries.
+   *
+   * The chunk size is fixed at 4 MiB and is not configurable. Each request body
+   * must arrive within two minutes, with no 60-second idle gap, so on a link
+   * slower than about 34 KiB/s call {@link writeFileChunk} yourself with smaller
+   * chunks under the same uploadId.
    */
   async uploadFile(
     path: string,

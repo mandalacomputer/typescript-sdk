@@ -373,8 +373,10 @@ describe('refusal words and the 503 on a change', () => {
     expect(isTransient(at('HEAD'))).toBe(true);
     for (const m of ['POST', 'PUT', 'PATCH', 'DELETE', 'post'])
       expect(isTransient(at(m))).toBe(false);
-    // One built by hand has no method and keeps its old answer.
-    expect(isTransient(new UnavailableError('x', 503))).toBe(true);
+    // One with no recorded method cannot say it was a read, so it is final,
+    // as in the other two clients (OPL-6079).
+    expect(isTransient(new UnavailableError('x', 503))).toBe(false);
+    expect(isTransient(errorForStatus(503, 'x', { error: 'x' }))).toBe(false);
     // A word that clears cannot make a change answered 503 transient: the
     // outcome is still unknown. It still does on a read.
     for (const reason of ['contention', 'starting']) {

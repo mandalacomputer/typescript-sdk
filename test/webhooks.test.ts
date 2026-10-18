@@ -708,17 +708,29 @@ describe('webhooks: the subscriptions', () => {
     }
   });
 
-  it('keeps only the strings in an id list', async () => {
-    // A `null` through `str()` would be `''`, which is not an id and would
-    // read as one, on the list that decides which computers are heard from.
+  it('refuses an id list it cannot read whole, rather than dropping ids (OPL-6079)', async () => {
+    // `computers: []` means every computer in scope, so dropping the one
+    // unreadable id would report a subscription as hearing more than it does.
+    for (const body of [
+      { computers: ['vm-1', null, 7, 'vm-2'] },
+      { computers: [7] },
+      { computers: [''] },
+      { events: 'process.exited' },
+      { events: [{}] },
+    ]) {
+      const { client: c } = client((call) =>
+        call.path === '/webhooks/whk-1' ? json({ ...WEBHOOK, ...body }) : anyRoute(call),
+      );
+      await expect(c.webhooks.get('whk-1')).rejects.toThrow(/to be a (string|list)/);
+    }
+    // Absent and null are no list, as before.
     const { client: c } = client((call) =>
       call.path === '/webhooks/whk-1'
-        ? json({ ...WEBHOOK, computers: ['vm-1', null, 7, 'vm-2'], events: 'process.exited' })
+        ? json({ ...WEBHOOK, computers: null, events: undefined })
         : anyRoute(call),
     );
     const w = await c.webhooks.get('whk-1');
-    expect(w.computers).toEqual(['vm-1', 'vm-2']);
-    expect(w.events).toEqual([]);
+    expect([w.computers, w.events]).toEqual([[], []]);
   });
 
   it('updates with only the fields named, and sends an empty list as itself', async () => {

@@ -20,6 +20,7 @@ import {
   ComputerNotRunningError,
   ConnectionError,
   CreateOnlyConflictError,
+  conflictKeepsPolling,
   FileExistsError,
   MoveRequiredError,
   OriginTLSError,
@@ -95,9 +96,10 @@ export type WaitOptions = {
  *   is why this one status is matched by NUMBER: the type cannot separate them.
  * - anything below 500 that is not named. A 4xx is the request — a bad body, a
  *   revoked key, a plan limit, a deleted id, an offset past the end of a file —
- *   and repeating it unchanged cannot change the answer. Three describe the
- *   moment instead and are named: 409, 429, and 408, which RFC 9110 defines as a
- *   request the client may repeat unchanged and which the edge does emit.
+ *   and repeating it unchanged cannot change the answer. Three can describe the
+ *   moment instead and are named: 429, 408, which RFC 9110 defines as a request
+ *   the client may repeat unchanged and which the edge does emit, and the 409s
+ *   that say so (below).
  *
  *   A 3xx goes with the 4xx, which is why the test is `>= 500` rather than "not
  *   a 4xx". The transport does not follow redirects and treats every non-2xx as
@@ -110,15 +112,18 @@ export type WaitOptions = {
  * origin can answer 700 — which `>= 500` alone called a passing moment and
  * polled until the caller's deadline (Codex adversarial review, OPL-3724).
  *
- * {@link APIError.reason} is deliberately NOT consulted here, and that is the
- * one place this predicate and {@link isTransient} part company (platform
- * OPL-3898). `unavailable` means the computer is not running, which is a
- * permanent answer to whoever asked — and a poll under a deadline is the one
- * caller for whom it may not be, since a computer coming up passes through it.
- * The same generosity as every unmapped 5xx above and for the same reason: this
- * only ever replays a read, and the waits return a verdict of their own the
- * moment the status they are watching settles. mandala-computer-python's
- * `_is_transient_for_poll` and the MCP server's draw the line in the same place.
+ * A 409 is judged by {@link conflictKeepsPolling} (OPL-6079), the same rule in
+ * all three clients. It used to be polled through whatever it said, and a
+ * refusal this SDK itself calls permanent — `unsupported`, `exists`, `running`,
+ * a `stale_*`, a `WORKSPACE_MOVING` that needs a person — then ran the wait to
+ * its deadline and came back as a timeout naming none of it. Now a permanent
+ * word or an always-final code ends the wait with that error, a transient word
+ * or code polls again, and a 409 with no word polls again only where the caller
+ * passes `settling409`: the polled route documents a reasonless 409 as a state
+ * that passes. Only the desktop probe does — "no desktop session yet". The
+ * waits that read the control plane (`GET computers/:id`, moves, builds,
+ * operations, snapshots) have no such state, and the plain exec probe's
+ * booting guest answers `starting`.
  *
  * 501 is inside the band deliberately, and it is the one that keeps being
  * queried, because "not implemented" reads like a permanent verdict on the
@@ -143,7 +148,7 @@ export type WaitOptions = {
  * rest of the waits poll the control plane, where a 502 is edge noise and was
  * being reported to callers as a machine that never came up.
  */
-export const isTransientForPoll = (err: unknown): boolean => {
+export const isTransientForPoll = (err: unknown, opts: { settling409?: boolean } = {}): boolean => {
   if (!(err instanceof APIError) && !(err instanceof ConnectionError)) return false;
   if (
     err instanceof MoveRequiredError ||
@@ -155,7 +160,8 @@ export const isTransientForPoll = (err: unknown): boolean => {
   if (err instanceof OriginTLSError) return false;
   if (err instanceof APIError) {
     if (err.status === 524) return false;
-    if (err.status === 408 || err.status === 409 || err.status === 429) return true;
+    if (err.status === 409) return conflictKeepsPolling(err, opts.settling409 === true);
+    if (err.status === 408 || err.status === 429) return true;
     return err.status >= 500 && err.status < 600;
   }
   return true;

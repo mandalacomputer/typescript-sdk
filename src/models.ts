@@ -161,6 +161,36 @@ export const wire = (v: unknown): Wire => {
 export const said = (v: unknown): boolean => wire(v) === WIRE.TRUE;
 
 /**
+ * A flag read strictly: absent or null is false, and anything this client
+ * cannot read as true or false fails the answer rather than reading as false
+ * (OPL-6079). `required` makes absent and null fail too, for a field the
+ * platform always sends.
+ */
+export const flag = (v: unknown, what: string, required = false): boolean => {
+  const w = wire(v);
+  if (w === WIRE.TRUE) return true;
+  if (w === WIRE.FALSE) return false;
+  if (w === WIRE.MALFORMED || required)
+    throw new MandalaError(`expected ${what} to be true or false`);
+  return false;
+};
+
+/**
+ * The object rows of an array field, refused whole when the field is not an
+ * array or a row is not an object (OPL-6079). Absent or null is no rows. A row
+ * left out silently is one the caller never sees, which is the defect listRow
+ * exists to stop.
+ */
+export const objectRows = (v: unknown, what: string): Record<string, unknown>[] => {
+  if (v == null) return [];
+  if (!Array.isArray(v)) throw new MandalaError(`expected ${what} to be a list`);
+  return v.map((row, i) => {
+    if (!isRecord(row)) throw new MandalaError(`expected ${what} ${i} to be an object`);
+    return row;
+  });
+};
+
+/**
  * True where the wire said so, AND where it sent something unreadable.
  *
  * The reading for a caveat — `degraded`, `unmatched`, `timed_out`, the
@@ -1094,7 +1124,7 @@ export function toBuildProgress(d: Record<string, unknown>): BuildProgress {
     phase: str(d.phase),
     step: num(d.step),
     of: num(d.of),
-    steps: Array.isArray(d.steps) ? d.steps.filter(isRecord).map(toBuildStep) : [],
+    steps: objectRows(d.steps, 'build step').map(toBuildStep),
     note: str(d.note),
     error: str(d.error),
     updatedAt: str(d.updated_at),
@@ -1129,18 +1159,25 @@ export type Size = {
   raw: Record<string, unknown>;
 };
 
-export function toSize(d: Record<string, unknown>): Size {
+export function toSize(d: Record<string, unknown>, which = 'a size'): Size {
   const cheapest = d.cheapest_plan;
+  const shape = (key: string): number => {
+    const n = count(d[key]);
+    if (n === undefined || n < 0) throw new MandalaError(`expected ${which} to carry ${key}`);
+    return n;
+  };
   return {
-    id: str(d.id),
+    // Strict (OPL-6079): the id is what a create names, and a size whose
+    // numbers or permission cannot be read is not one to offer at all.
+    id: rowId(d, which),
     label: str(d.label),
     template: str(d.template),
-    cpu: num(d.cpu),
-    ramMb: num(d.ram_mb),
-    diskGb: num(d.disk_gb),
-    // TRUE only. A permission nobody granted is not granted, and the caller
-    // reads this to decide whether to offer the row at all.
-    allowed: said(d.allowed),
+    cpu: shape('cpu'),
+    ramMb: shape('ram_mb'),
+    diskGb: shape('disk_gb'),
+    // Always sent. An unreadable or missing one fails the answer rather than
+    // reading as "not allowed", which would hide a size the plan admits.
+    allowed: flag(d.allowed, `${which}'s allowed`, true),
     cheapestPlan: cheapest == null ? undefined : str(cheapest),
     raw: { ...d },
   };
@@ -1452,7 +1489,7 @@ export function toUsageReport(d: Record<string, unknown>): UsageReport {
     throw new MandalaError('expected a usage report to carry its totals');
   }
   const totals = d.usage;
-  const rows = Array.isArray(totals.computers) ? totals.computers.filter(isRecord) : [];
+  const rows = objectRows(totals.computers, 'usage computer');
   const through = d.reported_through;
   return {
     period: { start: str(period.start), end: str(period.end), source: str(period.source) },
@@ -1466,14 +1503,15 @@ export function toUsageReport(d: Record<string, unknown>): UsageReport {
       snapshotGbMonths: num(totals.snapshot_gb_months),
       diskGbHours: num(totals.disk_gb_hours),
       diskGbMonths: num(totals.disk_gb_months),
-      computers: rows.map((c) => ({
-        id: str(c.id),
+      computers: rows.map((c, i) => ({
+        id: rowId(c, `usage computer ${i}`),
         name: str(c.name),
         runHours: num(c.run_hours),
         vcpuHours: num(c.vcpu_hours),
         ramGbHours: num(c.ram_gb_hours),
-        // TRUE only: a line is not about a deleted computer unless it says so.
-        gone: said(c.gone),
+        // Absent is a line about a computer that still exists; an unreadable
+        // value fails the answer rather than guessing which.
+        gone: flag(c.gone, `usage computer ${i}'s gone`),
       })),
     },
     // Caveats on every figure above, and the reason this type tells callers to
@@ -3204,8 +3242,17 @@ export type WebhookCreated = Webhook & {
  * not an id and would read as one, and this list is what decides which
  * computers a subscription hears about.
  */
-const strings = (v: unknown): string[] =>
-  Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
+const strings = (v: unknown, what: string): string[] => {
+  if (v == null) return [];
+  if (!Array.isArray(v)) throw new MandalaError(`expected ${what} to be a list`);
+  return v.map((x, i) => {
+    // Refused rather than dropped (OPL-6079): `computers: []` means every
+    // computer in scope, so a list whose one id was unreadable must not come
+    // back as that.
+    if (typeof x !== 'string' || !x) throw new MandalaError(`expected ${what} ${i} to be a string`);
+    return x;
+  });
+};
 
 /**
  * A row's `id`, refused when it is missing or empty (OPL-5973). The id is what
@@ -3255,8 +3302,8 @@ export function toWebhook(d: Record<string, unknown>, which = 'a webhook'): Webh
     id,
     url: str(d.url),
     description: str(d.description),
-    events: strings(d.events),
-    computers: strings(d.computers),
+    events: strings(d.events, `${which}'s event`),
+    computers: strings(d.computers, `${which}'s computer`),
     enabled: enabled === WIRE.TRUE,
     ...(d.disabled_reason == null ? {} : { disabledReason: str(d.disabled_reason) }),
     ...(disabledAt === undefined ? {} : { disabledAt }),

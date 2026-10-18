@@ -1712,9 +1712,10 @@ export function isTransient(err: unknown): boolean {
   // is an unknown outcome: the platform answers a failure after the request was
   // sent with the same status, so a create, a command or a delete answered 503
   // may already have happened. Only a read is safe to replay blind, and the
-  // method is what says which this was. An error built by hand carries no
-  // method and keeps the answer this predicate always gave it.
-  if (err instanceof UnavailableError && err.method !== undefined) {
+  // method is what says which this was. An error with no recorded method —
+  // one built by hand — cannot say it was a read, so it is final, as in the
+  // other two clients (OPL-6079).
+  if (err instanceof UnavailableError) {
     return err.method === 'GET' || err.method === 'HEAD';
   }
   // A 409 that reached here carried no word this version recognises, which the
@@ -1722,11 +1723,60 @@ export function isTransient(err: unknown): boolean {
   // clears by itself (OPL-5973). A transient word returned true above.
   if (err instanceof ConflictError)
     return err.code !== undefined && CONFLICT_CODES_CLEAR.has(err.code);
-  return (
-    err instanceof RateLimitError ||
-    err instanceof UnavailableError ||
-    err instanceof ConnectionError
-  );
+  return err instanceof RateLimitError || err instanceof ConnectionError;
+}
+
+/**
+ * The 409 `code`s that end a wait whatever else the refusal says: neither is
+ * answered differently by asking again. `template_image_preparing` is continued
+ * only with its own token, and `idempotency_outcome_unknown` answers the same
+ * thing for as long as the key is kept.
+ */
+const CONFLICT_CODES_FINAL: ReadonlySet<string> = new Set([
+  'template_image_preparing',
+  'idempotency_outcome_unknown',
+]);
+
+/**
+ * Whether a wait should poll again after a 409 (OPL-6079).
+ *
+ * The poll-side half of {@link isTransient}'s 409 rule, and the same rule in all
+ * three clients. A 409 used to be polled through whatever it said, so a refusal
+ * this SDK itself calls permanent (`unsupported`, `exists`, `running`, a
+ * `stale_*`, a `WORKSPACE_MOVING` that needs a person) ran the wait to its
+ * deadline and came back as a timeout naming none of it.
+ *
+ * - A code on the always-final list, or one of the conflict classes that are
+ *   decisions (a move offer, a file in the way, a create-only conflict, a
+ *   computer that is not running), ends the wait.
+ * - A transient word (`contention`, `starting`) polls again; a permanent one
+ *   ends the wait.
+ * - With no word this version recognises, `idempotency_in_progress` and
+ *   `WORKSPACE_MOVING` poll again: they clear on their own.
+ * - Any other reasonless 409 polls again only when `settling` says the polled
+ *   route documents one as a state that passes — the desktop probe's "no
+ *   desktop session yet". Everywhere else it is a decision, and ends the wait.
+ *
+ * @internal
+ */
+export function conflictKeepsPolling(err: APIError, settling: boolean): boolean {
+  if (
+    err instanceof MoveRequiredError ||
+    err instanceof FileExistsError ||
+    err instanceof CreateOnlyConflictError ||
+    err instanceof ComputerNotRunningError
+  )
+    return false;
+  if (err.code !== undefined && CONFLICT_CODES_FINAL.has(err.code)) return false;
+  if (err.reason !== undefined) {
+    // Only a top-level word grants another poll, as in isTransient: a nested
+    // run error's word is diagnostic.
+    if (REASON_CLEARS.has(err.reason) && typeof errorRecord(err.body)?.reason === 'string')
+      return true;
+    if (REASON_PERMANENT.has(err.reason)) return false;
+  }
+  if (err.code !== undefined && CONFLICT_CODES_CLEAR.has(err.code)) return true;
+  return settling;
 }
 
 /**

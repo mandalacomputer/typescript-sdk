@@ -90,8 +90,17 @@ const SUFFIXES = new Set(['.ts', '.tsx', '.mjs', '.js', '.md', '.json', '.yml', 
 const PATH_PATTERNS = [
   [/\b[A-Za-z_][A-Za-z0-9_/]*\.go\b/g, 'names a platform source file'],
   [/\b(?:web\/)?lib\/[A-Za-z][A-Za-z0-9_]*(?:\.ts)?\b/g, 'names a platform module'],
+  // The directory on its own, which the rule above needs a module after.
+  [/\bweb\/lib\b/g, 'names a platform module'],
   [/\bserver\/[A-Za-z][A-Za-z0-9_/]*\b/g, 'names a platform module'],
 ];
+
+/**
+ * Names no declaration in the platform's source carries, so the derived list
+ * cannot hold them: the daemon's binary name, today. Hashed for the reason the
+ * derived list is.
+ */
+const EXTRA_DIGESTS = new Set(['45f122a7ca20']);
 
 const IDENTIFIER = /\b[A-Za-z_][A-Za-z0-9_]*\b/g;
 const MIN_IDENTIFIER = 7;
@@ -129,7 +138,7 @@ export function scanText(text, label, digests) {
       // Limit this collision exception to its actual protocol consumer.
       if (label === 'src/browser-cdp.ts' && token === 'errorText') continue;
       const digest = createHash('sha256').update(token).digest('hex').slice(0, 12);
-      if (digests.has(digest)) {
+      if (digests.has(digest) || EXTRA_DIGESTS.has(digest)) {
         problems.push(`${label}:${i + 1}: names a platform identifier: ${token}`);
       }
     }

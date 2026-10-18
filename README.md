@@ -562,6 +562,11 @@ points and waits) before it wakes a suspended computer. It runs on one input
 lane, so no other API input interleaves. `{ context: true }` adds the desktop
 after the batch, as `type` does.
 
+Coordinates in a batch are numbers, as OpenAI sends them. The platform drops a
+fraction toward zero (`x: 100.7` clicks at 100), while the single-action
+methods such as `click` refuse a non-integer with a `ValidationError`. Round
+them yourself if you want nearest-pixel.
+
 A batch the platform **refuses before any action runs** (a computer that is
 not running, the input lane busy) throws the ordinary error for its status, and
 nothing happened. If the error's answer can't be read (an empty or cut-off
@@ -3730,12 +3735,22 @@ API error reasons that identify temporary or permanent failures.
 request was sent with the same 503, so a create, a command or a delete answered
 503 may already have happened. Every error this SDK builds carries `err.method`,
 and `isTransient` calls an `UnavailableError` transient only when that was GET
-or HEAD. Read the current state before sending a change again.
+or HEAD; one with no recorded method, such as one built by hand, is not. Read
+the current state before sending a change again.
 
 The wait helpers do not ask it. They replay idempotent reads under a deadline
 you set, so they can ride out 502, 504 and 520-523. They stop on 524 (a proxy
 timeout that retrying unchanged will not fix) and 525/526 (TLS failures), as well
-as permanent request failures. Two audiences, two predicates: the internal
+as permanent request failures. A `409` is judged by its word: a permanent
+`reason` (`unavailable`, `unsupported`, `revoked`, `exists`, `running`,
+`name_taken`, `stale_revision`, `stale_capture`) or the code
+`template_image_preparing` or `idempotency_outcome_unknown` ends the wait with
+that error, while `contention`, `starting` and the reasonless codes
+`idempotency_in_progress` and `WORKSPACE_MOVING` keep it polling. Any other `409`
+without a reason ends the wait too, except in `waitForDesktop`, where it is the
+"no desktop session yet" answer the wait exists for. `waitForGuest` re-reads
+the computer after an `unavailable` probe and ends only if it is stopped with
+nothing admitted, so a start already on its way is waited out. Two audiences, two predicates: the internal
 `isTransientForPoll` can retry an uncertain read that the public `isTransient`
 cannot safely recommend replaying for an arbitrary operation.
 
@@ -4950,7 +4965,7 @@ found `windows()` broken against the live platform on its first run.
 
 ## Large resumable uploads
 
-On Linux with Python 3, `computer.uploadFile(path, source, options)` uploads up to 2 GiB in 4 MiB chunks. The random-access source has a `size` and an async `read(offset, length)` returning exactly that many bytes. A browser `File` can be read with `new Uint8Array(await file.slice(offset, offset + length).arrayBuffer())`. Keep the source unchanged throughout.
+On Linux with Python 3, `computer.uploadFile(path, source, options)` uploads up to 2 GiB in 4 MiB chunks. The chunk size is fixed. Each request body must arrive within two minutes, with no 60-second idle gap, so on a slow link (under about 34 KiB/s) call `writeFileChunk` yourself with smaller chunks under the same upload ID. The random-access source has a `size` and an async `read(offset, length)` returning exactly that many bytes. A browser `File` can be read with `new Uint8Array(await file.slice(offset, offset + length).arrayBuffer())`. Keep the source unchanged throughout.
 
 ```ts
 const done = await computer.uploadFile('/tmp/dataset.bin', {
