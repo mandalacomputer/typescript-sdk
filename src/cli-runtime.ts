@@ -28,6 +28,12 @@ export type CliIO = {
   ssh?: SshRuntime;
   /** How `computers view` opens a page; {@link openBrowser} unless replaced. */
   openBrowser?: (url: string) => Promise<boolean>;
+  /**
+   * The terminal stdin is, opened for writing, where `agent chat` and
+   * `agent resume` draw their prompt when stderr is not a terminal; the
+   * process's own unless replaced.
+   */
+  openTerminal?: () => NodeJS.WritableStream | undefined;
 };
 
 /**

@@ -13,6 +13,7 @@
  */
 
 import { createInterface } from 'node:readline';
+import { WriteStream } from 'node:tty';
 import { agentRunEnded } from './agent.js';
 import { CliError, help } from './cli-options.js';
 import {
@@ -410,34 +411,56 @@ const QUEUED_LINES = 16;
 const HOW_TO_LEAVE = '(Ctrl-D or /exit to leave)';
 
 /**
+ * The terminal stdin is, opened for writing, for the line editor to draw on
+ * when stderr is not one (`--json 2>session.log`): the prompt and what is
+ * typed belong in front of the person typing, not in the log. libuv reopens a
+ * stdio terminal by name, so this handle is its own and closing it leaves
+ * stdin as it was (cli.ts measures the window through such a handle). Only
+ * for the process's own stdin; `undefined` when it cannot be opened.
+ */
+function openTerminal(stdin: CliIO['stdin']): NodeJS.WritableStream | undefined {
+  if (stdin !== process.stdin) return undefined;
+  try {
+    return new WriteStream(0);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Lines from stdin, one at a time, as they are asked for. Read as they
  * arrive, so a line piped (or typed) while a run goes waits for its turn
  * rather than being lost.
  *
- * At a terminal, stdin and stderr both, readline holds the line in the
- * terminal's raw mode: it echoes and edits it, keeps a history, and takes a
- * line of any length. The terminal's own line mode stops taking a line at its
- * limit (1024 bytes on macOS), so a task description pasted at a prompt read
- * that way never arrived, and nothing typed after it did either. In raw mode
- * Ctrl-C is a key, which readline reports as its `SIGINT`, handed to
- * `interrupt`; Ctrl-D on an empty line ends the input. {@link hold} gives the
- * terminal its line mode back for a run, in which Ctrl-C is the process's
- * SIGINT again, which is what stops the run. What is typed while a run goes
- * is the terminal's own type-ahead, held to its limit, as it is while a shell
- * runs any command.
+ * When stdin is a terminal, readline holds the line in the terminal's raw
+ * mode: it echoes and edits it, keeps a history, and takes a line of any
+ * length. The terminal's own line mode stops taking a line at its limit (1024
+ * bytes on macOS), so a task description pasted at a prompt read that way
+ * never arrived, and nothing typed after it did either. readline draws on
+ * stderr, or on the terminal itself when stderr is not one ({@link
+ * openTerminal}), and so does everything else the session shows the person
+ * typing: `draw`. In raw mode Ctrl-C is a key, which readline reports as its
+ * `SIGINT`, handed to `interrupt`; Ctrl-D on an empty line ends the input.
+ * {@link hold} gives the terminal its line mode back for a run, in which
+ * Ctrl-C is the process's SIGINT again, which is what stops the run. What is
+ * typed while a run goes is the terminal's own type-ahead, held to its limit,
+ * as it is while a shell runs any command.
  *
- * Anywhere else (piped input, or a terminal writing stderr to a file) lines
- * are read as they come and nothing is drawn but the prompt, and that only
- * when stdin is a terminal.
+ * Piped input is read as it comes, and nothing is drawn for it.
  */
 function lineReader(io: CliIO, interrupt: () => void) {
   const { stdin } = io;
-  const terminal =
-    stdin.isTTY === true && io.stderr.isTTY === true && typeof stdin.setRawMode === 'function';
+  const rawCapable = stdin.isTTY === true && typeof stdin.setRawMode === 'function';
+  const opened =
+    rawCapable && io.stderr.isTTY !== true
+      ? (io.openTerminal ?? (() => openTerminal(stdin)))()
+      : undefined;
+  const screen: Pick<NodeJS.WritableStream, 'write'> = opened ?? io.stderr;
+  const terminal = rawCapable && (opened !== undefined || io.stderr.isTTY === true);
   const rl = createInterface({
     input: stdin,
     ...(terminal
-      ? { output: io.stderr as unknown as NodeJS.WritableStream, terminal: true }
+      ? { output: screen as NodeJS.WritableStream, terminal: true }
       : { terminal: false }),
     crlfDelay: Infinity,
   });
@@ -475,7 +498,7 @@ function lineReader(io: CliIO, interrupt: () => void) {
         if (terminal) {
           rl.setPrompt(prompt);
           rl.prompt();
-        } else if (prompt && stdin.isTTY) io.stderr.write(prompt);
+        } else if (prompt && stdin.isTTY) screen.write(prompt);
       }
       for (;;) {
         signal.throwIfAborted();
@@ -503,12 +526,12 @@ function lineReader(io: CliIO, interrupt: () => void) {
     reprompt(prompt: string): void {
       if (!terminal) {
         // The terminal's line mode has dropped the line already.
-        io.stderr.write(`\n${HOW_TO_LEAVE}\n${prompt}`);
+        screen.write(`\n${HOW_TO_LEAVE}\n${prompt}`);
         return;
       }
       rl.write(null, { ctrl: true, name: 'e' });
       rl.write(null, { ctrl: true, name: 'u' });
-      io.stderr.write(`\n${HOW_TO_LEAVE}\n`);
+      screen.write(`\n${HOW_TO_LEAVE}\n`);
       rl.prompt();
     },
     /** For a run: the terminal's own line mode, in which Ctrl-C is SIGINT. */
@@ -525,7 +548,15 @@ function lineReader(io: CliIO, interrupt: () => void) {
       held = false;
       flow();
     },
-    close: () => rl.close(),
+    /** Where the session shows the person typing what it has to say. */
+    screen,
+    draw: (text: string) => {
+      screen.write(text);
+    },
+    close: () => {
+      rl.close();
+      (opened as { destroy?: () => void } | undefined)?.destroy?.();
+    },
   };
 }
 
@@ -535,8 +566,8 @@ type LineReader = ReturnType<typeof lineReader>;
 const PICKER_THREADS = 20;
 
 /**
- * `agent resume` with no thread: the most recently used threads, numbered on
- * stderr, and the one whose number (or id) is typed back. An empty answer, or
+ * `agent resume` with no thread: the most recently used threads, numbered
+ * where the prompt is drawn, and the one whose number (or id) is typed back. An empty answer, or
  * the end of the input, chooses none.
  */
 async function pickThread(
@@ -552,16 +583,16 @@ async function pickThread(
       'not_found',
       'There is no thread to resume; start one with: mandala agent chat --computer COMPUTER',
     );
-  io.stderr.write('Threads, most recently used first:\n');
+  reader.draw('Threads, most recently used first:\n');
   listTable(
     io,
     ['#', 'THREAD', 'COMPUTER', 'TURNS', 'LAST USED', 'TITLE'],
     threads.map((t, i) => [i + 1, t.id, t.computerId, t.turns, t.updatedAt, t.title]),
     '',
-    io.stderr,
+    reader.screen,
   );
   if (page.hasMore)
-    io.stderr.write(
+    reader.draw(
       `(the ${threads.length} most recently used; type the id of an older one, or list them with: mandala agent threads list)\n`,
     );
   for (;;) {
@@ -577,7 +608,7 @@ async function pickThread(
       const chosen = threads[Number(answer) - 1];
       if (chosen && Number(answer) >= 1) return chosen.id;
     } else if (answer.startsWith('thr_')) return answer;
-    io.stderr.write(`Type a number from 1 to ${threads.length}, or a thread id (thr_...).\n`);
+    reader.draw(`Type a number from 1 to ${threads.length}, or a thread id (thr_...).\n`);
   }
 }
 
@@ -648,16 +679,16 @@ export async function agentSession(
       const thread = threadSafe(io, await client.agentThreads.get(threadId, { signal }));
       c = await client.computers.get(thread.computerId, { signal });
       if (chatty)
-        io.stderr.write(
+        reader.draw(
           `Resuming ${threadLine(io, thread)}\n${turnLines(io, thread.messages.slice(-2), 500)}`,
         );
     } else if (chatty)
-      output.diagnostic(`A new conversation on ${c.id}${c.name ? ` (${c.name})` : ''}.`, {
-        keepNewlines: false,
-      });
+      reader.draw(
+        `${terminalSafe(redact(`A new conversation on ${c.id}${c.name ? ` (${c.name})` : ''}.`, io.env, io.secrets) as string)}\n`,
+      );
     if (chatty)
-      output.diagnostic(
-        'Each line you type runs the agent. Ctrl-C stops a run; Ctrl-D or /exit leaves.',
+      reader.draw(
+        'Each line you type runs the agent. Ctrl-C stops a run; Ctrl-D or /exit leaves.\n',
       );
     let failed = false;
     for (;;) {
@@ -670,7 +701,7 @@ export async function agentSession(
       }
       if (line === undefined) {
         // Ctrl-D: the shell's prompt starts on a line of its own.
-        if (interactive) io.stderr.write('\n');
+        if (interactive) reader.draw('\n');
         break;
       }
       if (!line.trim()) continue;
@@ -704,7 +735,7 @@ export async function agentSession(
         failed = true;
         if (run.signal.aborted) {
           // After the terminal's `^C`, on a line of its own.
-          if (interactive) io.stderr.write('\n');
+          if (interactive) reader.draw('\n');
           output.error(
             new CliError(
               'cancelled',

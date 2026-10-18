@@ -82,6 +82,7 @@ function harness(
   opts: {
     stdin?: Stdin;
     stderr?: CliIO['stderr'];
+    openTerminal?: CliIO['openTerminal'];
     env?: NodeJS.ProcessEnv;
     fetch?: typeof globalThis.fetch;
   } = {},
@@ -112,6 +113,7 @@ function harness(
     createClient: () =>
       new Client({ apiKey: 'com_cli_test', baseUrl: BASE, fetch: opts.fetch ?? rec.fetch }),
     now: () => new Date(stamp),
+    ...(opts.openTerminal ? { openTerminal: opts.openTerminal } : {}),
   };
   return {
     rec,
@@ -861,6 +863,28 @@ describe('agent chat and agent resume at a terminal', () => {
     expect(rawDuringRun).toBe(false);
     expect(t.stdin.setRawMode.mock.calls.map(([mode]) => mode)).toEqual([true, false, true, false]);
     expect(t.stdin.isRaw).toBe(false);
+  });
+
+  it('stays in raw mode with stderr redirected, drawing on the terminal instead', async () => {
+    const t = terminal();
+    // stderr is the harness's own, which is not a terminal: `2>session.log`.
+    const h = harness((call) => (isAgentPost(call) ? done(THREAD) : anyRoute(call)), {
+      stdin: t.io.stdin,
+      openTerminal: () => t.stderr,
+    });
+    const pending = h.run(['agent', 'resume', THREAD]);
+    await vi.waitFor(() => expect(t.drawn()).toContain('> '));
+    const long = 'z'.repeat(3000);
+    t.type(`${long}\r`);
+    await vi.waitFor(() => expect(h.agentBodies()).toHaveLength(1));
+    t.type('\x04');
+    const result = await pending;
+    expect(result.code).toBe(0);
+    expect(h.agentBodies()[0]).toMatchObject({ prompt: long });
+    expect(t.stdin.setRawMode.mock.calls.map(([mode]) => mode)).toEqual([true, false, true, false]);
+    // The prompt and the echo went to the terminal, and stderr kept none of it.
+    expect(result.err).toBe('');
+    expect(t.stderr.destroyed).toBe(true);
   });
 
   it('drops the line on a Ctrl-C key at the prompt, says how to leave, and goes on', async () => {
