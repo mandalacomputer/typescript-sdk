@@ -2841,26 +2841,55 @@ function agentMessages(v: unknown): AgentHistoryMessage[] {
     if (!isRecord(m)) {
       throw new ValidationError(`messages[${i}] must be an object with a role and content`);
     }
+    // Each read once, for the reason agentBody reads its own fields once.
+    const { role, content } = m;
     // Compared, never quoted: a role that is not a string is named by its type,
     // and quoting one with `JSON.stringify` throws on a BigInt.
-    if (m.role !== 'user' && m.role !== 'assistant') {
+    if (role !== 'user' && role !== 'assistant') {
       throw new ValidationError(
         `messages[${i}].role must be "user" or "assistant"` +
-          (typeof m.role === 'string' ? '' : ` (got ${m.role === null ? 'null' : typeof m.role})`),
+          (typeof role === 'string' ? '' : ` (got ${role === null ? 'null' : typeof role})`),
       );
     }
-    if (typeof m.content !== 'string') {
+    if (typeof content !== 'string') {
       throw new ValidationError(
-        `messages[${i}].content must be a string (got ${m.content === null ? 'null' : typeof m.content})`,
+        `messages[${i}].content must be a string (got ${content === null ? 'null' : typeof content})`,
       );
     }
-    return { role: m.role, content: m.content };
+    return { role, content };
   });
 }
 
+/** What the agent body is built from: the run's own arguments, without the key and the signal. */
+export type AgentBodyArgs = {
+  prompt: string;
+  maxSteps?: number;
+  maxCostUsd?: number;
+  system?: string;
+  model?: string;
+  provider?: 'anthropic' | 'openai';
+  threadId?: string;
+  store?: boolean;
+  messages?: readonly AgentHistoryMessage[];
+  stream?: boolean;
+};
+
 /**
- * The body of `POST computers/:id/agent`, and of a background run without
- * `stream`.
+ * The body of `POST computers/:id/agent`, and with `background` of
+ * `POST computers/:id/agent/runs`.
+ *
+ * EVERY FIELD IS READ BY NAME, ONCE, off the caller's own object — never
+ * copied with a spread first. A spread copies only own enumerable properties,
+ * so an options object whose fields are getters on its class (a config object,
+ * a settings model) lost them on the way here: `store: false` and `maxSteps`
+ * went unsent, and the platform kept the conversation and ran to its default
+ * step cap. Reading each once also means a getter cannot answer one value to
+ * the check and another to the body.
+ *
+ * `opts.stream` is what the caller's method decides, and wins over a `stream`
+ * on `args`. A background run sends none, whatever `args` says, since the
+ * platform refuses it there, and refuses `store: false` the way the platform
+ * does: a background run is kept so it can be read back.
  *
  * The thread fields (OPL-6083) are refused here on the platform's own rules,
  * each of which it answers with a 400: `threadId` must be a string, `store` a
@@ -2873,20 +2902,24 @@ function agentMessages(v: unknown): AgentHistoryMessage[] {
  * around it: no thread is called that, and a variable that was set but empty
  * is a mistake to name rather than a thread to look up.
  */
-export function agentBody(args: {
-  prompt: string;
-  maxSteps?: number;
-  maxCostUsd?: number;
-  system?: string;
-  model?: string;
-  provider?: 'anthropic' | 'openai';
-  threadId?: string;
-  store?: boolean;
-  messages?: readonly AgentHistoryMessage[];
-  /** Absent on a background run, which refuses it. */
-  stream?: boolean;
-}): Json {
-  if (!requireString(args.prompt, 'prompt').trim()) {
+export function agentBody(
+  args: AgentBodyArgs,
+  opts: { stream?: boolean; background?: boolean } = {},
+): Json {
+  if (!isRecord(args)) throw new ValidationError(`options must be an object (got ${typeof args})`);
+  const {
+    prompt,
+    maxSteps,
+    maxCostUsd,
+    system,
+    model,
+    provider,
+    threadId,
+    store: storeArg,
+    messages: sentMessages,
+    stream: streamArg,
+  } = args;
+  if (!requireString(prompt, 'prompt').trim()) {
     throw new ValidationError('prompt must not be empty');
   }
   // The other two strings on this body, checked for the reason `prompt` is.
@@ -2895,78 +2928,67 @@ export function agentBody(args: {
   // a JSON object where a prompt was meant. A 400 naming a field the caller
   // did not knowingly send is a worse answer than a refusal naming the
   // argument they did (OPL-4215, leftover on this builder).
-  if (args.provider !== undefined && args.provider !== 'anthropic' && args.provider !== 'openai')
+  if (provider !== undefined && provider !== 'anthropic' && provider !== 'openai')
     throw new ValidationError('provider must be anthropic or openai');
-  if (args.system !== undefined) requireString(args.system, 'system');
-  if (args.model !== undefined) requireString(args.model, 'model');
-  if (args.maxSteps !== undefined && (!Number.isInteger(args.maxSteps) || args.maxSteps < 1)) {
-    throw new ValidationError(`maxSteps must be a positive integer (got ${args.maxSteps})`);
+  if (system !== undefined) requireString(system, 'system');
+  if (model !== undefined) requireString(model, 'model');
+  if (maxSteps !== undefined && (!Number.isInteger(maxSteps) || maxSteps < 1)) {
+    throw new ValidationError(`maxSteps must be a positive integer (got ${maxSteps})`);
   }
-  if (args.maxSteps !== undefined && args.maxSteps > MAX_AGENT_STEPS) {
+  if (maxSteps !== undefined && maxSteps > MAX_AGENT_STEPS) {
     throw new ValidationError(
-      `maxSteps is ${args.maxSteps}; the platform accepts at most ${MAX_AGENT_STEPS}`,
+      `maxSteps is ${maxSteps}; the platform accepts at most ${MAX_AGENT_STEPS}`,
     );
   }
   if (
-    args.maxCostUsd !== undefined &&
-    (typeof args.maxCostUsd !== 'number' ||
-      !Number.isFinite(args.maxCostUsd) ||
-      args.maxCostUsd < MIN_AGENT_COST_USD ||
-      args.maxCostUsd > MAX_AGENT_COST_USD)
+    maxCostUsd !== undefined &&
+    (typeof maxCostUsd !== 'number' ||
+      !Number.isFinite(maxCostUsd) ||
+      maxCostUsd < MIN_AGENT_COST_USD ||
+      maxCostUsd > MAX_AGENT_COST_USD)
   ) {
     throw new ValidationError(
-      `maxCostUsd must be a number from ${MIN_AGENT_COST_USD} to ${MAX_AGENT_COST_USD} (got ${String(args.maxCostUsd)})`,
+      `maxCostUsd must be a number from ${MIN_AGENT_COST_USD} to ${MAX_AGENT_COST_USD} (got ${String(maxCostUsd)})`,
     );
   }
-  if (args.threadId !== undefined) {
-    const id = requireString(args.threadId, 'threadId');
+  if (threadId !== undefined) {
+    const id = requireString(threadId, 'threadId');
     if (!id || id !== id.trim()) {
       throw new ValidationError(
         'threadId must be a thread id (thr_ and 24 hex characters), not empty and with no spaces around it',
       );
     }
   }
-  const store = flag(args.store, 'store');
-  const messages = args.messages === undefined ? undefined : agentMessages(args.messages);
-  if (store === false && args.threadId !== undefined) {
-    throw new ValidationError(
-      'store: false keeps nothing, so it cannot continue a thread: leave out threadId or store',
-    );
-  }
-  if (messages?.length && args.threadId !== undefined) {
-    throw new ValidationError(
-      'send messages or threadId, not both: a thread already holds its conversation',
-    );
-  }
-  return omitUndefined({
-    prompt: args.prompt,
-    max_steps: args.maxSteps,
-    max_cost_usd: args.maxCostUsd,
-    system: args.system,
-    model: args.model,
-    provider: args.provider,
-    thread_id: args.threadId,
-    store,
-    messages,
-    stream: args.stream,
-  });
-}
-
-/**
- * The body of `POST computers/:id/agent/runs` (OPL-6083): the agent route's,
- * without `stream`, which the platform refuses there, and refusing
- * `store: false` the way the platform does — a background run is kept so it
- * can be read back. `store: true` is the default and is sent only when given.
- */
-export function agentRunBody(args: Parameters<typeof agentBody>[0]): Json {
-  if (!isRecord(args)) throw new ValidationError(`options must be an object (got ${typeof args})`);
-  if (args.store === false) {
+  const store = flag(storeArg, 'store');
+  if (opts.background && store === false) {
     throw new ValidationError(
       'a background run is always kept, so it can be read back: store: false is refused; ' +
         'use agent() for a run that keeps nothing',
     );
   }
-  return agentBody({ ...args, stream: undefined });
+  const messages = sentMessages === undefined ? undefined : agentMessages(sentMessages);
+  if (store === false && threadId !== undefined) {
+    throw new ValidationError(
+      'store: false keeps nothing, so it cannot continue a thread: leave out threadId or store',
+    );
+  }
+  if (messages?.length && threadId !== undefined) {
+    throw new ValidationError(
+      'send messages or threadId, not both: a thread already holds its conversation',
+    );
+  }
+  return omitUndefined({
+    prompt,
+    max_steps: maxSteps,
+    max_cost_usd: maxCostUsd,
+    system,
+    model,
+    provider,
+    thread_id: threadId,
+    store,
+    messages,
+    stream: opts.background ? undefined : (opts.stream ?? streamArg),
+  });
 }
 
 // --- webhooks -------------------------------------------------------------

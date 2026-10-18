@@ -303,12 +303,15 @@ const usd = (v: unknown, signed = false): number | undefined =>
   typeof v === 'number' && Number.isFinite(v) && (signed || v >= 0) ? v : undefined;
 
 /**
- * A `thread_id` the platform sent: a non-empty string, or absent. Absent rather
- * than thrown, for the reason the money fields are: it is read inside the
- * caller's `for await`, and a run that cannot name its thread has still run.
+ * A `thread_id` the platform sent, or absent. Only a value that could be sent
+ * back as `threadId`: a non-empty string with no space around it, which is
+ * what {@link agentBody} accepts, so a run's own continuation id is never one
+ * the next call refuses. Anything else is absent rather than thrown, for the
+ * reason the money fields are: it is read inside the caller's `for await`, and
+ * a run that cannot name its thread has still run. `raw` keeps what was sent.
  */
 const threadOf = (v: unknown): string | undefined =>
-  typeof v === 'string' && v.trim() ? v : undefined;
+  typeof v === 'string' && v && v === v.trim() ? v : undefined;
 
 export function toAgentUsage(d: unknown): AgentUsage {
   const u = isRecord(d) ? d : {};
@@ -521,11 +524,25 @@ const rowId = (d: Record<string, unknown>, what: string): string => {
 };
 
 /**
- * `true` or `false` for `has_more`, refused otherwise: an unreadable one read
- * as `false` would end a walk early and call the listing complete.
+ * Where the next page starts: the last row's id when `has_more` says another
+ * page follows, `null` when it says none does. Refused when `has_more` is not
+ * true or false, and when it says more follow a page with no row to page from:
+ * either, read as the last page, would end a walk early and call the listing
+ * complete.
  */
-const hasMore = (d: Record<string, unknown>, where: string): boolean =>
-  flag(d.has_more, `has_more from ${where}`, true) === true;
+const nextBefore = (
+  d: Record<string, unknown>,
+  rows: readonly { id: string }[],
+  where: string,
+): { hasMore: boolean; nextBefore: string | null } => {
+  const more = flag(d.has_more, `has_more from ${where}`, true);
+  if (!more) return { hasMore: false, nextBefore: null };
+  const last = rows[rows.length - 1];
+  if (!last) {
+    throw new MandalaError(`expected the page from ${where} that says more follow to have a row`);
+  }
+  return { hasMore: true, nextBefore: last.id };
+};
 
 export function toAgentThreadSummary(d: unknown, what = 'an agent thread'): AgentThreadSummary {
   if (!isRecord(d)) throw new MandalaError(`expected ${what} to be an object`);
@@ -555,9 +572,16 @@ export function toAgentThreadTurn(d: Record<string, unknown>): AgentThreadTurn {
   return turn;
 }
 
+/**
+ * Strict on the turns as a whole: a thread read by id always carries the list,
+ * so one without it is refused rather than read as a thread with nothing in
+ * it — which would show a thread of two turns as empty, and complete.
+ */
 export function toAgentThread(d: unknown, what = 'an agent thread'): AgentThread {
   const summary = toAgentThreadSummary(d, what);
-  const rows = objectRows((d as Record<string, unknown>).messages, `${what}'s messages`);
+  const turns = (d as Record<string, unknown>).messages;
+  if (!Array.isArray(turns)) throw new MandalaError(`expected ${what} to carry its messages`);
+  const rows = objectRows(turns, `${what}'s messages`);
   return { ...summary, messages: rows.map(toAgentThreadTurn) };
 }
 
@@ -569,13 +593,7 @@ export function toAgentThreadPage(d: unknown, method: string, path: string): Age
   const threads = d.threads.map((row, i) =>
     toAgentThreadSummary(row, `agent thread ${i} from ${where}`),
   );
-  const more = hasMore(d, where);
-  return {
-    threads,
-    hasMore: more,
-    nextBefore: more ? (threads[threads.length - 1]?.id ?? null) : null,
-    raw: { ...d },
-  };
+  return { threads, ...nextBefore(d, threads, where), raw: { ...d } };
 }
 
 // --- background runs -----------------------------------------------------------
@@ -584,10 +602,16 @@ export function toAgentThreadPage(d: unknown, method: string, path: string): Age
  * What a background run is started with: the {@link AgentArgs} of `agent()`,
  * less the `signal` — a background run is stopped with
  * `client.agentRuns.cancel()`, not by abandoning a request — and less
- * `store: false`, which the platform refuses (and this SDK before it): a
- * background run is always kept, so it can be read back.
+ * `store: false`, which the platform refuses (and this SDK before it).
  */
-export type AgentRunArgs = Omit<AgentArgs, 'signal'>;
+export type AgentRunArgs = Omit<AgentArgs, 'signal' | 'store'> & {
+  /**
+   * A background run is always kept, so it can be read back: `true` is the
+   * platform's default and the only value it takes here. `false` is refused
+   * before the call.
+   */
+  store?: true;
+};
 
 /**
  * Where a background run has got to. `running` is live; `completed`,
@@ -699,6 +723,18 @@ const RUN_ENDED: ReadonlySet<string> = new Set(['completed', 'failed', 'cancelle
 export const agentRunEnded = (run: AgentRun): boolean =>
   RUN_ENDED.has(run.status) || run.endedAt !== null;
 
+/**
+ * A run's `thread_id`: `null`, or an id that could be sent back as `threadId`,
+ * and refused as anything else — it is what the next run continues.
+ */
+const runThread = (v: unknown, what: string): string | null => {
+  const id = textOrNull(v, `${what}'s thread_id`);
+  if (id !== null && threadOf(id) === undefined) {
+    throw new MandalaError(`expected ${what}'s thread_id to be a thread id or null`);
+  }
+  return id;
+};
+
 /** A text field the platform sends as a string or `null`, refused as anything else. */
 const textOrNull = (v: unknown, what: string): string | null => {
   if (v === null || v === undefined) return null;
@@ -742,7 +778,7 @@ export function toAgentRun(d: unknown, what = 'an agent run', baseUrl?: string):
   const run: AgentRun = {
     id,
     computerId: str(d.computer_id),
-    threadId: textOrNull(d.thread_id, `${what}'s thread_id`),
+    threadId: runThread(d.thread_id, what),
     status: d.status,
     prompt: str(d.prompt),
     model: str(d.model),
@@ -775,11 +811,5 @@ export function toAgentRunPage(
     throw new MandalaError(`expected a list of agent runs from ${where}`);
   }
   const runs = d.runs.map((row, i) => toAgentRun(row, `agent run ${i} from ${where}`, baseUrl));
-  const more = hasMore(d, where);
-  return {
-    runs,
-    hasMore: more,
-    nextBefore: more ? (runs[runs.length - 1]?.id ?? null) : null,
-    raw: { ...d },
-  };
+  return { runs, ...nextBefore(d, runs, where), raw: { ...d } };
 }

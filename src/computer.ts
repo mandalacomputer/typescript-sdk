@@ -6574,7 +6574,7 @@ export class Computer {
     // a method the caller had not called. The body is built here for the same
     // reason, so a bad `maxCostUsd` is refused at the call too.
     const headers = modelKeyHeaders(args.modelKey, 'agentStream()');
-    P.agentBody({ ...args, stream: true });
+    P.agentBody(args, { stream: true });
     return this.#agentStream(args, headers);
   }
 
@@ -6588,8 +6588,9 @@ export class Computer {
       for await (const raw of this.#t.sse('POST', P.computerAction(this.id, 'agent'), {
         // Every field the caller gave, read by name inside the builder: a list
         // spelled out here once kept `threadId`, `store` and `messages` off the
-        // wire while the types said they were sent.
-        body: P.agentBody({ ...args, stream: true }),
+        // wire while the types said they were sent. Not spread into a copy
+        // first, which would drop any of them that is a getter.
+        body: P.agentBody(args, { stream: true }),
         headers,
         signal: args.signal,
       })) {
@@ -6658,7 +6659,7 @@ export class Computer {
     const run = { funded: !(MODEL_KEY_HEADER in headers), baseUrl: this.#t.baseUrl };
     const data = await this.#t
       .json<Record<string, unknown>>('POST', P.computerAction(this.id, 'agent'), {
-        body: P.agentBody({ ...args, stream: false }),
+        body: P.agentBody(args, { stream: false }),
         headers,
         signal: args.signal,
         // One held request for a run that is minutes of clicking — the same
@@ -6740,7 +6741,7 @@ export async function postAgentRun(
     throw new ValidationError(`${what}: options must be an object (got ${typeof args})`);
   }
   const headers = modelKeyHeaders(args.modelKey, what);
-  const body = P.agentRunBody(args);
+  const body = P.agentBody(args, { background: true });
   const path = P.computerAction(computerId, 'agent/runs');
   const run = { funded: !(MODEL_KEY_HEADER in headers), baseUrl: t.baseUrl };
   const data = await t

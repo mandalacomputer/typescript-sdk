@@ -283,7 +283,11 @@ export class APIError extends MandalaError {
     this.reason = refusalReason(body);
     this.code = nonblank(errorRecord(body)?.code);
     this.operationId = nonblank(errorRecord(body)?.operation_id);
-    this.threadId = nonblank(errorRecord(body)?.thread_id);
+    // Only an id the next run could be sent with: non-empty, and with no space
+    // around it, which the agent methods refuse as a `threadId`.
+    const thread = errorRecord(body)?.thread_id;
+    this.threadId =
+      typeof thread === 'string' && thread && thread === thread.trim() ? thread : undefined;
     this.retryAfterMs = retryAfterMs;
     this.requestId = nonblank(metadata.requestId) ?? nonblank(errorRecord(body)?.request_id);
     this.allow = metadata.allow;

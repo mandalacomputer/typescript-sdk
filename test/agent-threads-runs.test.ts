@@ -106,6 +106,62 @@ describe('threadId, store and messages on the agent route', () => {
     }
   });
 
+  it("reads fields that are getters on the caller's class, not only its own properties", async () => {
+    // A spread copies own enumerable properties only, so an options object
+    // whose fields live on its prototype lost `store: false` and `maxSteps`
+    // on the way to the body: the platform kept the conversation and ran to
+    // its default step cap.
+    class Options {
+      prompt = 'go';
+      modelKey = 'sk';
+      get store() {
+        return false;
+      }
+      get maxSteps() {
+        return 1;
+      }
+      get messages() {
+        return [new Turn()];
+      }
+    }
+    class Turn {
+      get role() {
+        return 'user' as const;
+      }
+      get content() {
+        return 'earlier';
+      }
+    }
+    const want = {
+      prompt: 'go',
+      store: false,
+      max_steps: 1,
+      messages: [{ role: 'user', content: 'earlier' }],
+    };
+    for (const name of Object.keys(RUNNERS)) {
+      const { rec, c } = await computer();
+      await RUNNERS[name]!(c, new Options() as AgentArgs);
+      expect(rec.last().body, name).toMatchObject(want);
+    }
+    class Background {
+      prompt = 'go';
+      get threadId() {
+        return THREAD;
+      }
+      get maxSteps() {
+        return 1;
+      }
+    }
+    const { rec, client } = sdk();
+    await client.agentRuns.start('vm-1', new Background() as never);
+    expect(rec.last().body).toEqual({ prompt: 'go', thread_id: THREAD, max_steps: 1 });
+    const err = await client.agentRuns
+      .start('vm-1', new Options() as never)
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ValidationError);
+    expect((err as Error).message).toMatch(/background run is always kept/);
+  });
+
   it('sends only the role and content of each turn', async () => {
     const { rec, c } = await computer();
     const turn = { role: 'user', content: 'hi', id: 'msg-1', at: 1 } as never;
@@ -189,7 +245,9 @@ describe('the threadId a run comes back with', () => {
     const result = await c.agentOnce({ prompt: 'go', store: false });
     expect(result.threadId).toBeUndefined();
     expect(result).not.toHaveProperty('threadId');
-    for (const bad of ['', '  ', 7, ['thr_x'], null]) {
+    // Nor when it could not be sent back as a threadId: one with space around
+    // it is refused by the next call, so it is not offered as the id to continue.
+    for (const bad of ['', '  ', ` ${THREAD}`, `${THREAD}\n`, 7, ['thr_x'], null]) {
       const { c: d } = await computer(onAgent(() => json({ ...AGENT_RESULT, thread_id: bad })));
       expect((await d.agentOnce({ prompt: 'go' })).threadId).toBeUndefined();
     }
@@ -259,6 +317,25 @@ describe('the threadId a run comes back with', () => {
     expect((other as APIError).threadId).toBe(THREAD);
   });
 
+  it('is undefined on an error whose thread_id could not be sent back', async () => {
+    for (const thread_id of [` ${THREAD}`, '', 7]) {
+      const { c } = await computer(
+        onAgent(() =>
+          json({ error: 'failed', usage: {}, steps_taken: [], thread_id }, { status: 500 }),
+        ),
+      );
+      const err = await c.agentOnce({ prompt: 'go' }).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(APIError);
+      expect((err as APIError).threadId).toBeUndefined();
+    }
+    const { c } = await computer(
+      onAgent(() => sse(['error', { error: 'failed', status: 500, thread_id: ` ${THREAD}` }])),
+    );
+    const events = [];
+    for await (const ev of c.agentStream({ prompt: 'go' })) events.push(ev);
+    expect(events[0]).not.toHaveProperty('threadId');
+  });
+
   it('is undefined on an error that names no thread', async () => {
     const { c } = await computer(
       onAgent(() => json({ error: 'thread not found' }, { status: 404 })),
@@ -309,6 +386,9 @@ describe('client.agentThreads', () => {
       { threads: [AGENT_THREAD_SUMMARY], has_more: 'maybe' },
       { threads: [{ ...AGENT_THREAD_SUMMARY, id: 7 }], has_more: false },
       { threads: ['thr_a'], has_more: false },
+      // More to come, and no row to page on from: read as the last page, it
+      // would end a walk early and call the listing complete.
+      { threads: [], has_more: true },
     ]) {
       const { client } = sdk(() => json(bad));
       await expect(client.agentThreads.list()).rejects.toThrow(MandalaError);
@@ -370,7 +450,9 @@ describe('client.agentThreads', () => {
   });
 
   it('refuses a thread whose turns are not a list of objects', async () => {
-    for (const messages of ['none', ['hi']]) {
+    // Absent and null too: a thread read by id always carries its turns, and one
+    // without them read as empty would show a thread of two turns as complete.
+    for (const messages of ['none', ['hi'], undefined, null]) {
       const { client } = sdk(() => json({ ...AGENT_THREAD, messages }));
       await expect(client.agentThreads.get(THREAD)).rejects.toThrow(MandalaError);
     }
@@ -571,6 +653,8 @@ describe('client.agentRuns reads', () => {
       { ...AGENT_RUN, id: '' },
       { ...AGENT_RUN, status: 7 },
       { ...AGENT_RUN, thread_id: 7 },
+      { ...AGENT_RUN, thread_id: '' },
+      { ...AGENT_RUN, thread_id: ` ${THREAD}` },
       { ...AGENT_RUN, ended_at: 0 },
       { ...AGENT_RUN, error: 'failed' },
       { ...AGENT_RUN, error: { status: 500 } },
@@ -620,6 +704,7 @@ describe('client.agentRuns reads', () => {
       { runs: {}, has_more: false },
       { runs: [] },
       { runs: [7], has_more: false },
+      { runs: [], has_more: true },
     ]) {
       const { client } = sdk(() => json(bad));
       await expect(client.agentRuns.list()).rejects.toThrow(MandalaError);
