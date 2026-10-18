@@ -208,7 +208,7 @@ describe('checking a document', () => {
     // parent gets `build_digest_needs` instead.
     // So a client watching only for the digest sees a field missing and is told
     // nothing about why — and the platform sent the reason, naming what cannot
-    // be computed and the command that computes it.
+    // be computed yet and when it will be.
     const { client: c } = client((call) =>
       call.path === '/templates/validate' ? json(TEMPLATE_CHECK_LAYERED) : anyRoute(call),
     );
@@ -216,7 +216,7 @@ describe('checking a document', () => {
     expect(check.valid).toBe(true);
     expect(check.buildDigest).toBeUndefined();
     expect(check.buildDigestNeeds).toContain("acme/base's image");
-    expect(check.buildDigestNeeds).toContain('gorillad -build-template');
+    expect(check.buildDigestNeeds).toContain('computed when the build runs');
   });
 
   it('leaves a non-record `template` off rather than decoding one from nothing', async () => {

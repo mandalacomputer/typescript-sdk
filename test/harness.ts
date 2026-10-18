@@ -750,16 +750,16 @@ export const TEMPLATE_CHECK = {
  *
  * `build_digest_needs` REPLACES `build_digest` here — the daemon is an if/else,
  * not two fields — and the text is the platform's own, which is the whole reason
- * the field is worth decoding: it names what could not be computed and where to
- * compute it.
+ * the field is worth decoding: it names what could not be computed and when it
+ * will be.
  */
 export const TEMPLATE_CHECK_LAYERED = {
   valid: true,
   ref: 'acc-1/layered@1.0.0',
   doc_digest: 'sha256:cccc',
   build_digest_needs:
-    "the contents of acme/base's image, which only a host holding it can supply. " +
-    "Run `gorillad -build-template <file> -dry-run` there to see this document's build digest",
+    "the contents of acme/base's image, which only a host holding that image can compute; " +
+    'the digest is computed when the build runs',
   template: {
     name: 'layered',
     ref: 'acc-1/layered@1.0.0',
