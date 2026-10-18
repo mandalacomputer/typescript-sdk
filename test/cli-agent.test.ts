@@ -362,6 +362,14 @@ describe('agent runs', () => {
     expect(result.err).toContain('--before run_111111111111111111111111');
   });
 
+  it('says a completed run with no result did not finish', async () => {
+    const h = harness(() =>
+      json({ runs: [{ ...AGENT_RUN, result: undefined, steps_taken: [] }], has_more: false }),
+    );
+    const result = await h.run(['agent', 'runs', 'list'], false);
+    expect(result.out).toContain(`${RUN}  completed (unknown)  `);
+  });
+
   it.each([
     [2, ['agent', 'runs', 'list', '--status', 'done']],
     [1, ['agent', 'runs', 'list', '--limit', '101']],

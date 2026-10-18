@@ -200,10 +200,14 @@ function morePages(output: Output, next: string | null, what: string): void {
   );
 }
 
-/** A run's status for a table: a run that completed without finishing says how it stopped. */
+/**
+ * A run's status for a table: a run that completed without finishing says how
+ * it stopped, `unknown` when it carried no result, as `agent runs get --wait`
+ * says it.
+ */
 const runStatus = (run: AgentRun) =>
-  run.status === 'completed' && run.result && !run.finished
-    ? `completed (${run.result.stop})`
+  run.status === 'completed' && !run.finished
+    ? `completed (${run.result?.stop ?? 'unknown'})`
     : run.status;
 
 export async function agentRunsList(
