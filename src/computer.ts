@@ -2764,9 +2764,11 @@ export class Computer {
           // The computer reads `stopped` (or `suspended`) with its memory
           // held, and the probe is refused as not running until the process
           // is there. The handle may be stale — another client can have
-          // stopped and started it — so the refresh below decides: an
-          // admitted start keeps the wait going, a computer holding nothing
-          // is refused as stopped, and anything else ends with this error.
+          // stopped and started it — so the refresh below decides: a
+          // computer reading stopped and holding nothing is refused as
+          // stopped at once, and one with an admitted start, or one that
+          // reads running because its boot finished meanwhile, is probed
+          // again.
           const unavailable =
             err instanceof APIError && err.status === 409 && err.reason === 'unavailable';
           if (!unavailable && !isDeadlineAbort(err) && !isTransientForPoll(err)) throw err;
@@ -2792,7 +2794,6 @@ export class Computer {
               // this loop had just learned was not running (Codex review).
               const found = this.#guestWaitFailure();
               if (found) throw found;
-              if (unavailable && (this.#statusIs('running') || !this.#startAdmitted())) throw err;
             } catch (inner) {
               // The caller's cancellation first, and before any predicate: the
               // outer catch has said so since OPL-3724 and this one did not, so

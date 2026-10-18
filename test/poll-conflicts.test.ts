@@ -190,16 +190,27 @@ describe('waitForGuest and an admitted cold start', () => {
     expect(probes).toBe(1);
   });
 
-  it('ends on `unavailable` from a computer that reads running', async () => {
-    const { c } = client((call) =>
-      call.path.endsWith('/exec')
-        ? json({ error: 'not running', reason: 'unavailable' }, { status: 409 })
-        : anyRoute(call),
-    );
+  it('probes again when the boot finished while the refresh was in flight', async () => {
+    let probes = 0;
+    let gets = 0;
+    const { c } = client((call) => {
+      if (call.path.endsWith('/exec')) {
+        probes += 1;
+        return probes === 1
+          ? json({ error: 'not running', reason: 'unavailable' }, { status: 409 })
+          : json(EXEC_OK);
+      }
+      if (call.method === 'GET' && call.path === '/computers/vm-1') {
+        gets += 1;
+        return gets === 1
+          ? json({ ...COMPUTER, status: 'stopped', running_ram_mb: 4096 })
+          : json(COMPUTER);
+      }
+      return anyRoute(call);
+    });
     const computer = await c.computers.get('vm-1');
-    const err = await computer.waitForGuest({ timeoutMs: 2_000, pollMs: 1 }).catch((e) => e);
-    expect(err).toBeInstanceOf(ConflictError);
-    expect((err as APIError).reason).toBe('unavailable');
+    await expect(computer.waitForGuest({ timeoutMs: 2_000, pollMs: 1 })).resolves.toBe(computer);
+    expect(probes).toBe(2);
   });
 });
 
