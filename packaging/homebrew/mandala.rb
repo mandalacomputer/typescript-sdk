@@ -1,3 +1,5 @@
+# frozen_string_literal: true
+
 # The mandala CLI, installed from the published npm tarball.
 #
 # The source of truth for the formula in the mandalacomputer/homebrew-tap
