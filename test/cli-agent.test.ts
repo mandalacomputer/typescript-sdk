@@ -905,6 +905,19 @@ describe('agent chat and agent resume at a terminal', () => {
     expect(process.listenerCount('SIGINT')).toBe(before);
   });
 
+  it('runs no line submitted in the same burst as a Ctrl-C', async () => {
+    const t = terminal();
+    const h = harness((call) => (isAgentPost(call) ? done(THREAD) : anyRoute(call)), t.io);
+    const pending = h.run(['agent', 'resume', THREAD], false);
+    await vi.waitFor(() => expect(t.drawn()).toContain('> '));
+    t.type('delete everything\r\x03');
+    await vi.waitFor(() => expect(t.drawn()).toContain('(Ctrl-D or /exit to leave)'));
+    t.type('/exit\r');
+    const result = await pending;
+    expect(result.code).toBe(0);
+    expect(h.agentBodies()).toEqual([]);
+  });
+
   it('ends the session on a Ctrl-C key at the picker, exit 130, the terminal restored', async () => {
     const t = terminal();
     const h = harness(anyRoute, t.io);

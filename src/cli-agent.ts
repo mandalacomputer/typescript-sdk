@@ -522,8 +522,15 @@ function lineReader(io: CliIO, interrupt: () => void) {
         });
       }
     },
-    /** Ctrl-C at the prompt: drop what was typed, say how to leave, and ask again. */
+    /**
+     * Ctrl-C at the prompt: drop what was typed, say how to leave, and ask
+     * again. A line already submitted and not yet run is dropped too: Enter
+     * and Ctrl-C in one burst of input put the line in the queue before the
+     * Ctrl-C is seen, and the Ctrl-C is the person saying not to run it.
+     */
     reprompt(prompt: string): void {
+      lines.length = 0;
+      flow();
       if (!terminal) {
         // The terminal's line mode has dropped the line already.
         screen.write(`\n${HOW_TO_LEAVE}\n${prompt}`);
