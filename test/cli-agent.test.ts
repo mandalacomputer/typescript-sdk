@@ -1055,6 +1055,78 @@ describe('piped input while a run goes', () => {
   });
 });
 
+describe('stdin failing in a session', () => {
+  const eio = () => Object.assign(new Error('read EIO'), { code: 'EIO' });
+
+  it('ends the session with io_error at the prompt', async () => {
+    const stdin = Object.assign(new PassThrough(), { isTTY: false });
+    const h = harness(anyRoute, { stdin: stdin as unknown as Stdin });
+    const before = process.listenerCount('SIGINT');
+    const pending = h.run(['agent', 'resume', THREAD]);
+    await vi.waitFor(() => expect(h.rec.calls).toHaveLength(2));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    stdin.destroy(eio());
+    const result = await pending;
+    expect(result.code).toBe(1);
+    expect(result.frames.at(-1)).toMatchObject({
+      type: 'error',
+      data: { error: { code: 'io_error', details: { errno: 'EIO' } }, exit_code: 1 },
+    });
+    expect(h.agentBodies()).toEqual([]);
+    expect(process.listenerCount('SIGINT')).toBe(before);
+  });
+
+  it('stops the run in flight and ends the session with io_error', async () => {
+    const stdin = Object.assign(new PassThrough(), { isTTY: false });
+    stdin.write('slow\n');
+    let stream: ReadableStreamDefaultController<Uint8Array> | undefined;
+    let aborted = false;
+    const h = harness(
+      (call) =>
+        isAgentPost(call)
+          ? new Response(
+              new ReadableStream<Uint8Array>({
+                start(controller) {
+                  stream = controller;
+                  controller.enqueue(
+                    new TextEncoder().encode('event: step\ndata: {"n":1,"tool":"bash"}\n\n'),
+                  );
+                },
+              }),
+              { headers: { 'content-type': 'text/event-stream' } },
+            )
+          : anyRoute(call),
+      { stdin: stdin as unknown as Stdin },
+    );
+    h.io.createClient = () =>
+      new Client({
+        apiKey: 'com_cli_test',
+        baseUrl: BASE,
+        fetch: async (input, init) => {
+          const response = await h.rec.fetch(input, init);
+          if (String(input).endsWith('/agent'))
+            init?.signal?.addEventListener(
+              'abort',
+              () => {
+                aborted = true;
+                stream!.error(init.signal?.reason);
+              },
+              { once: true },
+            );
+          return response;
+        },
+      });
+    const pending = h.run(['agent', 'resume', THREAD]);
+    await vi.waitFor(() => expect(stream).toBeDefined());
+    stdin.destroy(eio());
+    const result = await pending;
+    expect(aborted).toBe(true);
+    expect(result.code).toBe(1);
+    expect(result.frames.map((f) => f.type)).toEqual(['step', 'error']);
+    expect(result.frames[1].data.error).toMatchObject({ code: 'io_error' });
+  });
+});
+
 describe('the agent commands in the manifest, help and completion', () => {
   it('describes each, with the exit status of the new modes', () => {
     const tree = manifest();

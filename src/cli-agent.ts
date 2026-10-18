@@ -448,7 +448,7 @@ function openTerminal(stdin: CliIO['stdin']): NodeJS.WritableStream | undefined 
  *
  * Piped input is read as it comes, and nothing is drawn for it.
  */
-function lineReader(io: CliIO, interrupt: () => void) {
+function lineReader(io: CliIO, interrupt: () => void, broken: (failure: CliError) => void) {
   const { stdin } = io;
   const rawCapable = stdin.isTTY === true && typeof stdin.setRawMode === 'function';
   const opened =
@@ -487,6 +487,23 @@ function lineReader(io: CliIO, interrupt: () => void) {
     closed = true;
     wake?.();
   });
+  // stdin failing (a terminal gone, a file that cannot be read) is re-emitted
+  // here, and with no listener it would be thrown out of the event loop,
+  // past the session's cleanup. It ends the input instead: the next read
+  // throws it, and `broken` is told at once, for a run in flight.
+  let failure: CliError | undefined;
+  rl.on('error', (error) => {
+    if (failure) return;
+    const errno = (error as { code?: unknown }).code;
+    failure = new CliError(
+      'io_error',
+      `stdin could not be read: ${error.message}`,
+      typeof errno === 'string' ? { errno } : undefined,
+    );
+    closed = true;
+    wake?.();
+    broken(failure);
+  });
   if (terminal) rl.on('SIGINT', interrupt);
   return {
     /**
@@ -502,6 +519,7 @@ function lineReader(io: CliIO, interrupt: () => void) {
       }
       for (;;) {
         signal.throwIfAborted();
+        if (failure) throw failure;
         if (lines.length) {
           const line = lines.shift();
           flow();
@@ -666,7 +684,13 @@ export async function agentSession(
     else end();
   };
   process.on('SIGINT', interrupt);
-  const reader = lineReader(io, interrupt);
+  // stdin failed: the run in flight is stopped, as the session cannot go on
+  // after it, and the failure is what the session ends with.
+  let broken: CliError | undefined;
+  const reader = lineReader(io, interrupt, (failure) => {
+    broken = failure;
+    running?.abort(failure);
+  });
   try {
     let threadId = session.thread;
     let c = session.computer;
@@ -739,6 +763,7 @@ export async function agentSession(
       } catch (error) {
         // SIGTERM, or the process ending the session: not one run's failure.
         if (signal.aborted) throw error;
+        if (broken) throw broken;
         failed = true;
         if (run.signal.aborted) {
           // After the terminal's `^C`, on a line of its own.
