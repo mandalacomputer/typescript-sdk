@@ -168,3 +168,37 @@ describe('the waits end on a permanent 409 instead of timing out', () => {
     expect((err as APIError).reason).toBe('unsupported');
   });
 });
+
+describe('waitForGuest and an admitted cold start', () => {
+  it('ends on `unavailable` once the computer holds nothing', async () => {
+    let probes = 0;
+    const { c } = client((call) => {
+      if (call.path.endsWith('/exec')) {
+        probes += 1;
+        return json({ error: 'not running', reason: 'unavailable' }, { status: 409 });
+      }
+      if (call.method === 'GET' && call.path === '/computers/vm-1') {
+        // Admitted on the first read, then nothing held.
+        return json({ ...COMPUTER, status: 'stopped', running_ram_mb: probes === 0 ? 4096 : 0 });
+      }
+      return anyRoute(call);
+    });
+    const computer = await c.computers.get('vm-1');
+    const err = await computer.waitForGuest({ timeoutMs: 2_000, pollMs: 1 }).catch((e) => e);
+    expect(err).not.toBeInstanceOf(TimeoutError);
+    expect((err as Error).message).toMatch(/is stopped and its guest cannot answer/);
+    expect(probes).toBe(1);
+  });
+
+  it('ends on `unavailable` from a computer that reads running', async () => {
+    const { c } = client((call) =>
+      call.path.endsWith('/exec')
+        ? json({ error: 'not running', reason: 'unavailable' }, { status: 409 })
+        : anyRoute(call),
+    );
+    const computer = await c.computers.get('vm-1');
+    const err = await computer.waitForGuest({ timeoutMs: 2_000, pollMs: 1 }).catch((e) => e);
+    expect(err).toBeInstanceOf(ConflictError);
+    expect((err as APIError).reason).toBe('unavailable');
+  });
+});

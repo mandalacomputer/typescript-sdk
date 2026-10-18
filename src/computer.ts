@@ -2759,7 +2759,19 @@ export class Computer {
           // never heard of it must not be the thing asked. That race is
           // documented and deterministically tested for waitUntilRunning; this
           // loop was the one still exposed to it.
-          if (!isDeadlineAbort(err) && !isTransientForPoll(err)) throw err;
+          // One `unavailable` is the moment rather than the answer: a start
+          // the platform has admitted but whose process does not exist yet.
+          // The computer still reads `stopped` (or `suspended`) with its
+          // memory held, and the probe is refused as not running until the
+          // process is there. The refresh below re-reads the state, and a
+          // computer holding nothing is refused at the top of the next pass.
+          const admittedStart =
+            err instanceof APIError &&
+            err.status === 409 &&
+            err.reason === 'unavailable' &&
+            !this.#statusIs('running') &&
+            this.#startAdmitted();
+          if (!admittedStart && !isDeadlineAbort(err) && !isTransientForPoll(err)) throw err;
           delayMs = retryDelay(pollMs, err);
           // A failed probe may also mean the cached lifecycle state is stale,
           // and this is the read that turns "the guest is quiet" into "it is

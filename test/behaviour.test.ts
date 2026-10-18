@@ -832,8 +832,13 @@ describe('waiting', () => {
     const { client: c } = client((call) => {
       if (call.path.endsWith('/exec')) {
         probes += 1;
+        // The platform's answer before the admitted start has a process: not
+        // running, which this wait must ride out rather than throw (OPL-6079).
         return probes < 2
-          ? json({ error: 'the agent is not up yet', reason: 'starting' }, { status: 409 })
+          ? json(
+              { error: 'this computer is not running; start it first', reason: 'unavailable' },
+              { status: 409 },
+            )
           : json(EXEC_OK);
       }
       if (call.method === 'GET' && call.path === '/computers/vm-1') {
