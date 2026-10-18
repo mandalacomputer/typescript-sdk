@@ -134,9 +134,13 @@ export async function agentRunBackground(
   return 0;
 }
 
-/** The first line of `text`, cut to `max` characters, for a table cell. */
-function promptCell(text: string, max = 60): string {
-  const line = text.split('\n', 1)[0]!.trim();
+/**
+ * The first line of `text`, cut to `max` characters, for a table cell.
+ * Redacted WHOLE first: a key the cut went through would no longer match
+ * itself, and most of it would be printed.
+ */
+function promptCell(io: CliIO, text: string, max = 60): string {
+  const line = (redact(text, io.env, io.secrets) as string).split('\n', 1)[0]!.trim();
   return line.length > max ? `${line.slice(0, max - 1)}…` : line;
 }
 
@@ -181,7 +185,7 @@ export async function agentRunsList(
       r.threadId,
       r.steps,
       r.createdAt,
-      promptCell(r.prompt),
+      promptCell(io, r.prompt),
     ]),
     'No agent runs on this page.',
   );
@@ -283,14 +287,13 @@ const UNSETTLED: ReadonlySet<string> = new Set(['running', 'aborted', 'interrupt
  * answer how its run ended. The text is a prompt or a model's, redacted and
  * escaped; a line feed in it is kept and the line after it indented, so no
  * line of it can pass for another turn. `clip` cuts each text to that many
- * characters.
+ * characters, after it is redacted: cut first, a key the cut went through
+ * would no longer match itself.
  */
 function turnLines(io: CliIO, turns: readonly AgentThreadTurn[], clip?: number): string {
+  const hidden = (text: string) => redact(text, io.env, io.secrets) as string;
   const safe = (text: string) =>
-    terminalSafe(redact(text, io.env, io.secrets) as string, { keepNewlines: true }).replace(
-      /\n/g,
-      '\n  ',
-    );
+    terminalSafe(hidden(text), { keepNewlines: true }).replace(/\n/g, '\n  ');
   return turns
     .map((turn) => {
       const how = [
@@ -299,8 +302,8 @@ function turnLines(io: CliIO, turns: readonly AgentThreadTurn[], clip?: number):
         turn.costUsd === undefined ? undefined : `$${turn.costUsd}`,
         turn.error === undefined ? undefined : `error: ${turn.error}`,
       ].filter((part) => part !== undefined);
-      const text =
-        clip !== undefined && turn.text.length > clip ? `${turn.text.slice(0, clip)}…` : turn.text;
+      const whole = hidden(turn.text);
+      const text = clip !== undefined && whole.length > clip ? `${whole.slice(0, clip)}…` : whole;
       return `${safe(turn.createdAt)} ${safe(turn.role)}${how.length ? ` (${safe(how.join(', '))})` : ''}: ${safe(text)}\n`;
     })
     .join('');
@@ -347,15 +350,41 @@ export async function agentThreadsDelete(
   return output.result({ id, deleted: true });
 }
 
+/** Said when Ctrl-C lands on the prompt rather than on a run. */
+const HOW_TO_LEAVE = '(Ctrl-D or /exit to leave)';
+
 /**
  * Lines from stdin, one at a time, as they are asked for. Read as they
- * arrive, so a line typed (or piped) while a run goes waits for its turn
- * rather than being lost. `terminal: false` leaves a terminal in its own
- * line mode: it echoes and edits the line, Ctrl-D ends the input, and Ctrl-C
- * is the process's SIGINT, which is what lets it stop a run.
+ * arrive, so a line piped (or typed) while a run goes waits for its turn
+ * rather than being lost.
+ *
+ * At a terminal, stdin and stderr both, readline holds the line in the
+ * terminal's raw mode: it echoes and edits it, keeps a history, and takes a
+ * line of any length. The terminal's own line mode stops taking a line at its
+ * limit (1024 bytes on macOS), so a task description pasted at a prompt read
+ * that way never arrived, and nothing typed after it did either. In raw mode
+ * Ctrl-C is a key, which readline reports as its `SIGINT`, handed to
+ * `interrupt`; Ctrl-D on an empty line ends the input. {@link hold} gives the
+ * terminal its line mode back for a run, in which Ctrl-C is the process's
+ * SIGINT again, which is what stops the run. What is typed while a run goes
+ * is the terminal's own type-ahead, held to its limit, as it is while a shell
+ * runs any command.
+ *
+ * Anywhere else (piped input, or a terminal writing stderr to a file) lines
+ * are read as they come and nothing is drawn but the prompt, and that only
+ * when stdin is a terminal.
  */
-function lineReader(io: CliIO) {
-  const rl = createInterface({ input: io.stdin, terminal: false, crlfDelay: Infinity });
+function lineReader(io: CliIO, interrupt: () => void) {
+  const { stdin } = io;
+  const terminal =
+    stdin.isTTY === true && io.stderr.isTTY === true && typeof stdin.setRawMode === 'function';
+  const rl = createInterface({
+    input: stdin,
+    ...(terminal
+      ? { output: io.stderr as unknown as NodeJS.WritableStream, terminal: true }
+      : { terminal: false }),
+    crlfDelay: Infinity,
+  });
   const lines: string[] = [];
   let closed = false;
   let wake: (() => void) | undefined;
@@ -367,9 +396,19 @@ function lineReader(io: CliIO) {
     closed = true;
     wake?.();
   });
+  if (terminal) rl.on('SIGINT', interrupt);
   return {
-    /** The next line, or `undefined` at the end of the input. */
-    async next(signal: AbortSignal): Promise<string | undefined> {
+    /**
+     * The next line, or `undefined` at the end of the input, asked for with
+     * `prompt` when none is waiting already.
+     */
+    async next(signal: AbortSignal, prompt = ''): Promise<string | undefined> {
+      if (!lines.length && !closed) {
+        if (terminal) {
+          rl.setPrompt(prompt);
+          rl.prompt();
+        } else if (prompt && stdin.isTTY) io.stderr.write(prompt);
+      }
       for (;;) {
         signal.throwIfAborted();
         if (lines.length) return lines.shift();
@@ -387,6 +426,30 @@ function lineReader(io: CliIO) {
           signal.addEventListener('abort', onAbort, { once: true });
         });
       }
+    },
+    /** Ctrl-C at the prompt: drop what was typed, say how to leave, and ask again. */
+    reprompt(prompt: string): void {
+      if (!terminal) {
+        // The terminal's line mode has dropped the line already.
+        io.stderr.write(`\n${HOW_TO_LEAVE}\n${prompt}`);
+        return;
+      }
+      rl.write(null, { ctrl: true, name: 'e' });
+      rl.write(null, { ctrl: true, name: 'u' });
+      io.stderr.write(`\n${HOW_TO_LEAVE}\n`);
+      rl.prompt();
+    },
+    /** For a run: the terminal's own line mode, in which Ctrl-C is SIGINT. */
+    hold(): void {
+      if (!terminal) return;
+      rl.pause();
+      stdin.setRawMode!(false);
+    },
+    /** After a run: readline's raw mode again, for the next prompt. */
+    release(): void {
+      if (!terminal || closed) return;
+      stdin.setRawMode!(true);
+      rl.resume();
     },
     close: () => rl.close(),
   };
@@ -428,8 +491,12 @@ async function pickThread(
       `(the ${threads.length} most recently used; type the id of an older one, or list them with: mandala agent threads list)\n`,
     );
   for (;;) {
-    io.stderr.write(`Resume which? 1-${threads.length}, or a thread id (Enter for none): `);
-    const answer = (await reader.next(signal))?.trim();
+    const answer = (
+      await reader.next(
+        signal,
+        `Resume which? 1-${threads.length}, or a thread id (Enter for none): `,
+      )
+    )?.trim();
     if (!answer)
       throw new CliError('cancelled', 'No thread was chosen; nothing ran', undefined, 130);
     if (/^[0-9]+$/.test(answer)) {
@@ -483,12 +550,11 @@ export async function agentSession(
   // without a listener, which would kill it outright.
   const interrupt = () => {
     if (running) running.abort(new DOMException('Cancelled', 'AbortError'));
-    // The terminal dropped the line being typed; the prompt is still waiting.
-    else if (prompting && interactive) io.stderr.write('\n(Ctrl-D or /exit to leave)\n> ');
+    else if (prompting && interactive) reader.reprompt('> ');
     else end();
   };
   process.on('SIGINT', interrupt);
-  const reader = lineReader(io);
+  const reader = lineReader(io, interrupt);
   try {
     let threadId = session.thread;
     let c = session.computer;
@@ -521,11 +587,10 @@ export async function agentSession(
       );
     let failed = false;
     for (;;) {
-      if (interactive) io.stderr.write('> ');
       prompting = true;
       let line: string | undefined;
       try {
-        line = await reader.next(signal);
+        line = await reader.next(signal, interactive ? '> ' : '');
       } finally {
         prompting = false;
       }
@@ -538,6 +603,7 @@ export async function agentSession(
       if (line.trim() === '/exit') break;
       const run = new AbortController();
       running = run;
+      reader.hold();
       try {
         const outcome = await streamAgentRun(
           c,
@@ -586,6 +652,7 @@ export async function agentSession(
         }
       } finally {
         running = undefined;
+        reader.release();
       }
     }
     return failed ? 1 : 0;

@@ -4595,8 +4595,10 @@ Each line typed on stdin runs the agent, streamed exactly as `agent run`
 streams it, and every run continues the same thread: `agent resume` the one it
 was given, `agent chat` the one its first run started (until a run names one,
 each line starts afresh). The session ends at the end of the input (Ctrl-D) or
-a line reading `/exit`; blank lines are skipped. Ctrl-C stops the run in flight
-and the session goes on; at the prompt it says how to leave. Both take
+a line reading `/exit`; blank lines are skipped. At a terminal the prompt line
+can be edited and recalled (up arrow), and takes a pasted prompt of any length.
+Ctrl-C stops the run in flight and the session goes on; at the prompt it drops
+the line and says how to leave. Both take
 `agent run`'s `--max-steps`, `--max-cost-usd`, `--provider`, `--model` and
 `--system`, for every run.
 

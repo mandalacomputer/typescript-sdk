@@ -50,9 +50,41 @@ type Stdin = CliIO['stdin'];
 const piped = (text: string, tty = false): Stdin =>
   Object.assign(Readable.from(text ? [Buffer.from(text)] : []), { isTTY: tty }) as Stdin;
 
+/**
+ * A terminal: stdin, whose raw mode is set as readline and the session set
+ * it, and stderr, where readline draws its prompt. Keys are typed as bytes.
+ */
+function terminal() {
+  const stdin = Object.assign(new PassThrough(), {
+    isTTY: true,
+    isRaw: false,
+    setRawMode: vi.fn((mode: boolean) => {
+      stdin.isRaw = mode;
+      return stdin;
+    }),
+  });
+  const stderr = Object.assign(new PassThrough(), { isTTY: true, columns: 200 });
+  let drawn = '';
+  stderr.on('data', (chunk) => {
+    drawn += chunk;
+  });
+  return {
+    stdin,
+    stderr,
+    io: { stdin: stdin as unknown as Stdin, stderr: stderr as unknown as CliIO['stderr'] },
+    drawn: () => drawn,
+    type: (keys: string) => stdin.write(keys),
+  };
+}
+
 function harness(
   respond: Responder = anyRoute,
-  opts: { stdin?: Stdin; env?: NodeJS.ProcessEnv; fetch?: typeof globalThis.fetch } = {},
+  opts: {
+    stdin?: Stdin;
+    stderr?: CliIO['stderr'];
+    env?: NodeJS.ProcessEnv;
+    fetch?: typeof globalThis.fetch;
+  } = {},
 ) {
   // The listing names `demo`, which is not an id: its own route is 404.
   const rec = recorder((call) =>
@@ -70,7 +102,7 @@ function harness(
         return true;
       }) as NodeJS.WritableStream['write'],
     },
-    stderr: {
+    stderr: opts.stderr ?? {
       write: ((s: string | Uint8Array) => {
         stderr.push(Buffer.from(s));
         return true;
@@ -85,6 +117,8 @@ function harness(
     rec,
     io,
     agentBodies: () => rec.calls.filter(isAgentPost).map((c) => c.body as Record<string, unknown>),
+    /** What has been written to stderr so far. */
+    err: () => Buffer.concat(stderr).toString(),
     async run(args: string[], jsonMode = true) {
       const code = await main([...args, ...(jsonMode ? ['--json'] : [])], io);
       const out = Buffer.concat(stdout).toString();
@@ -683,7 +717,6 @@ describe('agent chat and agent resume', () => {
     expect(result.err).toContain(`Resuming ${OTHER.id} on vm-1: second`);
     expect(result.err).toContain('assistant (end_turn, 3 steps): Dark mode is on.');
     expect(result.err).toContain('Ctrl-D or /exit leaves');
-    expect(result.err).toContain('> ');
   });
 
   it('takes a thread id typed at the picker', async () => {
@@ -785,14 +818,106 @@ describe('agent chat and agent resume', () => {
     const stdin = Object.assign(new PassThrough(), { isTTY: true }) as unknown as Stdin;
     const h = harness((call) => (isAgentPost(call) ? done(THREAD) : anyRoute(call)), { stdin });
     const pending = h.run(['agent', 'resume', THREAD], false);
-    await vi.waitFor(() => expect(h.rec.calls).toHaveLength(2));
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    // At the prompt: the greeting is written, and then the prompt.
+    await vi.waitFor(() => expect(h.err()).toMatch(/leaves\.\n> $/));
     process.emit('SIGINT');
     (stdin as unknown as PassThrough).end('after\n');
     const result = await pending;
     expect(result.code).toBe(0);
     expect(result.err).toContain('(Ctrl-D or /exit to leave)');
     expect(h.agentBodies().map((b) => b.prompt)).toEqual(['after']);
+  });
+});
+
+describe('agent chat and agent resume at a terminal', () => {
+  it('reads a line of any length in raw mode, and gives the terminal its line mode for a run', async () => {
+    const t = terminal();
+    let rawDuringRun: boolean | undefined;
+    const h = harness((call) => {
+      if (!isAgentPost(call)) return anyRoute(call);
+      rawDuringRun = t.stdin.isRaw;
+      return done(THREAD);
+    }, t.io);
+    const pending = h.run(['agent', 'resume', THREAD], false);
+    await vi.waitFor(() => expect(t.drawn()).toContain('> '));
+    // Past the 1024 bytes a terminal's own line mode takes on macOS.
+    const long = `${'x'.repeat(3000)} and then save it`;
+    t.type(`${long}\r`);
+    await vi.waitFor(() => expect(h.agentBodies()).toHaveLength(1));
+    t.type('\x04');
+    const result = await pending;
+    expect(result.code).toBe(0);
+    expect(h.agentBodies()[0]).toMatchObject({ prompt: long, thread_id: THREAD });
+    // Raw for the prompt, the terminal's line mode for the run (where Ctrl-C
+    // is SIGINT), raw again, and the terminal left as it was found.
+    expect(rawDuringRun).toBe(false);
+    expect(t.stdin.setRawMode.mock.calls.map(([mode]) => mode)).toEqual([true, false, true, false]);
+    expect(t.stdin.isRaw).toBe(false);
+  });
+
+  it('drops the line on a Ctrl-C key at the prompt, says how to leave, and goes on', async () => {
+    const t = terminal();
+    const h = harness((call) => (isAgentPost(call) ? done(THREAD) : anyRoute(call)), t.io);
+    const before = process.listenerCount('SIGINT');
+    const pending = h.run(['agent', 'resume', THREAD], false);
+    await vi.waitFor(() => expect(t.drawn()).toContain('> '));
+    t.type('half typed');
+    t.type('\x03');
+    await vi.waitFor(() => expect(t.drawn()).toContain('(Ctrl-D or /exit to leave)'));
+    t.type('hi\r');
+    await vi.waitFor(() => expect(h.agentBodies()).toHaveLength(1));
+    t.type('/exit\r');
+    const result = await pending;
+    expect(result.code).toBe(0);
+    expect(h.agentBodies().map((b) => b.prompt)).toEqual(['hi']);
+    expect(process.listenerCount('SIGINT')).toBe(before);
+  });
+
+  it('ends the session on a Ctrl-C key at the picker, exit 130, the terminal restored', async () => {
+    const t = terminal();
+    const h = harness(anyRoute, t.io);
+    const pending = h.run(['agent', 'resume']);
+    await vi.waitFor(() => expect(t.drawn()).toContain('Resume which?'));
+    t.type('\x03');
+    const result = await pending;
+    expect(result.code).toBe(130);
+    expect(result.frames.at(-1).data.error).toMatchObject({ code: 'cancelled' });
+    expect(h.rec.routes()).toEqual([['GET', 'agent/threads']]);
+    expect(t.stdin.isRaw).toBe(false);
+  });
+});
+
+describe('agent threads and runs redact before they cut', () => {
+  const KEY = 'sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789';
+
+  it('masks a key the PROMPT column cut goes through', async () => {
+    const prompt = `${'p'.repeat(40)} ${KEY} and more`;
+    const h = harness(
+      () => json({ runs: [{ ...AGENT_RUN, prompt, steps_taken: [] }], has_more: false }),
+      { env: { MANDALA_MODEL_KEY: KEY } },
+    );
+    const result = await h.run(['agent', 'runs', 'list'], false);
+    expect(result.code).toBe(0);
+    expect(result.out).toContain('[REDACTED]');
+    expect(result.out).not.toContain(KEY.slice(0, 12));
+  });
+
+  it("masks a key the resume greeting's cut goes through", async () => {
+    const text = `${'a'.repeat(480)} ${KEY}`;
+    const t = terminal();
+    const h = harness(
+      (call) =>
+        call.path === `/agent/threads/${THREAD}`
+          ? json({ ...AGENT_THREAD, messages: [{ ...AGENT_THREAD.messages[1], text }] })
+          : anyRoute(call),
+      { ...t.io, env: { MANDALA_MODEL_KEY: KEY } },
+    );
+    const pending = h.run(['agent', 'resume', THREAD], false);
+    await vi.waitFor(() => expect(t.drawn()).toContain('> '));
+    t.type('\x04');
+    expect((await pending).code).toBe(0);
+    expect(t.drawn()).toContain('[REDACTED]');
+    expect(t.drawn()).not.toContain(KEY.slice(0, 9));
   });
 });
 
