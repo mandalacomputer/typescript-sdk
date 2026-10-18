@@ -202,3 +202,30 @@ describe('waitForGuest and an admitted cold start', () => {
     expect((err as APIError).reason).toBe('unavailable');
   });
 });
+
+describe('waitForGuest with a stale running handle', () => {
+  it('refreshes before judging `unavailable`, and waits out an admitted restart', async () => {
+    let probes = 0;
+    let gets = 0;
+    const { c } = client((call) => {
+      if (call.path.endsWith('/exec')) {
+        probes += 1;
+        return probes === 1
+          ? json({ error: 'not running', reason: 'unavailable' }, { status: 409 })
+          : json(EXEC_OK);
+      }
+      if (call.method === 'GET' && call.path === '/computers/vm-1') {
+        gets += 1;
+        // The first read is the handle; another client then stopped and
+        // started it, which the refresh shows as an admitted cold start.
+        return gets === 1
+          ? json(COMPUTER)
+          : json({ ...COMPUTER, status: 'stopped', running_ram_mb: 4096 });
+      }
+      return anyRoute(call);
+    });
+    const computer = await c.computers.get('vm-1');
+    await expect(computer.waitForGuest({ timeoutMs: 2_000, pollMs: 1 })).resolves.toBe(computer);
+    expect(probes).toBe(2);
+  });
+});

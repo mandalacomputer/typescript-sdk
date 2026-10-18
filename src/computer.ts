@@ -2761,17 +2761,15 @@ export class Computer {
           // loop was the one still exposed to it.
           // One `unavailable` is the moment rather than the answer: a start
           // the platform has admitted but whose process does not exist yet.
-          // The computer still reads `stopped` (or `suspended`) with its
-          // memory held, and the probe is refused as not running until the
-          // process is there. The refresh below re-reads the state, and a
-          // computer holding nothing is refused at the top of the next pass.
-          const admittedStart =
-            err instanceof APIError &&
-            err.status === 409 &&
-            err.reason === 'unavailable' &&
-            !this.#statusIs('running') &&
-            this.#startAdmitted();
-          if (!admittedStart && !isDeadlineAbort(err) && !isTransientForPoll(err)) throw err;
+          // The computer reads `stopped` (or `suspended`) with its memory
+          // held, and the probe is refused as not running until the process
+          // is there. The handle may be stale — another client can have
+          // stopped and started it — so the refresh below decides: an
+          // admitted start keeps the wait going, a computer holding nothing
+          // is refused as stopped, and anything else ends with this error.
+          const unavailable =
+            err instanceof APIError && err.status === 409 && err.reason === 'unavailable';
+          if (!unavailable && !isDeadlineAbort(err) && !isTransientForPoll(err)) throw err;
           delayMs = retryDelay(pollMs, err);
           // A failed probe may also mean the cached lifecycle state is stale,
           // and this is the read that turns "the guest is quiet" into "it is
@@ -2794,6 +2792,7 @@ export class Computer {
               // this loop had just learned was not running (Codex review).
               const found = this.#guestWaitFailure();
               if (found) throw found;
+              if (unavailable && (this.#statusIs('running') || !this.#startAdmitted())) throw err;
             } catch (inner) {
               // The caller's cancellation first, and before any predicate: the
               // outer catch has said so since OPL-3724 and this one did not, so
