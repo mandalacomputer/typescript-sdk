@@ -6,6 +6,17 @@ import {
   type Artifact,
   artifactBody,
 } from './artifacts.js';
+import {
+  agentRunBackground,
+  agentRunsCancel,
+  agentRunsGet,
+  agentRunsList,
+  agentSession,
+  agentThreadsDelete,
+  agentThreadsGet,
+  agentThreadsList,
+  streamAgentRun,
+} from './cli-agent.js';
 import { completion } from './cli-completion.js';
 import {
   apiKeysCreate,
@@ -17,7 +28,7 @@ import {
 import { loginCommand } from './cli-login.js';
 import { manifest } from './cli-manifest.js';
 import { CliError, help, type Parsed, parseArgs } from './cli-options.js';
-import { errorInfo, Output, redact, snakeKeys, terminalSafe } from './cli-output.js';
+import { errorInfo, listTable, Output, redact, snakeKeys, terminalSafe } from './cli-output.js';
 import { type CliIO, documentInput, openBrowser, readInput } from './cli-runtime.js';
 import {
   bindingSpecs,
@@ -658,45 +669,6 @@ const publicWebhook = (value: { raw: Record<string, unknown> }, secret?: string)
   return secret === undefined ? data : { ...data, secret };
 };
 
-/** Human list cells: redact and escape before measuring, with no guessed missing values. */
-function listTable(
-  io: CliIO,
-  headers: readonly string[],
-  rows: readonly (readonly unknown[])[],
-  empty: string,
-): void {
-  if (!rows.length) {
-    io.stdout.write(`${empty}\n`);
-    return;
-  }
-  const all = [
-    headers,
-    ...rows.map((row) =>
-      row.map((value) => {
-        const cell =
-          (typeof value === 'string' && value !== '') ||
-          (typeof value === 'number' && Number.isFinite(value))
-            ? String(value)
-            : '-';
-        return terminalSafe(redact(cell, io.env, io.secrets) as string);
-      }),
-    ),
-  ];
-  const widths = headers.map((_, i) =>
-    all.reduce((width, row) => Math.max(width, row[i]!.length), 0),
-  );
-  io.stdout.write(
-    `${all
-      .map((row) =>
-        row
-          .map((cell, i) => (i < headers.length - 1 ? cell.padEnd(widths[i]!) : cell))
-          .join('  ')
-          .trimEnd(),
-      )
-      .join('\n')}\n`,
-  );
-}
-
 function accountText(q: AccountQuota): string {
   const amount = (value: number | null) => (value === null ? 'unknown' : String(value));
   const pool = (label: string, used: number | null, limit: number, remaining: number | null) =>
@@ -1065,7 +1037,8 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
     parsed = parseArgs(argv);
     const { path, flags: f, args, json } = parsed;
     output = new Output(io, path, json);
-    watching = parsed.command?.jsonMode === 'ndjson' && !parsed.help;
+    // `agent run --background` answers once, with the run it started: not frames.
+    watching = parsed.command?.jsonMode === 'ndjson' && !parsed.help && !parsed.flags.background;
     if (parsed.help || !argv.length) {
       if (json) output.result({ help: help(path) });
       else io.stdout.write(help(path));
@@ -1412,7 +1385,8 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
     // blank is refused, as the SDK refuses a blank modelKey: a secret that
     // failed to load must not quietly start a run billed to the account.
     const modelKey = io.env.MANDALA_MODEL_KEY;
-    if (path === 'agent run' && modelKey !== undefined && !modelKey.trim())
+    const session = path === 'agent chat' || path === 'agent resume';
+    if ((path === 'agent run' || session) && modelKey !== undefined && !modelKey.trim())
       throw new CliError(
         'invalid_arguments',
         "MANDALA_MODEL_KEY is set but empty: set it to your model key, or unset it to run on the account's AI credits",
@@ -1425,9 +1399,36 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
       maxCostUsd: n('max-cost-usd'),
       model: s('model'),
       system: s('system'),
+      threadId: s('thread'),
+      // Only `false` is sent: the platform keeps a run by default.
+      store: b('no-store') ? false : undefined,
       signal,
     };
-    if (path === 'agent run') P.agentBody(agent, { stream: true });
+    if (path === 'agent run')
+      P.agentBody(agent, b('background') ? { background: true } : { stream: true });
+    // A session's prompts are read from stdin later; the options every one of
+    // its runs is sent with are checked now, before anything is typed.
+    if (session) P.agentBody({ ...agent, prompt: '-', threadId: undefined }, { stream: true });
+    const agentPage = {
+      // The parser has held --status to the statuses there are.
+      status: s('status') as P.AgentRunListArgs['status'],
+      limit: n('limit'),
+      before: s('before'),
+    };
+    if (path === 'agent runs list') P.agentRunsQuery(agentPage);
+    if (path === 'agent threads list') P.agentThreadsQuery(agentPage);
+    if (
+      path === 'agent runs get' &&
+      !b('wait') &&
+      (wait.timeoutMs !== undefined || wait.pollMs !== undefined)
+    )
+      throw new CliError('invalid_arguments', '--timeout-ms and --poll-ms go with --wait');
+    // Deleted for good, so not on a bare command, as artifacts rm is not.
+    if (path === 'agent threads delete' && !b('yes'))
+      throw new CliError(
+        'confirmation_required',
+        `deleting thread ${target} removes its turns for good, and it cannot be continued again; what its runs did to the desktop stands. Pass --yes to delete it`,
+      );
     const hook = {
       url: path === 'webhooks create' ? target : s('url'),
       description: s('description'),
@@ -2314,40 +2315,105 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
         return await sshConfigCommand(c, seen.listing, io, output, ssh, b('write') ?? false);
       }
       case 'agent run': {
-        const c = await resolveComputer(client, s('computer')!, signal);
-        watching = true;
-        for await (const event of c.agentStream(agent)) {
-          if (event.type === 'error') {
-            // The funded run the account's credits could not start, reported
-            // on the stream: the same refusal InsufficientCreditsError is when
-            // it is the response, under the same code, with where to top up.
-            const short = event.status === 402 && event.topUpUrl !== undefined;
-            return output.error(
-              new CliError(
-                short ? 'insufficient_credits' : 'agent_error',
-                short ? `${event.error} (add credits at ${event.topUpUrl})` : event.error,
-                {
-                  status: event.status,
-                  steps: event.steps,
-                  usage: event.usage,
-                  ...(event.costUsd === undefined ? {} : { costUsd: event.costUsd }),
-                  ...(event.topUpUrl === undefined ? {} : { topUpUrl: event.topUpUrl }),
-                },
-              ),
-              1,
-              true,
-            );
-          }
-          if (event.type === 'done') {
-            const code = event.result.finished ? 0 : 1;
-            const { raw: _raw, ...summary } = event.result;
-            output.frame('done', snakeKeys({ ...summary, exitCode: code }));
-            return code;
-          }
-          output.frame(event.type, event.type === 'step' ? snakeKeys(event.step) : event.text);
-        }
-        throw new CliError('incomplete_stream', 'Agent stream ended without a result');
+        const thread = s('thread');
+        // With --thread and no --computer, the thread's own computer: a thread
+        // is continued only on the computer its runs drove.
+        const kept =
+          s('computer') === undefined
+            ? (await client.agentThreads.get(thread!, call)).computerId
+            : undefined;
+        if (b('background'))
+          return await agentRunBackground(
+            client,
+            kept ?? (await resolveComputer(client, s('computer')!, signal)).id,
+            agent,
+            io,
+            output,
+            signal,
+          );
+        const c =
+          kept === undefined
+            ? await resolveComputer(client, s('computer')!, signal)
+            : await client.computers.get(kept, call);
+        const outcome = await streamAgentRun(c, agent, output);
+        // Said where the run started a thread: how to go on with it.
+        if (!json && thread === undefined && outcome.threadId !== undefined)
+          output.diagnostic(
+            `mandala: kept in thread ${outcome.threadId}; continue it with --thread ${outcome.threadId}, or line by line with: mandala agent resume ${outcome.threadId}`,
+            { keepNewlines: false },
+          );
+        return outcome.code;
       }
+      case 'agent chat':
+      case 'agent resume': {
+        const start =
+          path === 'agent chat' ? await resolveComputer(client, s('computer')!, signal) : undefined;
+        const {
+          prompt: _prompt,
+          threadId: _threadId,
+          store: _store,
+          signal: _signal,
+          ...runArgs
+        } = agent;
+        // A Ctrl-C stops the run in flight and not the session, so the
+        // session listens for it itself, from the moment it is called.
+        process.off('SIGINT', cancel);
+        return await agentSession(
+          client,
+          io,
+          output,
+          {
+            agent: runArgs,
+            thread: path === 'agent resume' ? args[0] : undefined,
+            computer: start,
+          },
+          cancel,
+          signal,
+        );
+      }
+      case 'agent runs list':
+        return await agentRunsList(
+          client,
+          io,
+          output,
+          {
+            ...agentPage,
+            computerId:
+              s('computer') === undefined
+                ? undefined
+                : await operationsComputer(client, s('computer')!, output, signal, 'agent runs'),
+          },
+          signal,
+        );
+      case 'agent runs get':
+        return await agentRunsGet(
+          client,
+          output,
+          target,
+          { wait: b('wait') === true, ...wait },
+          signal,
+        );
+      case 'agent runs cancel':
+        return await agentRunsCancel(client, output, target, signal);
+      case 'agent threads list':
+        return await agentThreadsList(
+          client,
+          io,
+          output,
+          {
+            limit: agentPage.limit,
+            before: agentPage.before,
+            computerId:
+              s('computer') === undefined
+                ? undefined
+                : await operationsComputer(client, s('computer')!, output, signal, 'agent threads'),
+          },
+          signal,
+        );
+      case 'agent threads get':
+        return await agentThreadsGet(client, io, output, target, signal);
+      case 'agent threads delete':
+        return await agentThreadsDelete(client, output, target, signal);
       default:
         throw new CliError('invalid_arguments', `unknown command ${path}`);
     }

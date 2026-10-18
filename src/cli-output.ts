@@ -148,6 +148,50 @@ export function redact(
 }
 
 /**
+ * Human list cells: redact and escape before measuring, with no guessed missing
+ * values. On stdout, unless `to` says otherwise: `agent resume`'s picker draws
+ * its list on stderr, beside the question it asks.
+ */
+export function listTable(
+  io: CliIO,
+  headers: readonly string[],
+  rows: readonly (readonly unknown[])[],
+  empty: string,
+  to: Pick<NodeJS.WritableStream, 'write'> = io.stdout,
+): void {
+  if (!rows.length) {
+    to.write(`${empty}\n`);
+    return;
+  }
+  const all = [
+    headers,
+    ...rows.map((row) =>
+      row.map((value) => {
+        const cell =
+          (typeof value === 'string' && value !== '') ||
+          (typeof value === 'number' && Number.isFinite(value))
+            ? String(value)
+            : '-';
+        return terminalSafe(redact(cell, io.env, io.secrets) as string);
+      }),
+    ),
+  ];
+  const widths = headers.map((_, i) =>
+    all.reduce((width, row) => Math.max(width, row[i]!.length), 0),
+  );
+  to.write(
+    `${all
+      .map((row) =>
+        row
+          .map((cell, i) => (i < headers.length - 1 ? cell.padEnd(widths[i]!) : cell))
+          .join('  ')
+          .trimEnd(),
+      )
+      .join('\n')}\n`,
+  );
+}
+
+/**
  * What a caller needs to find out how a call whose answer was lost ended: the
  * `Idempotency-Key` it was sent with (on an error that leaves the outcome
  * unknown), the operation the platform named, and the request id to quote.
