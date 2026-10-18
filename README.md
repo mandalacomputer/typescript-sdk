@@ -3730,12 +3730,20 @@ API error reasons that identify temporary or permanent failures.
 request was sent with the same 503, so a create, a command or a delete answered
 503 may already have happened. Every error this SDK builds carries `err.method`,
 and `isTransient` calls an `UnavailableError` transient only when that was GET
-or HEAD. Read the current state before sending a change again.
+or HEAD; one with no recorded method, such as one built by hand, is not. Read
+the current state before sending a change again.
 
 The wait helpers do not ask it. They replay idempotent reads under a deadline
 you set, so they can ride out 502, 504 and 520-523. They stop on 524 (a proxy
 timeout that retrying unchanged will not fix) and 525/526 (TLS failures), as well
-as permanent request failures. Two audiences, two predicates: the internal
+as permanent request failures. A `409` is judged by its word: a permanent
+`reason` (`unavailable`, `unsupported`, `revoked`, `exists`, `running`,
+`name_taken`, `stale_revision`, `stale_capture`) or the code
+`template_image_preparing` or `idempotency_outcome_unknown` ends the wait with
+that error, while `contention`, `starting` and the reasonless codes
+`idempotency_in_progress` and `WORKSPACE_MOVING` keep it polling. Any other `409`
+without a reason ends the wait too, except in `waitForDesktop`, where it is the
+"no desktop session yet" answer the wait exists for. Two audiences, two predicates: the internal
 `isTransientForPoll` can retry an uncertain read that the public `isTransient`
 cannot safely recommend replaying for an arbitrary operation.
 

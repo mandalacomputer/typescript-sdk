@@ -1712,9 +1712,10 @@ export function isTransient(err: unknown): boolean {
   // is an unknown outcome: the platform answers a failure after the request was
   // sent with the same status, so a create, a command or a delete answered 503
   // may already have happened. Only a read is safe to replay blind, and the
-  // method is what says which this was. An error built by hand carries no
-  // method and keeps the answer this predicate always gave it.
-  if (err instanceof UnavailableError && err.method !== undefined) {
+  // method is what says which this was. An error with no recorded method —
+  // one built by hand — cannot say it was a read, so it is final, as in the
+  // other two clients (OPL-6079).
+  if (err instanceof UnavailableError) {
     return err.method === 'GET' || err.method === 'HEAD';
   }
   // A 409 that reached here carried no word this version recognises, which the
@@ -1722,11 +1723,7 @@ export function isTransient(err: unknown): boolean {
   // clears by itself (OPL-5973). A transient word returned true above.
   if (err instanceof ConflictError)
     return err.code !== undefined && CONFLICT_CODES_CLEAR.has(err.code);
-  return (
-    err instanceof RateLimitError ||
-    err instanceof UnavailableError ||
-    err instanceof ConnectionError
-  );
+  return err instanceof RateLimitError || err instanceof ConnectionError;
 }
 
 /**

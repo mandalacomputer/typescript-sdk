@@ -440,7 +440,8 @@ describe('status mapping', () => {
     expect(isTransient(new ConflictError('', 409))).toBe(false);
     expect(isTransient(new ConflictError('', 409, { reason: 'contention' }))).toBe(true);
     expect(isTransient(new RateLimitError('', 429))).toBe(true);
-    expect(isTransient(new UnavailableError('', 503))).toBe(true);
+    // No recorded method: not known to be a read, so final (OPL-6079).
+    expect(isTransient(new UnavailableError('', 503))).toBe(false);
     expect(isTransient(new ConnectionError('offline'))).toBe(true);
     expect(isTransient(new PlanLimitError('', 402))).toBe(false);
     expect(isTransient(new Error('boom'))).toBe(false);
