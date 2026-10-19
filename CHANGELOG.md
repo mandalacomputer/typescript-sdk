@@ -29,6 +29,20 @@ This is the summary you read to decide whether to upgrade.
   from when no thread is given and stdin is a terminal. A session exits 0 when
   every run in it finished and 1 when any did not.
 
+### Changed
+
+- **A run refused while the platform updates is safe to send again.** While the
+  platform updates, `agent()`, `agentStream()`, `agentOnce()`,
+  `agentRuns.start()` and `startAgentRun()` can be refused with a `503`
+  carrying `reason: "draining"` and a `Retry-After`, before anything starts.
+  `isTransient` now answers true for it, whatever the method. A client
+  constructed with `retries` sends those calls again after the wait, within the
+  same budget, backoff and deadline; retries stay off by default, and nothing
+  else those calls meet is resent.
+- **CLI: human error output names the platform's `reason`** after the status
+  and the API's code, as `(HTTP 503, reason: draining)`. `--json` already
+  carried it.
+
 ## [0.16.0] — 2026-10-18
 
 ### Added

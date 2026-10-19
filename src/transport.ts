@@ -18,6 +18,7 @@ import {
   errorForStatus,
   MandalaError,
   type RateLimitInfo,
+  refusedWhileDraining,
   ValidationError,
 } from './errors.js';
 import { isIdempotencyKey, isRecord } from './paths.js';
@@ -329,6 +330,16 @@ export type RequestOptions = {
    * applies when larger, and a client that disabled the deadline stays exempt.
    */
   minTimeoutMs?: number;
+  /**
+   * Send this request again, under the client's `retries` budget, when it is
+   * refused with a `503` and `reason: "draining"`, whatever its method.
+   *
+   * For the calls that start an agent run (OPL-6094). The platform answers them
+   * that way for a few minutes while it updates, before anything starts, so the
+   * same request is safe to resend. No other failure of the request changes
+   * its method's rule, and a client without `retries` still makes one attempt.
+   */
+  resendDraining?: boolean;
 };
 
 /**
@@ -456,6 +467,9 @@ export type TransportOptions = {
    * Backoff starts at 250ms and doubles to 30s; Retry-After is a lower bound.
    * One deadline covers all attempts, and a wait that cannot end before it is
    * not started: the last answer is thrown. Legacy consuming execution polls are excluded.
+   * The same budget also resends the calls that start an agent run when the
+   * platform refuses them with a 503 `reason: "draining"` during an update,
+   * which it answers before anything starts; nothing else they meet is resent.
    */
   retries?: { idempotent: number };
   /** Swap in a fetch implementation. Defaults to the global one. */
@@ -830,13 +844,24 @@ export class Transport {
     return caller ? AbortSignal.any([caller, timeout]) : timeout;
   }
 
-  #retryDelay(method: string, path: string, error: unknown, attempt: number): number | undefined {
+  #retryDelay(
+    method: string,
+    path: string,
+    error: unknown,
+    attempt: number,
+    opts: RequestOptions,
+  ): number | undefined {
+    if (attempt >= this.#retries) return undefined;
+    // A call that starts an agent run, refused during a platform update before
+    // anything started (OPL-6094): safe to resend whatever its method, where it
+    // asked to be. Every other failure of it keeps its method's rule below.
+    const draining = opts.resendDraining === true && refusedWhileDraining(error);
     // The PID endpoint advances a shared output cursor, despite its GET method.
     const pathname = new URL(this.#url(path)).pathname;
     if (
-      attempt >= this.#retries ||
-      !['GET', 'HEAD'].includes(method.toUpperCase()) ||
-      /\/computers\/[^/]+\/exec\/[^/]+\/?$/.test(pathname) ||
+      (!draining &&
+        (!['GET', 'HEAD'].includes(method.toUpperCase()) ||
+          /\/computers\/[^/]+\/exec\/[^/]+\/?$/.test(pathname))) ||
       isTimeoutFailure(error) ||
       (error instanceof APIError && this.#terminalBodies.has(error))
     )
@@ -867,7 +892,7 @@ export class Transport {
         return await read(sent);
       } catch (error) {
         if (operation.signal?.aborted) throw withIdempotencyKey(error, opts);
-        const delay = this.#retryDelay(method, path, error, attempt);
+        const delay = this.#retryDelay(method, path, error, attempt, opts);
         if (delay === undefined) throw withIdempotencyKey(error, opts);
         // A wait that cannot end before the deadline would spend the rest of
         // it and then report a timeout in place of the answer the platform
@@ -1421,7 +1446,7 @@ export class Transport {
         return;
       } catch (error) {
         if (exposed || opts.signal?.aborted) throw error;
-        const delay = this.#retryDelay(method, path, error, attempt);
+        const delay = this.#retryDelay(method, path, error, attempt, opts);
         if (delay === undefined) throw error;
         await retrySleep(delay, opts.signal);
       }

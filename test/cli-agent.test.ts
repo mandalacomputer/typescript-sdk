@@ -298,6 +298,55 @@ describe('agent run --background', () => {
   });
 });
 
+// OPL-6094: the refusal a run gets while the platform updates said only how
+// long to wait in text, not that it was this refusal.
+describe('a run refused while the platform updates', () => {
+  const PAUSED =
+    'New agent runs are paused for a few minutes while the platform updates; runs already going are not ' +
+    'affected. Send the same request again after the Retry-After wait.';
+  const paused = () =>
+    json(
+      { error: PAUSED, reason: 'draining' },
+      { status: 503, headers: { 'content-type': 'application/json', 'Retry-After': '30' } },
+    );
+  const refusing = () =>
+    harness((call) =>
+      call.method === 'POST' && /\/agent(\/runs)?$/.test(call.path) ? paused() : anyRoute(call),
+    );
+  const ARGV: Record<string, string[]> = {
+    streamed: ['agent', 'run', 'tidy', '--computer', COMPUTER.id],
+    background: ['agent', 'run', 'tidy', '--computer', COMPUTER.id, '--background'],
+  };
+
+  it.each(Object.keys(ARGV))('%s: says the reason, the sentence and the wait', async (name) => {
+    const h = refusing();
+    const result = await h.run(ARGV[name]!, false);
+    expect(result.code).toBe(1);
+    expect(result.out).toBe('');
+    expect(result.err).toBe(
+      `mandala: ${PAUSED} (HTTP 503, reason: draining)\n` +
+        'mandala: the platform asked to wait 30s before trying again\n',
+    );
+  });
+
+  it.each(Object.keys(ARGV))('%s: carries all three in JSON', async (name) => {
+    const h = refusing();
+    const result = await h.run(ARGV[name]!);
+    expect(result.code).toBe(1);
+    expect(result.frames).toHaveLength(1);
+    // A streamed run reports it as its error frame, a background start as its
+    // one finite answer.
+    const frame = result.frames[0];
+    expect(name === 'streamed' ? frame.data.error : frame.error).toEqual({
+      code: 'unavailable',
+      message: PAUSED,
+      status: 503,
+      reason: 'draining',
+      retry_after_ms: 30_000,
+    });
+  });
+});
+
 describe('agent runs', () => {
   it('lists runs with every filter and paging, newest first', async () => {
     const h = harness(() => json({ runs: [{ ...AGENT_RUN, steps_taken: [] }], has_more: true }));

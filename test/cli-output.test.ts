@@ -213,6 +213,51 @@ describe('versioned output contract', () => {
     expect(plain.read().stderr).toBe('mandala: busy (HTTP 409)\n');
   });
 
+  // OPL-6094: a 503 that is safe to send again read like any other 503 in text,
+  // which carried only the wait.
+  it("shows the platform's reason in text beside the status and the API code", () => {
+    const paused = new UnavailableError(
+      'New agent runs are paused for a few minutes while the platform updates.',
+      503,
+      {
+        error: 'New agent runs are paused for a few minutes while the platform updates.',
+        reason: 'draining',
+      },
+      30_000,
+      { method: 'POST' },
+    );
+    const t = writer(false);
+    t.output.error(paused);
+    expect(t.read().stderr).toBe(
+      'mandala: New agent runs are paused for a few minutes while the platform updates. ' +
+        '(HTTP 503, reason: draining)\n' +
+        'mandala: the platform asked to wait 30s before trying again\n',
+    );
+    const j = writer();
+    j.output.error(paused);
+    expect(JSON.parse(j.read().stdout).error).toEqual({
+      code: 'unavailable',
+      message: 'New agent runs are paused for a few minutes while the platform updates.',
+      status: 503,
+      reason: 'draining',
+      retry_after_ms: 30_000,
+    });
+    const busy = new ConflictError('moving', 409, {
+      error: 'moving',
+      code: 'WORKSPACE_MOVING',
+      reason: 'contention',
+    });
+    const b = writer(false);
+    b.output.error(busy);
+    expect(b.read().stderr).toBe(
+      'mandala: moving (HTTP 409, WORKSPACE_MOVING, reason: contention)\n',
+    );
+    // A word the platform chose is escaped like the sentence beside it.
+    const odd = writer(false);
+    odd.output.error(new ConflictError('x', 409, { error: 'x', reason: 'a\u001bb' }));
+    expect(odd.read().stderr).toBe('mandala: x (HTTP 409, reason: a\\u001bb)\n');
+  });
+
   it('sends human errors only to stderr without color escapes', () => {
     const w = writer(false);
     w.output.error(new CliError('invalid_arguments', 'bad flag'));

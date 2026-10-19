@@ -230,7 +230,7 @@ export class APIError extends MandalaError {
   readonly retryAfterMs?: number;
   /**
    * The platform's own word for what KIND of refusal this is, where it sent one
-   * (platform OPL-3898): `contention`, `starting`, `unavailable`,
+   * (platform OPL-3898): `contention`, `starting`, `draining`, `unavailable`,
    * `unsupported`, `revoked`, `exists` or `running`. `undefined` for most
    * errors, and always will be — the platform is explicit that an absent value
    * means unclassified rather than "none of these", which is what makes it safe
@@ -392,6 +392,27 @@ const CONFLICT_CODES_CLEAR: ReadonlySet<string> = new Set([
   'idempotency_in_progress',
   'WORKSPACE_MOVING',
 ]);
+
+/**
+ * Whether `err` is a call that starts an agent run, refused while the platform
+ * is about to restart for an update (OPL-6094): a `503` whose top-level
+ * `reason` is `draining`, sent with a `Retry-After`. The refusal comes before
+ * anything starts, so nothing ran, nothing was held and nothing was charged,
+ * and the same request is safe to send again once the wait is over.
+ *
+ * Its own rule rather than a third word beside `contention` and `starting`:
+ * those clear on a 400 or a 409, and this one on a 503 — the one 503 a change
+ * may be sent again after, where every other is an unknown outcome. Only the
+ * top-level word counts, as in {@link isTransient}'s other reason rules: a
+ * nested one belongs to a run's own error.
+ *
+ * @internal
+ */
+export function refusedWhileDraining(err: unknown): err is APIError {
+  return (
+    err instanceof APIError && err.status === 503 && errorRecord(err.body)?.reason === 'draining'
+  );
+}
 
 /**
  * The platform's one-word classification off a refusal body, or `undefined`.
@@ -1064,6 +1085,15 @@ export class RateLimitError extends APIError {
  * Three listings, not two, since OPL-3840. The builds one always answered this
  * way and until then documented no way out, which made a build listing strictly
  * less available than a computer listing.
+ *
+ * On the calls that start an agent run — {@link Computer.agent},
+ * {@link Computer.agentStream}, {@link Computer.agentOnce} and
+ * `agentRuns.start()` — a 503 with `reason: "draining"` and a `retryAfterMs` is
+ * the platform refusing new runs for a few minutes while it updates
+ * (OPL-6094). It comes before anything starts, so nothing ran or was charged,
+ * and {@link isTransient} answers true for it: send the same request again
+ * after `retryAfterMs`. A client constructed with `retries` does that itself,
+ * within the same budget.
  */
 export class UnavailableError extends APIError {
   override name = 'UnavailableError';
@@ -1627,7 +1657,10 @@ function withoutRefusalReason(body: unknown): unknown {
  * is transient only while the run has taken no step: once it has, the steps
  * are on the desktop and replaying the prompt would repeat them, so this
  * answers false (OPL-5446). Read the error's body before running again. The platform's
- * own unprefixed 429 there is unchanged.
+ * own unprefixed 429 there is unchanged. A 503 with `reason: "draining"` on a
+ * call that starts a run is the other way round: the platform refusing new runs
+ * during an update before anything started, so this answers true for it,
+ * whatever the method (OPL-6094).
  * A 403 there without `reason: "revoked"` may likewise be the model key's own
  * `permission_error`. A 403 that arrives as the run's `error` event — a
  * refusal after the run started — reaches `agent()`'s thrown error without
@@ -1709,6 +1742,11 @@ export function isTransient(err: unknown): boolean {
     }
     if (REASON_PERMANENT.has(err.reason)) return false;
   }
+  // A call that starts an agent run, refused during a platform update before
+  // anything started (OPL-6094): the one 503 that is safe to send again
+  // whatever the method. Ahead of the 503 rule below, which would call a
+  // POST's refusal an unknown outcome.
+  if (refusedWhileDraining(err)) return true;
   // {@link OriginUnreachableError} is deliberately not here, and 502 and 504
   // are not either. All of them mean the outcome is unknown, which is exactly
   // what an embedder replaying a create cannot afford — one computer becomes
