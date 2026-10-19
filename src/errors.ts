@@ -413,6 +413,13 @@ const CONFLICT_CODES_CLEAR: ReadonlySet<string> = new Set([
  * from the platform's own answer, not through a redirect (see
  * {@link markRedirected}).
  *
+ * Read from the answer alone, not from the route: an error does not carry the
+ * path it answered, so {@link isTransient} grants this on any call. That is
+ * safe because the platform sends `draining` only on the calls that start an
+ * agent run, and this relies on it — the same trust `contention` and
+ * `starting` already get. The transport's own resend is narrower still: only
+ * the calls that ask for it with `resendDraining`.
+ *
  * @internal
  */
 export function refusedWhileDraining(err: unknown): err is APIError {
