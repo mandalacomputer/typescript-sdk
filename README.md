@@ -3602,7 +3602,8 @@ const client = new Client({ retries: { idempotent: 2 } }); // up to two addition
 
 `idempotent` must be a nonnegative finite integer; zero keeps a single attempt.
 The client copies this setting at construction. Only GET and HEAD can retry,
-on connection failures or HTTP 502, 503 and 504. Legacy `execPoll` reads are
+on connection failures or HTTP 502, 503 and 504 — except the calls that start
+an agent run, which resend the one draining refusal described below. Legacy `execPoll` reads are
 excluded because reading them advances a shared output cursor. HTTP 429 is
 never retried, including when its error body is interrupted;
 `RateLimitError.retryAfterMs` still carries a usable server delay. Other

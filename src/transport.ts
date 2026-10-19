@@ -337,7 +337,9 @@ export type RequestOptions = {
    *
    * For the calls that start an agent run (OPL-6094). The platform answers them
    * that way for a few minutes while it updates, before anything starts, so the
-   * same request is safe to resend. No other failure of the request changes
+   * same request is safe to resend. Only the refusal's own shape counts: an
+   * `error` that is a plain string, no record of a run beside it, and not an
+   * answer reached through a redirect. No other failure of the request changes
    * its method's rule, and a client without `retries` still makes one attempt.
    */
   resendDraining?: boolean;

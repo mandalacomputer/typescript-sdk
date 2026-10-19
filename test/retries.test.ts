@@ -512,7 +512,7 @@ it('never reopens SSE after exposing a frame', async () => {
   expect(fetch).toHaveBeenCalledTimes(1);
 });
 
-it('never retries POST agent streams or public creates', async () => {
+it('never retries POST agent streams or public creates on a 503 that is not the draining refusal', async () => {
   const fetch = vi
     .fn<typeof globalThis.fetch>()
     .mockImplementation(async () => new Response(null, { status: 503 }));
