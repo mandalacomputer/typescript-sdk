@@ -6458,6 +6458,15 @@ export class Computer {
    * refusal reported, so read those before deciding what to do next.
    * {@link agentStream} surfaces the same facts as `usage` and `steps` on its
    * `error` event.
+   *
+   * **A 503 WITH `reason: "draining"` IS THE ONE TO SEND AGAIN.** While the
+   * platform updates it refuses new runs for a few minutes with an
+   * {@link UnavailableError} whose `retryAfterMs` says how long to wait. It
+   * answers before the stream opens and before anything starts, so nothing ran
+   * and nothing was charged, and {@link isTransient} answers true for it. A
+   * client constructed with `retries` sends the same request again after the
+   * wait, within that budget; without it, this throws. The same holds for
+   * {@link agentStream}, {@link agentOnce} and {@link startAgentRun} (OPL-6094).
    */
   async agent(args: AgentArgs): Promise<AgentResult> {
     // Named here as well, though agentStream checks the same argument a line
@@ -6593,6 +6602,9 @@ export class Computer {
         body: P.agentBody(args, { stream: true }),
         headers,
         signal: args.signal,
+        // Refused during a platform update before anything started: sent
+        // again under the client's `retries`, before any frame (OPL-6094).
+        resendDraining: true,
       })) {
         const ev = toAgentEvent(raw.event, raw.data, steps, run.baseUrl);
         if (!ev) continue;
@@ -6667,6 +6679,7 @@ export class Computer {
         // ordinary deadline would end every run over a minute at exactly the
         // same place. A caller's own signal is what stops one early.
         noTimeout: true,
+        resendDraining: true,
       })
       .catch((err: unknown) => {
         // The HTTP form of agent()'s mapping: this route's 402 is the model
@@ -6704,9 +6717,13 @@ export class Computer {
    * refuses a run before that is thrown, and no run is recorded: an unknown
    * computer ({@link NotFoundError}), one not running ({@link ConflictError}),
    * one already driven or whose workspace is changing ({@link ConflictError}
-   * with `reason: 'contention'`), and a funded run the account's credits
-   * cannot start ({@link InsufficientCreditsError}). Everything after it, the
-   * model API's errors included, ends the run as `failed` with that `error`.
+   * with `reason: 'contention'`), a funded run the account's credits
+   * cannot start ({@link InsufficientCreditsError}), and new runs paused for a
+   * few minutes while the platform updates ({@link UnavailableError} with
+   * `reason: 'draining'` and `retryAfterMs`, which {@link isTransient} calls
+   * safe to send again; a client with `retries` does, within that budget).
+   * Everything after it, the model API's errors included, ends the run as
+   * `failed` with that `error`.
    *
    * `modelKey` is held in memory for the run's life and never stored. The run
    * uses the API key that started it: deleting that key stops it at its next
@@ -6745,7 +6762,7 @@ export async function postAgentRun(
   const path = P.computerAction(computerId, 'agent/runs');
   const run = { funded: !(MODEL_KEY_HEADER in headers), baseUrl: t.baseUrl };
   const data = await t
-    .json('POST', path, { body, headers, signal: opts?.signal })
+    .json('POST', path, { body, headers, signal: opts?.signal, resendDraining: true })
     .catch((err: unknown) => {
       throw err instanceof APIError ? agentRouteError(err, 0, run) : err;
     });

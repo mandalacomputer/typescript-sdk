@@ -355,11 +355,15 @@ export class Output {
       // The status and the API's own code beside the sentence, as `(HTTP 409,
       // LABEL_TAKEN)`: two refusals with one status can want different fixes,
       // and a person reading this should not need --json to tell them apart
-      // (OPL-5973).
+      // (OPL-5973). The platform's word for the kind of refusal too, as
+      // `(HTTP 503, reason: draining)`: a 503 that is safe to send again reads
+      // like any other without it (OPL-6094).
       const said =
         info.status === undefined
           ? ''
-          : ` (HTTP ${info.status}${info.api_code === undefined ? '' : `, ${info.api_code}`})`;
+          : ` (HTTP ${info.status}${info.api_code === undefined ? '' : `, ${info.api_code}`}${
+              info.reason === undefined ? '' : `, reason: ${info.reason}`
+            })`;
       this.diagnostic(`mandala: ${info.message}${said}`, { keepNewlines: false });
       if (info.retry_after_ms !== undefined)
         this.diagnostic(

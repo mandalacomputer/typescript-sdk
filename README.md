@@ -1796,6 +1796,16 @@ The long writes are refused the same way and at the same kind of point — `crea
 the body has been read and the work prepared. For those the durable write has
 **not** happened; for an agent run the completed steps have.
 
+**A `503` with `reason: "draining"` is the one to send again.** While the
+platform updates, it refuses new runs for a few minutes with an
+`UnavailableError` carrying that `reason` and a `retryAfterMs`; runs already
+going are not affected. It answers before the stream opens and before anything
+starts, so nothing ran and nothing was charged, and `isTransient` answers true
+for it. A client constructed with `retries` sends the same request again after
+the wait itself (see [Optional retries for reads](#optional-retries-for-reads));
+otherwise send it again yourself. `mandala agent run` prints the reason beside
+the status.
+
 `agent()` is itself the stream, read to its `done`. `agentOnce()` is the same
 run as a single non-streaming request — simpler, and worse for anything long,
 since nothing is reported until the whole run is over. **On the hosted API it
@@ -1882,9 +1892,11 @@ before the call. The start answers once the loop holds the computer, with
 `status: 'running'`; what refuses a run before that is thrown as its own error
 and records no run — an unknown computer (`NotFoundError`), one not running
 (`ConflictError`), one already driven or whose workspace is changing
-(`ConflictError` with `reason: 'contention'`), and a funded run the account's
-credits cannot start (`InsufficientCreditsError`). Everything after it, the
-model API's errors included, ends the run as `failed` with that `error`.
+(`ConflictError` with `reason: 'contention'`), a funded run the account's
+credits cannot start (`InsufficientCreditsError`), and new runs paused while the
+platform updates (`UnavailableError` with `reason: 'draining'`, safe to send
+again after its `retryAfterMs`). Everything after it, the model API's errors
+included, ends the run as `failed` with that `error`.
 
 `modelKey` is held in memory for the run's life and never stored. The run uses
 the API key that started it, and deleting that key stops it at its next step.
@@ -3590,7 +3602,8 @@ const client = new Client({ retries: { idempotent: 2 } }); // up to two addition
 
 `idempotent` must be a nonnegative finite integer; zero keeps a single attempt.
 The client copies this setting at construction. Only GET and HEAD can retry,
-on connection failures or HTTP 502, 503 and 504. Legacy `execPoll` reads are
+on connection failures or HTTP 502, 503 and 504 — except the calls that start
+an agent run, which resend the one draining refusal described below. Legacy `execPoll` reads are
 excluded because reading them advances a shared output cursor. HTTP 429 is
 never retried, including when its error body is interrupted;
 `RateLimitError.retryAfterMs` still carries a usable server delay. Other
@@ -3617,8 +3630,25 @@ websocket reconnection behavior is unchanged.
 POST, PUT, PATCH and DELETE are never retried, even on a connection failure.
 A lost answer does not prove a mutation did not happen: another create or exec
 can duplicate work. Creates, template preparation, retained publication and POST
-agent streams therefore remain single attempts. Check an uncertain mutation's
-outcome explicitly before deciding what to do next.
+agent streams therefore remain single attempts, but for the one refusal below.
+Check an uncertain mutation's outcome explicitly before deciding what to do next.
+
+That refusal is the platform pausing new agent runs while it updates. The calls
+that start one — `agent()`, `agentStream()`, `agentOnce()`,
+`agentRuns.start()` and `startAgentRun()` — are answered `503` with
+`reason: "draining"` and a `Retry-After`, before anything starts: nothing ran
+and nothing was charged. With `retries` set, they send the same request again
+after that wait, under the same budget and backoff, and within the request's
+deadline where it has one: `agentRuns.start()` and `startAgentRun()` have the
+client's, so the default 60 seconds hold one 30-second wait and not a second;
+a stream and `agentOnce()` have none. Without `retries` they throw the
+`UnavailableError`, which `isTransient` calls safe to send again. Only the
+refusal's own shape counts: an `error` that is a plain string, no record of a
+run beside it (`usage`, `steps`, `steps_taken`, `cost_usd`, `thread_id` or
+`agent`), and the platform's own answer rather than one a `fetch` you passed
+reached through a redirect. Anything else with the word is neither resent nor
+transient. Nothing else those calls meet is resent: another `503`, a `502` or a
+connection failure still ends the call.
 
 ### Errors
 
@@ -3648,7 +3678,9 @@ import {
   RateLimitError,      //     429 — retry after retryAfterMs when present; also
                        //           limit, remaining, resetSeconds (RateLimit-*)
   UnavailableError,    //     503 — could not answer now. A READ can be asked again;
-                       //           a CHANGE may or may not have happened
+                       //           a CHANGE may or may not have happened — except
+                       //           reason "draining": an agent run not started,
+                       //           send it again after retryAfterMs
   GatewayTimeoutError, //     504/524 — a proxy gave up; work may carry on (not
                        //           for agentOnce(): its 524 stops the run)
   OriginResponseError, //     520 — it answered, unreadably; work may have happened
@@ -3764,7 +3796,9 @@ one (`LABEL_TAKEN`, `PUBLIC_URL_LIMIT`), names which refusal it was.
 `err.reason` is what says which kind you have, where the platform sent a word
 for it, and it is the part a program is allowed to depend on — `err.message` is
 prose and is rewritten. For ordinary request refusals, `contention` and `starting` clear on their
-own, `unavailable` means the computer is not running and only starting it helps,
+own, `draining` (a `503` on a call that starts an agent run) means the platform
+is updating and started nothing, so the same request goes again after its
+`Retry-After`, `unavailable` means the computer is not running and only starting it helps,
 `unsupported` means this computer cannot do it at all, `exists` means a
 create-only upload found its path taken, `running` means the computer is
 running and this call needs it stopped (stop it: waiting never helps),
@@ -4677,8 +4711,9 @@ status), `retry_after_ms` (the platform's `Retry-After`, in milliseconds),
 `request_id` (to quote when asking about the failure), `idempotency_key` and
 `operation_id` (on a call whose outcome is unknown; see Operations below),
 command-specific `details`, or — for a mistyped command — its full `usage`,
-which human output prints under the message. Human output puts the status and
-the API's code after the message, as `(HTTP 409, LABEL_TAKEN)`, and says the
+which human output prints under the message. Human output puts the status,
+the API's code and the platform's `reason` after the message, as
+`(HTTP 409, LABEL_TAKEN)` or `(HTTP 503, reason: draining)`, and says the
 `Retry-After` wait on a line of its own.
 An unknown command word shows the help of the group it was typed under (the
 whole command list for an unknown first word), and under `secrets` the word
