@@ -66,13 +66,22 @@ const starting =
     return answer(attempts++, call) ?? anyRoute(call);
   };
 
-async function sdk(respond: Responder, opts: Partial<ClientOptions> = {}) {
+async function sdk(
+  respond: Responder,
+  opts: Partial<ClientOptions> = {},
+  { redirected = false }: { redirected?: boolean } = {},
+) {
   const times: number[] = [];
   const rec = recorder((call) => {
     if (startsRun(call)) times.push(Date.now());
     return respond(call);
   });
-  const client = new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: rec.fetch, ...opts });
+  // A fetch that followed a redirect: the same answer, flagged as such.
+  const fetch: typeof globalThis.fetch = redirected
+    ? async (input, init) =>
+        Object.defineProperty(await rec.fetch(input, init), 'redirected', { value: true })
+    : rec.fetch;
+  const client = new Client({ apiKey: 'com_test', baseUrl: BASE, fetch, ...opts });
   const c = await client.computers.get('vm-1');
   return { rec, client, c, times, starts: () => rec.calls.filter(startsRun) };
 }
@@ -332,4 +341,68 @@ describe('with retries opted in', () => {
     expect(isTransient(err)).toBe(true);
     expect(starts()).toHaveLength(1);
   });
+});
+
+// The refusal's own shape, and nothing else: a draining word on a body that
+// reports a run, or on one that is not the refusal's, or on an answer that
+// came through a redirect, is not the platform saying nothing started.
+describe('what is not the draining refusal', () => {
+  const RUN_RECORDS: [string, unknown][] = [
+    ['usage', { input_tokens: 10, output_tokens: 2 }],
+    ['steps', []],
+    ['steps_taken', [{ n: 1, tool: 'computer', action: 'left_click', detail: 'x' }]],
+    ['cost_usd', 0.01],
+    ['thread_id', 'thr_0123456789abcdef01234567'],
+    ['agent', { stop: 'error' }],
+  ];
+  const ERRORS: [string, unknown][] = [
+    ['an object', { message: DRAINING.error }],
+    ['null', null],
+    ['a number', 503],
+  ];
+  const SHAPES: [string, Record<string, unknown>][] = [
+    ...RUN_RECORDS.map(([key, value]): [string, Record<string, unknown>] => [
+      `a body that also reports ${key}`,
+      { ...DRAINING, [key]: value },
+    ]),
+    ...ERRORS.map(([what, error]): [string, Record<string, unknown>] => [
+      `an error that is ${what}`,
+      { ...DRAINING, error },
+    ]),
+    ['a body with no error', { reason: 'draining' }],
+  ];
+
+  it.each(SHAPES)('%s is not transient', (_, body) => {
+    const err = errorForStatus(503, DRAINING.error, body, { method: 'POST', retryAfterMs: 30_000 });
+    expect(err).toBeInstanceOf(UnavailableError);
+    expect(err.reason).toBe('draining');
+    expect(isTransient(err)).toBe(false);
+  });
+
+  it.each(SHAPES)('%s is not resent', async (_, body) => {
+    const { client, c, starts } = await sdk(
+      starting(() => refusal(503, body, { 'Retry-After': '30' })),
+      { retries: { idempotent: 3 } },
+    );
+    const err = await settle(RUNNERS.agentOnce!(client, c));
+    expect(err).toBeInstanceOf(UnavailableError);
+    expect(isTransient(err)).toBe(false);
+    expect(starts()).toHaveLength(1);
+  });
+
+  it.each(Object.keys(RUNNERS))(
+    '%s neither resends nor calls transient a refusal reached through a redirect',
+    async (name) => {
+      const { client, c, starts } = await sdk(
+        starting(() => draining()),
+        { retries: { idempotent: 3 } },
+        { redirected: true },
+      );
+      const err = await settle(RUNNERS[name]!(client, c));
+      expect(err).toBeInstanceOf(UnavailableError);
+      expect(err).toMatchObject({ reason: 'draining', retryAfterMs: 30_000 });
+      expect(isTransient(err)).toBe(false);
+      expect(starts()).toHaveLength(1);
+    },
+  );
 });

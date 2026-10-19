@@ -17,6 +17,7 @@ import {
   ConnectionInterruptedError,
   errorForStatus,
   MandalaError,
+  markRedirected,
   type RateLimitInfo,
   refusedWhileDraining,
   ValidationError,
@@ -1180,6 +1181,11 @@ export class Transport {
       rangeTotal: unsatisfiedTotal(resp.headers.get('content-range')),
     });
     if (terminalBody) this.#terminalBodies.add(error);
+    // A `fetch` passed to the client can follow a redirect that `redirect:
+    // 'manual'` asked it not to, and then this answer is not the platform's to
+    // the request sent. Kept as it came, but its retry advice is not taken
+    // (OPL-6094).
+    if (resp.redirected === true) markRedirected(error);
     return error;
   }
 

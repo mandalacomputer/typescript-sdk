@@ -406,12 +406,47 @@ const CONFLICT_CODES_CLEAR: ReadonlySet<string> = new Set([
  * top-level word counts, as in {@link isTransient}'s other reason rules: a
  * nested one belongs to a run's own error.
  *
+ * Only the refusal's own shape counts, because the answer is "resend a POST
+ * that starts a run" and a wrong yes runs it twice. Its `error` is a plain
+ * string, and it carries none of {@link RUN_RECORD_KEYS}: a body that reports
+ * a run is a run that may have happened, whatever word is on it. And it came
+ * from the platform's own answer, not through a redirect (see
+ * {@link markRedirected}).
+ *
  * @internal
  */
 export function refusedWhileDraining(err: unknown): err is APIError {
+  if (!(err instanceof APIError) || err.status !== 503 || viaRedirect.has(err)) return false;
+  const body = errorRecord(err.body);
   return (
-    err instanceof APIError && err.status === 503 && errorRecord(err.body)?.reason === 'draining'
+    body?.reason === 'draining' &&
+    typeof body.error === 'string' &&
+    !RUN_RECORD_KEYS.some((key) => Object.hasOwn(body, key))
   );
+}
+
+/**
+ * The fields a body reports a run with — what it spent, what it did, the
+ * thread it was kept in, the chat route's `agent` record. The draining refusal
+ * is answered before any run and carries none of them, so a body with one is
+ * not that refusal (OPL-6094).
+ */
+const RUN_RECORD_KEYS = ['usage', 'steps', 'steps_taken', 'cost_usd', 'thread_id', 'agent'];
+
+/**
+ * Errors built from a response that arrived through a redirect. This SDK asks
+ * fetch not to follow one, but a `fetch` passed to the client may follow it
+ * anyway, and then the answer is from wherever the redirect led — a proxy or
+ * another service — rather than the platform's to the request this SDK sent.
+ * Its retry advice is not the platform's, so {@link refusedWhileDraining}
+ * declines it (OPL-6094).
+ */
+const viaRedirect = new WeakSet<APIError>();
+
+/** @internal Mark `err` as built from a response that arrived through a redirect. */
+export function markRedirected<T extends APIError>(err: T): T {
+  viaRedirect.add(err);
+  return err;
 }
 
 /**

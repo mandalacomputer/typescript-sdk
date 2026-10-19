@@ -3641,9 +3641,13 @@ after that wait, under the same budget and backoff, and within the request's
 deadline where it has one: `agentRuns.start()` and `startAgentRun()` have the
 client's, so the default 60 seconds hold one 30-second wait and not a second;
 a stream and `agentOnce()` have none. Without `retries` they throw the
-`UnavailableError`, which `isTransient` calls safe to send again. Nothing else
-those calls meet is resent: another `503`, a `502` or a connection failure
-still ends the call.
+`UnavailableError`, which `isTransient` calls safe to send again. Only the
+refusal's own shape counts: an `error` that is a plain string, no record of a
+run beside it (`usage`, `steps`, `steps_taken`, `cost_usd`, `thread_id` or
+`agent`), and the platform's own answer rather than one a `fetch` you passed
+reached through a redirect. Anything else with the word is neither resent nor
+transient. Nothing else those calls meet is resent: another `503`, a `502` or a
+connection failure still ends the call.
 
 ### Errors
 

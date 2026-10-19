@@ -38,7 +38,11 @@ This is the summary you read to decide whether to upgrade.
   `isTransient` now answers true for it, whatever the method. A client
   constructed with `retries` sends those calls again after the wait, within the
   same budget, backoff and deadline; retries stay off by default, and nothing
-  else those calls meet is resent.
+  else those calls meet is resent. Only the refusal's own shape counts: a body
+  whose `error` is not a plain string, one that also reports a run (`usage`,
+  `steps`, `steps_taken`, `cost_usd`, `thread_id` or `agent`), and an answer a
+  `fetch` you passed reached through a redirect are neither resent nor
+  transient.
 - **CLI: human error output names the platform's `reason`** after the status
   and the API's code, as `(HTTP 503, reason: draining)`. `--json` already
   carried it.
