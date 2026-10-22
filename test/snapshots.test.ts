@@ -618,7 +618,7 @@ describe('a deletion that does not finish', () => {
     expect(err).toBeInstanceOf(TimeoutError);
     expect((err as Error).message).toContain('the deletion of snap-1 stalled');
     expect((err as Error).message).toContain('every fifteen minutes');
-    expect((err as Error).message).toContain('still billed');
+    expect((err as Error).message).toContain('still counts against storage');
   });
 
   it('does not call a row in another state a stall, because the remedy differs', async () => {

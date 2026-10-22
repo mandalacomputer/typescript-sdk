@@ -1220,7 +1220,7 @@ export class OriginUnreachableError extends APIError {
  *
  * Which makes a blind retry the thing to be careful about. Re-sending a read
  * costs nothing; re-sending a create can leave two computers where one was
- * meant, both billable, on the strength of a failure that said the first never
+ * meant, both consuming resources, on the strength of a failure that said the first never
  * happened.
  *
  * It was filed with {@link OriginUnreachableError} at first, on the reading that
@@ -1882,7 +1882,7 @@ export function conflictKeepsPolling(err: APIError, settling: boolean): boolean 
  * Constructing it unguarded there throws `ReferenceError` from inside the
  * handler that exists to stop two failures becoming one, and destroys BOTH of
  * them: the caller is told about a missing global instead of about the block
- * that failed and the cloud machine that is still billing for it. The engine
+ * that failed and the cloud machine that still consumes resources. The engine
  * that cannot report two errors is exactly the engine that must not lose them.
  *
  * The fallback is the object TypeScript's own `__disposeResources` downlevel

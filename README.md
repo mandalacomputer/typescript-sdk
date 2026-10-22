@@ -12,6 +12,9 @@ bytes, clicks go in as coordinates, and a shell in the guest is one call away.
 Zero runtime dependencies. Node 22+, and anywhere else with `fetch` — Bun, Deno,
 workers, the edge. (The `mandala` CLI is Node-only; the library is not.)
 
+Runtime and individual exec calls do not add a charge to the monthly subscription.
+Running computers consume running capacity; AI-credit usage is charged separately.
+
 ## Install
 
 ```sh
@@ -174,7 +177,7 @@ await c.waitForGuest();
 **If the block throws and the cleanup delete fails too, both errors arrive** —
 a `SuppressedError` whose `.suppressed` is the block's own error, the fault to
 read first, and whose `.error` is a `MandalaError` naming the machine that is
-still billable. Both spellings fill those two fields the same way, so a cleanup
+still consuming resources. Both spellings fill those two fields the same way, so a cleanup
 failure is never the thing that goes unmentioned.
 
 Read `.error`, not `.message`: the top-level message is the one field the two
@@ -820,7 +823,7 @@ fixes that, since a profile that prints your frame owns everything after it.
 The clipboard endpoints do not share that stream. The write is worse still: an
 X selection belongs to a live process, so the holder has to outlive the exec,
 the text has to travel quoted, and being granted a selection is asynchronous,
-so the result has to be polled for — each poll a billable exec. `setClipboard()`
+so the result has to be polled for — each poll an extra exec. `setClipboard()`
 does all of it in one call.
 
 ### Running commands
@@ -1947,7 +1950,7 @@ tested with `npm install openai@7.16.0`. Set these process environment variables
 
 This external client does not read `~/.mandala/credentials.json`, so
 `mandala login` does not configure it. That file holds a Mandala credential,
-not your Anthropic key. Existing computer charges and API rate budgets apply;
+not your Anthropic key. Existing capacity limits and API rate budgets apply;
 Anthropic bills model usage to your key. This endpoint provides no hosted
 inference or included model credits. Its runs are kept in threads as the
 native route's are (see [threads](#continuing-a-conversation-threads)):
@@ -2791,8 +2794,12 @@ console.log(site.url); // https://brave-otter-3f2a.mandala.dev
 
 | | who may open it |
 |---|---|
-| `access: 'public'` (the default) | anyone with the link |
-| `access: 'private'` | only a request carrying an API key of this account as `Authorization: Bearer`; the key never reaches the app |
+| `access: 'public'` | anyone with the link; default on paid plans |
+| `access: 'private'` | an appropriately scoped account API key as `Authorization: Bearer`, or browser sign-in through the dashboard's Open button; default on trials |
+
+Trials cannot request public access (`402 PUBLIC_ACCESS_REQUIRES_PLAN`); use
+private access or choose a paid plan. A workspace-scoped API key must match the
+computer's workspace. The key never reaches the app.
 
 Pass a `label` to choose the name (3 to 40 letters, digits and hyphens; the
 platform refuses names that are taken, reserved, or read as its own or another
@@ -3056,7 +3063,7 @@ the time whether the answer was one this client could read whole.
 `TimeoutError` means the *wait* stopped and not the capture — the id is in the
 message and the snapshot is still coming. A `MandalaError` saying the capture
 failed means the row went and nothing took its place; there is nothing to find
-and nothing being billed.
+and no storage being held.
 
 ```ts
 try {
@@ -3097,7 +3104,7 @@ wait polls for, and it asks with `includeUnfinished` because a row that reached
 
 That flag is not optional in a loop of your own. Without it, a deletion that
 stalled reads as one that finished, and you record a snapshot as gone while it
-is still holding objects and still being billed.
+is still holding objects and still counting against storage.
 
 Every refusal still arrives on the request and still carries the status it did:
 404 for no such snapshot, `ConflictError` for a capture reading through it, for a
@@ -3159,7 +3166,7 @@ returns the computer to never having had one.
 `client.snapshots.list()` is every snapshot on the account;
 `{ computerId }` narrows it to one computer's, and `{ includeUnfinished: true }`
 adds deletions that began and did not finish — nothing can be restored or
-cloned from one, but they still hold storage and are still billed.
+cloned from one, but they still hold storage and still count against storage limits.
 
 The `{ computerId }` filter drops a row whose `computer_id` is not a string,
 since a strict comparison is the whole of what keeps another computer's
@@ -3387,9 +3394,10 @@ the original fields, as does the CLI's normal and `--json` member output.
 
 ### Usage
 
-What the account has spent, in the same figures the dashboard shows and the
-invoice bills on. This is the read to build a spend check around: a loop that
-launches computers is the caller that can run up a bill without noticing.
+What the account has used: running hours weighted by cores and memory, and
+storage held over time. Use this to monitor resource use across a batch of
+computers. These measurements do not add a runtime or storage usage charge to
+the monthly subscription; AI-credit usage is separate.
 
 ```ts
 const u = await client.usage.read();
@@ -3400,10 +3408,8 @@ for (const c of u.usage.computers) {
 }
 ```
 
-With no arguments the window is the account's **current billing period**, which
-is what makes the numbers comparable with an invoice. Name a window for one that
-has closed — the billing period is always the current one, and by the time an
-invoice arrives the period it covers is not:
+With no arguments the window is the account's **current billing period**.
+Name both bounds to inspect a period that has closed:
 
 ```ts
 await client.usage.read({
@@ -3424,7 +3430,7 @@ carry a time zone — `2026-08-01T00:00:00Z`, not `2026-08-01T00:00:00` — and 
 zoneless one is refused here rather than sent. The platform refuses it too, and
 for the reason that matters: the zone it would otherwise have to assume is the
 server's, and a window silently shifted by a few hours is the worst possible
-failure on the one call whose output somebody checks against a bill.
+failure on the one call used to compare usage across periods.
 
 **Read `degraded` and `unmetered` before you use the numbers.** Every figure is a
 sum across the hypervisors your computers are on, so a host that did not
@@ -3435,7 +3441,7 @@ quietly too small.
 if (u.degraded || u.unmetered) {
   // Short, and saying so. `degraded` clears when the host comes back;
   // `unmetered` is a host running a daemon older than the meter and never does.
-  console.warn('these totals may be low — do not reconcile them against an invoice');
+  console.warn('these totals may be low — do not treat them as complete usage');
 }
 ```
 
@@ -3445,12 +3451,12 @@ missing row can — and one of the two shortfalls would never clear by retrying.
 
 Two more fields worth knowing:
 
-- `reportedThrough` — the last UTC day whose usage has settled for billing, as a
+- `reportedThrough` — the last UTC day whose usage has settled for metering, as a
   contiguous prefix. Not a caveat on the totals, which are live and true through
-  `to`; it is the boundary to check before comparing anything with an invoice.
+  `to`; settlement does not imply a usage charge on the subscription.
   `undefined` while none of the window has settled.
 - `breakdown` — false when the API key is scoped to a workspace. Usage is metered
-  and billed per **account**, so `usage.computers` would name computers outside
+  per **account**, so `usage.computers` would name computers outside
   such a key's scope and the platform withholds it; the account-wide totals still
   arrive. The array is empty either way, and this flag is what tells "no
   computers ran" from "this key may not see which did".

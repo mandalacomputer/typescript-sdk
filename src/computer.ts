@@ -1013,7 +1013,7 @@ export class Computer {
    * Why this computer was made but would not boot, or `''`.
    *
    * Only ever set on the response to a create that asked for a running machine
-   * and got as far as building one. The computer exists and is billable, which
+   * and got as far as building one. The computer exists and consumes resources, which
    * is why the platform answers with it rather than with an error alone; it is
    * simply stopped, and {@link start} may well work on a second attempt.
    *
@@ -3943,7 +3943,7 @@ export class Computer {
    * it with `key(['ctrl', 'v'])` to get the text into whatever has focus.
    *
    * Unlike {@link clipboard}, this DRIVES the computer: a suspended one is
-   * resumed to serve it, which is a start and is charged like one.
+   * resumed to serve it, which is a start and consumes running capacity.
    *
    * At most 64 KiB of UTF-8 goes in — half what comes out, and the two are
    * different bounds on different channels rather than one number rounded
@@ -5767,7 +5767,7 @@ export class Computer {
     // capture — it is what a poll matches, and no route answers "the capture you
     // just started" — so a 202 without one is unusable to either caller, and the
     // one who asked not to wait is the worse off: handed something that looks
-    // like a handle, cannot be polled, and leaving a snapshot billed for and
+    // like a handle, cannot be polled, and leaving a snapshot consuming storage and
     // reachable only by guessing which row it is.
     if (!P.isRecord(data) || !data.id) {
       throw new MandalaError(`expected a snapshot from POST ${path}`);
@@ -5911,7 +5911,7 @@ export class Computer {
         // match it either. The row is then missing from a listing this loop
         // believes it read whole, and the verdict below is reached over it: a
         // capture running normally reported as one that FAILED, about which the
-        // caller is told there is nothing to find and nothing being billed.
+        // caller is told there is nothing to find and no storage being held.
         // Both false. See {@link unmatchableRows} — it is the same shortfall,
         // found in the one place `incomplete` cannot look, and it reads the
         // same way.
@@ -6788,7 +6788,7 @@ type BrowserProxyState = 'applied' | 'applying' | 'unreported' | MandalaError;
 type EgressProxyState = 'applied' | 'applying' | MandalaError;
 
 export const strandedText = (id: string, err: unknown): string =>
-  `${id} was not deleted at the end of its block and is still billable: ` +
+  `${id} was not deleted at the end of its block and still consumes resources: ` +
   `${err instanceof Error ? err.message : String(err)}`;
 
 /**
@@ -6806,9 +6806,9 @@ export class EphemeralComputer extends Computer {
     } catch (err) {
       // A 404 is the goal state already reached: the block deleted the
       // machine itself (the documented way to purge snapshots), and nothing
-      // is billable or worth reporting.
+      // consumes resources or is worth reporting.
       if (err instanceof NotFoundError) return;
-      // Loud, and with the id: a machine that outlives its block is billable
+      // Loud, and with the id: a machine that outlives its block consumes resources
       // until somebody finds it, and a swallowed failure here mentions it to
       // no one. When the block itself also threw, the runtime keeps that error
       // too — it arrives as SuppressedError.suppressed rather than being
