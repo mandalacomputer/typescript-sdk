@@ -1683,7 +1683,7 @@ function isTimeoutFailure(error: unknown): boolean {
  * which carry no prefix), the protocol mismatches that can only be diagnosed
  * from the first record, and the two Node codes that are genuinely handshake
  * events. Add to it when a new one turns up. A missing entry costs an embedder
- * one blind retry it could have made; a wrong entry costs a second billable
+ * one blind retry it could have made; a wrong entry costs a second extra
  * computer, so the set stays short on purpose.
  */
 const TLS_CODES = new Set([
@@ -1726,7 +1726,7 @@ const SOCKET_ERRNOS = new Set(['ECONNRESET', 'ECONNABORTED', 'EPIPE', 'ENOTCONN'
  * FAIL CLOSED, which is the whole design. The two wrong answers do not cost the
  * same: calling a connect failure a possible dispatch costs one retry a caller
  * could have made blind, and calling a lost response a connect failure costs a
- * second billable computer. So this is an ALLOW-LIST of causes that can only
+ * second computer. So this is an ALLOW-LIST of causes that can only
  * arise from the connector, and everything else — anything unrecognised, and
  * anything at all out of a caller-supplied `fetch` — is possibly dispatched.
  *

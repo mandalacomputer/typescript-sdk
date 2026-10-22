@@ -452,7 +452,7 @@ const stamp = (v: unknown): string | undefined => {
  *   `setsid` and have its output redirected or the call hung to its full
  *   timeout; the text had to be base64 and quoted or an apostrophe ended the
  *   shell word; and the result had to be polled for in a bounded loop, each
- *   attempt billable, because being granted a selection is asynchronous.
+ *   attempt an extra request, because being granted a selection is asynchronous.
  *   `setClipboard` does all of it, confirms the selection was taken before it
  *   returns, and bills once.
  * - `viewToken` — watch only. The platform drops input on a socket opened with
@@ -3534,7 +3534,7 @@ export type PublicUrl = {
   label: string;
   /** The port inside the computer it serves. */
   port: number;
-  /** `public`: anyone with the link. `private`: only this account's API keys, as `Authorization: Bearer`. */
+  /** `public`: anyone with the link. `private`: an appropriately scoped account API key or dashboard browser sign-in. */
   access: PublicUrlAccess;
   /**
    * `true` when the platform has turned this URL off, by its name, its

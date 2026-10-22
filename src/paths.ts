@@ -3208,8 +3208,9 @@ export function sshAccessBody(enabled: boolean): Json {
 
 /**
  * Who may open a public URL: `public`, anyone with the link, or `private`,
- * only a request carrying an API key of the account as `Authorization:
- * Bearer`, which never reaches the app.
+ * an appropriately scoped account API key as `Authorization: Bearer`, or
+ * browser sign-in through the dashboard's Open button. A workspace-scoped key
+ * must match the computer's workspace; the key never reaches the app.
  */
 export type PublicUrlAccess = 'public' | 'private';
 export const PUBLIC_URL_ACCESS: readonly PublicUrlAccess[] = ['public', 'private'];
@@ -3233,7 +3234,7 @@ export type PublicUrlCreateArgs = {
    * company's own address are refused by the platform.
    */
   label?: string;
-  /** `public` (the platform's default) or `private`. */
+  /** Defaults to public on paid plans, private on trials. Trials cannot request public access. */
   access?: PublicUrlAccess;
 };
 

@@ -3438,7 +3438,9 @@ describe('ephemeral', () => {
     // fill: the runtime writes its own generic text over `.message` for
     // `await using`, so a caller who reads the message there gets no id at all.
     expect(pair(err).error).toBeInstanceOf(MandalaError);
-    expect((pair(err).error as Error).message).toMatch(/vm-1 was not deleted.*still billable/);
+    expect((pair(err).error as Error).message).toMatch(
+      /vm-1 was not deleted.*still consumes resources/,
+    );
     expect((pair(err).error as Error).message).toContain('a snapshot is in flight');
   });
 
@@ -3488,7 +3490,9 @@ describe('ephemeral', () => {
       expect(err).toBeInstanceOf(Error);
       expect(pair(err).name).toBe('SuppressedError');
       expect(pair(err).suppressed).toBe(block);
-      expect((pair(err).error as Error).message).toMatch(/vm-1 was not deleted.*still billable/);
+      expect((pair(err).error as Error).message).toMatch(
+        /vm-1 was not deleted.*still consumes resources/,
+      );
     } finally {
       vi.unstubAllGlobals();
     }
@@ -3521,11 +3525,11 @@ describe('ephemeral', () => {
       call.method === 'DELETE' ? errorJson(409, 'a snapshot is in flight') : anyRoute(call),
     );
     await expect(c.computers.ephemeral({ template: 'base' }, async () => 'done')).rejects.toThrow(
-      /vm-1.*still billable/,
+      /vm-1.*still consumes resources/,
     );
   });
 
-  it('does not call a machine the block already deleted itself "still billable"', async () => {
+  it('does not call a machine the block already deleted itself "still consumes resources"', async () => {
     // delete({ deleteSnapshots: true, expect }) inside the block is the
     // documented way to purge snapshots; the wrapper's own delete then answers
     // 404, which is the goal state already reached — and the block's result
@@ -3557,7 +3561,7 @@ describe('ephemeral', () => {
       await using computer = await c.computers.ephemeral({ template: 'base' });
       expect(computer.id).toBe('vm-1');
     };
-    await expect(attempt()).rejects.toThrow(/vm-1.*still billable/);
+    await expect(attempt()).rejects.toThrow(/vm-1.*still consumes resources/);
   });
 
   it('destroys itself at the end of an `await using` block', async () => {

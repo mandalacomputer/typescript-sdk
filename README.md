@@ -12,6 +12,9 @@ bytes, clicks go in as coordinates, and a shell in the guest is one call away.
 Zero runtime dependencies. Node 22+, and anywhere else with `fetch` — Bun, Deno,
 workers, the edge. (The `mandala` CLI is Node-only; the library is not.)
 
+Runtime and individual exec calls do not add a charge to the monthly subscription.
+Running computers consume running capacity; AI-credit usage is charged separately.
+
 ## Install
 
 ```sh
@@ -174,7 +177,7 @@ await c.waitForGuest();
 **If the block throws and the cleanup delete fails too, both errors arrive** —
 a `SuppressedError` whose `.suppressed` is the block's own error, the fault to
 read first, and whose `.error` is a `MandalaError` naming the machine that is
-still billable. Both spellings fill those two fields the same way, so a cleanup
+still consuming resources. Both spellings fill those two fields the same way, so a cleanup
 failure is never the thing that goes unmentioned.
 
 Read `.error`, not `.message`: the top-level message is the one field the two
@@ -820,7 +823,7 @@ fixes that, since a profile that prints your frame owns everything after it.
 The clipboard endpoints do not share that stream. The write is worse still: an
 X selection belongs to a live process, so the holder has to outlive the exec,
 the text has to travel quoted, and being granted a selection is asynchronous,
-so the result has to be polled for — each poll a billable exec. `setClipboard()`
+so the result has to be polled for — each poll an extra exec. `setClipboard()`
 does all of it in one call.
 
 ### Running commands
@@ -2791,8 +2794,12 @@ console.log(site.url); // https://brave-otter-3f2a.mandala.dev
 
 | | who may open it |
 |---|---|
-| `access: 'public'` (the default) | anyone with the link |
-| `access: 'private'` | only a request carrying an API key of this account as `Authorization: Bearer`; the key never reaches the app |
+| `access: 'public'` | anyone with the link; default on paid plans |
+| `access: 'private'` | an appropriately scoped account API key as `Authorization: Bearer`, or browser sign-in through the dashboard's Open button; default on trials |
+
+Trials cannot request public access (`402 PUBLIC_ACCESS_REQUIRES_PLAN`); use
+private access or choose a paid plan. A workspace-scoped API key must match the
+computer's workspace. The key never reaches the app.
 
 Pass a `label` to choose the name (3 to 40 letters, digits and hyphens; the
 platform refuses names that are taken, reserved, or read as its own or another
@@ -3056,7 +3063,7 @@ the time whether the answer was one this client could read whole.
 `TimeoutError` means the *wait* stopped and not the capture — the id is in the
 message and the snapshot is still coming. A `MandalaError` saying the capture
 failed means the row went and nothing took its place; there is nothing to find
-and nothing being billed.
+and no storage being held.
 
 ```ts
 try {
@@ -3097,7 +3104,7 @@ wait polls for, and it asks with `includeUnfinished` because a row that reached
 
 That flag is not optional in a loop of your own. Without it, a deletion that
 stalled reads as one that finished, and you record a snapshot as gone while it
-is still holding objects and still being billed.
+is still holding objects and still counting against storage.
 
 Every refusal still arrives on the request and still carries the status it did:
 404 for no such snapshot, `ConflictError` for a capture reading through it, for a
@@ -3159,7 +3166,7 @@ returns the computer to never having had one.
 `client.snapshots.list()` is every snapshot on the account;
 `{ computerId }` narrows it to one computer's, and `{ includeUnfinished: true }`
 adds deletions that began and did not finish — nothing can be restored or
-cloned from one, but they still hold storage and are still billed.
+cloned from one, but they still hold storage and still count against storage limits.
 
 The `{ computerId }` filter drops a row whose `computer_id` is not a string,
 since a strict comparison is the whole of what keeps another computer's
@@ -3450,7 +3457,7 @@ Two more fields worth knowing:
   `to`; it is the boundary to check before comparing anything with an invoice.
   `undefined` while none of the window has settled.
 - `breakdown` — false when the API key is scoped to a workspace. Usage is metered
-  and billed per **account**, so `usage.computers` would name computers outside
+  per **account**, so `usage.computers` would name computers outside
   such a key's scope and the platform withholds it; the account-wide totals still
   arrive. The array is empty either way, and this flag is what tells "no
   computers ran" from "this key may not see which did".

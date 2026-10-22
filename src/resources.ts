@@ -332,7 +332,7 @@ export class Computers {
    *
    * A create that builds a computer which then will not boot is **not** an
    * error: it returns the computer, stopped, with {@link Computer.startError}
-   * saying what went wrong. The machine exists and is billable either way, so it
+   * saying what went wrong. The machine exists and consumes resources either way, so it
    * comes back rather than being thrown away with the exception — check
    * `startError` if it matters, and `start()` may work on a second attempt.
    */
@@ -593,7 +593,7 @@ export class Computers {
    * WHEN THE BLOCK THROWS AND THE CLEANUP DELETE FAILS TOO, both errors arrive
    * rather than one. A `SuppressedError`: `.suppressed` is the block's own
    * error, which is the fault to read first, and `.error` is a `MandalaError`
-   * naming the machine that is still billable. Both spellings of this feature
+   * naming the machine that still consumes resources. Both spellings of this feature
    * fill those two fields the same way, so `.error.message` carries the id
    * whichever one was used — a cleanup failure that went unmentioned would be a
    * cloud machine nothing anywhere names.
@@ -608,7 +608,7 @@ export class Computers {
    * portable test and `instanceof` is not.
    *
    * A 404 from the cleanup is not one of these: the block deleted the machine
-   * itself, nothing is billable, and its error stands alone.
+   * itself, no computer remains, and its error stands alone.
    *
    * `idempotencyKey`, in either spelling's options, is sent on the create, as
    * {@link create} sends it. See {@link IdempotencyOptions}.
@@ -632,7 +632,7 @@ export class Computers {
     const fn = typeof fnOrOpts === 'function' ? fnOrOpts : undefined;
     const opts = typeof fnOrOpts === 'function' ? rest : (fnOrOpts ?? {});
     // Only the create carries the signal. Cancelling the cleanup delete would
-    // leave a billable machine behind, which is the one thing this method
+    // leave a machine behind, which is the one thing this method
     // exists to prevent.
     const data = await this.#t.json('POST', P.COMPUTERS, {
       body: P.createBody(args),
@@ -650,13 +650,13 @@ export class Computers {
       } catch (cleanupErr) {
         // A 404 is the goal state already reached: the block deleted the
         // machine itself — delete({ deleteSnapshots: true }) inside the block is
-        // the documented way to purge snapshots — so nothing is billable and the
+        // the documented way to purge snapshots — so no computer remains and the
         // block's error travels alone, exactly as it does when the cleanup
         // succeeds.
         if (!(cleanupErr instanceof NotFoundError)) {
           // BOTH, and the block's stays primary. Replacing it hides the actual
           // fault behind a secondary one; a `.catch(() => {})` in its place
-          // swallows this one and strands a billable machine with nothing
+          // swallows this one and strands a machine with nothing
           // anywhere naming it — the outcome the success path below calls
           // unacceptable, in as many words. `SuppressedError` is how the
           // language already says both, and it is what the runtime hands the
@@ -682,7 +682,7 @@ export class Computers {
       throw err;
     }
     // On the success path there is no error to protect, and a swallowed
-    // failure here is a billable machine leaking with nothing ever going to
+    // failure here is a machine leaking with nothing ever going to
     // mention it. Loud, and with the id, so a stranded machine can still be
     // found.
     try {
@@ -691,11 +691,11 @@ export class Computers {
       // Except a 404, which is the goal state already reached: the block
       // deleted the machine itself — delete({ deleteSnapshots: true }) inside
       // the block is the documented way to purge snapshots — and a claim that
-      // a provably-gone machine is still billable would be false, and would
+      // a provably-gone machine still consumes resources would be false, and would
       // replace the block's result with it.
       if (!(err instanceof NotFoundError)) {
         throw new MandalaError(
-          `the block succeeded but ${computer.id} was not deleted and is still billable: ` +
+          `the block succeeded but ${computer.id} was not deleted and still consumes resources: ` +
             `${err instanceof Error ? err.message : String(err)}`,
         );
       }
@@ -806,7 +806,7 @@ const deleteTimeoutText = (w: {
     const state = JSON.stringify(w.lastState) ?? String(w.lastState);
     const where =
       `it is on snapshots.list({ includeUnfinished: true }) under that id, and it still holds ` +
-      `objects and is still billed`;
+      `objects and still counts against storage`;
     return w.stalled
       ? `the deletion of ${w.snapshotId} stalled: it was still listed as \`deleting\` after ` +
           `${w.timeoutMs}ms, which is a deletion that began and did not finish. The platform ` +
@@ -896,7 +896,7 @@ export class Snapshots {
    *
    * `includeUnfinished` also returns deletions that began and did not finish.
    * They are not usable — nothing can be restored or cloned from one — but they
-   * still hold objects and are still billed, so this is the flag for when the
+   * still hold objects and still count against storage, so this is the flag for when the
    * question is about storage rather than about what can be restored. It is also
    * what {@link delete}'s own wait polls with, and for that reading it is not
    * optional: without it a stalled deletion is missing from the listing and
@@ -1073,7 +1073,7 @@ export class Snapshots {
    * dependents are detached the daemon marks the snapshot `deleting`, and a bare
    * listing leaves that state out — so a poll without the flag would read a
    * deletion that had stalled as one that had finished, and say a snapshot was
-   * gone while it was still holding objects and still being billed.
+   * gone while it was still holding objects and still counting against storage.
    *
    * EVERY REFUSAL IS STILL SYNCHRONOUS and still carries the status it always
    * did: 404 for no such snapshot, {@link ConflictError} for a capture reading
@@ -1283,7 +1283,7 @@ export class Snapshots {
         // for this snapshot, then cannot match it either. Absence over such a
         // listing is not absence: this row might BE the one, and returning on it
         // reports a snapshot as destroyed while it is still on a host, still
-        // holding objects and still billed. So it is the same shortfall
+        // holding objects and still counted against storage. So it is the same shortfall
         // `incomplete` describes, found the only other place it can hide, and it
         // reads the same way: this poll says nothing, and the wait goes on.
         // {@link unmatchableRows}, shared with the capture and move waits since
