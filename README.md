@@ -1950,7 +1950,7 @@ tested with `npm install openai@7.16.0`. Set these process environment variables
 
 This external client does not read `~/.mandala/credentials.json`, so
 `mandala login` does not configure it. That file holds a Mandala credential,
-not your Anthropic key. Existing computer charges and API rate budgets apply;
+not your Anthropic key. Existing capacity limits and API rate budgets apply;
 Anthropic bills model usage to your key. This endpoint provides no hosted
 inference or included model credits. Its runs are kept in threads as the
 native route's are (see [threads](#continuing-a-conversation-threads)):
@@ -3394,9 +3394,10 @@ the original fields, as does the CLI's normal and `--json` member output.
 
 ### Usage
 
-What the account has spent, in the same figures the dashboard shows and the
-invoice bills on. This is the read to build a spend check around: a loop that
-launches computers is the caller that can run up a bill without noticing.
+What the account has used: running hours weighted by cores and memory, and
+storage held over time. Use this to monitor resource use across a batch of
+computers. These measurements do not add a runtime or storage usage charge to
+the monthly subscription; AI-credit usage is separate.
 
 ```ts
 const u = await client.usage.read();
@@ -3407,10 +3408,8 @@ for (const c of u.usage.computers) {
 }
 ```
 
-With no arguments the window is the account's **current billing period**, which
-is what makes the numbers comparable with an invoice. Name a window for one that
-has closed — the billing period is always the current one, and by the time an
-invoice arrives the period it covers is not:
+With no arguments the window is the account's **current billing period**.
+Name both bounds to inspect a period that has closed:
 
 ```ts
 await client.usage.read({
@@ -3431,7 +3430,7 @@ carry a time zone — `2026-08-01T00:00:00Z`, not `2026-08-01T00:00:00` — and 
 zoneless one is refused here rather than sent. The platform refuses it too, and
 for the reason that matters: the zone it would otherwise have to assume is the
 server's, and a window silently shifted by a few hours is the worst possible
-failure on the one call whose output somebody checks against a bill.
+failure on the one call used to compare usage across periods.
 
 **Read `degraded` and `unmetered` before you use the numbers.** Every figure is a
 sum across the hypervisors your computers are on, so a host that did not
@@ -3442,7 +3441,7 @@ quietly too small.
 if (u.degraded || u.unmetered) {
   // Short, and saying so. `degraded` clears when the host comes back;
   // `unmetered` is a host running a daemon older than the meter and never does.
-  console.warn('these totals may be low — do not reconcile them against an invoice');
+  console.warn('these totals may be low — do not treat them as complete usage');
 }
 ```
 
@@ -3452,9 +3451,9 @@ missing row can — and one of the two shortfalls would never clear by retrying.
 
 Two more fields worth knowing:
 
-- `reportedThrough` — the last UTC day whose usage has settled for billing, as a
+- `reportedThrough` — the last UTC day whose usage has settled for metering, as a
   contiguous prefix. Not a caveat on the totals, which are live and true through
-  `to`; it is the boundary to check before comparing anything with an invoice.
+  `to`; settlement does not imply a usage charge on the subscription.
   `undefined` while none of the window has settled.
 - `breakdown` — false when the API key is scoped to a workspace. Usage is metered
   per **account**, so `usage.computers` would name computers outside

@@ -389,7 +389,7 @@ export const COMMANDS: readonly Command[] = [
       ),
       flag(
         'access',
-        'Who may open it: public (paid-plan default), anyone with the link; private (trial default), an account API key matching the workspace or dashboard browser sign-in. Trials cannot request public access; keys never reach the app',
+        'Who may open it: public (paid-plan default), anyone with the link; private (trial default), an account API key (workspace-scoped keys must match the computer) or dashboard browser sign-in. Trials cannot request public access; keys never reach the app',
         { choices: ['public', 'private'] },
       ),
     ],
@@ -403,7 +403,7 @@ export const COMMANDS: readonly Command[] = [
       bool('id', 'URL is the public URL id; send it without looking it up'),
       flag(
         'access',
-        'Who may open it: public, anyone with the link; private, an account API key matching the workspace or dashboard browser sign-in. Trials cannot request public access; keys never reach the app',
+        'Who may open it: public, anyone with the link; private, an account API key (workspace-scoped keys must match the computer) or dashboard browser sign-in. Trials cannot request public access; keys never reach the app',
         { choices: ['public', 'private'] },
       ),
     ],

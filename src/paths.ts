@@ -2556,7 +2556,7 @@ export const startQuery = (resumeOnly?: boolean): Query =>
  * rather than guessing, because the zone it would have to assume is the
  * server's and not yours — and a window silently shifted by a few hours is the
  * worst possible failure on the one call whose output somebody reconciles
- * against an invoice. A local-looking string is refused here so that the reason
+ * across periods. A local-looking string is refused here so that the reason
  * arrives with the argument that caused it rather than as a 400 from a route.
  */
 const RFC3339 = /^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[Zz]|[+-]\d{2}:\d{2})$/;

@@ -2053,7 +2053,7 @@ export type UsageOptions = { from?: Date | string; to?: Date | string; signal?: 
  * Its own collection because `GET /usage` is its own route, account-scoped like
  * `GET /moves` rather than hanging off a computer — which it could not: the
  * figures include computers that have since been deleted, and those are exactly
- * the ones an unexplained line on an invoice belongs to.
+ * the ones an unexpected usage total belongs to.
  */
 export class Usage {
   #t: Transport;
@@ -2067,14 +2067,11 @@ export class Usage {
    * Running hours weighted by cores and memory, the storage held, and the
    * per-computer breakdown behind the totals.
    *
-   * The read to build a spend check around: a loop that launches computers is
-   * the caller that can run up a bill without noticing, and this is the same
-   * figure the dashboard shows the person who will ask about it.
+   * Use this to monitor resource use. These measurements do not add a usage
+   * charge to the monthly subscription; AI-credit usage is separate.
    *
-   * With no arguments the window is the account's current billing period, which
-   * is what makes the numbers comparable with an invoice. Name `from`/`to` for a
-   * window that has CLOSED — the billing period is always the current one, and
-   * by the time an invoice arrives the period it covers is not.
+   * With no arguments the window is the account's current billing period.
+   * Name both `from` and `to` for a window that has closed.
    *
    * Check {@link UsageReport.degraded} and {@link UsageReport.unmetered} on the
    * way out. Each figure is a sum across the fleet, so a hypervisor that did not

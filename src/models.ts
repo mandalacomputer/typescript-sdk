@@ -454,7 +454,7 @@ const stamp = (v: unknown): string | undefined => {
  *   shell word; and the result had to be polled for in a bounded loop, each
  *   attempt an extra request, because being granted a selection is asynchronous.
  *   `setClipboard` does all of it, confirms the selection was taken before it
- *   returns, and bills once.
+ *   returns, in one request.
  * - `viewToken` — watch only. The platform drops input on a socket opened with
  *   it, so a browser holding this one cannot type even from a patched client.
  *   The guest's CLIPBOARD does not come back over it either, and that is
@@ -1374,7 +1374,7 @@ export type ComputerUsage = {
   ramGbHours: number;
   /**
    * This computer is no longer on the fleet. It ran during the window and was
-   * deleted, which is why it is billed for and not in `client.computers.list()`
+   * deleted, which is why it appears in usage and not in `client.computers.list()`
    * — the line is not stale, the machine is gone.
    */
   gone: boolean;
@@ -1400,7 +1400,7 @@ export type UsageTotals = {
    * The breakdown, which is what makes a total checkable.
    *
    * EMPTY on a workspace-scoped API key, and empty rather than absent so that
-   * reading it never needs a null check. Usage is metered and billed per
+   * reading it never needs a null check. Usage is metered per
    * ACCOUNT, so these lines cover the whole account and would name computers
    * outside such a key's scope; the platform withholds them and sends the
    * account-wide totals either way. {@link UsageReport.breakdown} is how to tell
@@ -1458,13 +1458,13 @@ export type UsageReport = {
    */
   breakdown: boolean;
   /**
-   * The last UTC day (`YYYY-MM-DD`) whose usage has settled for billing — a
+   * The last UTC day (`YYYY-MM-DD`) whose usage has settled for metering — a
    * contiguous prefix, so a day still being held back stops the count where it
    * is. `undefined` when none of the window has settled yet.
    *
    * NOT a caveat on the totals, which are live from the ledger and true through
    * {@link UsageReport.to}. It answers the other question, and it is the one to
-   * check before comparing these numbers against an invoice.
+   * check to distinguish settled metering from live usage.
    */
   reportedThrough?: string;
   raw: Record<string, unknown>;
