@@ -1,6 +1,6 @@
 /** Stable identity reads over volatile output; no retained results or implicit polling. */
 import { MandalaError } from './errors.js';
-import { base64Bytes } from './models.js';
+import { base64Bytes, outputUnavailable } from './models.js';
 import { isExecutionId, isRecord } from './paths.js';
 import type { CallOptions } from './resources.js';
 
@@ -10,6 +10,17 @@ type ExecutionIdentity = {
   pid: number;
   startedAt: string;
   outputSource: 'volatile_guest_files';
+  /**
+   * Set when `executionOutput()` cannot read this execution's
+   * output, `undefined` otherwise. `'daemon_restarted'` is the one value
+   * today: the command was already running when the service on the
+   * computer's host restarted, so its status, exit code and end time are
+   * still reported but its output route answers a final `ConflictError` with
+   * `code: 'output_unavailable'`. Treat any value, including one this version
+   * does not name, as "no output is coming"; a value that is present but is
+   * not text reads `'unknown'` rather than being dropped.
+   */
+  outputUnavailable?: 'daemon_restarted' | (string & {});
   raw: Record<string, unknown>;
 };
 
@@ -103,6 +114,7 @@ export function toExecutionMetadata(
     pid,
     startedAt,
     outputSource: 'volatile_guest_files',
+    ...outputUnavailable(d.output_unavailable),
     raw: { ...d },
   };
   if (d.status === 'exited') {

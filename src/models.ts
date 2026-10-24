@@ -2620,6 +2620,21 @@ export type BackgroundExec = {
   pid: number;
   /** Stable identity when supported; PID routes remain shared, consuming reads. */
   executionId?: string;
+  /**
+   * The command line, echoed back. On a command that was already running when
+   * the service on the computer's host restarted, it is the platform's kept
+   * copy: at most the first 1 KiB, with {@link commandTruncated} set where it
+   * was cut, and empty if the command started before the platform kept one.
+   */
+  command: string;
+  /**
+   * True when {@link command} is only the first part of the command line. Set
+   * only on a command that was already running when the service on the
+   * computer's host restarted, and whose command line was longer than the
+   * platform keeps. A value that is present but unreadable reads `true`: the
+   * claim it might be making is that {@link command} is not the whole line.
+   */
+  commandTruncated: boolean;
   running: boolean;
   /** Set once it has exited. `undefined` while it is still running. */
   exitCode?: number;
@@ -2673,7 +2688,7 @@ export type BackgroundExec = {
  * is not a non-empty string is still a claim that the streams are not the
  * command's output, which is the one reading that must not be lost.
  */
-const outputUnavailable = (v: unknown): { outputUnavailable?: string } => {
+export const outputUnavailable = (v: unknown): { outputUnavailable?: string } => {
   if (v == null || v === '') return {};
   return { outputUnavailable: typeof v === 'string' ? v : 'unknown' };
 };
@@ -2738,6 +2753,8 @@ export function toBackgroundExec(d: Record<string, unknown>): BackgroundExec {
   return {
     pid,
     ...(isExecutionId(d.execution_id) ? { executionId: d.execution_id } : {}),
+    command: typeof d.command === 'string' ? d.command : '',
+    commandTruncated: caveat(d.command_truncated),
     running: stillRunning(d),
     // Absent and null are "did not send one" and read `undefined`; anything
     // else that `count` cannot read as a number — `"killed"`, `"signal:9"`, an

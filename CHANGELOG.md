@@ -11,6 +11,16 @@ This is the summary you read to decide whether to upgrade.
 
 ### Added
 
+- `BackgroundExec.command` and `BackgroundExec.commandTruncated`. A background
+  command that was already running when the service on the computer's host
+  restarted now reports its command line, kept to at most the first 1 KiB, and
+  `commandTruncated` is `true` where it was cut. The CLI's
+  `computers exec-poll --json` data carries both as `command` and
+  `command_truncated`.
+- `ExecutionMetadata.outputUnavailable`: `execution()` sets it (today to
+  `'daemon_restarted'`) on such a command, whose `executionOutput()` throws a
+  final `ConflictError` with `code: 'output_unavailable'`. Any present non-text
+  value reads `'unknown'` rather than being dropped.
 - `BackgroundExec.outputUnavailable`: set (today to `'daemon_restarted'`) when
   a background command's streams are empty because the platform can no longer
   read its output — the command was already running when the service on the

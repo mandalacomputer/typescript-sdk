@@ -5343,6 +5343,22 @@ describe('background exec follow-up: exec-poll and exec-kill (OPL-5524)', () => 
     expect(quiet.err).not.toContain('cannot be read');
   });
 
+  it('carries the command line and whether it was cut in JSON', async () => {
+    const respond = (body: Record<string, unknown>) => (call: Parameters<typeof anyRoute>[0]) =>
+      /\/exec\/42$/.test(call.path) ? json(handle(body)) : anyRoute(call);
+    const cut = await harness(
+      respond({ exit_code: 0, command: 'make all', command_truncated: true }),
+    ).run(['computers', 'exec-poll', COMPUTER.id, '42']);
+    expect(cut.frames[0].data).toMatchObject({ command: 'make all', command_truncated: true });
+    const whole = await harness(respond({ exit_code: 0, command: 'make all' })).run([
+      'computers',
+      'exec-poll',
+      COMPUTER.id,
+      '42',
+    ]);
+    expect(whole.frames[0].data).toMatchObject({ command: 'make all', command_truncated: false });
+  });
+
   it('reads on while more output waits, and joins it', async () => {
     let polls = 0;
     const h = harness((call) => {
