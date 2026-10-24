@@ -2654,8 +2654,10 @@ export type BackgroundExec = {
    * running when the service on the computer's host restarted, so its status
    * and exit code are still reported but its output never is, on this poll or
    * any later one. Treat any value, including one this version does not
-   * name, as "no output is coming"; a command that has to be read in full
-   * needs running again. A value that is present but is not text reads
+   * name, as "no output is coming". Losing the output undid nothing the
+   * command did, so running it again to recover the output repeats its
+   * effects; check what it changed inside the computer first. A value that
+   * is present but is not text reads
    * `'unknown'` rather than being dropped, since dropping it would present
    * empty streams as a quiet command.
    */
