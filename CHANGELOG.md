@@ -9,6 +9,8 @@ This is the summary you read to decide whether to upgrade.
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-10-24
+
 ### Added
 
 - `BackgroundExec.command` and `BackgroundExec.commandTruncated`. A background
@@ -1735,7 +1737,8 @@ No effect on the published surface, listed because it is most of the window.
 - Several parser fixes landed before that scanner was retired, each ported
   to and from the MCP server's byte-identical copy.
 
-[Unreleased]: https://github.com/mandalacomputer/typescript-sdk/compare/v0.17.2...HEAD
+[Unreleased]: https://github.com/mandalacomputer/typescript-sdk/compare/v0.18.0...HEAD
+[0.18.0]: https://github.com/mandalacomputer/typescript-sdk/compare/v0.17.2...v0.18.0
 [0.17.2]: https://github.com/mandalacomputer/typescript-sdk/compare/v0.17.0...v0.17.2
 [0.17.0]: https://github.com/mandalacomputer/typescript-sdk/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/mandalacomputer/typescript-sdk/compare/v0.15.0...v0.16.0
