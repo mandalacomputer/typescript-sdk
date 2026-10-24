@@ -5324,6 +5324,25 @@ describe('background exec follow-up: exec-poll and exec-kill (OPL-5524)', () => 
     expect(result.err).toContain(note);
   });
 
+  it('says when the output cannot be read, for a person and in JSON', async () => {
+    const recovered = handle({ exit_code: 0, output_unavailable: 'daemon_restarted' });
+    const respond = (call: Parameters<typeof anyRoute>[0]) =>
+      /\/exec\/42$/.test(call.path) ? json(recovered) : anyRoute(call);
+    const person = await harness(respond).run(['computers', 'exec-poll', COMPUTER.id, '42'], false);
+    expect(person.code).toBe(0);
+    expect(person.out).toBe('');
+    expect(person.err).toContain('output of pid 42 cannot be read (daemon_restarted)');
+    const machine = await harness(respond).run(['computers', 'exec-poll', COMPUTER.id, '42']);
+    expect(machine.frames[0].data).toMatchObject({
+      output_unavailable: 'daemon_restarted',
+      stdout_text: '',
+    });
+    const quiet = await harness((call) =>
+      /\/exec\/42$/.test(call.path) ? json(handle({ exit_code: 0 })) : anyRoute(call),
+    ).run(['computers', 'exec-poll', COMPUTER.id, '42'], false);
+    expect(quiet.err).not.toContain('cannot be read');
+  });
+
   it('reads on while more output waits, and joins it', async () => {
     let polls = 0;
     const h = harness((call) => {

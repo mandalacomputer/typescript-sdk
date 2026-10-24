@@ -945,6 +945,18 @@ through a multi-byte character. Write the bytes to a stream as above, or join
 them and decode once at the end; `s.stdoutText` decodes each chunk on its own,
 which is what you want for a line of output and lossy across a cut.
 
+A command that was already running when the service on the computer's host
+restarted still reports whether it is running and, once it ends, its
+`exitCode` — but never its output again. Its polls carry empty streams and
+`s.outputUnavailable === 'daemon_restarted'`, so read that field before taking
+empty streams to mean a quiet command, and treat any value there as "no output
+is coming". Its `executionId` may be `undefined` if the command started before
+the host was upgraded. For a few seconds after the restart a poll can answer
+`ConflictError` with `reason: 'contention'`, which `isTransient()` calls worth
+retrying; a `ConflictError` with no `reason` is final. `execKill` on such a
+command answers that final `ConflictError` while it is still running, so stop
+it from inside the computer instead.
+
 ### Independent execution reads
 
 Newer platforms supply `job.executionId` on an accepted background command.

@@ -2645,7 +2645,35 @@ export type BackgroundExec = {
   killed: boolean;
   outTruncated: boolean;
   errTruncated: boolean;
+  /**
+   * Set when {@link stdout} and {@link stderr} are empty because the platform
+   * cannot read this command's output, not because it printed nothing.
+   * `undefined` otherwise.
+   *
+   * `'daemon_restarted'` is the one value today: the command was already
+   * running when the service on the computer's host restarted, so its status
+   * and exit code are still reported but its output never is, on this poll or
+   * any later one. Treat any value, including one this version does not
+   * name, as "no output is coming"; a command that has to be read in full
+   * needs running again. A value that is present but is not text reads
+   * `'unknown'` rather than being dropped, since dropping it would present
+   * empty streams as a quiet command.
+   */
+  outputUnavailable?: 'daemon_restarted' | (string & {});
   raw: Record<string, unknown>;
+};
+
+/**
+ * Why a background command's streams carry no output, as a field to spread,
+ * empty when nothing says they do not.
+ *
+ * Absent, `null` and the empty string are all "not said". Anything else that
+ * is not a non-empty string is still a claim that the streams are not the
+ * command's output, which is the one reading that must not be lost.
+ */
+const outputUnavailable = (v: unknown): { outputUnavailable?: string } => {
+  if (v == null || v === '') return {};
+  return { outputUnavailable: typeof v === 'string' ? v : 'unknown' };
 };
 
 /**
@@ -2678,7 +2706,11 @@ const stillRunning = (d: Record<string, unknown>): boolean => {
 };
 
 export function toBackgroundExec(d: Record<string, unknown>): BackgroundExec {
-  if ('execution_id' in d && !isExecutionId(d.execution_id)) {
+  // An EMPTY id is the platform saying it has none for this command, which a
+  // command running from before a host upgrade can answer; it reads as absent,
+  // like a reply from a platform with no stable IDs. Anything else that is
+  // not an execution ID is refused rather than dropped.
+  if ('execution_id' in d && d.execution_id !== '' && !isExecutionId(d.execution_id)) {
     throw new MandalaError('invalid background execution_id');
   }
   const pid = num(d.pid);
@@ -2740,6 +2772,7 @@ export function toBackgroundExec(d: Record<string, unknown>): BackgroundExec {
     killed: said(d.killed),
     outTruncated: caveat(d.out_truncated),
     errTruncated: caveat(d.err_truncated),
+    ...outputUnavailable(d.output_unavailable),
     raw: { ...d },
   };
 }

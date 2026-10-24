@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   Client,
+  ConflictError,
   type ExecutionMetadata,
   type ExecutionOutputOptions,
+  isTransient,
   MandalaError,
   ValidationError,
 } from '../src/index.js';
@@ -227,7 +229,7 @@ describe('execution identity and observations', () => {
   it.each(['start', 'poll', 'kill'] as const)(
     'preserves older omission and validates IDs on legacy %s',
     async (method) => {
-      for (const id of [undefined, ID, OTHER, null, '', `${ID}\n`, 'exec_bad']) {
+      for (const id of [undefined, ID, OTHER, '', null, ' ', `${ID}\n`, 'exec_bad']) {
         const rec = recorder((call) =>
           call.path.includes('/exec')
             ? json({ ...EXEC_STARTED, ...(id === undefined ? {} : { execution_id: id }) })
@@ -244,10 +246,96 @@ describe('execution identity and observations', () => {
             : method === 'poll'
               ? c.execPoll(42)
               : c.execKill(42);
-        if (id === undefined || id === ID || id === OTHER)
+        if (id === '') {
+          const read = await call;
+          expect(read.executionId).toBeUndefined();
+          expect(Object.hasOwn(read, 'executionId')).toBe(false);
+        } else if (id === undefined || id === ID || id === OTHER)
           expect((await call).executionId).toBe(id);
         else await expect(call).rejects.toBeInstanceOf(MandalaError);
         expect(rec.calls).toHaveLength(2);
+      }
+    },
+  );
+});
+
+describe('a command running across a host service restart', () => {
+  const recovered = (body: Record<string, unknown>, status = 200) => {
+    const rec = recorder((call) =>
+      /\/exec\/42$/.test(call.path) ? json(body, { status }) : anyRoute(call),
+    );
+    return {
+      rec,
+      computer: () =>
+        new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: rec.fetch }).computers.get('vm-1'),
+    };
+  };
+  const unreadable = {
+    pid: 42,
+    command: '',
+    execution_id: '',
+    stdout_b64: '',
+    stderr_b64: '',
+    stdout_offset: 0,
+    stderr_offset: 0,
+    output_unavailable: 'daemon_restarted',
+  };
+
+  it.each([
+    [{ running: true, exited: false }, true, undefined],
+    [{ running: false, exited: true, exit_code: 3 }, false, 3],
+  ])('reports status without claiming output for %j', async (state, running, exitCode) => {
+    const { computer } = recovered({ ...unreadable, ...state });
+    const c = await computer();
+    for (const read of [await c.execPoll(42), await c.execKill(42)]) {
+      expect(read.outputUnavailable).toBe('daemon_restarted');
+      expect(read.running).toBe(running);
+      expect(read.exitCode).toBe(exitCode);
+      expect(read.stdout).toHaveLength(0);
+      expect(read.stderr).toHaveLength(0);
+      expect(read.executionId).toBeUndefined();
+    }
+  });
+
+  it.each([
+    [undefined, undefined],
+    [null, undefined],
+    ['', undefined],
+    ['daemon_restarted', 'daemon_restarted'],
+    ['some_later_reason', 'some_later_reason'],
+    [true, 'unknown'],
+    [1, 'unknown'],
+    [{}, 'unknown'],
+  ])('reads output_unavailable %j as %j', async (value, expected) => {
+    const { computer } = recovered({
+      ...EXEC_STARTED,
+      pid: 42,
+      ...(value === undefined ? {} : { output_unavailable: value }),
+    });
+    const read = await (await computer()).execPoll(42);
+    expect(read.outputUnavailable).toBe(expected);
+    expect(Object.hasOwn(read, 'outputUnavailable')).toBe(expected !== undefined);
+  });
+
+  it.each(['poll', 'kill'] as const)(
+    'treats a 409 with no reason on %s as final, and contention as worth retrying',
+    async (method) => {
+      for (const [body, transient] of [
+        [{ error: 'not answering' }, false],
+        [{ error: 'not yet checked', reason: 'contention' }, true],
+      ] as const) {
+        const { rec, computer } = recovered(body, 409);
+        const c = await computer();
+        const error = await (method === 'poll' ? c.execPoll(42) : c.execKill(42)).then(
+          () => undefined,
+          (e: unknown) => e,
+        );
+        expect(error).toBeInstanceOf(ConflictError);
+        expect(isTransient(error)).toBe(transient);
+        expect(rec.routes()).toEqual([
+          ['GET', 'computers/vm-1'],
+          [method === 'poll' ? 'GET' : 'DELETE', 'computers/vm-1/exec/42'],
+        ]);
       }
     },
   );
