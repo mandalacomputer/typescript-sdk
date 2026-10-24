@@ -955,7 +955,9 @@ the host was upgraded. For a few seconds after the restart a poll can answer
 `ConflictError` with `reason: 'contention'`, which `isTransient()` calls worth
 retrying; a `ConflictError` with no `reason` is final. `execKill` on such a
 command answers that final `ConflictError` while it is still running, so stop
-it from inside the computer instead.
+it from inside the computer instead. Its `s.command` is the platform's kept copy
+of the command line: at most the first 1 KiB, with `s.commandTruncated` set
+where it was cut, and empty if the command started before the host was upgraded.
 
 ### Independent execution reads
 
@@ -1002,6 +1004,17 @@ views. The files are mutable guest content, not retained
 artifacts. Handles disappear on platform/computer state loss, replacement or
 cleanup; observed exits expire after ten minutes. Unavailable reads throw the
 normal API error instead of returning an empty successful result.
+
+A command that was already running when the service on the computer's host
+restarted keeps its `executionId`. `execution()` still reports its status, exit
+code and end time, with `observed.outputUnavailable === 'daemon_restarted'`, and
+`executionOutput()` for it throws a final `ConflictError` with
+`code: 'output_unavailable'` that no retry changes; treat any
+`outputUnavailable` value as "no output is coming". For a few seconds after the
+restart both reads can answer `ConflictError` with `reason: 'contention'`, which
+`isTransient()` calls worth retrying; once the computer has stopped answering
+about the command for five minutes they answer a `ConflictError` with no
+`reason`, which is final.
 
 ### Retained results and nominated artifacts
 

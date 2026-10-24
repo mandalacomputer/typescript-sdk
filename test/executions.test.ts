@@ -341,6 +341,94 @@ describe('a command running across a host service restart', () => {
   );
 });
 
+describe('a recovered command by execution ID and by command line', () => {
+  it.each([
+    [{}, '', false],
+    [{ command: 'sleep 60' }, 'sleep 60', false],
+    [{ command: 'make all', command_truncated: true }, 'make all', true],
+    [{ command: 'sleep 60', command_truncated: false }, 'sleep 60', false],
+    [{ command: 'sleep 60', command_truncated: null }, 'sleep 60', false],
+    [{ command: 'sleep 60', command_truncated: 'cut' }, 'sleep 60', true],
+    [{ command: 7 }, '', false],
+  ])('reads command and command_truncated from %j', async (fields, command, truncated) => {
+    const rec = recorder((call) =>
+      /\/exec\/42$/.test(call.path)
+        ? json({ ...EXEC_STARTED, pid: 42, ...fields })
+        : anyRoute(call),
+    );
+    const c = await new Client({
+      apiKey: 'com_test',
+      baseUrl: BASE,
+      fetch: rec.fetch,
+    }).computers.get('vm-1');
+    for (const read of [await c.execPoll(42), await c.execKill(42)]) {
+      expect(read.command).toBe(command);
+      expect(read.commandTruncated).toBe(truncated);
+    }
+  });
+
+  it.each([
+    [undefined, undefined],
+    [null, undefined],
+    ['', undefined],
+    ['daemon_restarted', 'daemon_restarted'],
+    ['some_later_reason', 'some_later_reason'],
+    [true, 'unknown'],
+    [{}, 'unknown'],
+  ])('reads metadata output_unavailable %j as %j', async (value, expected) => {
+    for (const state of [
+      { status: 'running' },
+      { status: 'exited', ended_at: '2026-09-15T12:01:00Z', exit_code: 3 },
+    ]) {
+      const { c } = await setup({
+        ...metadata,
+        ...state,
+        ...(value === undefined ? {} : { output_unavailable: value }),
+      });
+      const read = await c.execution(ID);
+      expect(read.status).toBe(state.status);
+      expect(read.outputUnavailable).toBe(expected);
+      expect(Object.hasOwn(read, 'outputUnavailable')).toBe(expected !== undefined);
+    }
+  });
+
+  it('treats a 409 with no reason on the metadata read as final, and contention as worth retrying', async () => {
+    for (const [body, transient] of [
+      [{ error: 'not answering' }, false],
+      [{ error: 'not yet checked', reason: 'contention' }, true],
+    ] as const) {
+      const { c, rec } = await setup(body, 409);
+      const error = await c.execution(ID).then(
+        () => undefined,
+        (e: unknown) => e,
+      );
+      expect(error).toBeInstanceOf(ConflictError);
+      expect(isTransient(error)).toBe(transient);
+      expect(rec.routes()).toEqual([
+        ['GET', 'computers/vm-1'],
+        ['GET', `computers/vm-1/executions/${ID}`],
+      ]);
+    }
+  });
+
+  it("treats the output route's output_unavailable 409 as final", async () => {
+    for (const body of [
+      { error: 'unavailable', code: 'output_unavailable', output_unavailable: 'daemon_restarted' },
+      { error: 'unavailable', code: 'output_unavailable' },
+    ]) {
+      const { c, rec } = await setup(body, 409);
+      const error = await c.executionOutput(ID, zero).then(
+        () => undefined,
+        (e: unknown) => e,
+      );
+      expect(error).toBeInstanceOf(ConflictError);
+      expect((error as ConflictError).code).toBe('output_unavailable');
+      expect(isTransient(error)).toBe(false);
+      expect(rec.calls.filter((call) => call.path.endsWith('/output'))).toHaveLength(1);
+    }
+  });
+});
+
 describe('independent byte cursors', () => {
   it('preserves split UTF-8, independent stderr and repeated diagnostics through current EOF', async () => {
     const chunks = [

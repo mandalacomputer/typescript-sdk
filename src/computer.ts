@@ -4829,7 +4829,15 @@ export class Computer {
     return toBackgroundExec(data);
   }
 
-  /** Last observed state by stable identity. Does not resume, wait, or read guest output. */
+  /**
+   * Last observed state by stable identity. Does not resume, wait, or read guest output.
+   *
+   * A command already running when the service on the computer's host
+   * restarted answers with `outputUnavailable` set, and for a few seconds after
+   * the restart a `ConflictError` with `reason: 'contention'`, which
+   * {@link isTransient} calls worth retrying. A `ConflictError` with no
+   * `reason` is final.
+   */
   async execution(executionId: string, opts: CallOptions = {}): Promise<ExecutionMetadata> {
     const computerId = this.id;
     const path = P.execution(computerId, executionId);
@@ -4845,6 +4853,8 @@ export class Computer {
    * A false more flag is current EOF, not completion. Diagnostics repeat separately.
    * One request by default; opt-in safe GET retries can repeat the same read.
    * No resume, PID fallback, or command replay occurs, including on unavailable output.
+   * Output lost to a restart of the service on the computer's host throws a final
+   * `ConflictError` with `code: 'output_unavailable'`; no retry changes it.
    * Guest I/O makes this unsuitable for passive history views; output is not retained.
    */
   async executionOutput(
