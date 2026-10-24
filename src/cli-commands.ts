@@ -2034,6 +2034,12 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
           );
         if (state.outTruncated || state.errTruncated)
           output.diagnostic('mandala: command output is incomplete (truncated)');
+        // Empty streams here are not a quiet command, and nothing else in a
+        // person's output would say so.
+        if (state.outputUnavailable !== undefined)
+          output.diagnostic(
+            `mandala: the output of pid ${state.pid} cannot be read (${state.outputUnavailable}); only its status is reported`,
+          );
         if (!drained)
           output.diagnostic(
             `mandala: a later read failed (${errorInfo(drainError).message}); the output above was read and is not given out again; run computers exec-poll again for the rest`,

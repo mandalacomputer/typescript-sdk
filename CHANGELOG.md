@@ -9,6 +9,21 @@ This is the summary you read to decide whether to upgrade.
 
 ## [Unreleased]
 
+### Added
+
+- `BackgroundExec.outputUnavailable`: set (today to `'daemon_restarted'`) when
+  a background command's streams are empty because the platform can no longer
+  read its output — the command was already running when the service on the
+  computer's host restarted. Its status and exit code are still reported. The
+  CLI's `computers exec-poll` says so on stderr, and its `--json` data carries
+  `output_unavailable`.
+
+### Fixed
+
+- `execPoll`, `execKill` and `execBackground` read an empty `execution_id` as
+  absent instead of throwing, so a command that started before a host upgrade
+  can still be polled. Any other malformed ID is still refused.
+
 ## [0.17.2] — 2026-10-22
 
 ### Fixed
