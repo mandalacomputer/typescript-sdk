@@ -14,6 +14,7 @@ import { anyRoute, BASE, recorder } from './harness.js';
 describe('agent stop reasons', () => {
   it.each([
     'max_steps',
+    'time_limit',
     'rate_limited',
     'refusal',
     'pause_turn',

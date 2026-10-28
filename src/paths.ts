@@ -2817,6 +2817,8 @@ export function deleteQuery(opts: { deleteSnapshots?: boolean; expect?: string }
  * keep it (OPL-4862).
  */
 export const MAX_AGENT_STEPS = LIMITS['agent.maxSteps'];
+/** Background runs have a larger action cap than foreground runs. */
+export const MAX_BACKGROUND_AGENT_STEPS = LIMITS['agent.maxBackgroundSteps'];
 
 /**
  * The range a funded run's `max_cost_usd` may take, in USD, as the platform's
@@ -2935,9 +2937,10 @@ export function agentBody(
   if (maxSteps !== undefined && (!Number.isInteger(maxSteps) || maxSteps < 1)) {
     throw new ValidationError(`maxSteps must be a positive integer (got ${maxSteps})`);
   }
-  if (maxSteps !== undefined && maxSteps > MAX_AGENT_STEPS) {
+  const stepLimit = opts.background ? MAX_BACKGROUND_AGENT_STEPS : MAX_AGENT_STEPS;
+  if (maxSteps !== undefined && maxSteps > stepLimit) {
     throw new ValidationError(
-      `maxSteps is ${maxSteps}; the platform accepts at most ${MAX_AGENT_STEPS}`,
+      `maxSteps is ${maxSteps}; the platform accepts at most ${stepLimit}`,
     );
   }
   if (

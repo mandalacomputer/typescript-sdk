@@ -14,6 +14,7 @@ export const LIMITS = {
   'browser.defaultLeaseSeconds': 1800,
   'browser.maximumSessionSeconds': 7200,
   'agent.maxSteps': 100,
+  'agent.maxBackgroundSteps': 500,
   'clipboard.writeMaxBytes': 64 * 1024,
   'exec.maxEnvEntries': 64,
   'exec.maxEnvEntryBytes': 4096,

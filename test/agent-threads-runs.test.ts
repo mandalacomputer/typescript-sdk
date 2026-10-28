@@ -481,6 +481,14 @@ describe('client.agentRuns.start and computer.startAgentRun', () => {
       (await client.computers.get('vm-1')).startAgentRun(args as never),
   };
 
+  it.each(Object.keys(STARTS))('%s accepts the background step cap', async (name) => {
+    for (const maxSteps of [1, 101, 500]) {
+      const { rec, client } = sdk();
+      await STARTS[name as keyof typeof STARTS](client, { prompt: 'go', maxSteps });
+      expect(rec.last().body).toMatchObject({ max_steps: maxSteps });
+    }
+  });
+
   it.each(Object.keys(STARTS))(
     '%s posts the body without stream and decodes the 202',
     async (name) => {
@@ -531,7 +539,7 @@ describe('client.agentRuns.start and computer.startAgentRun', () => {
           { prompt: 'go', threadId: THREAD, messages: [{ role: 'user', content: 'x' }] },
           /not both/,
         ],
-        [{ prompt: 'go', maxSteps: 101 }, /at most 100/],
+        [{ prompt: 'go', maxSteps: 501 }, /at most 500/],
       ] as const) {
         const { rec, client } = sdk();
         const err = await STARTS[name as keyof typeof STARTS](client, args).catch(
@@ -616,10 +624,10 @@ describe('client.agentRuns reads', () => {
     });
   });
 
-  it('is finished only when it completed at end_turn', async () => {
+  it.each(['max_steps', 'time_limit'])('is unfinished at %s', async (stop) => {
     const read = async (body: unknown) => sdk(() => json(body)).client.agentRuns.get(RUN);
     expect((await read(AGENT_RUN)).finished).toBe(true);
-    const maxed = { ...AGENT_RUN, result: { ...AGENT_RUN.result, stop: 'max_steps' } };
+    const maxed = { ...AGENT_RUN, result: { ...AGENT_RUN.result, stop } };
     expect((await read(maxed)).finished).toBe(false);
     expect((await read({ ...AGENT_RUN, status: 'cancelled' })).finished).toBe(false);
   });
