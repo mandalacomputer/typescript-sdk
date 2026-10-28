@@ -1607,6 +1607,8 @@ export class Computer {
 
   /**
    * Stop this computer, discarding a suspended session if it has one.
+   * Finite request timeouts are widened to at least 95 seconds. Larger or disabled
+   * client deadlines and explicit caller cancellation are preserved.
    *
    * Use {@link suspend} to keep it.
    *
@@ -1690,6 +1692,7 @@ export class Computer {
       query,
       headers: idempotencyHeaders(opts.idempotencyKey),
       signal: opts.signal,
+      minTimeoutMs: action === 'stop' ? 95_000 : undefined,
     });
     this.#operationId = operationIdOf(answer);
     const data = P.computerPayload(answer);
