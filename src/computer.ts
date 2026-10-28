@@ -6421,7 +6421,7 @@ export class Computer {
    * reaches the cap with `stop: 'max_cost'`.
    *
    * Throws `MandalaError` if the stream ends without a result. It does **not**
-   * throw when a run ends unfinished: `max_steps`, `rate_limited`, `refusal`,
+   * throw when a run ends unfinished: `time_limit`, `max_steps`, `rate_limited`, `refusal`,
    * `credits_exhausted`, `max_cost` and the rest of {@link AgentStop} leave real
    * work on the desktop, and discarding the result would discard the only
    * account of what was done to the machine. Check {@link AgentResult.finished}.

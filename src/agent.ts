@@ -77,6 +77,7 @@ export type AgentUsage = {
  * The others the platform documents:
  *
  * - `max_steps` — the run reached `maxSteps`.
+ * - `time_limit` — the run reached its fixed 60-minute wall-clock limit.
  * - `rate_limited` — the account's API rate budget ran out mid-run.
  * - `refusal` — the model declined.
  * - `pause_turn` — the model kept pausing its turn.
@@ -94,6 +95,7 @@ export type AgentUsage = {
 export type AgentStop =
   | 'end_turn'
   | 'max_steps'
+  | 'time_limit'
   | 'rate_limited'
   | 'refusal'
   | 'pause_turn'
@@ -232,8 +234,9 @@ export type AgentArgs = {
    * turn is resubmitted for tokens and no step, and a `bash` call or a cursor
    * read takes no screenshot. Bounds the work; budget the bill on your own key.
    *
-   * Omitted sends nothing and takes the platform's default of 20; 100 is the
-   * ceiling, refused before the call as it is in the other clients.
+   * Omitted sends nothing and takes the platform's default of 20. The cap is
+   * 100 for foreground runs and 500 for background runs, refused locally.
+   * All runs have a fixed 60-minute wall-clock limit (stop `time_limit`).
    */
   maxSteps?: number;
   /** Override the model the platform would pick. */

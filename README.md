@@ -1738,14 +1738,21 @@ is the response, and yields it as an `error` event with `status: 402` and
 `client.credits.read()` reads the balance, the live lots, this plan period's
 grant and one page of the ledger. See [AI credits](#ai-credits).
 
+All agent runs have a fixed 60-minute wall-clock limit. Reaching it ends the
+run with `stop: "time_limit"`, preserving the work already done. A background
+status of `completed` means the loop ended; only `stop: "end_turn"` means the
+task finished. Background runs accept 1–500 steps (default 20); foreground
+sync, streaming and chat runs accept 1–100 (default 20).
+
 Ten clicks stop being ten images in *your* context. `maxSteps` bounds the loop,
 and bounds what your key is billed only loosely: a step is one **action on the
 desktop**, not one exchange with the model, and the two do not line up in either
 direction. One reply may ask for several actions and spends a step on each,
 while a reply that asks for none — or a paused turn, resubmitted — costs tokens
 and no step. Nor does every step take a screenshot; a `bash` call or a cursor
-read does not. Omit it for the platform's default of 20; 100 is the ceiling,
-and a larger value is refused before the call.
+read does not. Omit it for the platform's default of 20; the ceiling is 100
+for foreground runs and 500 for background runs. A larger value is refused
+before the call.
 `system` carries standing instructions into the run and `model` overrides the
 one the platform would pick. The computer must already be running.
 
@@ -1904,6 +1911,9 @@ last three may have done more than they reported.
 
 `agent()` holds a connection for as long as the run goes. A background run does
 not: start it, and read it back by id while it goes and after it ends.
+Background runs accept `maxSteps` from 1 to 500 (default 20). The local wait
+budget defaults to 30 minutes; pass a longer `timeoutMs` to wait for a run
+that approaches the fixed 60-minute server limit.
 
 ```ts
 const run = await c.startAgentRun({ prompt: 'Tidy the desktop.', maxSteps: 40 });
