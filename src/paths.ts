@@ -2939,9 +2939,7 @@ export function agentBody(
   }
   const stepLimit = opts.background ? MAX_BACKGROUND_AGENT_STEPS : MAX_AGENT_STEPS;
   if (maxSteps !== undefined && maxSteps > stepLimit) {
-    throw new ValidationError(
-      `maxSteps is ${maxSteps}; the platform accepts at most ${stepLimit}`,
-    );
+    throw new ValidationError(`maxSteps is ${maxSteps}; the platform accepts at most ${stepLimit}`);
   }
   if (
     maxCostUsd !== undefined &&
