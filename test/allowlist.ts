@@ -248,7 +248,12 @@ export const UNIMPLEMENTED: ReadonlySet<string> = new Set([
  * comparison is against what the platform actually reads.
  */
 export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
-  ['POST computers/:id/credential-gateway', ['body:methods', 'body:origin', 'body:path_prefix', 'body:secret_id']],
+  ['GET computers/:id/credential-gateway', []],
+  ['DELETE computers/:id/credential-gateway/:binding', []],
+  [
+    'POST computers/:id/credential-gateway',
+    ['body:methods', 'body:origin', 'body:path_prefix', 'body:secret_id'],
+  ],
 
   [
     'POST computers/:id/browser-connections',
