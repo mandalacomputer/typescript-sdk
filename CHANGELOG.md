@@ -9,6 +9,29 @@ This is the summary you read to decide whether to upgrade.
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-10-28
+
+### Added
+
+- `startAgentRun` accepts `maxSteps` up to 500 (default 20). Foreground
+  `agent`, `agentOnce` and `agentStream` runs keep the ceiling of 100, and a
+  larger value is still refused before the call.
+- `'time_limit'` stop reason. Every agent run has a fixed 60-minute wall-clock
+  limit; reaching it ends the run with `stop: 'time_limit'` and keeps the work
+  already done. A background `status` of `completed` only means the loop
+  ended: `stop: 'end_turn'` is the one that means the task finished.
+  `runs.wait` does not throw for it, like the other unfinished stops.
+
+### Changed
+
+- `stop()` widens finite request timeouts to at least 95 seconds. The platform
+  now gives a guest up to 45 seconds to shut down on its own, so an ordinary
+  stop can take about 83 seconds to answer; an older client with a shorter
+  timeout gives up before the answer. Larger or disabled deadlines and the
+  caller's `signal` are unchanged.
+- `runs.wait` documents its 30-minute default as a local waiting budget, not
+  the server's run limit; pass a longer `timeoutMs` to wait for a long run.
+
 ## [0.18.0] - 2026-10-24
 
 ### Added
@@ -1737,7 +1760,8 @@ No effect on the published surface, listed because it is most of the window.
 - Several parser fixes landed before that scanner was retired, each ported
   to and from the MCP server's byte-identical copy.
 
-[Unreleased]: https://github.com/mandalacomputer/typescript-sdk/compare/v0.18.0...HEAD
+[Unreleased]: https://github.com/mandalacomputer/typescript-sdk/compare/v0.19.0...HEAD
+[0.19.0]: https://github.com/mandalacomputer/typescript-sdk/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/mandalacomputer/typescript-sdk/compare/v0.17.2...v0.18.0
 [0.17.2]: https://github.com/mandalacomputer/typescript-sdk/compare/v0.17.0...v0.17.2
 [0.17.0]: https://github.com/mandalacomputer/typescript-sdk/compare/v0.16.0...v0.17.0
