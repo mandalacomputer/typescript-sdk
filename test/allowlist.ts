@@ -644,6 +644,8 @@ export function patternFor(path: string): string {
       out.push(':resultId');
     else if (out.length === 3 && out[0] === 'computers' && prev === 'artifacts')
       out.push(':artifactId');
+    else if (out.length === 3 && out[0] === 'computers' && prev === 'credential-gateway')
+      out.push(':binding');
     else if (out.length === 3 && out[0] === 'computers' && prev === 'public-urls')
       out.push(':urlId');
     else if (prev === 'windows') out.push(':window');
@@ -673,6 +675,7 @@ export function patternFor(path: string): string {
 /** The placeholders {@link patternFor} produces — path parameters, not request ones. */
 const PATH_PARAMETERS: ReadonlySet<string> = new Set([
   ':connection',
+  ':binding',
   ':id',
   ':pid',
   ':executionId',
