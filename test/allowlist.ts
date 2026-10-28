@@ -18,6 +18,10 @@ export type Route = [method: string, pattern: string];
 export const ALLOWED: ReadonlySet<string> = new Set(
   (
     [
+      // Credential gateway management is API-first; use direct HTTP until wrappers ship.
+      ['GET', 'computers/:id/credential-gateway'],
+      ['POST', 'computers/:id/credential-gateway'],
+      ['DELETE', 'computers/:id/credential-gateway/:binding'],
       ['GET', 'templates'],
       // The template document format (platform OPL-3568): the published JSON
       // Schema, and a check of a document against it that stores nothing.
@@ -209,6 +213,11 @@ export const ALLOWED: ReadonlySet<string> = new Set(
  * design is that it is enumerable.
  */
 export const UNIMPLEMENTED: ReadonlySet<string> = new Set([
+  // API-first credential gateway management, without SDK wrappers yet.
+  'GET computers/:id/credential-gateway',
+  'POST computers/:id/credential-gateway',
+  'DELETE computers/:id/credential-gateway/:binding',
+
   // The OpenAI-shaped door onto the agent loop. Deliberately not wrapped: a
   // caller who wants it already has an OpenAI client and points its baseURL
   // here, and a second, worse OpenAI client inside this SDK would be a
@@ -239,6 +248,13 @@ export const UNIMPLEMENTED: ReadonlySet<string> = new Set([
  * comparison is against what the platform actually reads.
  */
 export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
+  ['GET computers/:id/credential-gateway', []],
+  ['DELETE computers/:id/credential-gateway/:binding', []],
+  [
+    'POST computers/:id/credential-gateway',
+    ['body:methods', 'body:origin', 'body:path_prefix', 'body:secret_id'],
+  ],
+
   [
     'POST computers/:id/browser-connections',
     ['body:lifecycle_version', 'body:lease_seconds', 'body:max_duration_seconds'],
@@ -628,6 +644,8 @@ export function patternFor(path: string): string {
       out.push(':resultId');
     else if (out.length === 3 && out[0] === 'computers' && prev === 'artifacts')
       out.push(':artifactId');
+    else if (out.length === 3 && out[0] === 'computers' && prev === 'credential-gateway')
+      out.push(':binding');
     else if (out.length === 3 && out[0] === 'computers' && prev === 'public-urls')
       out.push(':urlId');
     else if (prev === 'windows') out.push(':window');
@@ -657,6 +675,7 @@ export function patternFor(path: string): string {
 /** The placeholders {@link patternFor} produces — path parameters, not request ones. */
 const PATH_PARAMETERS: ReadonlySet<string> = new Set([
   ':connection',
+  ':binding',
   ':id',
   ':pid',
   ':executionId',
