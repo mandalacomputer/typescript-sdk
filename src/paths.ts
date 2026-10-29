@@ -723,7 +723,9 @@ export type CreateArgs = {
   endsAt?: string | Date;
   /**
    * {@link endsAt} as a number of hours from now (fractions allowed), turned
-   * into a time by the platform. Give this or `endsAt`, not both.
+   * into a time by the platform. Give this or `endsAt`, not both. On an
+   * answer replayed under an idempotency key, the time is only checked to be
+   * no later than asked; its lower bound is unconfirmed.
    */
   endsInHours?: number;
 };
@@ -751,105 +753,22 @@ export const RELATIVE_SLACK_MS = 60_000;
 /** Slack around this machine's clock when the answer had no `Date` header. */
 export const RELATIVE_NO_DATE_SLACK_MS = 10 * 60_000;
 
-/** How many idempotency keys' first exchanges this process keeps, and for how long. */
-const SENDS_MAX = 256;
-const SENDS_TTL_MS = 3_600_000;
-/**
- * How long a first exchange whose answer was lost may have taken to reach
- * the platform: the bound on the window when only its send is known.
- */
-export const LOST_EXCHANGE_MS = 120_000;
-
-type FirstExchange = {
-  t0: number;
-  clientStart: number;
-  until: number;
-  /** The timing a replay of this key is held to, once known. */
-  done?: ExchangeClock;
-  /** The first answer seen here was already a replay: the call was made elsewhere. */
-  foreign?: boolean;
-};
-const firstSends = new Map<string, FirstExchange>();
-
-/**
- * Start timing one request; feed it the answer's headers, then finish it.
- *
- * An answer replayed under an idempotency key is the FIRST call's, its time
- * worked out when that call reached the platform. So with a `key`, the first
- * exchange of each `route` and key is kept (in this process, for an hour, up
- * to {@link SENDS_MAX} keys), and a replay is held to its timing, never to
- * the retry's, so the window cannot widen with the delay before a retry:
- *
- * - The first exchange answered: its own timing, in full.
- * - Its answer lost: from its send to {@link LOST_EXCHANGE_MS} after it,
- *   placed on the platform's clock by the replay's `Date` header less the
- *   time since that send.
- * - Made elsewhere (the first answer seen here was a replay): only the upper
- *   bound, of the first answer seen here (`upperOnly`).
- *
- * With no key of the caller's, a replay can only be the transport's own retry
- * of this exchange, which the timing already spans.
- */
-export function exchangeClock(
-  route?: string,
-  key?: string,
-): {
-  headers(h: Headers): void;
-  finish(replayed?: boolean): { clock: ExchangeClock; upperOnly: boolean };
-} {
+/** Start timing one request; feed it the answer's headers, then finish it. */
+export function exchangeClock(): { headers(h: Headers): void; finish(): ExchangeClock } {
   const clientStart = Date.now();
   const t0 = performance.now();
-  let entry: FirstExchange | undefined;
-  let earlier = false;
-  if (route !== undefined && key !== undefined) {
-    for (const [k, v] of firstSends) if (v.until <= clientStart) firstSends.delete(k);
-    const id = `${route} ${key}`;
-    entry = firstSends.get(id);
-    earlier = entry !== undefined;
-    if (!entry) {
-      if (firstSends.size >= SENDS_MAX) firstSends.delete(firstSends.keys().next().value as string);
-      entry = { t0, clientStart, until: clientStart + SENDS_TTL_MS };
-      firstSends.set(id, entry);
-    }
-  }
   let serverDate: number | undefined;
   return {
     headers(h) {
       const d = Date.parse(h.get('date') ?? '');
       serverDate = Number.isNaN(d) ? undefined : d;
     },
-    finish(replayed = false) {
-      const now = performance.now();
-      const clock: ExchangeClock = {
-        clientStart,
-        clientEnd: Date.now(),
-        durationMs: now - t0,
-        serverDate,
-      };
-      if (!entry) return { clock, upperOnly: false };
-      // Carried out now, not replayed: this exchange's own timing is right.
-      if (!replayed) {
-        entry.done ??= clock;
-        return { clock, upperOnly: false };
-      }
-      if (!earlier) {
-        entry.foreign = true;
-        entry.done = clock;
-        return { clock, upperOnly: true };
-      }
-      if (entry.foreign) return { clock: entry.done ?? clock, upperOnly: true };
-      if (!entry.done) {
-        const sinceFirst = now - entry.t0;
-        entry.done = {
-          clientStart: entry.clientStart,
-          clientEnd: entry.clientStart + LOST_EXCHANGE_MS,
-          durationMs: LOST_EXCHANGE_MS,
-          serverDate:
-            serverDate === undefined ? undefined : serverDate - sinceFirst + LOST_EXCHANGE_MS,
-        };
-      }
-      return { clock: entry.done, upperOnly: false };
-    },
+    finish: () => ({
+      clientStart,
+      clientEnd: Date.now(),
+      durationMs: performance.now() - t0,
+      serverDate,
+    }),
   };
 }
 
@@ -857,8 +776,8 @@ export function exchangeClock(
  * The window a time of "now plus `spanMs`" worked out by the platform during
  * one request falls in. With the answer's `Date` as the platform's now:
  * from it, less the request's duration and a minute, to it plus a minute.
- * Without one, this machine's clock, a little either side of the request,
- * widened by ten minutes for the skew between the two.
+ * Without one, this machine's clock either side of the request, widened by
+ * ten minutes (and a little) for the skew between the two.
  */
 export function relativeBounds(spanMs: number, clock: ExchangeClock): [number, number] {
   if (clock.serverDate !== undefined) {
@@ -868,8 +787,8 @@ export function relativeBounds(spanMs: number, clock: ExchangeClock): [number, n
     ];
   }
   return [
-    clock.clientStart + spanMs - RELATIVE_NO_DATE_SLACK_MS,
-    clock.clientEnd + spanMs + RELATIVE_NO_DATE_SLACK_MS,
+    clock.clientStart + spanMs - RELATIVE_SLACK_MS - RELATIVE_NO_DATE_SLACK_MS,
+    clock.clientEnd + spanMs + RELATIVE_SLACK_MS + 10_000 + RELATIVE_NO_DATE_SLACK_MS,
   ];
 }
 
@@ -1283,7 +1202,8 @@ export type UpdateArgs = {
   endsAt?: string | Date | null;
   /**
    * {@link endsAt} as a number of hours from now (fractions allowed); `null`
-   * clears the end time. On its own, as `endsAt` is.
+   * clears the end time. On its own, as `endsAt` is. On a replayed answer
+   * the time is only checked to be no later than asked.
    */
   endsInHours?: number | null;
 };

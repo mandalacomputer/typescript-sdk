@@ -322,25 +322,6 @@ describe('an end time the platform did not apply', () => {
     }
   });
 
-  it('accepts a replayed update whose end time came from the first call', async () => {
-    // The first call was minutes ago; its answer is replayed as it was.
-    const first = serverHours(-5 * 60_000, 2);
-    const { client } = sdk((call) =>
-      call.method === 'PATCH'
-        ? dated({ ...COMPUTER, ends_at: first }, 0, { 'idempotent-replayed': 'true' })
-        : anyRoute(call),
-    );
-    const c = await client.computers.get(COMPUTER.id);
-    await c.update({ endsInHours: 2 }, { idempotencyKey: 'k-2' });
-    expect(c.endsAt).toBe(first);
-    // Not replayed, the same answer is too early for this request.
-    const fresh = sdk((call) =>
-      call.method === 'PATCH' ? dated({ ...COMPUTER, ends_at: first }, 0) : anyRoute(call),
-    );
-    const d = await fresh.client.computers.get(COMPUTER.id);
-    await expect(d.update({ endsInHours: 2 })).rejects.toThrow(/did not apply/);
-  });
-
   it('checks nothing on a create or update that did not ask', async () => {
     const { client } = sdk(noEndTime);
     const c = await client.computers.create({ template: 'base' });
@@ -461,144 +442,90 @@ describe('a launch asked for an end time', () => {
 });
 
 describe('a replayed relative end time', () => {
-  afterEach(() => {
-    vi.restoreAllMocks();
-  });
-  // Date.now() is the platform's clock here, shifted with this machine's
-  // where a test moves time on.
-  const dated = (body: unknown, replayed: boolean) =>
+  // The platform's answer, replayed or not, with its Date header.
+  const answer = (body: unknown, replayed: boolean, date = true) =>
     new Response(JSON.stringify(body), {
       headers: {
         'content-type': 'application/json',
-        date: new Date(Date.now()).toUTCString(),
+        ...(date ? { date: new Date().toUTCString() } : {}),
         ...(replayed ? { 'idempotent-replayed': 'true' } : {}),
       },
     });
+  const hoursFromNow = (hours: number, offsetMs = 0) =>
+    new Date(Date.now() + hours * 3_600_000 + offsetMs).toISOString();
+  const replaying =
+    (endsAt: string, date = true): Responder =>
+    (call) =>
+      call.path === '/computers' || call.method === 'PATCH'
+        ? answer({ ...COMPUTER, ends_at: endsAt }, true, date)
+        : anyRoute(call);
 
   it.each([
-    ['an unchanged earlier deadline', -30 * 60_000, true],
-    ['the deadline the first call set', 0, false],
-  ])(
-    "holds a replay after a lost answer to the first send's timing: %s",
-    async (_what, offset, refused) => {
-      const firstSent = Date.now();
-      const stored = new Date(firstSent + offset + 7_200_000).toISOString();
-      let calls = 0;
-      const { client } = sdk((call) => {
-        if (call.method !== 'POST' || call.path !== '/computers') return anyRoute(call);
-        calls++;
-        // The first answer is lost on the way back.
-        if (calls === 1) return Promise.reject(new Error('dropped answer'));
-        return dated({ ...COMPUTER, ends_at: stored }, true);
-      });
-      const key = `lost-${offset}-${Date.now()}`;
-      await expect(
-        client.computers.create({ endsInHours: 2 }, { idempotencyKey: key }),
-      ).rejects.toThrow();
-      const retry = client.computers.create({ endsInHours: 2 }, { idempotencyKey: key });
-      if (refused) await expect(retry).rejects.toThrow(/did not apply the requested end time/);
-      else expect((await retry).endsAt).toBe(stored);
-    },
-  );
-
-  it("accepts a replay of a good first answer, judged by the first call's timing", async () => {
-    const good = new Date(Date.now() + 7_200_000).toISOString();
-    let calls = 0;
-    const { client } = sdk((call) => {
-      if (call.method !== 'PATCH') return anyRoute(call);
-      calls++;
-      return dated({ ...COMPUTER, ends_at: good }, calls > 1);
-    });
-    const c = await client.computers.get(COMPUTER.id);
-    const key = `update-${Date.now()}`;
-    await c.update({ endsInHours: 2 }, { idempotencyKey: key });
-    await c.update({ endsInHours: 2 }, { idempotencyKey: key });
-    expect(c.endsAt).toBe(good);
+    ['with a Date header', true],
+    ['without one', false],
+  ])('accepts one set long ago, within the upper bound (%s)', async (_what, date) => {
+    // Set by a first call hours ago: only bounded above, so not refused.
+    const early = hoursFromNow(2, -3 * 3_600_000);
+    const { client } = sdk(replaying(early, date));
+    const c = await client.computers.create({ endsInHours: 2 }, { idempotencyKey: 'k-r1' });
+    expect(c.endsAt).toBe(early);
+    await c.update({ endsInHours: 2 }, { idempotencyKey: 'k-r2' });
+    expect(c.endsAt).toBe(early);
   });
 
-  it('keeps a late deadline refused when it is replayed half an hour later', async () => {
-    let shiftMs = 0;
-    const realNow = Date.now.bind(Date);
-    const realPerf = performance.now.bind(performance);
-    vi.spyOn(Date, 'now').mockImplementation(() => realNow() + shiftMs);
-    vi.spyOn(performance, 'now').mockImplementation(() => realPerf() + shiftMs);
-    // Set by the first call, five minutes later than asked.
-    const late = new Date(realNow() + 7_200_000 + 5 * 60_000).toISOString();
-    let calls = 0;
-    const { client } = sdk((call) => {
-      if (call.method !== 'POST' || call.path !== '/computers') return anyRoute(call);
-      calls++;
-      return dated({ ...COMPUTER, ends_at: late }, calls > 1);
-    });
-    const key = `late-${realNow()}`;
+  it.each([
+    ['with a Date header', true, 5 * 60_000],
+    ['without one', false, 15 * 60_000],
+  ])('refuses one past the upper bound (%s)', async (_what, date, late) => {
+    const { client } = sdk(replaying(hoursFromNow(2, late), date));
     await expect(
-      client.computers.create({ endsInHours: 2 }, { idempotencyKey: key }),
-    ).rejects.toThrow(/did not apply/);
-    shiftMs = 30 * 60_000;
-    await expect(
-      client.computers.create({ endsInHours: 2 }, { idempotencyKey: key }),
-    ).rejects.toThrow(/did not apply/);
-  });
-
-  it('bounds a lost first answer by its send, not by the retry', async () => {
-    let shiftMs = 0;
-    const realNow = Date.now.bind(Date);
-    const realPerf = performance.now.bind(performance);
-    vi.spyOn(Date, 'now').mockImplementation(() => realNow() + shiftMs);
-    vi.spyOn(performance, 'now').mockImplementation(() => realPerf() + shiftMs);
-    // Worked out ten minutes after the send: later than a lost answer allows.
-    const late = new Date(realNow() + 7_200_000 + 10 * 60_000).toISOString();
-    let calls = 0;
-    const { client } = sdk((call) => {
-      if (call.method !== 'POST' || call.path !== '/computers') return anyRoute(call);
-      calls++;
-      if (calls === 1) return Promise.reject(new Error('dropped answer'));
-      return dated({ ...COMPUTER, ends_at: late }, true);
-    });
-    const key = `lost-late-${realNow()}`;
-    await expect(
-      client.computers.create({ endsInHours: 2 }, { idempotencyKey: key }),
-    ).rejects.toThrow();
-    shiftMs = 30 * 60_000;
-    await expect(
-      client.computers.create({ endsInHours: 2 }, { idempotencyKey: key }),
+      client.computers.create({ endsInHours: 2 }, { idempotencyKey: 'k-r3' }),
     ).rejects.toThrow(/did not apply the requested end time/);
+    const c = await client.computers.get(COMPUTER.id);
+    await expect(c.update({ endsInHours: 2 }, { idempotencyKey: 'k-r4' })).rejects.toThrow(
+      /did not apply/,
+    );
   });
 
-  it('keeps a key first answered here as a replay at the upper bound on every retry', async () => {
-    let shiftMs = 0;
-    const realNow = Date.now.bind(Date);
-    const realPerf = performance.now.bind(performance);
-    vi.spyOn(Date, 'now').mockImplementation(() => realNow() + shiftMs);
-    vi.spyOn(performance, 'now').mockImplementation(() => realPerf() + shiftMs);
-    // The original was sent elsewhere, twenty minutes before the first retry
-    // here: its deadline is earlier than any window this process's retries span.
-    const original = new Date(realNow() - 20 * 60_000 + 7_200_000).toISOString();
-    const { rec, client } = sdk((call) =>
-      call.method === 'POST' && call.path === '/computers'
-        ? dated({ ...COMPUTER, ends_at: original }, true)
-        : anyRoute(call),
-    );
-    const key = `elsewhere-twice-${realNow()}`;
-    const first = await client.computers.create({ endsInHours: 2 }, { idempotencyKey: key });
-    expect(first.endsAt).toBe(original);
-    shiftMs = 5 * 60_000;
-    const second = await client.computers.create({ endsInHours: 2 }, { idempotencyKey: key });
-    expect(second.endsAt).toBe(original);
-    expect(rec.calls.filter((call) => call.path === '/computers')).toHaveLength(2);
+  it('refuses one missing or unreadable', async () => {
+    for (const endsAt of ['soon', '']) {
+      const { client } = sdk(replaying(endsAt));
+      await expect(
+        client.computers.create({ endsInHours: 2 }, { idempotencyKey: 'k-r5' }),
+      ).rejects.toThrow(/did not apply/);
+    }
   });
 
-  it('holds an unknown key only to the upper bound', async () => {
-    const stale = new Date(Date.now() - 30 * 60_000 + 7_200_000).toISOString();
-    const { client } = sdk((call) =>
-      call.method === 'POST' && call.path === '/computers'
-        ? dated({ ...COMPUTER, ends_at: stale }, true)
-        : anyRoute(call),
-    );
-    const c = await client.computers.create(
-      { endsInHours: 2 },
-      { idempotencyKey: `elsewhere-${Date.now()}` },
-    );
-    expect(c.endsAt).toBe(stale);
+  it('holds an absolute end time exactly, replayed or not', async () => {
+    const { client } = sdk(replaying('2029-06-01T00:00:00Z'));
+    await expect(
+      client.computers.create({ endsAt: AT }, { idempotencyKey: 'k-r6' }),
+    ).rejects.toThrow(/did not apply/);
+    const ok = sdk(replaying(AT));
+    const c = await ok.client.computers.create({ endsAt: AT }, { idempotencyKey: 'k-r7' });
+    expect(c.endsAt).toBe(AT);
+  });
+});
+
+describe('a limited mint on a client with no timeout', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('gives up after its own deadline, saying a key may have been minted', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const rec = recorder(() => new Promise<Response>(() => {}));
+    const client = new Client({
+      apiKey: 'com_test',
+      baseUrl: BASE,
+      fetch: rec.fetch,
+      timeoutMs: 0,
+    });
+    const pending = client.apiKeys.create({ expiresInHours: 1 }).catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(60_000);
+    const error = await pending;
+    expect(error).toBeInstanceOf(MandalaError);
+    expect((error as Error).message).toContain('did not answer within 60s');
+    expect(rec.routes()).toEqual([['POST', 'api-keys']]);
   });
 });

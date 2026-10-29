@@ -22,10 +22,11 @@ This is the summary you read to decide whether to upgrade.
   suspended computer itself: it throws naming it, and `computer.start()` is
   the caller's to call (so `start: false` with an end time is refused up
   front). A time given in hours is checked against the platform's clock (its
-  `Date` header), and a replayed answer against the first exchange of its
-  idempotency key when this process made it (from its send to two minutes
-  after it, if its answer was lost); otherwise only against the upper bound
-  of the first answer seen. A failed check in `ephemeral()` deletes the
+  `Date` header) when the answer is fresh. An answer replayed under an
+  idempotency key was worked out by an earlier call, so a time in hours on it
+  is checked only for being present, readable and no later than asked: its
+  lower bound is unconfirmed. An absolute `endsAt` is checked exactly either
+  way. A failed check in `ephemeral()` deletes the
   computer, with or without a block. The CLI has
   `computers create --ends-in HOURS` / `--ends-at TIME` and
   `computers end-time COMPUTER HOURS|TIME|clear`.
@@ -35,7 +36,8 @@ This is the summary you read to decide whether to upgrade.
   `computerIds` (`null` when unset). An expired key is answered `401`. A mint
   whose answer does not carry the expiry or computer limit asked for is
   revoked and a `MandalaError` thrown; its key is never returned. Once such a
-  mint is sent, a cancellation stops neither it nor that revoke. The CLI
+  mint is sent, a cancellation stops neither it nor that revoke; each runs to
+  a deadline of its own, even on a client with no timeout. The CLI
   has `api-keys create --expires-in HOURS` / `--expires-at TIME` and a
   repeatable `--computer ID`, and `api-keys list` shows both.
 

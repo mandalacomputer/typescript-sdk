@@ -360,7 +360,7 @@ export class Computers {
     let replayed = false;
     const body = P.createBody(args);
     const endTime = P.endTimeRequest(args);
-    const timing = P.exchangeClock(`POST ${P.COMPUTERS}`, opts.idempotencyKey);
+    const timing = P.exchangeClock();
     const data = await this.#t.json(
       'POST',
       P.COMPUTERS,
@@ -375,8 +375,7 @@ export class Computers {
       },
     );
     const computer = oneComputer(this.#t, data, 'POST', P.COMPUTERS);
-    const held = timing.finish(replayed);
-    confirmEndTime(computer.raw, endTime, 'create', held.clock, held.upperOnly);
+    confirmEndTime(computer.raw, endTime, 'create', timing.finish(), replayed);
     return { computer, replayed };
   }
 
@@ -671,7 +670,7 @@ export class Computers {
     // exists to prevent.
     const body = P.createBody(args);
     const endTime = P.endTimeRequest(args);
-    const timing = P.exchangeClock(`POST ${P.COMPUTERS}`, opts.idempotencyKey);
+    const timing = P.exchangeClock();
     let replayed = false;
     const data = await this.#t.json(
       'POST',
@@ -682,10 +681,10 @@ export class Computers {
         timing.headers(headers);
       },
     );
-    const held = timing.finish(replayed);
+    const clock = timing.finish();
     const computer = new EphemeralComputer(this.#t, computerRecord(data, 'POST', P.COMPUTERS));
     try {
-      confirmEndTime(computer.raw, endTime, 'create', held.clock, held.upperOnly);
+      confirmEndTime(computer.raw, endTime, 'create', clock, replayed);
     } catch (err) {
       // The computer is this call's to delete either way: a block never run
       // is no reason to keep it, and the `await using` form never gets a
@@ -2757,8 +2756,9 @@ export class ApiKeys {
    * A mint asking for an expiry or a computer limit is held to its answer: one
    * that does not carry them is revoked and thrown, the key never returned.
    * So that a cancellation cannot strand such a key, `signal` is honoured only
-   * until the mint is sent; the request then runs to its own timeout, and the
-   * revoke, if one is needed, to a deadline of its own.
+   * until the mint is sent; the request then runs to a deadline of its own
+   * (60 seconds, whatever the client's `timeoutMs`), and the revoke, if one is
+   * needed, to another.
    */
   async create(args: P.ApiKeyCreateArgs = {}, opts: CallOptions = {}): Promise<ApiKeyCreated> {
     const body = P.apiKeyCreateBody(args);
@@ -2768,13 +2768,33 @@ export class ApiKeys {
       body.computer_ids !== undefined;
     opts.signal?.throwIfAborted();
     const timing = P.exchangeClock();
-    const data = await this.#t.json(
-      'POST',
-      P.API_KEYS,
-      { body, signal: limited ? undefined : opts.signal },
-      (_, headers) => timing.headers(headers),
-    );
-    const { clock } = timing.finish();
+    // A limited mint runs to a finite deadline of its own, not the caller's
+    // signal, so neither a cancellation nor a client with no timeout can leave
+    // it hanging or its answer unread.
+    const deadline = limited ? new AbortController() : undefined;
+    const timer = deadline
+      ? setTimeout(() => deadline.abort(new Error('deadline')), KEY_MINT_TIMEOUT_MS)
+      : undefined;
+    let data: unknown;
+    try {
+      data = await this.#t.json(
+        'POST',
+        P.API_KEYS,
+        { body, signal: deadline ? deadline.signal : opts.signal },
+        (_, headers) => timing.headers(headers),
+      );
+    } catch (err) {
+      if (deadline?.signal.aborted) {
+        throw new MandalaError(
+          `POST ${P.API_KEYS} did not answer within ${KEY_MINT_TIMEOUT_MS / 1000}s; a key may have ` +
+            'been minted: list your keys and revoke any you do not hold',
+        );
+      }
+      throw err;
+    } finally {
+      clearTimeout(timer);
+    }
+    const clock = timing.finish();
     // Read before the decode, so an answer that cannot be decoded can still
     // be revoked by it when it was meant to be limited.
     const id = P.isRecord(data) && typeof data.id === 'string' ? data.id : '';
@@ -2842,6 +2862,9 @@ export class ApiKeys {
 /** A message with a key's secret taken out, should one ever be quoted in it. */
 const scrub = (message: string, secret: string): string =>
   secret ? message.split(secret).join('[key]') : message;
+
+/** How long a limited mint may take, whatever the client's own timeout. */
+const KEY_MINT_TIMEOUT_MS = 60_000;
 
 /** How long the revoke of a key minted without its limits may take. */
 const KEY_ROLLBACK_TIMEOUT_MS = 15_000;
