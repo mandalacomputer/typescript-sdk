@@ -191,6 +191,7 @@ import {
 import {
   checkWait,
   deadlineSignal,
+  desktopDelay,
   isDeadlineAbort,
   isTransientForPoll,
   rampDelay,
@@ -2866,9 +2867,10 @@ export class Computer {
    *
    * Like {@link waitForGuest}, the probe resumes a suspended computer.
    *
-   * Polls 250ms after the first probe, then doubling up to `pollMs`, so a
-   * session that appears a moment after a probe is not a whole interval late;
-   * the no-desktop 409 without a reason uses that ramp too. Other retryable
+   * Probes every 100ms for the first ten "not yet" answers (about two
+   * seconds), then 250ms later, doubling up to `pollMs`, so a session that
+   * appears a moment after a probe is not a whole interval late; the
+   * no-desktop 409 without a reason counts as "not yet". Other retryable
    * failures wait `pollMs` (or their `Retry-After`).
    */
   async waitForDesktop(opts: WaitOptions = {}): Promise<this> {
@@ -2877,8 +2879,8 @@ export class Computer {
     if (this.os !== 'linux' || this.desktop === '') return this;
     const deadline = Date.now() + timeoutMs;
     let probed = false;
-    // Ordinary "not yet" answers so far, which is what ramps the sleep: see
-    // rampDelay. Other retryable failures set their own delay and leave it.
+    // Ordinary "not yet" answers so far, which is what paces the sleep: see
+    // desktopDelay. Other retryable failures set their own delay and leave it.
     let notYet = 0;
     for (;;) {
       let delayMs: number | undefined;
@@ -2923,7 +2925,7 @@ export class Computer {
                 'timeout.',
         );
       }
-      await sleepUntilNextPoll(delayMs ?? rampDelay(notYet++, pollMs), deadline, signal);
+      await sleepUntilNextPoll(delayMs ?? desktopDelay(notYet++, pollMs), deadline, signal);
     }
   }
 

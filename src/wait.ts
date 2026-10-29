@@ -272,6 +272,29 @@ export const FIRST_POLL_MS = 250;
 export const rampDelay = (turn: number, pollMs: number): number =>
   Math.min(FIRST_POLL_MS * 2 ** Math.min(turn, 30), pollMs);
 
+/** The sleep between `waitForDesktop`'s first probes; see {@link desktopDelay}. */
+export const DESKTOP_FAST_POLL_MS = 100;
+
+/** How many "not yet" answers `waitForDesktop` sleeps {@link DESKTOP_FAST_POLL_MS} after. */
+export const DESKTOP_FAST_PROBES = 10;
+
+/**
+ * The sleep after the desktop probe's `turn`th "not yet" (counting from 0):
+ * {@link DESKTOP_FAST_POLL_MS} for the first {@link DESKTOP_FAST_PROBES}, then
+ * {@link rampDelay} from 250ms, never more than `pollMs`.
+ *
+ * The desktop of a computer created with secrets logs in well under a second
+ * after its guest answers, and the ramp's 250ms-then-500ms sleeps found it up
+ * to half a second late every time. A probe is one short request, and a
+ * session that is that close is worth asking about more often; the ten fast
+ * probes cover about two seconds, and a desktop that takes longer than that
+ * (a cold boot) is waited on as before.
+ */
+export const desktopDelay = (turn: number, pollMs: number): number =>
+  turn < DESKTOP_FAST_PROBES
+    ? Math.min(DESKTOP_FAST_POLL_MS, pollMs)
+    : rampDelay(turn - DESKTOP_FAST_PROBES, pollMs);
+
 /** A poll sleep that cannot carry its loop beyond the loop's own deadline. */
 export const sleepUntilNextPoll = (
   delayMs: number,

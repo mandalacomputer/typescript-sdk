@@ -21,6 +21,15 @@ This is the summary you read to decide whether to upgrade.
   origin, path prefix, methods or address cannot be read fails the listing.
   The CLI has `mandala computers gateway list|create|rm`.
 
+### Changed
+
+- `waitForDesktop` (and so `launch()`) probes the desktop session every 100ms
+  for its first ten "not yet" answers, then ramps from 250ms to `pollMs` as
+  before. A computer created with secrets logs its desktop in under a second
+  after its guest answers, and the 250ms-then-500ms ramp noticed it up to half
+  a second late; `launch()` with secrets now returns about 0.3 to 0.4 seconds
+  sooner. A smaller `pollMs` still caps every sleep.
+
 ## [0.19.0] - 2026-10-28
 
 ### Added

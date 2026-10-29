@@ -1462,7 +1462,8 @@ describe('computer.waitForDesktop', () => {
 // A flat interval rounded every readiness stage up to a whole `pollMs`: a
 // secret that landed just after a read made a bound launch sleep out the rest
 // of three seconds. The ordinary "not yet" sleep now ramps 250ms, doubling, up
-// to `pollMs`; a failed poll keeps its own delay (Retry-After included).
+// to `pollMs` (the desktop probe first probes every 100ms, ten times); a
+// failed poll keeps its own delay (Retry-After included).
 
 describe('fast first poll', () => {
   // Each wait's sleeps, read off the fake clock as the gaps between the
@@ -1546,16 +1547,35 @@ describe('fast first poll', () => {
   it.each([
     { label: 'a reasonless 409', body: NO_DESKTOP, status: 409 },
     { label: 'an unfinished probe', body: UNFINISHED, status: 200 },
-  ])('waitForDesktop ramps after $label, doubling up to pollMs', async ({ body, status }) => {
+  ])(
+    'waitForDesktop probes every 100ms after $label, then ramps up to pollMs',
+    async ({ body, status }) => {
+      vi.useFakeTimers({ toFake: ['Date', 'performance', 'setTimeout', 'clearTimeout'] });
+      let n = 0;
+      const { probes, get } = desktopGet(() => (++n < 16 ? json(body, { status }) : json(guest)));
+      const c = await get();
+      await settle(c.waitForDesktop({ timeoutMs: 60_000, pollMs: 1_500 }));
+      expect(gaps(probes)).toEqual([...Array(10).fill(100), 250, 500, 1_000, 1_500, 1_500]);
+    },
+  );
+
+  it('waitForDesktop sees a desktop that appears between probes within 100ms', async () => {
+    // A bound computer's desktop logs in a fraction of a second after its
+    // guest answers. Ready 550ms into the wait, it is seen at the next 100ms
+    // probe, not at the 750ms the 250ms-then-500ms ramp reached.
     vi.useFakeTimers({ toFake: ['Date', 'performance', 'setTimeout', 'clearTimeout'] });
-    let n = 0;
-    const { probes, get } = desktopGet(() => (++n < 6 ? json(body, { status }) : json(guest)));
+    let readyAt = 0;
+    const { probes, get } = desktopGet(() =>
+      Date.now() >= readyAt ? json(guest) : json(NO_DESKTOP, { status: 409 }),
+    );
     const c = await get();
-    await settle(c.waitForDesktop({ timeoutMs: 60_000, pollMs: 1_500 }));
-    expect(gaps(probes)).toEqual([250, 500, 1_000, 1_500, 1_500]);
+    const started = Date.now();
+    readyAt = started + 550;
+    await settle(c.waitForDesktop({ timeoutMs: 60_000, pollMs: 3_000 }));
+    expect(probes.at(-1)! - started).toBe(600);
   });
 
-  it('a bound launch notices the desktop within 250ms of a reasonless 409', async () => {
+  it('a bound launch notices the desktop within 100ms of a reasonless 409', async () => {
     vi.useFakeTimers({ toFake: ['Date', 'performance', 'setTimeout', 'clearTimeout'] });
     const probes: number[] = [];
     const rec = recorder((call) => {
@@ -1574,8 +1594,8 @@ describe('fast first poll', () => {
       client.computers.launch({ secrets: [{ secretId: BINDING.secret_id, env: 'TOKEN' }] }),
     );
     expect(c.secretsDelivering).toBe(false);
-    expect(gaps(probes)).toEqual([250]);
-    expect(Date.now() - started).toBe(250);
+    expect(gaps(probes)).toEqual([100]);
+    expect(Date.now() - started).toBe(100);
     expect(rec.last().body).toEqual({ command: 'true', session: 'desktop', timeout_s: 5 });
   });
 
@@ -1627,7 +1647,7 @@ describe('fast first poll', () => {
     });
     const c = await get();
     await settle(c.waitForDesktop({ timeoutMs: 60_000, pollMs: 3_000 }));
-    expect(gaps(probes)).toEqual([250, failure.delay, 500]);
+    expect(gaps(probes)).toEqual([100, failure.delay, 100]);
   });
 
   it('waitForDesktop caps the no-desktop sleep at its deadline without another probe', async () => {
@@ -1635,10 +1655,10 @@ describe('fast first poll', () => {
     const { probes, get } = desktopGet(() => json(NO_DESKTOP, { status: 409 }));
     const c = await get();
     const started = Date.now();
-    const result = c.waitForDesktop({ timeoutMs: 600 }).catch((err) => err);
-    await vi.advanceTimersByTimeAsync(600);
+    const result = c.waitForDesktop({ timeoutMs: 150 }).catch((err) => err);
+    await vi.advanceTimersByTimeAsync(150);
     expect(await result).toBeInstanceOf(TimeoutError);
-    expect(probes.map((stamp) => stamp - started)).toEqual([0, 250]);
+    expect(probes.map((stamp) => stamp - started)).toEqual([0, 100]);
     await vi.advanceTimersByTimeAsync(3_000);
     expect(probes).toHaveLength(2);
   });
@@ -1650,7 +1670,7 @@ describe('fast first poll', () => {
     const controller = new AbortController();
     const reason = new Error('cancel desktop wait');
     const result = c.waitForDesktop({ signal: controller.signal }).catch((err) => err);
-    await vi.advanceTimersByTimeAsync(100);
+    await vi.advanceTimersByTimeAsync(50);
     controller.abort(reason);
     expect(await result).toBe(reason);
     await vi.advanceTimersByTimeAsync(3_000);
@@ -1672,11 +1692,11 @@ describe('fast first poll', () => {
     );
     const c = await get();
     const result = c.waitForDesktop().catch((err) => err);
-    await vi.advanceTimersByTimeAsync(250);
+    await vi.advanceTimersByTimeAsync(100);
     const error = await result;
     expect(error).not.toBeInstanceOf(TimeoutError);
     expect(error.status).toBe(failure.status);
     expect(error.reason).toBe(failure.reason);
-    expect(gaps(probes)).toEqual([250]);
+    expect(gaps(probes)).toEqual([100]);
   });
 });
