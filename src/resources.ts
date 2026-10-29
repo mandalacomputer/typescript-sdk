@@ -13,7 +13,13 @@ import {
   toAgentThread,
   toAgentThreadPage,
 } from './agent.js';
-import { Computer, EphemeralComputer, postAgentRun, strandedText } from './computer.js';
+import {
+  Computer,
+  confirmEndTime,
+  EphemeralComputer,
+  postAgentRun,
+  strandedText,
+} from './computer.js';
 import {
   type APIError,
   type AuthenticationError,
@@ -364,7 +370,9 @@ export class Computers {
         replayed = headers.get('idempotent-replayed')?.trim().toLowerCase() === 'true';
       },
     );
-    return { computer: oneComputer(this.#t, data, 'POST', P.COMPUTERS), replayed };
+    const computer = oneComputer(this.#t, data, 'POST', P.COMPUTERS);
+    confirmEndTime(computer.raw, P.endTimeRequest(args), 'create');
+    return { computer, replayed };
   }
 
   /**
@@ -494,6 +502,19 @@ export class Computers {
         (computer.runningRamMb === 0 ||
           (args.start === false && computer.runningRamMb === undefined))
       ) {
+        // A launch resent under its key replays a create that may be hours
+        // old. If the end time it asked for has since come, the host stopped
+        // the computer and cleared it; starting it now would bring it back
+        // with no end at all.
+        if (P.endTimeRequest(args) === 'set') {
+          const endsAt = computer.endsAt;
+          if (endsAt === undefined || !(Date.parse(endsAt) > Date.now())) {
+            throw new MandalaError(
+              `${id} is ${computer.status} and ${endsAt === undefined ? 'has no end time' : `its end time ${endsAt} has passed`}, ` +
+                'though one was asked for; not starting it. Start it yourself, with a new end time if it needs one',
+            );
+          }
+        }
         remaining();
         await computer.start({ signal });
       }
@@ -644,6 +665,26 @@ export class Computers {
       signal: opts.signal,
     });
     const computer = new EphemeralComputer(this.#t, computerRecord(data, 'POST', P.COMPUTERS));
+    try {
+      confirmEndTime(computer.raw, P.endTimeRequest(args), 'create');
+    } catch (err) {
+      // With a block, the computer is this call's to delete, and a block
+      // never run is no reason to keep it. Without one, it is the caller's.
+      if (fn) {
+        try {
+          await computer.delete();
+        } catch (cleanupErr) {
+          if (!(cleanupErr instanceof NotFoundError)) {
+            throw suppressing(
+              new MandalaError(strandedText(computer.id, cleanupErr)),
+              err,
+              strandedText(computer.id, cleanupErr),
+            );
+          }
+        }
+      }
+      throw err;
+    }
     if (!fn) return computer;
     let result: T;
     try {
@@ -2696,11 +2737,30 @@ export class ApiKeys {
    * holds at most 1000 keys, and the one past that is a 400.
    */
   async create(args: P.ApiKeyCreateArgs = {}, opts: CallOptions = {}): Promise<ApiKeyCreated> {
-    const data = await this.#t.json('POST', P.API_KEYS, {
-      body: P.apiKeyCreateBody(args),
-      signal: opts.signal,
-    });
-    return toApiKeyCreated(data, 'POST', P.API_KEYS);
+    const body = P.apiKeyCreateBody(args);
+    // Taken before the request, so the slack below is all the platform's.
+    const before = Date.now();
+    const data = await this.#t.json('POST', P.API_KEYS, { body, signal: opts.signal });
+    const created = toApiKeyCreated(data, 'POST', P.API_KEYS);
+    const missed = unappliedKeyLimits(created, body, before);
+    if (!missed.length) return created;
+    // A platform that does not know a limit ignores it and mints a key without
+    // it: one that never expires, or that reaches every computer. Such a key
+    // is not handed back; it is revoked, best effort, and never shown.
+    let revoked = false;
+    let revokeError = '';
+    try {
+      await this.revoke(created.id, { signal: opts.signal });
+      revoked = true;
+    } catch (err) {
+      revokeError = err instanceof Error ? err.message : String(err);
+    }
+    throw new MandalaError(
+      `the platform did not apply the requested ${missed.join(' and ')} to the new key ${created.id}; ` +
+        (revoked
+          ? 'it was revoked, and the key is not returned'
+          : `revoking it failed (${revokeError}); the key is not returned: revoke ${created.id} yourself`),
+    );
   }
 
   /**
@@ -2716,6 +2776,33 @@ export class ApiKeys {
   async revoke(keyId: string, opts: CallOptions = {}): Promise<void> {
     await this.#t.json('DELETE', P.apiKey(keyId), { signal: opts.signal });
   }
+}
+
+/** Slack on an `expires_in_hours` the platform turned into a time. */
+const KEY_EXPIRY_SLACK_MS = 60_000;
+
+/**
+ * The limits a mint asked for that its answer does not carry: an expiry that
+ * is missing or later than asked, a computer limit that is missing, empty, or
+ * names a computer that was not asked for.
+ */
+function unappliedKeyLimits(key: ApiKey, body: Record<string, unknown>, before: number): string[] {
+  const missed: string[] = [];
+  let latest: number | undefined;
+  if (typeof body.expires_at === 'string') latest = Date.parse(body.expires_at);
+  if (typeof body.expires_in_hours === 'number') {
+    latest = before + body.expires_in_hours * 3_600_000 + KEY_EXPIRY_SLACK_MS;
+  }
+  if (latest !== undefined) {
+    const got = key.expiresAt === null ? Number.NaN : Date.parse(key.expiresAt);
+    if (!(got <= latest)) missed.push('expiry');
+  }
+  if (Array.isArray(body.computer_ids)) {
+    const asked = new Set(body.computer_ids as string[]);
+    const got = key.computerIds;
+    if (!got?.length || !got.every((id) => asked.has(id))) missed.push('computer limit');
+  }
+  return missed;
 }
 
 /**

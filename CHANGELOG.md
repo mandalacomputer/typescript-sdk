@@ -16,12 +16,18 @@ This is the summary you read to decide whether to upgrade.
   `computer.update({ endsAt })` or `{ endsInHours }` moves it, and `null`
   clears it. It happens once and is then cleared. `computer.endsAt` reads it.
   On `update()` it travels alone, refused beside any other field before any
-  request. The CLI has `computers create --ends-in HOURS` / `--ends-at TIME`
-  and `computers end-time COMPUTER HOURS|TIME|clear`.
+  request. An answer that does not carry the end time asked for (or still
+  carries one that was cleared) is a `MandalaError` naming the computer, which
+  is left as it is; `launch()` resent under its key does not start a computer
+  whose requested end time has since come. The CLI has
+  `computers create --ends-in HOURS` / `--ends-at TIME` and
+  `computers end-time COMPUTER HOURS|TIME|clear`.
 - Expiring and computer-limited API keys. `apiKeys.create()` takes
   `expiresAt` or `expiresInHours` (at most 366 days) and `computerIds` (1 to
   50 computers the key may act on), and every `ApiKey` carries `expiresAt` and
-  `computerIds` (`null` when unset). An expired key is answered `401`. The CLI
+  `computerIds` (`null` when unset). An expired key is answered `401`. A mint
+  whose answer does not carry the expiry or computer limit asked for is
+  revoked and a `MandalaError` thrown; its key is never returned. The CLI
   has `api-keys create --expires-in HOURS` / `--expires-at TIME` and a
   repeatable `--computer ID`, and `api-keys list` shows both.
 

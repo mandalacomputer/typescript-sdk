@@ -1777,8 +1777,10 @@ export class Computer {
    * the computer, and send the setting again if it stays pending.
    */
   async update(args: P.UpdateArgs, opts: CallOptions & IdempotencyOptions = {}): Promise<this> {
+    const body = P.updateBody(args);
+    const endTime = P.endTimeRequest(args);
     const answer = await this.#t.json('PATCH', P.computer(this.id), {
-      body: P.updateBody(args),
+      body,
       headers: idempotencyHeaders(opts.idempotencyKey),
       signal: opts.signal,
     });
@@ -1789,9 +1791,12 @@ export class Computer {
     // and reporting the update as applied.
     if (data.id) {
       this.#data = data;
+      confirmEndTime(this.#data, endTime, 'update');
       return this;
     }
-    return this.#refreshAfterMutation(`PATCH ${P.computer(this.id)}`, opts);
+    await this.#refreshAfterMutation(`PATCH ${P.computer(this.id)}`, opts);
+    confirmEndTime(this.#data, endTime, 'update');
+    return this;
   }
 
   /**
@@ -6881,6 +6886,35 @@ type SecretsState = 'delivered' | 'delivering' | 'unreported' | MandalaError;
 type BrowserProxyState = 'applied' | 'applying' | 'unreported' | MandalaError;
 /** Where a computer's egress proxy is, as {@link Computer.waitForEgressProxy} reads it. */
 type EgressProxyState = 'applied' | 'applying' | MandalaError;
+
+/**
+ * Hold an answer to the end time that was asked for. A platform that does not
+ * know end times ignores the field and answers as though it had not been sent,
+ * which would leave a computer running with no end, believed to have one. So
+ * an answer without one, after a time was asked for, is an error naming the
+ * computer; and so is one still carrying one after it was cleared. Nothing is
+ * stopped or deleted: the computer is as the platform answered.
+ */
+export function confirmEndTime(
+  data: Record<string, unknown>,
+  want: 'set' | 'clear' | undefined,
+  what: 'create' | 'update',
+): void {
+  if (!want) return;
+  const at = str(data.ends_at);
+  const id = str(data.id) || '(no id)';
+  if (want === 'set' && at === '') {
+    throw new MandalaError(
+      `the ${what} of computer ${id} did not apply the requested end time: the platform's answer has none. ` +
+        'The computer has no end time and will not be stopped by one; stop it yourself, or set one again',
+    );
+  }
+  if (want === 'clear' && at !== '') {
+    throw new MandalaError(
+      `the update of computer ${id} did not clear its end time: the platform's answer still has ${at}`,
+    );
+  }
+}
 
 export const strandedText = (id: string, err: unknown): string =>
   `${id} was not deleted at the end of its block and still consumes resources: ` +

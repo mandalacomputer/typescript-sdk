@@ -488,6 +488,21 @@ describe('mandala api-keys', () => {
     expect(h.rec.last().body).toEqual({ expires_at: '2030-01-01T00:00:00Z' });
   });
 
+  it('prints no key, and fails, when the platform did not apply the limits', async () => {
+    const h = cli((call) =>
+      call.method === 'POST' ? json(API_KEY_CREATED, { status: 201 }) : anyRoute(call),
+    );
+    const r = await h.run(['api-keys', 'create', '--expires-in', '2', '--computer', 'vm-1']);
+    expect(r.code).not.toBe(0);
+    expect(r.out).toBe('');
+    expect(r.out + r.err).not.toContain(API_KEY_CREATED.raw);
+    expect(r.err).toContain('did not apply the requested expiry and computer limit');
+    expect(h.rec.routes()).toEqual([
+      ['POST', 'api-keys'],
+      ['DELETE', `api-keys/${API_KEY_CREATED.id}`],
+    ]);
+  });
+
   it('lists a key with its expiry and computer limit', async () => {
     const limited = { ...API_KEY, expires_at: '2030-01-01T00:00:00Z', computer_ids: ['vm-1'] };
     const r = await cli(() => json([limited])).run(['api-keys', 'list']);

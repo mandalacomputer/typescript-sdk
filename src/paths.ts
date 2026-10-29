@@ -729,6 +729,19 @@ export type CreateArgs = {
 };
 
 /**
+ * What a create or an update asked of the end time: `set` for a time, `clear`
+ * for `null`, `undefined` for nothing. What {@link confirmEndTime} holds the
+ * answer to.
+ */
+export function endTimeRequest(args: {
+  endsAt?: string | Date | null;
+  endsInHours?: number | null;
+}): 'set' | 'clear' | undefined {
+  if (args.endsAt === undefined && args.endsInHours === undefined) return undefined;
+  return args.endsAt === null || args.endsInHours === null ? 'clear' : 'set';
+}
+
+/**
  * An end time as the wire takes it: a `Date` becomes its RFC 3339 form, and a
  * string is checked for shape only. Which times are allowed (how soon, how
  * far ahead) is the platform's rule, answered with a `400` that says why.
