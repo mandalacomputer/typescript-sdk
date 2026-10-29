@@ -71,6 +71,29 @@ describe('an API key mint the platform did not limit', () => {
     expect(key.key).toBe(API_KEY_CREATED.raw);
   });
 
+  it.each([
+    ['malformed computer_ids', { computerIds: ['vm-1'] }, { computer_ids: 'vm-1' }],
+    ['a non-string expires_at', { expiresInHours: 1 }, { expires_at: 1893456000 }],
+  ])('revokes a limited key whose answer has %s', async (_what, args, extra) => {
+    const { rec, client } = sdk(minted(extra));
+    const error = await client.apiKeys.create(args).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(MandalaError);
+    const message = (error as Error).message;
+    expect(message).toContain(`the new key ${API_KEY_CREATED.id} could not be read`);
+    expect(message).toContain('it was revoked');
+    expect(message).not.toContain(API_KEY_CREATED.raw);
+    expect(rec.last()).toMatchObject({
+      method: 'DELETE',
+      path: `/api-keys/${API_KEY_CREATED.id}`,
+    });
+  });
+
+  it('throws the decode error as before on a mint that asked for no limits', async () => {
+    const { rec, client } = sdk(minted({ computer_ids: 'vm-1' }));
+    await expect(client.apiKeys.create({ name: 'ci' })).rejects.toThrow(/computer_ids/);
+    expect(rec.routes()).toEqual([['POST', 'api-keys']]);
+  });
+
   it('says so, and still keeps the key back, when the revoke fails', async () => {
     const { client } = sdk(
       minted({}, () => json({ error: 'upstream down', request_id: 'r1' }, { status: 400 })),
@@ -118,11 +141,75 @@ describe('an end time the platform did not apply', () => {
     );
     const d = await kept.client.computers.get(COMPUTER.id);
     await expect(d.update({ endsAt: null })).rejects.toThrow(
-      `did not clear its end time: the platform's answer still has ${AT}`,
+      `did not clear its end time: the platform's answer still has "${AT}"`,
     );
     await expect(d.update({ endsInHours: null })).rejects.toThrow(/did not clear/);
     expect(rec.calls.filter((call) => call.method !== 'GET' && call.method !== 'PATCH')).toEqual(
       [],
+    );
+  });
+
+  const answering =
+    (endsAt: unknown): Responder =>
+    (call) =>
+      call.path === '/computers' || call.method === 'PATCH'
+        ? json({ ...COMPUTER, ends_at: endsAt })
+        : anyRoute(call);
+
+  it.each([
+    ['an earlier end time, unchanged', '2029-06-01T00:00:00Z'],
+    ['a malformed one', {}],
+    ['an unreadable one', 'soon'],
+    ['a number', 1893456000],
+  ])('refuses a create and an update answered with %s', async (_what, endsAt) => {
+    const { rec, client } = sdk(answering(endsAt));
+    for (const args of [{ endsAt: AT }, { endsInHours: 2 }]) {
+      await expect(client.computers.create(args)).rejects.toThrow(
+        /create of computer .* did not apply the requested end time/,
+      );
+    }
+    const c = await client.computers.get(COMPUTER.id);
+    for (const args of [{ endsAt: AT }, { endsInHours: 2 }]) {
+      await expect(c.update(args)).rejects.toThrow(
+        /update of computer .* did not apply the requested end time/,
+      );
+    }
+    expect(rec.calls.some((call) => call.method === 'DELETE' || call.path.endsWith('/stop'))).toBe(
+      false,
+    );
+  });
+
+  it('refuses a clear answered with a malformed end time', async () => {
+    const { client } = sdk(answering({}));
+    const c = await client.computers.get(COMPUTER.id);
+    await expect(c.update({ endsAt: null })).rejects.toThrow(/did not clear its end time/);
+  });
+
+  it('accepts the time asked for, truncated to the second', async () => {
+    const { client } = sdk(answering('2030-01-01T00:00:00Z'));
+    const c = await client.computers.create({ endsAt: new Date('2030-01-01T00:00:00.900Z') });
+    expect(c.endsAt).toBe('2030-01-01T00:00:00Z');
+    const later = sdk(answering('2030-01-01T00:00:02Z'));
+    await expect(later.client.computers.create({ endsAt: AT })).rejects.toThrow(/did not apply/);
+  });
+
+  it('accepts hours landing between the request and a minute after it', async () => {
+    const hours =
+      (offsetMs: number): Responder =>
+      (call) =>
+        call.path === '/computers'
+          ? json({
+              ...COMPUTER,
+              ends_at: new Date(Date.now() + 7_200_000 + offsetMs).toISOString(),
+            })
+          : anyRoute(call);
+    await sdk(hours(0)).client.computers.create({ endsInHours: 2 });
+    await sdk(hours(30_000)).client.computers.create({ endsInHours: 2 });
+    await expect(sdk(hours(-10_000)).client.computers.create({ endsInHours: 2 })).rejects.toThrow(
+      /did not apply/,
+    );
+    await expect(sdk(hours(120_000)).client.computers.create({ endsInHours: 2 })).rejects.toThrow(
+      /did not apply/,
     );
   });
 
@@ -163,10 +250,12 @@ describe('a launch replayed after its end time has come', () => {
     ['cleared it', {}],
     ['passed', { ends_at: '2001-01-01T00:00:00Z' }],
   ])('does not start a computer whose end time has %s', async (_what, now) => {
-    // The replayed answer is the first call's: an end time still to come.
+    // The replayed answer is the first call's: an end time two hours from a
+    // request made an hour ago, still to come when it was answered.
+    const first = new Date(Date.now() + 3_600_000).toISOString();
     const rec = recorder((call) =>
       call.method === 'POST' && call.path === '/computers'
-        ? new Response(JSON.stringify(stopped({ ends_at: AT })), {
+        ? new Response(JSON.stringify(stopped({ ends_at: first })), {
             headers: { 'content-type': 'application/json', 'idempotent-replayed': 'true' },
           })
         : json(stopped(now)),

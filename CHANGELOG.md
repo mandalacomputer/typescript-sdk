@@ -16,8 +16,8 @@ This is the summary you read to decide whether to upgrade.
   `computer.update({ endsAt })` or `{ endsInHours }` moves it, and `null`
   clears it. It happens once and is then cleared. `computer.endsAt` reads it.
   On `update()` it travels alone, refused beside any other field before any
-  request. An answer that does not carry the end time asked for (or still
-  carries one that was cleared) is a `MandalaError` naming the computer, which
+  request. An answer that does not carry the end time asked for (none, a
+  different or unreadable one, or one still there after a clear) is a `MandalaError` naming the computer, which
   is left as it is; `launch()` resent under its key does not start a computer
   whose requested end time has since come. The CLI has
   `computers create --ends-in HOURS` / `--ends-at TIME` and

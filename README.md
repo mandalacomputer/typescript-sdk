@@ -2567,8 +2567,9 @@ at least 10 minutes and at most 366 days ahead; on `update()` it only has to be
 in the future, and it travels alone, as an egress proxy does: beside any other
 field it is refused before any request. A host that cannot keep end times
 answers `409` with reason `unsupported`. `c.endsAt` is `undefined` when the
-computer has none. An answer that does not carry the end time asked for, or
-still carries one that was cleared, is a `MandalaError` naming the computer;
+computer has none. An answer that does not carry the end time asked for (to the
+second, or within a minute for `endsInHours`), or still carries one that was
+cleared, is a `MandalaError` naming the computer;
 the computer is left as it is, so stop it yourself or set the end time again.
 A `launch()` resent under its idempotency key does not start a computer whose
 requested end time has since come and gone.
@@ -3428,8 +3429,8 @@ console.log(temp.expiresAt, temp.computerIds);
 The expiry is in the future and at most 366 days (8784 hours) ahead; after it,
 every request with the key is answered `401` (`API key expired`). `expiresAt`
 and `computerIds` are `null` on a key without them. A mint whose answer does
-not carry the expiry or computer limit asked for (a later expiry, or a computer
-not asked for, counts) is revoked at once and a `MandalaError` thrown; the key
+not carry the expiry or computer limit asked for (a later expiry, a computer
+not asked for, or an answer that cannot be read, counts) is revoked at once and a `MandalaError` thrown; the key
 is never returned, and the CLI prints none.
 
 **Every `apiKeys` call needs the calling key to be allowed to manage keys.**

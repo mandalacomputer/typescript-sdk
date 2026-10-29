@@ -729,16 +729,23 @@ export type CreateArgs = {
 };
 
 /**
- * What a create or an update asked of the end time: `set` for a time, `clear`
- * for `null`, `undefined` for nothing. What {@link confirmEndTime} holds the
- * answer to.
+ * What a create or an update asked of the end time, for
+ * {@link confirmEndTime} to hold the answer to: a time (`at`, in ms), a number
+ * of hours from the request, a clear, or nothing (`undefined`). Read off
+ * arguments the body builder has already accepted.
  */
+export type EndTimeRequest = { kind: 'clear' } | { kind: 'set'; at?: number; hours?: number };
+
 export function endTimeRequest(args: {
   endsAt?: string | Date | null;
   endsInHours?: number | null;
-}): 'set' | 'clear' | undefined {
+}): EndTimeRequest | undefined {
   if (args.endsAt === undefined && args.endsInHours === undefined) return undefined;
-  return args.endsAt === null || args.endsInHours === null ? 'clear' : 'set';
+  if (args.endsAt === null || args.endsInHours === null) return { kind: 'clear' };
+  if (args.endsAt !== undefined) {
+    return { kind: 'set', at: Date.parse(endTimeArg(args.endsAt, 'endsAt')) };
+  }
+  return { kind: 'set', hours: args.endsInHours as number };
 }
 
 /**

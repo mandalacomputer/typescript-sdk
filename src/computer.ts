@@ -1779,6 +1779,7 @@ export class Computer {
   async update(args: P.UpdateArgs, opts: CallOptions & IdempotencyOptions = {}): Promise<this> {
     const body = P.updateBody(args);
     const endTime = P.endTimeRequest(args);
+    const started = Date.now();
     const answer = await this.#t.json('PATCH', P.computer(this.id), {
       body,
       headers: idempotencyHeaders(opts.idempotencyKey),
@@ -1791,11 +1792,11 @@ export class Computer {
     // and reporting the update as applied.
     if (data.id) {
       this.#data = data;
-      confirmEndTime(this.#data, endTime, 'update');
+      confirmEndTime(this.#data, endTime, 'update', started);
       return this;
     }
     await this.#refreshAfterMutation(`PATCH ${P.computer(this.id)}`, opts);
-    confirmEndTime(this.#data, endTime, 'update');
+    confirmEndTime(this.#data, endTime, 'update', started);
     return this;
   }
 
@@ -6887,33 +6888,55 @@ type BrowserProxyState = 'applied' | 'applying' | 'unreported' | MandalaError;
 /** Where a computer's egress proxy is, as {@link Computer.waitForEgressProxy} reads it. */
 type EgressProxyState = 'applied' | 'applying' | MandalaError;
 
+/** How far an answered end time may sit from an asked-for absolute one: the platform keeps whole seconds. */
+const END_TIME_SLACK_MS = 1_000;
+/** How much later than the request an end time given in hours may land. */
+const END_HOURS_SLACK_MS = 60_000;
+
 /**
  * Hold an answer to the end time that was asked for. A platform that does not
  * know end times ignores the field and answers as though it had not been sent,
- * which would leave a computer running with no end, believed to have one. So
- * an answer without one, after a time was asked for, is an error naming the
- * computer; and so is one still carrying one after it was cleared. Nothing is
+ * which would leave a computer running with no end, or an old one, believed
+ * to have the new one. So the answer's `ends_at` must be the time asked for:
+ * within a second of an absolute time, or for hours, between `started` plus
+ * the hours and now plus the hours and a minute. A `replayed` answer is an
+ * earlier call's, so for hours only the upper bound holds. After a clear, it
+ * must carry none. Otherwise this is an error naming the computer. Nothing is
  * stopped or deleted: the computer is as the platform answered.
  */
 export function confirmEndTime(
   data: Record<string, unknown>,
-  want: 'set' | 'clear' | undefined,
+  want: P.EndTimeRequest | undefined,
   what: 'create' | 'update',
+  started: number,
+  replayed = false,
 ): void {
   if (!want) return;
-  const at = str(data.ends_at);
+  const raw = data.ends_at;
   const id = str(data.id) || '(no id)';
-  if (want === 'set' && at === '') {
+  const absent = raw === undefined || raw === null || raw === '';
+  if (want.kind === 'clear') {
+    if (absent) return;
     throw new MandalaError(
-      `the ${what} of computer ${id} did not apply the requested end time: the platform's answer has none. ` +
-        'The computer has no end time and will not be stopped by one; stop it yourself, or set one again',
+      `the update of computer ${id} did not clear its end time: the platform's answer still has ${JSON.stringify(raw)}`,
     );
   }
-  if (want === 'clear' && at !== '') {
-    throw new MandalaError(
-      `the update of computer ${id} did not clear its end time: the platform's answer still has ${at}`,
-    );
+  const got = typeof raw === 'string' ? Date.parse(raw) : Number.NaN;
+  let ok = false;
+  if (want.at !== undefined) {
+    ok = Math.abs(got - Math.floor(want.at / 1000) * 1000) <= END_TIME_SLACK_MS;
+  } else if (want.hours !== undefined) {
+    const span = want.hours * 3_600_000;
+    ok =
+      (replayed || got >= started + span - END_TIME_SLACK_MS) &&
+      got <= Date.now() + span + END_HOURS_SLACK_MS;
   }
+  if (ok) return;
+  throw new MandalaError(
+    `the ${what} of computer ${id} did not apply the requested end time: the platform's answer has ` +
+      `${absent ? 'none' : JSON.stringify(raw)}. The computer may not be stopped when asked; ` +
+      'stop it yourself, or set the end time again',
+  );
 }
 
 export const strandedText = (id: string, err: unknown): string =>

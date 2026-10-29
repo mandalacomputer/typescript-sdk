@@ -358,11 +358,14 @@ export class Computers {
     opts: CallOptions & IdempotencyOptions,
   ): Promise<{ computer: Computer; replayed: boolean }> {
     let replayed = false;
+    const body = P.createBody(args);
+    const endTime = P.endTimeRequest(args);
+    const started = Date.now();
     const data = await this.#t.json(
       'POST',
       P.COMPUTERS,
       {
-        body: P.createBody(args),
+        body,
         headers: idempotencyHeaders(opts.idempotencyKey),
         signal: opts.signal,
       },
@@ -371,7 +374,7 @@ export class Computers {
       },
     );
     const computer = oneComputer(this.#t, data, 'POST', P.COMPUTERS);
-    confirmEndTime(computer.raw, P.endTimeRequest(args), 'create');
+    confirmEndTime(computer.raw, endTime, 'create', started, replayed);
     return { computer, replayed };
   }
 
@@ -506,7 +509,7 @@ export class Computers {
         // old. If the end time it asked for has since come, the host stopped
         // the computer and cleared it; starting it now would bring it back
         // with no end at all.
-        if (P.endTimeRequest(args) === 'set') {
+        if (P.endTimeRequest(args)?.kind === 'set') {
           const endsAt = computer.endsAt;
           if (endsAt === undefined || !(Date.parse(endsAt) > Date.now())) {
             throw new MandalaError(
@@ -659,14 +662,21 @@ export class Computers {
     // Only the create carries the signal. Cancelling the cleanup delete would
     // leave a machine behind, which is the one thing this method
     // exists to prevent.
-    const data = await this.#t.json('POST', P.COMPUTERS, {
-      body: P.createBody(args),
-      headers: idempotencyHeaders(opts.idempotencyKey),
-      signal: opts.signal,
-    });
+    const body = P.createBody(args);
+    const endTime = P.endTimeRequest(args);
+    const started = Date.now();
+    let replayed = false;
+    const data = await this.#t.json(
+      'POST',
+      P.COMPUTERS,
+      { body, headers: idempotencyHeaders(opts.idempotencyKey), signal: opts.signal },
+      (_, headers) => {
+        replayed = headers.get('idempotent-replayed')?.trim().toLowerCase() === 'true';
+      },
+    );
     const computer = new EphemeralComputer(this.#t, computerRecord(data, 'POST', P.COMPUTERS));
     try {
-      confirmEndTime(computer.raw, P.endTimeRequest(args), 'create');
+      confirmEndTime(computer.raw, endTime, 'create', started, replayed);
     } catch (err) {
       // With a block, the computer is this call's to delete, and a block
       // never run is no reason to keep it. Without one, it is the caller's.
@@ -2741,25 +2751,56 @@ export class ApiKeys {
     // Taken before the request, so the slack below is all the platform's.
     const before = Date.now();
     const data = await this.#t.json('POST', P.API_KEYS, { body, signal: opts.signal });
-    const created = toApiKeyCreated(data, 'POST', P.API_KEYS);
+    const limited =
+      body.expires_at !== undefined ||
+      body.expires_in_hours !== undefined ||
+      body.computer_ids !== undefined;
+    // Read before the decode, so an answer that cannot be decoded can still
+    // be revoked by it when it was meant to be limited.
+    const id = P.isRecord(data) && typeof data.id === 'string' ? data.id : '';
+    const secret = P.isRecord(data) && typeof data.raw === 'string' ? data.raw : '';
+    let created: ApiKeyCreated;
+    try {
+      created = toApiKeyCreated(data, 'POST', P.API_KEYS);
+    } catch (err) {
+      if (!limited || !id || id !== id.trim()) throw err;
+      return this.#refuseUnlimited(
+        id,
+        `the platform's answer for the new key ${id} could not be read (${scrub(
+          err instanceof Error ? err.message : String(err),
+          secret,
+        )}), so the requested limits cannot be confirmed`,
+        opts,
+      );
+    }
     const missed = unappliedKeyLimits(created, body, before);
     if (!missed.length) return created;
-    // A platform that does not know a limit ignores it and mints a key without
-    // it: one that never expires, or that reaches every computer. Such a key
-    // is not handed back; it is revoked, best effort, and never shown.
+    return this.#refuseUnlimited(
+      created.id,
+      `the platform did not apply the requested ${missed.join(' and ')} to the new key ${created.id}`,
+      opts,
+    );
+  }
+
+  /**
+   * A platform that does not know a limit ignores it and mints a key without
+   * it: one that never expires, or that reaches every computer. Such a key is
+   * not handed back; it is revoked, best effort, and never shown.
+   */
+  async #refuseUnlimited(id: string, why: string, opts: CallOptions): Promise<never> {
     let revoked = false;
     let revokeError = '';
     try {
-      await this.revoke(created.id, { signal: opts.signal });
+      await this.revoke(id, { signal: opts.signal });
       revoked = true;
     } catch (err) {
       revokeError = err instanceof Error ? err.message : String(err);
     }
     throw new MandalaError(
-      `the platform did not apply the requested ${missed.join(' and ')} to the new key ${created.id}; ` +
+      `${why}; ` +
         (revoked
           ? 'it was revoked, and the key is not returned'
-          : `revoking it failed (${revokeError}); the key is not returned: revoke ${created.id} yourself`),
+          : `revoking it failed (${revokeError}); the key is not returned: revoke ${id} yourself`),
     );
   }
 
@@ -2777,6 +2818,10 @@ export class ApiKeys {
     await this.#t.json('DELETE', P.apiKey(keyId), { signal: opts.signal });
   }
 }
+
+/** A message with a key's secret taken out, should one ever be quoted in it. */
+const scrub = (message: string, secret: string): string =>
+  secret ? message.split(secret).join('[key]') : message;
 
 /** Slack on an `expires_in_hours` the platform turned into a time. */
 const KEY_EXPIRY_SLACK_MS = 60_000;
