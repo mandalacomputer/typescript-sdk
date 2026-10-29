@@ -145,9 +145,28 @@ describe('client.apiKeys', () => {
         workspaceName: null,
         manageKeys: false,
         mintedByKeyId: null,
+        expiresAt: null,
+        computerIds: null,
         raw: API_KEY,
       },
     ]);
+  });
+
+  it('decodes an expiry and a computer limit, and refuses a limit it cannot read', async () => {
+    const limited = {
+      ...API_KEY,
+      expires_at: '2030-01-01T00:00:00Z',
+      computer_ids: ['vm-1', 'vm-2'],
+    };
+    const [key] = await sdk(() => json([limited])).client.apiKeys.list();
+    expect(key?.expiresAt).toBe('2030-01-01T00:00:00Z');
+    expect(key?.computerIds).toEqual(['vm-1', 'vm-2']);
+    for (const computer_ids of ['vm-1', [7], {}]) {
+      const bad = sdk(() => json([{ ...API_KEY, computer_ids }]));
+      await expect(bad.client.apiKeys.list()).rejects.toThrow(/computer_ids/);
+    }
+    const badExpiry = sdk(() => json([{ ...API_KEY, expires_at: 7 }]));
+    await expect(badExpiry.client.apiKeys.list()).rejects.toThrow(/expires_at/);
   });
 
   it('decodes the key that minted each one, and refuses a non-string minter', async () => {
@@ -181,6 +200,22 @@ describe('client.apiKeys', () => {
     expect(created.manageKeys).toBe(false);
   });
 
+  it('mints with an expiry and a computer limit', async () => {
+    const { rec, client } = sdk();
+    await client.apiKeys.create({
+      expiresAt: new Date('2030-01-01T00:00:00Z'),
+      computerIds: ['vm-1', 'vm-2'],
+    });
+    expect(rec.last().body).toEqual({
+      expires_at: '2030-01-01T00:00:00.000Z',
+      computer_ids: ['vm-1', 'vm-2'],
+    });
+    await client.apiKeys.create({ expiresInHours: 1.5, expiresAt: undefined });
+    expect(rec.last().body).toEqual({ expires_in_hours: 1.5 });
+    await client.apiKeys.create({ expiresAt: '2030-01-01T00:00:00Z' });
+    expect(rec.last().body).toEqual({ expires_at: '2030-01-01T00:00:00Z' });
+  });
+
   it('mints with an empty body when given nothing', async () => {
     const { rec, client } = sdk();
     await client.apiKeys.create();
@@ -200,6 +235,19 @@ describe('client.apiKeys', () => {
     [{ workspaceId: ' wsp-1' }, /workspaceId must be a workspace id/],
     [{ workspaceId: 7 }, /workspaceId/],
     [{ name: 7 }, /name/],
+    [{ expiresAt: '2030-01-01T00:00:00Z', expiresInHours: 2 }, /not both/],
+    [{ expiresAt: 'tomorrow' }, /RFC 3339/],
+    [{ expiresAt: '' }, /RFC 3339/],
+    [{ expiresInHours: 0 }, /more than 0/],
+    [{ expiresInHours: -1 }, /more than 0/],
+    [{ expiresInHours: 8785 }, /at most 8784/],
+    [{ expiresInHours: Number.NaN }, /finite/],
+    [{ expiresInHours: '24' }, /number of hours/],
+    [{ computerIds: [] }, /1 to 50/],
+    [{ computerIds: Array.from({ length: 51 }, (_, i) => `vm-${i}`) }, /1 to 50/],
+    [{ computerIds: 'vm-1' }, /array/],
+    [{ computerIds: [''] }, /computerIds\[0\]/],
+    [{ computerIds: ['vm-1', 7] }, /computerIds\[1\]/],
   ])('refuses %j before sending anything', async (args, message) => {
     const { rec, client } = sdk();
     await expect(client.apiKeys.create(args as never)).rejects.toThrow(message);
@@ -420,6 +468,32 @@ describe('mandala api-keys', () => {
     expect(r.out).toBe(`${API_KEY_CREATED.raw}\n`);
     expect(r.err).toContain(`Created ${API_KEY_CREATED.id} (ci, account-wide)`);
     expect(r.err).toContain('shown once');
+  });
+
+  it('mints with an expiry and computer limits from the flags', async () => {
+    const h = cli();
+    const r = await h.run([
+      'api-keys',
+      'create',
+      '--expires-in',
+      '2',
+      '--computer',
+      'vm-1',
+      '--computer',
+      'vm-2',
+    ]);
+    expect(r.code).toBe(0);
+    expect(h.rec.last().body).toEqual({ expires_in_hours: 2, computer_ids: ['vm-1', 'vm-2'] });
+    await h.run(['api-keys', 'create', '--expires-at', '2030-01-01T00:00:00Z']);
+    expect(h.rec.last().body).toEqual({ expires_at: '2030-01-01T00:00:00Z' });
+  });
+
+  it('lists a key with its expiry and computer limit', async () => {
+    const limited = { ...API_KEY, expires_at: '2030-01-01T00:00:00Z', computer_ids: ['vm-1'] };
+    const r = await cli(() => json([limited])).run(['api-keys', 'list']);
+    expect(r.out).toBe(
+      `${API_KEY.id}  ci  ${API_KEY.prefix}  account-wide  -  last used ${API_KEY.last_used_at}  expires 2030-01-01T00:00:00Z  computers vm-1\n`,
+    );
   });
 
   it('answers the key once under --json, as the platform names it', async () => {

@@ -1233,6 +1233,15 @@ export class Computer {
     return count(this.#data.idle_suspend_min);
   }
 
+  /**
+   * When the host will stop this computer (RFC 3339, UTC), or `undefined` when
+   * it has no end time. Cleared once it has stopped it.
+   */
+  get endsAt(): string | undefined {
+    const at = str(this.#data.ends_at);
+    return at === '' ? undefined : at;
+  }
+
   /** The workspace containing this computer, or `''` when none was reported. */
   get workspaceId(): string {
     return str(this.#data.workspace_id);

@@ -323,6 +323,21 @@ function idleMinutes(value: string): number | null {
   return Number(value);
 }
 
+/**
+ * `computers end-time`'s operand: a number of hours from now (fractions
+ * allowed), an RFC 3339 time, or `clear` (null, no end time).
+ */
+function endTimeOperand(value: string): Pick<P.UpdateArgs, 'endsAt' | 'endsInHours'> {
+  if (value === 'clear') return { endsAt: null };
+  if (/^[0-9]+(\.[0-9]+)?$/.test(value)) return { endsInHours: Number(value) };
+  if (/^[0-9]{4}-[0-9]{2}-[0-9]{2}T/.test(value) && !Number.isNaN(Date.parse(value)))
+    return { endsAt: value };
+  throw new CliError(
+    'invalid_arguments',
+    '<when> must be a number of hours from now, an RFC 3339 time such as 2026-01-31T18:00:00Z, or clear',
+  );
+}
+
 /** How many polls `computers exec-poll` reads back to back while more output waits. */
 const EXEC_POLL_DRAIN = 16;
 
@@ -1219,6 +1234,8 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
       diskGb: n('disk-gb'),
       resolution: s('resolution'),
       start: !b('no-start'),
+      endsInHours: n('ends-in'),
+      endsAt: s('ends-at'),
       browserProxy:
         s('browser-proxy') === undefined
           ? // Sent as null: a template's default proxy applies only when the
@@ -1275,6 +1292,8 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
     const idle =
       path === 'computers idle-suspend' ? { idleSuspendMin: idleMinutes(args[1]!) } : undefined;
     if (idle) P.updateBody(idle);
+    const endTime = path === 'computers end-time' ? endTimeOperand(args[1]!) : undefined;
+    if (endTime) P.updateBody(endTime);
     const relocation = { ramMb: n('ram-mb')!, cpu: n('cpu'), diskGb: n('disk-gb') };
     const workspaceDestination = s('workspace') === 'unassigned' ? null : s('workspace');
     if (path === 'computers move') {
@@ -1529,7 +1548,13 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
           client,
           io,
           output,
-          { name: s('name'), workspace: scopeFlag() },
+          {
+            name: s('name'),
+            workspace: scopeFlag(),
+            expiresInHours: n('expires-in'),
+            expiresAt: s('expires-at'),
+            computerIds: many('computer'),
+          },
           signal,
         );
       case 'api-keys revoke':
@@ -1796,6 +1821,8 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
       }
       case 'computers idle-suspend':
         return output.result(computerData(await (await computer()).update(idle!, keyed)));
+      case 'computers end-time':
+        return output.result(computerData(await (await computer()).update(endTime!, keyed)));
       case 'computers browser-proxy set': {
         const c = await computer();
         let change = proxy!;

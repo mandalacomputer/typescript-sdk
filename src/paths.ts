@@ -712,7 +712,53 @@ export type CreateArgs = {
    * is created.
    */
   workspaceId?: string;
+  /**
+   * When the host stops this computer, as though Stop were pressed: the disk
+   * is kept, and it can be started again. An RFC 3339 time or a `Date`, at
+   * least 10 minutes and at most 366 days ahead; outside that window is a
+   * `400`. It happens once and is then cleared. Give this or
+   * {@link endsInHours}, not both. A host that cannot keep end times answers
+   * `409` with reason `unsupported`.
+   */
+  endsAt?: string | Date;
+  /**
+   * {@link endsAt} as a number of hours from now (fractions allowed), turned
+   * into a time by the platform. Give this or `endsAt`, not both.
+   */
+  endsInHours?: number;
 };
+
+/**
+ * An end time as the wire takes it: a `Date` becomes its RFC 3339 form, and a
+ * string is checked for shape only. Which times are allowed (how soon, how
+ * far ahead) is the platform's rule, answered with a `400` that says why.
+ */
+export function endTimeArg(v: unknown, what: string): string {
+  if (v instanceof Date) {
+    if (Number.isNaN(v.getTime())) throw new ValidationError(`${what} is an invalid Date`);
+    return v.toISOString();
+  }
+  const t = requireString(v, what);
+  if (!t.trim() || t !== t.trim() || Number.isNaN(Date.parse(t))) {
+    throw new ValidationError(
+      `${what} must be an RFC 3339 time such as 2026-01-31T18:00:00Z (got ${JSON.stringify(t)})`,
+    );
+  }
+  return t;
+}
+
+/** A number of hours from now: finite and above zero, fractions allowed. */
+export function hoursArg(v: unknown, what: string, max?: number): number {
+  if (typeof v !== 'number') {
+    throw new ValidationError(`${what} must be a number of hours (got ${typeof v})`);
+  }
+  const h = finite(v, what);
+  if (!(h > 0)) throw new ValidationError(`${what} must be more than 0 hours (got ${h})`);
+  if (max !== undefined && h > max) {
+    throw new ValidationError(`${what} must be at most ${max} hours (got ${h})`);
+  }
+  return h;
+}
 
 /**
  * A proxy for ALL of a computer's outbound TCP.
@@ -921,6 +967,8 @@ export function createBody(args: CreateArgs): Json {
     browserProxy,
     egressProxy,
     workspaceId,
+    endsAt,
+    endsInHours,
   } = args;
   // Defaulted after validation, not by destructuring: `start = true` fills in
   // only for `undefined`, so a `"false"` kept its own shape and went onto the
@@ -958,6 +1006,9 @@ export function createBody(args: CreateArgs): Json {
   }
   if (template !== undefined) requireString(template, 'template');
   if (resolution !== undefined) requireString(resolution, 'resolution');
+  if (endsAt !== undefined && endsInHours !== undefined) {
+    throw new ValidationError('give endsAt or endsInHours, not both');
+  }
   return {
     ...omitUndefined({
       name,
@@ -977,6 +1028,8 @@ export function createBody(args: CreateArgs): Json {
           : browserProxyBody(browserProxy),
       egress_proxy: egressProxy === undefined ? undefined : egressProxyBody(egressProxy),
       workspace_id: workspaceIdArg(workspaceId, 'workspaceId'),
+      ends_at: endsAt === undefined ? undefined : endTimeArg(endsAt, 'endsAt'),
+      ends_in_hours: endsInHours === undefined ? undefined : hoursArg(endsInHours, 'endsInHours'),
     }),
     start,
   };
@@ -1061,6 +1114,19 @@ export type UpdateArgs = {
    * are closed when the setting changes.
    */
   egressProxy?: EgressProxyArgs | null;
+  /**
+   * Set when the host stops this computer (the disk is kept), replacing any
+   * end time it had; `null` clears it. An RFC 3339 time or a `Date` in the
+   * future. On its own: refused here, before any request, beside any other
+   * field. Give this or {@link endsInHours}, not both. A host that cannot keep
+   * end times answers `409` with reason `unsupported`.
+   */
+  endsAt?: string | Date | null;
+  /**
+   * {@link endsAt} as a number of hours from now (fractions allowed); `null`
+   * clears the end time. On its own, as `endsAt` is.
+   */
+  endsInHours?: number | null;
 };
 
 /**
@@ -1228,6 +1294,15 @@ export function updateBody(args: UpdateArgs): Json {
       args.egressProxy === undefined || args.egressProxy === null
         ? args.egressProxy
         : egressProxyBody(args.egressProxy),
+    // `null` is the clear on both, and survives the filter.
+    ends_at:
+      args.endsAt === undefined || args.endsAt === null
+        ? args.endsAt
+        : endTimeArg(args.endsAt, 'endsAt'),
+    ends_in_hours:
+      args.endsInHours === undefined || args.endsInHours === null
+        ? args.endsInHours
+        : hoursArg(args.endsInHours, 'endsInHours'),
   });
   if (args.name !== undefined && !requireString(args.name, 'name').trim()) {
     // On create an omitted name means "you pick one"; in an update an empty one
@@ -1236,18 +1311,37 @@ export function updateBody(args: UpdateArgs): Json {
   }
   if (!Object.keys(body).length) {
     throw new ValidationError(
-      'nothing to update: give at least one of name, cpu, ramMb, diskGb, idleSuspendMin, browserProxy, egressProxy',
+      'nothing to update: give at least one of name, cpu, ramMb, diskGb, idleSuspendMin, browserProxy, egressProxy, endsAt, endsInHours',
     );
   }
-  // The platform refuses it beside anything else with a 400; said here, before
-  // a request, since nothing about it depends on the computer's state.
-  if (args.egressProxy !== undefined) {
-    const beside = (
-      ['name', 'cpu', 'ramMb', 'diskGb', 'idleSuspendMin', 'browserProxy'] as const
-    ).filter((k) => args[k] !== undefined);
+  if (args.endsAt !== undefined && args.endsInHours !== undefined) {
+    throw new ValidationError('give endsAt or endsInHours, not both');
+  }
+  // The platform refuses each of these beside anything else with a 400; said
+  // here, before a request, since nothing about it depends on the computer's
+  // state.
+  const others = [
+    'name',
+    'cpu',
+    'ramMb',
+    'diskGb',
+    'idleSuspendMin',
+    'browserProxy',
+    'egressProxy',
+    'endsAt',
+    'endsInHours',
+  ] as const;
+  for (const alone of ['egressProxy', 'endsAt', 'endsInHours'] as const) {
+    if (args[alone] === undefined) continue;
+    // The two end-time fields are one setting, refused above as a pair.
+    const pair = alone === 'endsAt' || alone === 'endsInHours';
+    const beside = others.filter(
+      (k) =>
+        k !== alone && !(pair && (k === 'endsAt' || k === 'endsInHours')) && args[k] !== undefined,
+    );
     if (beside.length) {
       throw new ValidationError(
-        `egressProxy travels alone: send it in an update of its own, not beside ${beside.join(', ')}`,
+        `${alone} travels alone: send it in an update of its own, not beside ${beside.join(', ')}`,
       );
     }
   }
@@ -3664,7 +3758,29 @@ export type ApiKeyCreateArgs = {
    * itself.
    */
   workspaceId?: string;
+  /**
+   * When the new key stops working: an RFC 3339 time or a `Date` in the
+   * future, at most 366 days ahead. After it, every request with the key is
+   * a `401` (`API key expired`). Omitted, the key does not expire. Give this
+   * or {@link expiresInHours}, not both.
+   */
+  expiresAt?: string | Date;
+  /**
+   * {@link expiresAt} as a number of hours from now: above 0 and at most
+   * 8784 (366 days), fractions allowed.
+   */
+  expiresInHours?: number;
+  /**
+   * Limit the new key to these computers (1 to 50 ids): it can act on them
+   * and on nothing else. Omitted, it reaches every computer in its scope.
+   */
+  computerIds?: string[];
 };
+
+/** The most hours ahead an API key's expiry may be: 366 days. */
+export const API_KEY_EXPIRY_MAX_HOURS = 8784;
+/** The most computers one API key may be limited to. */
+export const API_KEY_COMPUTERS_MAX = 50;
 
 /** The body for `POST api-keys`. */
 export function apiKeyCreateBody(args: ApiKeyCreateArgs = {}): Json {
@@ -3681,7 +3797,41 @@ export function apiKeyCreateBody(args: ApiKeyCreateArgs = {}): Json {
     }
   }
   if (args.name !== undefined) requireString(args.name, 'name');
-  return omitUndefined({ name: args.name, workspace_id: workspaceId });
+  if (args.expiresAt !== undefined && args.expiresInHours !== undefined) {
+    throw new ValidationError('give expiresAt or expiresInHours, not both');
+  }
+  let computerIds: string[] | undefined;
+  if (args.computerIds !== undefined) {
+    if (!Array.isArray(args.computerIds)) {
+      throw new ValidationError(
+        `computerIds must be an array of computer ids (got ${typeof args.computerIds})`,
+      );
+    }
+    if (!args.computerIds.length || args.computerIds.length > API_KEY_COMPUTERS_MAX) {
+      throw new ValidationError(
+        `computerIds must name 1 to ${API_KEY_COMPUTERS_MAX} computers (got ${args.computerIds.length})`,
+      );
+    }
+    computerIds = args.computerIds.map((id, i) => {
+      const v = requireString(id, `computerIds[${i}]`);
+      if (!v.trim() || v !== v.trim()) {
+        throw new ValidationError(
+          `computerIds[${i}] must be a computer id, with no spaces around it`,
+        );
+      }
+      return v;
+    });
+  }
+  return omitUndefined({
+    name: args.name,
+    workspace_id: workspaceId,
+    expires_at: args.expiresAt === undefined ? undefined : endTimeArg(args.expiresAt, 'expiresAt'),
+    expires_in_hours:
+      args.expiresInHours === undefined
+        ? undefined
+        : hoursArg(args.expiresInHours, 'expiresInHours', API_KEY_EXPIRY_MAX_HOURS),
+    computer_ids: computerIds,
+  });
 }
 
 // --- workspaces -------------------------------------------------------------

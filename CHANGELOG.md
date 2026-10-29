@@ -9,6 +9,22 @@ This is the summary you read to decide whether to upgrade.
 
 ## [Unreleased]
 
+### Added
+
+- Computer end times. `computers.create({ endsAt })` or `{ endsInHours }`
+  gives a new computer a time at which its host stops it, keeping the disk;
+  `computer.update({ endsAt })` or `{ endsInHours }` moves it, and `null`
+  clears it. It happens once and is then cleared. `computer.endsAt` reads it.
+  On `update()` it travels alone, refused beside any other field before any
+  request. The CLI has `computers create --ends-in HOURS` / `--ends-at TIME`
+  and `computers end-time COMPUTER HOURS|TIME|clear`.
+- Expiring and computer-limited API keys. `apiKeys.create()` takes
+  `expiresAt` or `expiresInHours` (at most 366 days) and `computerIds` (1 to
+  50 computers the key may act on), and every `ApiKey` carries `expiresAt` and
+  `computerIds` (`null` when unset). An expired key is answered `401`. The CLI
+  has `api-keys create --expires-in HOURS` / `--expires-at TIME` and a
+  repeatable `--computer ID`, and `api-keys list` shows both.
+
 ## [0.20.0] - 2026-10-29
 
 ### Added
