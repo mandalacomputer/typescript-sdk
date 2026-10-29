@@ -395,9 +395,10 @@ describe('ephemeral() without a block, as `await using` calls it', () => {
           : anyRoute(call),
     );
     const error = await client.computers.ephemeral({ endsInHours: 1 }).catch((e: unknown) => e);
-    expect(error).toBeInstanceOf(SuppressedError);
-    expect((error as SuppressedError).error.message).toContain(`${COMPUTER.id} was not deleted`);
-    expect((error as SuppressedError).suppressed.message).toMatch(/did not apply/);
+    // SuppressedError is not a global on every supported Node, so its shape.
+    const both = error as { error: Error; suppressed: Error };
+    expect(both.error.message).toContain(`${COMPUTER.id} was not deleted`);
+    expect(both.suppressed.message).toMatch(/did not apply/);
   });
 });
 
