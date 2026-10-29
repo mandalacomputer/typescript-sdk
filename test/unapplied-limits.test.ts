@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Client, MandalaError, ValidationError } from '../src/index.js';
 import {
   API_KEY_CREATED,
@@ -366,6 +366,41 @@ describe('an end time the platform did not apply', () => {
   });
 });
 
+describe('ephemeral() without a block, as `await using` calls it', () => {
+  it('deletes the computer when its end time was not applied', async () => {
+    const { rec, client } = sdk((call) =>
+      call.method === 'DELETE'
+        ? json({ ok: true, snapshots_deleted: 0 })
+        : call.path === '/computers'
+          ? json(COMPUTER)
+          : anyRoute(call),
+    );
+    // `await using c = await client.computers.ephemeral(...)` never receives a
+    // handle to dispose of when this initializer throws.
+    await expect(client.computers.ephemeral({ endsInHours: 1 })).rejects.toThrow(
+      /did not apply the requested end time/,
+    );
+    expect(rec.routes()).toEqual([
+      ['POST', 'computers'],
+      ['DELETE', `computers/${COMPUTER.id}`],
+    ]);
+  });
+
+  it('says the computer is stranded when that delete fails', async () => {
+    const { client } = sdk((call) =>
+      call.method === 'DELETE'
+        ? json({ error: 'down', request_id: 'r1' }, { status: 400 })
+        : call.path === '/computers'
+          ? json(COMPUTER)
+          : anyRoute(call),
+    );
+    const error = await client.computers.ephemeral({ endsInHours: 1 }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(SuppressedError);
+    expect((error as SuppressedError).error.message).toContain(`${COMPUTER.id} was not deleted`);
+    expect((error as SuppressedError).suppressed.message).toMatch(/did not apply/);
+  });
+});
+
 describe('a launch asked for an end time', () => {
   const stopped = (extra: Record<string, unknown> = {}) => ({
     id: 'launch-42',
@@ -425,11 +460,16 @@ describe('a launch asked for an end time', () => {
 });
 
 describe('a replayed relative end time', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+  // Date.now() is the platform's clock here, shifted with this machine's
+  // where a test moves time on.
   const dated = (body: unknown, replayed: boolean) =>
     new Response(JSON.stringify(body), {
       headers: {
         'content-type': 'application/json',
-        date: new Date().toUTCString(),
+        date: new Date(Date.now()).toUTCString(),
         ...(replayed ? { 'idempotent-replayed': 'true' } : {}),
       },
     });
@@ -473,6 +513,55 @@ describe('a replayed relative end time', () => {
     await c.update({ endsInHours: 2 }, { idempotencyKey: key });
     await c.update({ endsInHours: 2 }, { idempotencyKey: key });
     expect(c.endsAt).toBe(good);
+  });
+
+  it('keeps a late deadline refused when it is replayed half an hour later', async () => {
+    let shiftMs = 0;
+    const realNow = Date.now.bind(Date);
+    const realPerf = performance.now.bind(performance);
+    vi.spyOn(Date, 'now').mockImplementation(() => realNow() + shiftMs);
+    vi.spyOn(performance, 'now').mockImplementation(() => realPerf() + shiftMs);
+    // Set by the first call, five minutes later than asked.
+    const late = new Date(realNow() + 7_200_000 + 5 * 60_000).toISOString();
+    let calls = 0;
+    const { client } = sdk((call) => {
+      if (call.method !== 'POST' || call.path !== '/computers') return anyRoute(call);
+      calls++;
+      return dated({ ...COMPUTER, ends_at: late }, calls > 1);
+    });
+    const key = `late-${realNow()}`;
+    await expect(
+      client.computers.create({ endsInHours: 2 }, { idempotencyKey: key }),
+    ).rejects.toThrow(/did not apply/);
+    shiftMs = 30 * 60_000;
+    await expect(
+      client.computers.create({ endsInHours: 2 }, { idempotencyKey: key }),
+    ).rejects.toThrow(/did not apply/);
+  });
+
+  it('bounds a lost first answer by its send, not by the retry', async () => {
+    let shiftMs = 0;
+    const realNow = Date.now.bind(Date);
+    const realPerf = performance.now.bind(performance);
+    vi.spyOn(Date, 'now').mockImplementation(() => realNow() + shiftMs);
+    vi.spyOn(performance, 'now').mockImplementation(() => realPerf() + shiftMs);
+    // Worked out ten minutes after the send: later than a lost answer allows.
+    const late = new Date(realNow() + 7_200_000 + 10 * 60_000).toISOString();
+    let calls = 0;
+    const { client } = sdk((call) => {
+      if (call.method !== 'POST' || call.path !== '/computers') return anyRoute(call);
+      calls++;
+      if (calls === 1) return Promise.reject(new Error('dropped answer'));
+      return dated({ ...COMPUTER, ends_at: late }, true);
+    });
+    const key = `lost-late-${realNow()}`;
+    await expect(
+      client.computers.create({ endsInHours: 2 }, { idempotencyKey: key }),
+    ).rejects.toThrow();
+    shiftMs = 30 * 60_000;
+    await expect(
+      client.computers.create({ endsInHours: 2 }, { idempotencyKey: key }),
+    ).rejects.toThrow(/did not apply the requested end time/);
   });
 
   it('holds an unknown key only to the upper bound', async () => {

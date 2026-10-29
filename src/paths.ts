@@ -751,23 +751,44 @@ export const RELATIVE_SLACK_MS = 60_000;
 /** Slack around this machine's clock when the answer had no `Date` header. */
 export const RELATIVE_NO_DATE_SLACK_MS = 10 * 60_000;
 
-/** How many idempotency keys' first sends this process keeps, and for how long. */
+/** How many idempotency keys' first exchanges this process keeps, and for how long. */
 const SENDS_MAX = 256;
 const SENDS_TTL_MS = 3_600_000;
-const firstSends = new Map<string, { t0: number; clientStart: number; until: number }>();
+/**
+ * How long a first exchange whose answer was lost may have taken to reach
+ * the platform: the bound on the window when only its send is known.
+ */
+export const LOST_EXCHANGE_MS = 120_000;
+
+type FirstExchange = {
+  t0: number;
+  clientStart: number;
+  until: number;
+  /** The timing a replay of this key is held to, once known. */
+  done?: ExchangeClock;
+  /** The first answer seen here was already a replay: the call was made elsewhere. */
+  foreign?: boolean;
+};
+const firstSends = new Map<string, FirstExchange>();
 
 /**
  * Start timing one request; feed it the answer's headers, then finish it.
  *
  * An answer replayed under an idempotency key is the FIRST call's, its time
- * worked out when that call reached the platform, which may be long before
- * this one, and that call's own answer may have been lost. So with a `key`,
- * the first send of each `route` and key is kept (in this process, for an
- * hour, up to {@link SENDS_MAX} keys), and the timing runs from it. A replay
- * whose first send this process did not make (another process, or a key
- * older than that) can be held only to the upper bound: `upperOnly`. With no
- * key of the caller's, a replay can only be the transport's own retry of this
- * exchange, which the timing already spans.
+ * worked out when that call reached the platform. So with a `key`, the first
+ * exchange of each `route` and key is kept (in this process, for an hour, up
+ * to {@link SENDS_MAX} keys), and a replay is held to its timing, never to
+ * the retry's, so the window cannot widen with the delay before a retry:
+ *
+ * - The first exchange answered: its own timing, in full.
+ * - Its answer lost: from its send to {@link LOST_EXCHANGE_MS} after it,
+ *   placed on the platform's clock by the replay's `Date` header less the
+ *   time since that send.
+ * - Made elsewhere (the first answer seen here was a replay): only the upper
+ *   bound, of the first answer seen here (`upperOnly`).
+ *
+ * With no key of the caller's, a replay can only be the transport's own retry
+ * of this exchange, which the timing already spans.
  */
 export function exchangeClock(
   route?: string,
@@ -778,14 +799,17 @@ export function exchangeClock(
 } {
   const clientStart = Date.now();
   const t0 = performance.now();
-  let earlier: { t0: number; clientStart: number } | undefined;
+  let entry: FirstExchange | undefined;
+  let earlier = false;
   if (route !== undefined && key !== undefined) {
     for (const [k, v] of firstSends) if (v.until <= clientStart) firstSends.delete(k);
     const id = `${route} ${key}`;
-    earlier = firstSends.get(id);
-    if (!earlier) {
+    entry = firstSends.get(id);
+    earlier = entry !== undefined;
+    if (!entry) {
       if (firstSends.size >= SENDS_MAX) firstSends.delete(firstSends.keys().next().value as string);
-      firstSends.set(id, { t0, clientStart, until: clientStart + SENDS_TTL_MS });
+      entry = { t0, clientStart, until: clientStart + SENDS_TTL_MS };
+      firstSends.set(id, entry);
     }
   }
   let serverDate: number | undefined;
@@ -795,16 +819,36 @@ export function exchangeClock(
       serverDate = Number.isNaN(d) ? undefined : d;
     },
     finish(replayed = false) {
-      const from = earlier ?? { t0, clientStart };
-      return {
-        clock: {
-          clientStart: from.clientStart,
-          clientEnd: Date.now(),
-          durationMs: performance.now() - from.t0,
-          serverDate,
-        },
-        upperOnly: replayed && key !== undefined && !earlier,
+      const now = performance.now();
+      const clock: ExchangeClock = {
+        clientStart,
+        clientEnd: Date.now(),
+        durationMs: now - t0,
+        serverDate,
       };
+      if (!entry) return { clock, upperOnly: false };
+      // Carried out now, not replayed: this exchange's own timing is right.
+      if (!replayed) {
+        entry.done ??= clock;
+        return { clock, upperOnly: false };
+      }
+      if (!earlier) {
+        entry.foreign = true;
+        entry.done = clock;
+        return { clock, upperOnly: true };
+      }
+      if (entry.foreign) return { clock: entry.done ?? clock, upperOnly: true };
+      if (!entry.done) {
+        const sinceFirst = now - entry.t0;
+        entry.done = {
+          clientStart: entry.clientStart,
+          clientEnd: entry.clientStart + LOST_EXCHANGE_MS,
+          durationMs: LOST_EXCHANGE_MS,
+          serverDate:
+            serverDate === undefined ? undefined : serverDate - sinceFirst + LOST_EXCHANGE_MS,
+        };
+      }
+      return { clock: entry.done, upperOnly: false };
     },
   };
 }

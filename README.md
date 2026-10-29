@@ -2577,9 +2577,12 @@ replays a create that may be hours old): it throws naming the computer, and
 `computer.start()` is yours to call. So `start: false` with an end time is
 refused by `launch()`; use `create()`. `endsInHours` is checked against the
 platform's clock, and an answer replayed under an idempotency key against the
-first send of that key, when this process made it (kept for an hour, up to 256
-keys); a replay of a call made elsewhere is checked only for being no later
-than asked.
+first exchange of that key, when this process made it (kept for an hour, up to
+256 keys; if its answer was lost, from its send to two minutes after it), so
+the window never widens with the delay before a retry. A replay of a call made
+elsewhere is checked only against the upper bound of the first answer seen.
+In `ephemeral()`, with or without a block, a computer whose end time was not
+applied is deleted before the error is thrown.
 
 ### A proxy for the browsers
 

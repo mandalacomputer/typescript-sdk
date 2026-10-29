@@ -22,9 +22,11 @@ This is the summary you read to decide whether to upgrade.
   suspended computer itself: it throws naming it, and `computer.start()` is
   the caller's to call (so `start: false` with an end time is refused up
   front). A time given in hours is checked against the platform's clock (its
-  `Date` header), and a replayed answer against the first send of its
-  idempotency key when this process made it; otherwise only its upper bound
-  is checked. The CLI has
+  `Date` header), and a replayed answer against the first exchange of its
+  idempotency key when this process made it (from its send to two minutes
+  after it, if its answer was lost); otherwise only against the upper bound
+  of the first answer seen. A failed check in `ephemeral()` deletes the
+  computer, with or without a block. The CLI has
   `computers create --ends-in HOURS` / `--ends-at TIME` and
   `computers end-time COMPUTER HOURS|TIME|clear`.
 - Expiring and computer-limited API keys. `apiKeys.create()` takes

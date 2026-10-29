@@ -687,19 +687,18 @@ export class Computers {
     try {
       confirmEndTime(computer.raw, endTime, 'create', held.clock, held.upperOnly);
     } catch (err) {
-      // With a block, the computer is this call's to delete, and a block
-      // never run is no reason to keep it. Without one, it is the caller's.
-      if (fn) {
-        try {
-          await computer.delete();
-        } catch (cleanupErr) {
-          if (!(cleanupErr instanceof NotFoundError)) {
-            throw suppressing(
-              new MandalaError(strandedText(computer.id, cleanupErr)),
-              err,
-              strandedText(computer.id, cleanupErr),
-            );
-          }
+      // The computer is this call's to delete either way: a block never run
+      // is no reason to keep it, and the `await using` form never gets a
+      // handle to dispose of when this throws.
+      try {
+        await computer.delete();
+      } catch (cleanupErr) {
+        if (!(cleanupErr instanceof NotFoundError)) {
+          throw suppressing(
+            new MandalaError(strandedText(computer.id, cleanupErr)),
+            err,
+            strandedText(computer.id, cleanupErr),
+          );
         }
       }
       throw err;
