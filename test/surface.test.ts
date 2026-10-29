@@ -656,6 +656,24 @@ async function exerciseEverything(client: Client): Promise<void> {
   await client.publicUrls.update('vm-0123456789ab', byId.id, { port: 8000, access: 'public' });
   await client.publicUrls.delete('vm-0123456789ab', byId.id);
 
+  // Credential gateway bindings: the list, a create with every field, and the
+  // delete, on a handle and by the computer's id.
+  await c.credentialGatewayBindings();
+  const gateway = {
+    secretId: 'csec-0123456789abcdef',
+    origin: 'https://api.github.com',
+    pathPrefix: '/repos/acme/app',
+    methods: ['GET', 'POST'],
+  } as const;
+  const gw = await c.createCredentialGatewayBinding({ ...gateway, methods: [...gateway.methods] });
+  await c.deleteCredentialGatewayBinding(gw.id);
+  await client.credentialGateway.list('vm-0123456789ab');
+  const gwById = await client.credentialGateway.create('vm-0123456789ab', {
+    ...gateway,
+    methods: [...gateway.methods],
+  });
+  await client.credentialGateway.delete('vm-0123456789ab', gwById.id);
+
   // A computer's secret bindings, read and replaced against the version read.
   const bound = await c.secrets();
   await c.setSecrets([{ secretId: 'csec-0123456789abcdef', env: 'API_TOKEN' }], {

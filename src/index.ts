@@ -26,6 +26,7 @@ import {
   ApiKeys,
   Builds,
   Computers,
+  CredentialGateway,
   Credits,
   Moves,
   Operations,
@@ -60,6 +61,8 @@ export class Client {
   readonly apiKeys: ApiKeys;
   readonly builds: Builds;
   readonly computers: Computers;
+  /** Credential gateway bindings by a computer's id: secrets a computer uses but never holds. */
+  readonly credentialGateway: CredentialGateway;
   readonly credits: Credits;
   readonly moves: Moves;
   readonly operations: Operations;
@@ -86,6 +89,7 @@ export class Client {
     this.apiKeys = new ApiKeys(this.#t);
     this.builds = new Builds(this.#t);
     this.computers = new Computers(this.#t);
+    this.credentialGateway = new CredentialGateway(this.#t);
     this.credits = new Credits(this.#t);
     this.moves = new Moves(this.#t);
     this.operations = new Operations(this.#t);
@@ -222,6 +226,7 @@ export type {
   BuildProgress,
   BuildStep,
   ComputerUsage,
+  CredentialGatewayBinding,
   CreditEntry,
   CreditEntryKind,
   CreditGrant,
@@ -294,6 +299,8 @@ export type {
   BrowserProxyArgs,
   ComputerState,
   CreateArgs,
+  CredentialGatewayBindingArgs,
+  CredentialGatewayMethod,
   CreditsArgs,
   EgressProxyArgs,
   ExecArgs,
@@ -324,6 +331,8 @@ export {
   AGENT_PAGE_MAX,
   AGENT_RUN_STATUSES,
   COMPUTER_STATES,
+  CREDENTIAL_GATEWAY_BINDINGS_MAX,
+  CREDENTIAL_GATEWAY_METHODS,
   CREDITS_PAGE_MAX,
   INPUT_BATCH_MAX,
   OPERATIONS_PAGE_MAX,
@@ -356,6 +365,7 @@ export {
   ApiKeys,
   Builds,
   Computers,
+  CredentialGateway,
   Credits,
   Moves,
   Operations,

@@ -247,6 +247,7 @@ type ComputerAction =
   | 'schedule'
   | 'ssh'
   | 'public-urls'
+  | 'credential-gateway'
   | 'secrets'
   | 'activities'
   | 'signals'
@@ -3332,6 +3333,152 @@ export function publicUrlUpdateBody(args: PublicUrlUpdateArgs): Json {
     throw new ValidationError('nothing to update: give a port, an access, or both');
   }
   return body;
+}
+
+// --- the credential gateway -----------------------------------------------
+
+/** The HTTP methods a credential gateway binding may allow. */
+export type CredentialGatewayMethod = 'GET' | 'HEAD' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
+export const CREDENTIAL_GATEWAY_METHODS: readonly CredentialGatewayMethod[] = [
+  'GET',
+  'HEAD',
+  'POST',
+  'PUT',
+  'PATCH',
+  'DELETE',
+];
+/** How many bindings one computer may have. */
+export const CREDENTIAL_GATEWAY_BINDINGS_MAX = 8;
+
+/**
+ * What a credential gateway binding is made with
+ * (`POST computers/:id/credential-gateway`). A binding never changes: delete
+ * it and make another to change any of these.
+ */
+export type CredentialGatewayBindingArgs = {
+  /**
+   * The secret in the account's store (`csec-` and sixteen hex characters)
+   * whose value is sent upstream as `Authorization: Bearer <value>`. It must
+   * be in the computer's workspace or the account's own scope; the latest
+   * revision is used on every request.
+   */
+  secretId: string;
+  /**
+   * The exact upstream origin, e.g. `https://api.github.com`: `https`, a public
+   * host name, port 443, and no path, query, fragment or user name.
+   */
+  origin: string;
+  /**
+   * The absolute path requests must be under, matched at segment boundaries:
+   * `/repos/acme/app` allows `/repos/acme/app` and `/repos/acme/app/issues`,
+   * not `/repos/acme/app2`. `/` allows every path.
+   */
+  pathPrefix: string;
+  /** The methods allowed: one to six of GET, HEAD, POST, PUT, PATCH and DELETE, no repeats. */
+  methods: CredentialGatewayMethod[];
+};
+
+/** A computer's credential gateway bindings: `computers/:id/credential-gateway`. */
+export const credentialGateway = (id: string): string => computerAction(id, 'credential-gateway');
+/** One of them, by its id (`cgw-` and twenty-four hex characters). */
+export const credentialGatewayBinding = (id: string, bindingId: string): string =>
+  `${credentialGateway(id)}/${pathId(bindingId, 'credential gateway binding id')}`;
+
+/**
+ * An origin the platform could take, as far as is knowable here: an `https`
+ * URL with a dotted host name, no IP address, no port, user name, path, query
+ * or fragment. Sent as given; the platform decides whether the host is public.
+ */
+function gatewayOrigin(v: unknown): string {
+  const text = requireString(v, 'origin');
+  if (text.length > 256)
+    throw new ValidationError(`origin must be at most 256 characters (got ${text.length})`);
+  let url: URL;
+  try {
+    url = new URL(text);
+  } catch {
+    throw new ValidationError(
+      `origin must be an https URL like https://api.example.com (got ${JSON.stringify(text)})`,
+    );
+  }
+  const host = url.hostname;
+  if (
+    url.protocol !== 'https:' ||
+    url.username ||
+    url.password ||
+    url.port ||
+    url.pathname !== '/' ||
+    url.search ||
+    url.hash ||
+    text.includes('?') ||
+    text.includes('#') ||
+    host.startsWith('[') ||
+    /^[0-9.]+$/.test(host) ||
+    !host.includes('.')
+  ) {
+    throw new ValidationError(
+      'origin must be an https origin on the default port with a host name and nothing after it, like https://api.example.com',
+    );
+  }
+  return text;
+}
+
+/**
+ * A path prefix's shape: absolute, one leading slash, no query, fragment,
+ * backslash, whitespace, empty or dot segment, or encoded separator or dot.
+ * The platform compares paths before any normalization and refuses the same.
+ */
+function gatewayPathPrefix(v: unknown): string {
+  const text = requireString(v, 'pathPrefix');
+  const bad =
+    !text.startsWith('/') ||
+    text.startsWith('//') ||
+    text.includes('//') ||
+    text.length > 4096 ||
+    [...text].some((ch) => ch <= ' ' || ch >= '\x7f' || '\\#?'.includes(ch)) ||
+    /%(?![0-9a-f]{2})/i.test(text) ||
+    /%(?:2e|2f|5c|25|0[0-9a-f]|1[0-9a-f]|7f)/i.test(text) ||
+    text.split('/').some((p) => p === '.' || p === '..');
+  if (bad) {
+    throw new ValidationError(
+      `pathPrefix must be an absolute path like /repos/acme/app, without a query, fragment, empty or dot segments, or encoded slashes or dots (got ${JSON.stringify(text)})`,
+    );
+  }
+  return text;
+}
+
+function gatewayMethods(v: unknown): CredentialGatewayMethod[] {
+  if (!Array.isArray(v) || v.length < 1 || v.length > CREDENTIAL_GATEWAY_METHODS.length) {
+    throw new ValidationError('methods must be a list of one to six HTTP methods');
+  }
+  for (const m of v) {
+    if (!CREDENTIAL_GATEWAY_METHODS.includes(m as CredentialGatewayMethod)) {
+      throw new ValidationError(
+        `methods may be ${CREDENTIAL_GATEWAY_METHODS.join(', ')} (got ${typeof m === 'string' ? JSON.stringify(m) : typeof m})`,
+      );
+    }
+  }
+  if (new Set(v).size !== v.length) throw new ValidationError('methods must not repeat');
+  return [...v] as CredentialGatewayMethod[];
+}
+
+/** The body for `POST computers/:id/credential-gateway`. */
+export function credentialGatewayBody(args: CredentialGatewayBindingArgs): Json {
+  if (!isRecord(args)) {
+    throw new ValidationError(
+      `credential gateway arguments must be an object with secretId, origin, pathPrefix and methods (got ${typeof args})`,
+    );
+  }
+  const secretId = requireString(args.secretId, 'secretId');
+  if (!SECRET_ID.test(secretId)) {
+    throw new ValidationError("secretId must be a secret's id: csec- and sixteen hex characters");
+  }
+  return {
+    secret_id: secretId,
+    origin: gatewayOrigin(args.origin),
+    path_prefix: gatewayPathPrefix(args.pathPrefix),
+    methods: gatewayMethods(args.methods),
+  };
 }
 
 // --- the secret store -----------------------------------------------------

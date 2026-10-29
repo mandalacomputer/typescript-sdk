@@ -420,6 +420,39 @@ export const COMMANDS: readonly Command[] = [
     ],
   ),
   command(
+    'computers gateway list',
+    "List a computer's credential gateway bindings: where each sends which secret, and the base_url and placeholder the computer calls it with (never values)",
+    ['computer'],
+  ),
+  command(
+    'computers gateway create',
+    'Let a computer call an HTTPS API with a secret it never holds: the platform sends the secret as a Bearer token to ORIGIN for the paths and methods given. Inside the computer, call base_url plus the provider path with Authorization: Bearer <placeholder>',
+    ['computer'],
+    [
+      flag('secret-id', 'The id of the secret to send upstream (csec-…; secrets list shows them)', {
+        required: true,
+      }),
+      flag('origin', 'The exact https origin, e.g. https://api.github.com (no path or port)', {
+        required: true,
+      }),
+      flag(
+        'path-prefix',
+        'Allow only paths under this one, at a segment boundary, e.g. /repos/acme/app; / allows all',
+        { required: true },
+      ),
+      flag(
+        'method',
+        'An allowed method: GET, HEAD, POST, PUT, PATCH or DELETE; repeat, or separate with commas, for more',
+        { required: true, repeatable: true },
+      ),
+    ],
+  ),
+  command(
+    'computers gateway rm',
+    'Revoke a credential gateway binding; requests not yet sent upstream can no longer use it',
+    ['computer', 'binding'],
+  ),
+  command(
     'computers secrets get',
     'Show the secrets a computer is bound to: secret ids, revisions and the variable or file each is bound as (never values)',
     ['computer'],

@@ -2872,6 +2872,51 @@ have the id and no handle: `client.publicUrls.delete(computerId, urlId)`. They
 are answered by the control plane, so they work while the computer's host is
 down, and on a lost computer whose labels you want back.
 
+### Credential gateway
+
+Let a computer call an HTTPS API with a secret it never holds. A binding names
+a secret from the account's store, one upstream origin, a path prefix and the
+methods allowed; the platform sends the secret's latest value upstream as
+`Authorization: Bearer`, over verified TLS, and nothing of it is delivered to
+the computer. Inside the computer, call the binding's `baseUrl` followed by the
+provider's path, with `Authorization: Bearer <placeholder>`:
+
+```ts
+const gw = await c.createCredentialGatewayBinding({
+  secretId: s.id,                     // a secret in the computer's workspace or the account's scope
+  origin: 'https://api.github.com',   // https, no path or port
+  pathPrefix: '/repos/acme/app',      // matched at segment boundaries; '/' allows every path
+  methods: ['GET'],
+});
+await c.exec(
+  `curl -s -H 'Authorization: Bearer ${gw.placeholder}' ${gw.baseUrl}/repos/acme/app/issues`,
+);
+```
+
+Owners only, on an active paid plan or trial. A computer has at most eight
+bindings, and a binding never changes: `deleteCredentialGatewayBinding(id)`
+and make another. `credentialGatewayBindings()` lists them, oldest first,
+with secret ids but never values. Only plain HTTP clients are supported (no
+redirects, streaming or WebSocket upgrades); a request is limited to 1 MiB, a
+response to 4 MiB and a call to 30 seconds. A failed call may still have
+reached the provider, so check before retrying. Clones do not inherit
+bindings, and moving the computer to another workspace or owner removes them.
+Guest code can make any call a binding allows, so give it a narrowly scoped
+provider key. Origins, path prefixes and methods are checked here before
+anything is sent; whether a host is public is the platform's to answer.
+
+From the CLI:
+
+```sh
+mandala computers gateway create my-computer --secret-id csec-0123456789abcdef \
+  --origin https://api.github.com --path-prefix /repos/acme/app --method GET
+mandala computers gateway list my-computer
+mandala computers gateway rm my-computer cgw-0123456789abcdef01234567
+```
+
+`client.credentialGateway` has the same three calls by the computer's id:
+`client.credentialGateway.delete(computerId, bindingId)`.
+
 ### Readiness
 
 ```ts
@@ -4020,7 +4065,7 @@ network access and never prompt for input; `logout` needs no network.
 
 | Command group | Available commands |
 | --- | --- |
-| `computers` | `list`, `create`, `get`, `start`, `stop`, `suspend`, `restart`, `delete`, `clone`, `rename`, `resize`, `move`, `idle-suspend`, `browser-proxy set`, `browser-proxy clear`, `egress-proxy set`, `egress-proxy clear`, `urls list`, `urls create`, `urls update`, `urls rm`, `secrets get`, `secrets set`, `view`, `screenshot`, `exec`, `exec-poll`, `exec-kill`, `wait` |
+| `computers` | `list`, `create`, `get`, `start`, `stop`, `suspend`, `restart`, `delete`, `clone`, `rename`, `resize`, `move`, `idle-suspend`, `browser-proxy set`, `browser-proxy clear`, `egress-proxy set`, `egress-proxy clear`, `urls list`, `urls create`, `urls update`, `urls rm`, `gateway list`, `gateway create`, `gateway rm`, `secrets get`, `secrets set`, `view`, `screenshot`, `exec`, `exec-poll`, `exec-kill`, `wait` |
 | `sizes` | `list` |
 | `templates` | `list`, `get`, `validate`, `publish`, `build`, `watch`, `retire`, `schema` |
 | `builds` | `list`, `get`, `progress` |

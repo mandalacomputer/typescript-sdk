@@ -193,7 +193,7 @@ export async function resolveComputer(
 }
 
 /**
- * The computer id a `computers urls` command acts on.
+ * The computer id a `computers urls` or `computers gateway` command acts on.
  *
  * A reference shaped like a computer id IS that id: no listing, no read, and
  * never a name match. The public URL routes are the control plane's, so they
@@ -1456,6 +1456,17 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
     };
     if (path === 'computers urls create') P.publicUrlCreateBody(urlArgs as P.PublicUrlCreateArgs);
     if (path === 'computers urls update') P.publicUrlUpdateBody(urlArgs);
+    // Methods may be repeated or comma-separated, in either case: the
+    // platform's spelling is upper case.
+    const gatewayArgs: P.CredentialGatewayBindingArgs = {
+      secretId: s('secret-id')!,
+      origin: s('origin')!,
+      pathPrefix: s('path-prefix')!,
+      methods: (many('method') ?? [])
+        .flatMap((m) => m.split(','))
+        .map((m) => m.trim().toUpperCase()) as P.CredentialGatewayMethod[],
+    };
+    if (path === 'computers gateway create') P.credentialGatewayBody(gatewayArgs);
     if (path === 'scp' || path === 'files upload' || path === 'files download') {
       const overwrite = { overwrite: !b('no-overwrite') };
       // Only when asked: absent is the default, which resumes a suspended
@@ -1852,6 +1863,21 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
           return output.result({ id: urlId, deleted: true });
         }
         return output.result((await client.publicUrls.update(id, urlId, urlArgs, call)).raw);
+      }
+      case 'computers gateway list':
+        return output.result({
+          bindings: (
+            await client.credentialGateway.list(await urlComputerId(client, target, signal), call)
+          ).map((g) => g.raw),
+        });
+      case 'computers gateway create': {
+        const id = await urlComputerId(client, target, signal);
+        return output.result((await client.credentialGateway.create(id, gatewayArgs, call)).raw);
+      }
+      case 'computers gateway rm': {
+        const id = await urlComputerId(client, target, signal);
+        await client.credentialGateway.delete(id, args[1]!, call);
+        return output.result({ id: args[1]!, deleted: true });
       }
       case 'computers view': {
         const c = await computer();
