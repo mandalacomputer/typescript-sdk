@@ -11,6 +11,8 @@
 
 import { MandalaError, ValidationError } from './errors.js';
 import {
+  CREDENTIAL_GATEWAY_METHODS,
+  type CredentialGatewayMethod,
   isExecutionId,
   isRecord,
   MOVES,
@@ -3680,6 +3682,100 @@ export function toPublicUrlList(d: Record<string, unknown>): PublicUrlList {
     publicUrls: d.public_urls.map((row, i) => toPublicUrl(row, i)),
     raw: { ...d },
   };
+}
+
+// --- the credential gateway -------------------------------------------------
+
+/**
+ * One credential gateway binding: a secret the platform sends upstream for
+ * this computer, to one origin, under one path prefix, for the methods named.
+ * The secret's value never reaches the computer.
+ *
+ * Inside the computer, call {@link baseUrl} followed by the provider's path,
+ * with `Authorization: Bearer <placeholder>`:
+ *
+ * ```sh
+ * curl -H "Authorization: Bearer $PLACEHOLDER" "$BASE_URL/repos/acme/app/issues"
+ * ```
+ */
+export type CredentialGatewayBinding = {
+  /** `cgw-` and twenty-four hex characters: what a delete names. */
+  id: string;
+  computerId: string;
+  /** The secret sent upstream. Its value is never returned. */
+  secretId: string;
+  /** The upstream origin, e.g. `https://api.github.com`. */
+  origin: string;
+  /** Requests must be under this path, at a segment boundary. */
+  pathPrefix: string;
+  /** The methods allowed. */
+  methods: CredentialGatewayMethod[];
+  createdAt: string;
+  /**
+   * The address to call from inside the computer, with the provider's path
+   * after it. Reachable only from that computer; read it here rather than
+   * writing one in.
+   */
+  baseUrl: string;
+  /**
+   * The bearer token to send to {@link baseUrl} in place of the secret; the
+   * gateway replaces it with the secret's latest value.
+   */
+  placeholder: string;
+  raw: Record<string, unknown>;
+};
+
+/**
+ * Strict on what decides where a secret is sent: the id a delete names, the
+ * origin, the path prefix, the methods and the address the guest calls. A row
+ * this client cannot read refuses the answer rather than vanish from it, since
+ * a binding left out of a listing is a credential in use that the caller never
+ * saw and so never revokes.
+ */
+export function toCredentialGatewayBinding(d: unknown, at?: number): CredentialGatewayBinding {
+  const which =
+    at === undefined ? 'a credential gateway binding' : `credential gateway binding ${at}`;
+  if (!isRecord(d)) throw new MandalaError(`expected ${which} to be an object`);
+  if (
+    !nonEmpty(d.id) ||
+    !nonEmpty(d.secret_id) ||
+    !nonEmpty(d.origin) ||
+    !nonEmpty(d.path_prefix) ||
+    !nonEmpty(d.base_url) ||
+    !nonEmpty(d.placeholder)
+  ) {
+    throw new MandalaError(
+      `expected ${which} to carry an id, secret_id, origin, path_prefix, base_url and placeholder`,
+    );
+  }
+  const methods = d.methods;
+  if (
+    !Array.isArray(methods) ||
+    !methods.length ||
+    methods.some((m) => !CREDENTIAL_GATEWAY_METHODS.includes(m as CredentialGatewayMethod))
+  ) {
+    throw new MandalaError(`expected ${which} to carry the methods it allows`);
+  }
+  return {
+    id: d.id,
+    computerId: str(d.computer_id),
+    secretId: d.secret_id,
+    origin: d.origin,
+    pathPrefix: d.path_prefix,
+    methods: [...methods] as CredentialGatewayMethod[],
+    createdAt: str(d.created_at),
+    baseUrl: d.base_url,
+    placeholder: d.placeholder,
+    raw: { ...d },
+  };
+}
+
+/** `GET computers/:id/credential-gateway`: `{ bindings: [...] }`, oldest first. */
+export function toCredentialGatewayBindings(d: unknown): CredentialGatewayBinding[] {
+  if (!isRecord(d) || !Array.isArray(d.bindings)) {
+    throw new MandalaError('expected a list of credential gateway bindings');
+  }
+  return d.bindings.map((row, i) => toCredentialGatewayBinding(row, i));
 }
 
 // --- browser proxy ----------------------------------------------------------

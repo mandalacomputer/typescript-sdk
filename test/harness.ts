@@ -1011,6 +1011,22 @@ export const PUBLIC_URL_LIST = {
   public_urls: [PUBLIC_URL],
 };
 
+/**
+ * One credential gateway binding, as a create and each row of a listing answer
+ * it. The address is a placeholder: the real one is the platform's to give.
+ */
+export const GATEWAY_BINDING = {
+  id: 'cgw-0123456789abcdef01234567',
+  computer_id: 'vm-1',
+  secret_id: 'csec-0123456789abcdef',
+  origin: 'https://api.github.com',
+  path_prefix: '/repos/acme/app',
+  methods: ['GET'],
+  created_at: '2026-10-29T00:00:00.000Z',
+  base_url: 'http://gateway.invalid/cgw-0123456789abcdef01234567',
+  placeholder: 'mandala-placeholder',
+};
+
 /** One secret in the account's store, as `GET secrets/:id` answers it: never a value (OPL-4984). */
 export const SECRET = {
   id: 'csec-0123456789abcdef',
@@ -1235,6 +1251,12 @@ export const anyRoute: Responder = (call) => {
   if (/^\/ssh-keys\/[^/]+$/.test(path)) return new Response(null, { status: 204 });
   if (path.endsWith('/ssh')) return json(SSH_ACCESS);
   // The listing is an envelope and the create a 201 of one URL; the delete an ack.
+  if (path.endsWith('/credential-gateway'))
+    return json(
+      get ? { bindings: [GATEWAY_BINDING] } : GATEWAY_BINDING,
+      get ? {} : { status: 201 },
+    );
+  if (/\/credential-gateway\/[^/]+$/.test(path)) return json({ ok: true });
   if (path.endsWith('/public-urls'))
     return json(get ? PUBLIC_URL_LIST : PUBLIC_URL, get ? {} : { status: 201 });
   if (/\/public-urls\/[^/]+$/.test(path))
