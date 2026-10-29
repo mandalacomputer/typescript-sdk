@@ -306,6 +306,27 @@ describe('an end time the platform did not apply', () => {
     await expect(c.update({ endsInHours: 2 })).rejects.toThrow(/did not apply/);
   });
 
+  it('with a Date header, refuses a one-minute end time five seconds off', async () => {
+    for (const off of [5_000, -5_000]) {
+      const { client } = sdk((call) =>
+        call.path === '/computers' || call.method === 'PATCH'
+          ? dated({ ...COMPUTER, ends_at: serverHours(0, 1 / 60, off) }, 0)
+          : anyRoute(call),
+      );
+      await expect(client.computers.create({ endsInHours: 1 / 60 })).rejects.toThrow(
+        /did not apply/,
+      );
+      const c = await client.computers.get(COMPUTER.id);
+      await expect(c.update({ endsInHours: 1 / 60 })).rejects.toThrow(/did not apply/);
+    }
+    const exact = sdk((call) =>
+      call.path === '/computers'
+        ? dated({ ...COMPUTER, ends_at: serverHours(0, 1 / 60) }, 0)
+        : anyRoute(call),
+    );
+    await exact.client.computers.create({ endsInHours: 1 / 60 });
+  });
+
   it('without a Date header, allows ten minutes of skew either side', async () => {
     const hours =
       (offsetMs: number): Responder =>
@@ -504,6 +525,28 @@ describe('a replayed relative end time', () => {
     const ok = sdk(replaying(AT));
     const c = await ok.client.computers.create({ endsAt: AT }, { idempotencyKey: 'k-r7' });
     expect(c.endsAt).toBe(AT);
+  });
+});
+
+describe('a limited mint on a client with a short timeout', () => {
+  it("is checked and rolled back on its own deadlines, not the client's", async () => {
+    const rec = recorder(async (call) => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      return call.method === 'POST' ? json(API_KEY_CREATED, { status: 201 }) : json({ ok: true });
+    });
+    const client = new Client({
+      apiKey: 'com_test',
+      baseUrl: BASE,
+      fetch: rec.fetch,
+      timeoutMs: 10,
+    });
+    const error = await client.apiKeys.create({ expiresInHours: 1 }).catch((e: unknown) => e);
+    expect((error as Error).message).toContain('did not apply the requested expiry');
+    expect((error as Error).message).toContain('it was revoked');
+    expect(rec.routes()).toEqual([
+      ['POST', 'api-keys'],
+      ['DELETE', `api-keys/${API_KEY_CREATED.id}`],
+    ]);
   });
 });
 

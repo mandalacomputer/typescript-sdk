@@ -748,7 +748,13 @@ export type ExchangeClock = {
   serverDate?: number;
 };
 
-/** Slack around the platform's "now" when its `Date` header is known. */
+/**
+ * Slack around the platform's "now" when its `Date` header is known: it works
+ * the time out between the request's arrival and that stamp, both in whole
+ * seconds.
+ */
+export const DATED_SLACK_MS = 2_000;
+/** Slack around this machine's clock, before the skew allowance below. */
 export const RELATIVE_SLACK_MS = 60_000;
 /** Slack around this machine's clock when the answer had no `Date` header. */
 export const RELATIVE_NO_DATE_SLACK_MS = 10 * 60_000;
@@ -775,15 +781,16 @@ export function exchangeClock(): { headers(h: Headers): void; finish(): Exchange
 /**
  * The window a time of "now plus `spanMs`" worked out by the platform during
  * one request falls in. With the answer's `Date` as the platform's now:
- * from it, less the request's duration and a minute, to it plus a minute.
+ * from it, less the request's duration and two seconds, to it plus two
+ * seconds.
  * Without one, this machine's clock either side of the request, widened by
  * ten minutes (and a little) for the skew between the two.
  */
 export function relativeBounds(spanMs: number, clock: ExchangeClock): [number, number] {
   if (clock.serverDate !== undefined) {
     return [
-      clock.serverDate + spanMs - RELATIVE_SLACK_MS - clock.durationMs,
-      clock.serverDate + spanMs + RELATIVE_SLACK_MS,
+      clock.serverDate + spanMs - clock.durationMs - DATED_SLACK_MS,
+      clock.serverDate + spanMs + DATED_SLACK_MS,
     ];
   }
   return [

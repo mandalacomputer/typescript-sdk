@@ -2780,7 +2780,9 @@ export class ApiKeys {
       data = await this.#t.json(
         'POST',
         P.API_KEYS,
-        { body, signal: deadline ? deadline.signal : opts.signal },
+        // A limited mint's deadline is its own timer's alone: the client's
+        // timeout could cut it off before its answer is checked.
+        { body, signal: deadline ? deadline.signal : opts.signal, noTimeout: limited },
         (_, headers) => timing.headers(headers),
       );
     } catch (err) {
@@ -2831,7 +2833,11 @@ export class ApiKeys {
     try {
       // Not the caller's signal: a cancellation after the mint must not leave
       // the unlimited key alive. Bounded on its own instead.
-      await this.revoke(id, { signal: AbortSignal.timeout(KEY_ROLLBACK_TIMEOUT_MS) });
+      // Its own deadline, not the client's timeout, which may be shorter.
+      await this.#t.json('DELETE', P.apiKey(id), {
+        signal: AbortSignal.timeout(KEY_ROLLBACK_TIMEOUT_MS),
+        noTimeout: true,
+      });
       revoked = true;
     } catch (err) {
       revokeError = err instanceof Error ? err.message : String(err);
