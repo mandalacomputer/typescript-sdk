@@ -379,7 +379,8 @@ export class Computers {
    * transport deadlines, so this is not a total wall-clock limit on launch.
    * `pollMs` defaults to 3,000 for every stage, and is the ceiling for the
    * secrets, browser proxy, egress proxy and desktop stages, which poll 250ms
-   * after their first read and double from there: a stage whose answer lands
+   * after their first read and double from there (the desktop probes every
+   * 100ms for its first ten answers first): a stage whose answer lands
    * just after a read is noticed within moments rather than a whole interval
    * later. `signal` cancels all stages.
    *
