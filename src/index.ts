@@ -389,7 +389,7 @@ export {
   WEBHOOK_TOLERANCE_S,
 } from './webhooks.js';
 
-export const VERSION = '0.19.0';
+export const VERSION = '0.20.0';
 
 export type {
   Artifact,
