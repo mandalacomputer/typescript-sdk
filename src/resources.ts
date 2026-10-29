@@ -13,7 +13,13 @@ import {
   toAgentThread,
   toAgentThreadPage,
 } from './agent.js';
-import { Computer, EphemeralComputer, postAgentRun, strandedText } from './computer.js';
+import {
+  Computer,
+  confirmEndTime,
+  EphemeralComputer,
+  postAgentRun,
+  strandedText,
+} from './computer.js';
 import {
   type APIError,
   type AuthenticationError,
@@ -352,19 +358,25 @@ export class Computers {
     opts: CallOptions & IdempotencyOptions,
   ): Promise<{ computer: Computer; replayed: boolean }> {
     let replayed = false;
+    const body = P.createBody(args);
+    const endTime = P.endTimeRequest(args);
+    const timing = P.exchangeClock();
     const data = await this.#t.json(
       'POST',
       P.COMPUTERS,
       {
-        body: P.createBody(args),
+        body,
         headers: idempotencyHeaders(opts.idempotencyKey),
         signal: opts.signal,
       },
       (_, headers) => {
         replayed = headers.get('idempotent-replayed')?.trim().toLowerCase() === 'true';
+        timing.headers(headers);
       },
     );
-    return { computer: oneComputer(this.#t, data, 'POST', P.COMPUTERS), replayed };
+    const computer = oneComputer(this.#t, data, 'POST', P.COMPUTERS);
+    confirmEndTime(computer.raw, endTime, 'create', timing.finish(), replayed);
+    return { computer, replayed };
   }
 
   /**
@@ -432,6 +444,14 @@ export class Computers {
   ): Promise<Computer> {
     const { timeoutMs = 180_000, pollMs = 3_000, signal, idempotencyKey } = opts;
     checkWait(timeoutMs, pollMs);
+    const endTime = P.endTimeRequest(args);
+    // A launch with an end time never starts the computer itself (see
+    // below), so one that asks to be created stopped could only fail later.
+    if (endTime && args.start === false) {
+      throw new ValidationError(
+        'launch with an end time needs start: create it with computers.create({ start: false }) instead',
+      );
+    }
     signal?.throwIfAborted();
     // Settled here rather than in create, so an error from a later stage can
     // be handed back with the key that replays THIS create.
@@ -494,6 +514,16 @@ export class Computers {
         (computer.runningRamMb === 0 ||
           (args.start === false && computer.runningRamMb === undefined))
       ) {
+        // A computer asked for an end time is never started here. Stopped,
+        // its end time may already have come (a launch resent under its key
+        // replays a create that may be hours old), and a start would bring it
+        // back with none. Whether to start it is the caller's call.
+        if (endTime) {
+          throw new MandalaError(
+            `${id} is ${computer.status}, and it was asked for an end time that may have passed; ` +
+              'launch does not start it. Call computer.start() if you still want it running',
+          );
+        }
         remaining();
         await computer.start({ signal });
       }
@@ -638,12 +668,40 @@ export class Computers {
     // Only the create carries the signal. Cancelling the cleanup delete would
     // leave a machine behind, which is the one thing this method
     // exists to prevent.
-    const data = await this.#t.json('POST', P.COMPUTERS, {
-      body: P.createBody(args),
-      headers: idempotencyHeaders(opts.idempotencyKey),
-      signal: opts.signal,
-    });
+    const body = P.createBody(args);
+    const endTime = P.endTimeRequest(args);
+    const timing = P.exchangeClock();
+    let replayed = false;
+    const data = await this.#t.json(
+      'POST',
+      P.COMPUTERS,
+      { body, headers: idempotencyHeaders(opts.idempotencyKey), signal: opts.signal },
+      (_, headers) => {
+        replayed = headers.get('idempotent-replayed')?.trim().toLowerCase() === 'true';
+        timing.headers(headers);
+      },
+    );
+    const clock = timing.finish();
     const computer = new EphemeralComputer(this.#t, computerRecord(data, 'POST', P.COMPUTERS));
+    try {
+      confirmEndTime(computer.raw, endTime, 'create', clock, replayed);
+    } catch (err) {
+      // The computer is this call's to delete either way: a block never run
+      // is no reason to keep it, and the `await using` form never gets a
+      // handle to dispose of when this throws.
+      try {
+        await computer.delete();
+      } catch (cleanupErr) {
+        if (!(cleanupErr instanceof NotFoundError)) {
+          throw suppressing(
+            new MandalaError(strandedText(computer.id, cleanupErr)),
+            err,
+            strandedText(computer.id, cleanupErr),
+          );
+        }
+      }
+      throw err;
+    }
     if (!fn) return computer;
     let result: T;
     try {
@@ -2694,13 +2752,102 @@ export class ApiKeys {
    * Not retried on a 503: a mint that may already have happened is a key
    * nobody holds, so list and revoke rather than send it again. An account
    * holds at most 1000 keys, and the one past that is a 400.
+   *
+   * A mint asking for an expiry or a computer limit is held to its answer: one
+   * that does not carry them is revoked and thrown, the key never returned.
+   * So that a cancellation cannot strand such a key, `signal` is honoured only
+   * until the mint is sent; the request then runs to a deadline of its own
+   * (60 seconds, whatever the client's `timeoutMs`), and the revoke, if one is
+   * needed, to another.
    */
   async create(args: P.ApiKeyCreateArgs = {}, opts: CallOptions = {}): Promise<ApiKeyCreated> {
-    const data = await this.#t.json('POST', P.API_KEYS, {
-      body: P.apiKeyCreateBody(args),
-      signal: opts.signal,
-    });
-    return toApiKeyCreated(data, 'POST', P.API_KEYS);
+    const body = P.apiKeyCreateBody(args);
+    const limited =
+      body.expires_at !== undefined ||
+      body.expires_in_hours !== undefined ||
+      body.computer_ids !== undefined;
+    opts.signal?.throwIfAborted();
+    const timing = P.exchangeClock();
+    // A limited mint runs to a finite deadline of its own, not the caller's
+    // signal, so neither a cancellation nor a client with no timeout can leave
+    // it hanging or its answer unread.
+    const deadline = limited ? new AbortController() : undefined;
+    const timer = deadline
+      ? setTimeout(() => deadline.abort(new Error('deadline')), KEY_MINT_TIMEOUT_MS)
+      : undefined;
+    let data: unknown;
+    try {
+      data = await this.#t.json(
+        'POST',
+        P.API_KEYS,
+        // A limited mint's deadline is its own timer's alone: the client's
+        // timeout could cut it off before its answer is checked.
+        { body, signal: deadline ? deadline.signal : opts.signal, noTimeout: limited },
+        (_, headers) => timing.headers(headers),
+      );
+    } catch (err) {
+      if (deadline?.signal.aborted) {
+        throw new MandalaError(
+          `POST ${P.API_KEYS} did not answer within ${KEY_MINT_TIMEOUT_MS / 1000}s; a key may have ` +
+            'been minted: list your keys and revoke any you do not hold',
+        );
+      }
+      throw err;
+    } finally {
+      clearTimeout(timer);
+    }
+    const clock = timing.finish();
+    // Read before the decode, so an answer that cannot be decoded can still
+    // be revoked by it when it was meant to be limited.
+    const id = P.isRecord(data) && typeof data.id === 'string' ? data.id : '';
+    const secret = P.isRecord(data) && typeof data.raw === 'string' ? data.raw : '';
+    let created: ApiKeyCreated;
+    try {
+      created = toApiKeyCreated(data, 'POST', P.API_KEYS);
+    } catch (err) {
+      if (!limited || !id || id !== id.trim()) throw err;
+      return this.#refuseUnlimited(
+        id,
+        `the platform's answer for the new key ${id} could not be read (${scrub(
+          err instanceof Error ? err.message : String(err),
+          secret,
+        )}), so the requested limits cannot be confirmed`,
+      );
+    }
+    const missed = unappliedKeyLimits(created, body, clock);
+    if (!missed.length) return created;
+    return this.#refuseUnlimited(
+      created.id,
+      `the platform did not apply the requested ${missed.join(' and ')} to the new key ${created.id}`,
+    );
+  }
+
+  /**
+   * A platform that does not know a limit ignores it and mints a key without
+   * it: one that never expires, or that reaches every computer. Such a key is
+   * not handed back; it is revoked, best effort, and never shown.
+   */
+  async #refuseUnlimited(id: string, why: string): Promise<never> {
+    let revoked = false;
+    let revokeError = '';
+    try {
+      // Not the caller's signal: a cancellation after the mint must not leave
+      // the unlimited key alive. Bounded on its own instead.
+      // Its own deadline, not the client's timeout, which may be shorter.
+      await this.#t.json('DELETE', P.apiKey(id), {
+        signal: AbortSignal.timeout(KEY_ROLLBACK_TIMEOUT_MS),
+        noTimeout: true,
+      });
+      revoked = true;
+    } catch (err) {
+      revokeError = err instanceof Error ? err.message : String(err);
+    }
+    throw new MandalaError(
+      `${why}; ` +
+        (revoked
+          ? 'it was revoked, and the key is not returned'
+          : `revoking it failed (${revokeError}); the key is not returned: revoke ${id} yourself`),
+    );
   }
 
   /**
@@ -2716,6 +2863,46 @@ export class ApiKeys {
   async revoke(keyId: string, opts: CallOptions = {}): Promise<void> {
     await this.#t.json('DELETE', P.apiKey(keyId), { signal: opts.signal });
   }
+}
+
+/** A message with a key's secret taken out, should one ever be quoted in it. */
+const scrub = (message: string, secret: string): string =>
+  secret ? message.split(secret).join('[key]') : message;
+
+/** How long a limited mint may take, whatever the client's own timeout. */
+const KEY_MINT_TIMEOUT_MS = 60_000;
+
+/** How long the revoke of a key minted without its limits may take. */
+const KEY_ROLLBACK_TIMEOUT_MS = 15_000;
+
+/**
+ * The limits a mint asked for that its answer does not carry: an expiry that
+ * is missing or later than asked, a computer limit that is missing, empty, or
+ * names a computer that was not asked for.
+ */
+function unappliedKeyLimits(
+  key: ApiKey,
+  body: Record<string, unknown>,
+  clock: P.ExchangeClock,
+): string[] {
+  const missed: string[] = [];
+  let latest: number | undefined;
+  if (typeof body.expires_at === 'string') latest = Date.parse(body.expires_at);
+  if (typeof body.expires_in_hours === 'number') {
+    // An expiry earlier than asked is no wider a key, so only the upper
+    // bound of the window holds.
+    latest = P.relativeBounds(body.expires_in_hours * 3_600_000, clock)[1];
+  }
+  if (latest !== undefined) {
+    const got = key.expiresAt === null ? Number.NaN : Date.parse(key.expiresAt);
+    if (!(got <= latest)) missed.push('expiry');
+  }
+  if (Array.isArray(body.computer_ids)) {
+    const asked = new Set(body.computer_ids as string[]);
+    const got = key.computerIds;
+    if (!got?.length || !got.every((id) => asked.has(id))) missed.push('computer limit');
+  }
+  return missed;
 }
 
 /**

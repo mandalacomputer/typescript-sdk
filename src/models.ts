@@ -4809,6 +4809,13 @@ export type ApiKey = {
    * how to find them and revoke them too.
    */
   mintedByKeyId: string | null;
+  /** When it stops working (RFC 3339), or `null` for a key that does not expire. */
+  expiresAt: string | null;
+  /**
+   * The computers it is limited to, or `null` for a key that reaches every
+   * computer in its scope.
+   */
+  computerIds: string[] | null;
   raw: Record<string, unknown>;
 };
 
@@ -4825,6 +4832,18 @@ const nullableText = (v: unknown, what: string): string | null => {
   if (v === null || v === undefined) return null;
   if (typeof v !== 'string') throw new MandalaError(`expected ${what} to be a string or null`);
   return v;
+};
+
+/**
+ * A key's computer limit. Strict, as `manage_keys` is: it narrows what the key
+ * can reach, and a limit this client cannot read is not one to report as none.
+ */
+const keyComputers = (v: unknown, what: string): string[] | null => {
+  if (v === null || v === undefined) return null;
+  if (!Array.isArray(v) || !v.every((id) => typeof id === 'string')) {
+    throw new MandalaError(`expected ${what}'s computer_ids to be a list of computer ids or null`);
+  }
+  return [...v];
 };
 
 /**
@@ -4850,6 +4869,8 @@ export function toApiKey(d: unknown, what = 'an API key'): ApiKey {
     workspaceName: nullableText(d.workspace_name, `${what}'s workspace_name`),
     manageKeys: d.manage_keys,
     mintedByKeyId: nullableText(d.minted_by_key_id, `${what}'s minted_by_key_id`),
+    expiresAt: nullableText(d.expires_at, `${what}'s expires_at`),
+    computerIds: keyComputers(d.computer_ids, what),
     raw: { ...d },
   };
 }

@@ -39,6 +39,8 @@ const keyLine = (k: ApiKey): string =>
       // Only a key minted over the API names its minter; one made in the
       // dashboard has none, and says nothing rather than a placeholder.
       ...(k.mintedByKeyId ? [`minted by ${k.mintedByKeyId}`] : []),
+      ...(k.expiresAt ? [`expires ${k.expiresAt}`] : []),
+      ...(k.computerIds ? [`computers ${k.computerIds.join(',')}`] : []),
     ].join('  '),
   );
 
@@ -68,13 +70,22 @@ export async function apiKeysCreate(
   client: Client,
   io: CliIO,
   output: Output,
-  args: { name?: string; workspace?: string },
+  args: {
+    name?: string;
+    workspace?: string;
+    expiresInHours?: number;
+    expiresAt?: string;
+    computerIds?: string[];
+  },
   signal: AbortSignal,
 ): Promise<number> {
   const created = await client.apiKeys.create(
     {
       ...(args.name === undefined ? {} : { name: args.name }),
       ...(args.workspace === undefined ? {} : { workspaceId: args.workspace }),
+      ...(args.expiresInHours === undefined ? {} : { expiresInHours: args.expiresInHours }),
+      ...(args.expiresAt === undefined ? {} : { expiresAt: args.expiresAt }),
+      ...(args.computerIds?.length ? { computerIds: args.computerIds } : {}),
     },
     { signal },
   );

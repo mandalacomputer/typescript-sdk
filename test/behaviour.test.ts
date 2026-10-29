@@ -1345,6 +1345,16 @@ describe('what a payload cannot be allowed to mean', () => {
     expect(computer.idleSuspendMin).toBeUndefined();
   });
 
+  it('reads an end time, and none when it is absent or empty', async () => {
+    const at = '2030-01-01T00:00:00Z';
+    const { client: c } = client(() => json({ ...COMPUTER, ends_at: at }));
+    expect((await c.computers.get('vm-1')).endsAt).toBe(at);
+    const { client: none } = client(() => json({ ...COMPUTER, ends_at: '' }));
+    expect((await none.computers.get('vm-1')).endsAt).toBeUndefined();
+    const { client: bare } = client(() => json(COMPUTER));
+    expect((await bare.computers.get('vm-1')).endsAt).toBeUndefined();
+  });
+
   /**
    * OPL-4260. The field a caller reads before driving a window.
    *

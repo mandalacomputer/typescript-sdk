@@ -5841,6 +5841,53 @@ describe('computers idle-suspend (OPL-5524)', () => {
   });
 });
 
+describe('computer end times', () => {
+  it.each([
+    ['8', { ends_in_hours: 8 }],
+    ['0.5', { ends_in_hours: 0.5 }],
+    ['2030-01-01T00:00:00Z', { ends_at: '2030-01-01T00:00:00Z' }],
+    ['clear', { ends_at: null }],
+  ])('computers end-time sends %s as %j', async (typed, sent) => {
+    const h = harness();
+    const result = await h.run(['computers', 'end-time', COMPUTER.name, typed]);
+    expect(result.code).toBe(0);
+    expect(h.rec.last()).toMatchObject({ method: 'PATCH', path: `/computers/${COMPUTER.id}` });
+    expect(h.rec.last().body).toEqual(sent);
+  });
+
+  it.each(['soon', '-5', '0', 'tomorrow 9am'])(
+    'computers end-time refuses %s before any request',
+    async (typed) => {
+      const h = harness();
+      const result = await h.run(['computers', 'end-time', COMPUTER.id, '--', typed], false);
+      expect(result.code).toBe(1);
+      expect(result.err).toMatch(/<when> must be|more than 0/);
+      expect(h.rec.calls).toEqual([]);
+    },
+  );
+
+  it('computers create sends --ends-in and --ends-at', async () => {
+    const h = harness();
+    await h.run(['computers', 'create', '--size', 'small', '--ends-in', '1.5']);
+    const create = h.rec.calls.find((c) => c.method === 'POST' && c.path === '/computers');
+    expect(create?.body).toMatchObject({ ends_in_hours: 1.5 });
+    const g = harness();
+    await g.run(['computers', 'create', '--size', 'small', '--ends-at', '2030-01-01T00:00:00Z']);
+    const at = g.rec.calls.find((c) => c.method === 'POST' && c.path === '/computers');
+    expect(at?.body).toMatchObject({ ends_at: '2030-01-01T00:00:00Z' });
+  });
+
+  it('computers create refuses --ends-in beside --ends-at before any request', async () => {
+    const h = harness();
+    const result = await h.run(
+      ['computers', 'create', '--ends-in', '1', '--ends-at', '2030-01-01T00:00:00Z'],
+      false,
+    );
+    expect(result.code).not.toBe(0);
+    expect(h.rec.calls).toEqual([]);
+  });
+});
+
 describe('secrets get (OPL-5524)', () => {
   it('finds a secret by name and reads its metadata by id', async () => {
     const h = harness();
@@ -5894,6 +5941,7 @@ describe('--idempotency-key on keyed commands (OPL-5524)', () => {
     [['computers', 'resize', COMPUTER.id, '--cpu', '4'], 'PATCH', `computers/${COMPUTER.id}`],
     [['computers', 'rename', COMPUTER.id, 'next'], 'PATCH', `computers/${COMPUTER.id}`],
     [['computers', 'idle-suspend', COMPUTER.id, '30'], 'PATCH', `computers/${COMPUTER.id}`],
+    [['computers', 'end-time', COMPUTER.id, '8'], 'PATCH', `computers/${COMPUTER.id}`],
     [['snapshots', 'restore', SNAPSHOT.id], 'POST', `snapshots/${SNAPSHOT.id}/restore`],
     [['snapshots', 'clone', SNAPSHOT.id], 'POST', `snapshots/${SNAPSHOT.id}/clone`],
   ] as [string[], string, string, Responder?][])(

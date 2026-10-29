@@ -92,12 +92,59 @@ describe('createBody', () => {
   it('refuses an all-whitespace name', () => {
     expect(() => P.createBody({ name: '  ' })).toThrow(/must not be empty/);
   });
+
+  it('sends an end time as a time or as hours from now', () => {
+    expect(P.createBody({ template: 'base', endsAt: '2030-01-01T00:00:00Z' })).toEqual({
+      template: 'base',
+      ends_at: '2030-01-01T00:00:00Z',
+      start: true,
+    });
+    expect(P.createBody({ endsAt: new Date('2030-01-01T00:00:00Z') })).toMatchObject({
+      ends_at: '2030-01-01T00:00:00.000Z',
+    });
+    expect(P.createBody({ endsInHours: 0.5 })).toMatchObject({ ends_in_hours: 0.5 });
+  });
+
+  it.each([
+    [{ endsAt: '2030-01-01T00:00:00Z', endsInHours: 2 }, /not both/],
+    [{ endsAt: 'next week' }, /RFC 3339/],
+    [{ endsAt: ' 2030-01-01T00:00:00Z' }, /RFC 3339/],
+    [{ endsAt: new Date(Number.NaN) }, /invalid Date/],
+    [{ endsAt: 7 }, /endsAt/],
+    [{ endsInHours: 0 }, /more than 0/],
+    [{ endsInHours: -2 }, /more than 0/],
+    [{ endsInHours: Number.POSITIVE_INFINITY }, /finite/],
+    [{ endsInHours: '2' }, /number of hours/],
+  ])('refuses the end time %j', (args, message) => {
+    expect(() => P.createBody(args as never)).toThrow(message);
+  });
 });
 
 describe('updateBody', () => {
   it('keeps a null idle window, which means "follow the host"', () => {
     expect(P.updateBody({ idleSuspendMin: null })).toEqual({ idle_suspend_min: null });
     expect(P.updateBody({ idleSuspendMin: 30 })).toEqual({ idle_suspend_min: 30 });
+  });
+
+  it('sets and clears an end time, which travels alone', () => {
+    expect(P.updateBody({ endsAt: '2030-01-01T00:00:00Z' })).toEqual({
+      ends_at: '2030-01-01T00:00:00Z',
+    });
+    expect(P.updateBody({ endsInHours: 3 })).toEqual({ ends_in_hours: 3 });
+    expect(P.updateBody({ endsAt: null })).toEqual({ ends_at: null });
+    expect(P.updateBody({ endsInHours: null })).toEqual({ ends_in_hours: null });
+    expect(() => P.updateBody({ endsAt: null, endsInHours: null })).toThrow(/not both/);
+    expect(() => P.updateBody({ endsInHours: 0 })).toThrow(/more than 0/);
+    for (const other of [
+      { name: 'renamed' },
+      { cpu: 2 },
+      { idleSuspendMin: null },
+      { browserProxy: null },
+    ]) {
+      expect(() => P.updateBody({ ...other, endsAt: null })).toThrow(/endsAt travels alone/);
+      expect(() => P.updateBody({ ...other, endsInHours: 1 })).toThrow(/endsInHours travels alone/);
+    }
+    expect(() => P.updateBody({ egressProxy: null, endsAt: null })).toThrow(/travels alone/);
   });
 
   it('refuses an empty patch and an empty name', () => {

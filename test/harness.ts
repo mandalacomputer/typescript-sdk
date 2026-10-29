@@ -1133,6 +1133,34 @@ export const SIGNAL_PAGE = {
   retention: 'ephemeral',
 };
 
+/**
+ * The end time a platform that keeps them answers for a create or an update:
+ * the time asked for, or one worked out from the hours. Nothing when none was
+ * asked for, or it was cleared.
+ */
+export function appliedEndTime(body: unknown): { ends_at?: string } {
+  if (!isRecord(body)) return {};
+  if (typeof body.ends_at === 'string') return { ends_at: body.ends_at };
+  if (typeof body.ends_in_hours === 'number')
+    return { ends_at: new Date(Date.now() + body.ends_in_hours * 3_600_000).toISOString() };
+  return {};
+}
+
+/** The limits a platform that keeps them answers for a mint, as asked. */
+export function appliedKeyLimits(body: unknown): Record<string, unknown> {
+  if (!isRecord(body)) return {};
+  const expires_at =
+    typeof body.expires_at === 'string'
+      ? body.expires_at
+      : typeof body.expires_in_hours === 'number'
+        ? new Date(Date.now() + body.expires_in_hours * 3_600_000).toISOString()
+        : undefined;
+  return {
+    ...(expires_at === undefined ? {} : { expires_at }),
+    ...(Array.isArray(body.computer_ids) ? { computer_ids: body.computer_ids } : {}),
+  };
+}
+
 export const anyRoute: Responder = (call) => {
   const { path, method } = call;
   const get = method === 'GET';
@@ -1245,7 +1273,10 @@ export const anyRoute: Responder = (call) => {
   if (/^\/webhooks\/[^/]+$/.test(path)) return json(method === 'DELETE' ? { ok: true } : WEBHOOK);
   if (path === '/whoami') return json(WHOAMI);
   if (path === '/api-keys')
-    return json(get ? [API_KEY] : API_KEY_CREATED, get ? {} : { status: 201 });
+    return json(
+      get ? [API_KEY] : { ...API_KEY_CREATED, ...appliedKeyLimits(call.body) },
+      get ? {} : { status: 201 },
+    );
   if (/^\/api-keys\/[^/]+$/.test(path)) return json({ ok: true });
   if (path === '/ssh-keys') return json(get ? [SSH_KEY] : SSH_KEY, get ? {} : { status: 201 });
   if (/^\/ssh-keys\/[^/]+$/.test(path)) return new Response(null, { status: 204 });
@@ -1306,14 +1337,15 @@ export const anyRoute: Responder = (call) => {
   if (/^\/operations\/[^/]+$/.test(path)) return json(OPERATION);
   if (path === '/moves') return json({ moves: [MOVE_DONE] });
   if (path.endsWith('/move')) return json(MOVE_STARTED, { status: 202 });
-  if (path === '/computers') return json(get ? [COMPUTER] : COMPUTER);
+  if (path === '/computers')
+    return json(get ? [COMPUTER] : { ...COMPUTER, ...appliedEndTime(call.body) });
   // endsWith, because the recorder's paths keep the computer id: the real
   // route is /computers/:id/input, and an exact '/input' match never fired.
   if (path.endsWith('/input'))
     return json(
       isRecord(call.body) && call.body.action === 'type' ? { ok: true, mechanism: 'physical' } : {},
     );
-  return json(COMPUTER);
+  return json(method === 'PATCH' ? { ...COMPUTER, ...appliedEndTime(call.body) } : COMPUTER);
 };
 
 export const testClient = (fetchImpl: typeof globalThis.fetch, Ctor: typeof Client): Client =>

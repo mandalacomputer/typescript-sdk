@@ -2548,6 +2548,43 @@ is refused. `0` means never suspend — no idle suspend and no eviction under
 memory pressure — and how many computers may be pinned that way is capped by
 the plan (Solo 0, Studio 1, Fleet 4): one past the cap is a `PlanLimitError`.
 
+### An end time
+
+A computer can be given an end time: when it comes, its host stops the
+computer, as though `stop()` were called. The disk is kept, so it can be
+started again; the end time happens once and is then cleared.
+
+```ts
+const c = await client.computers.create({ template: 'base', endsInHours: 4 });
+console.log(c.endsAt);                                   // RFC 3339, UTC
+await c.update({ endsAt: new Date(Date.now() + 86_400_000) }); // move it
+await c.update({ endsAt: null });                         // clear it
+```
+
+`endsAt` is an RFC 3339 time or a `Date`; `endsInHours` is hours from now,
+fractions allowed. Give one or the other, not both. At create the time must be
+at least 10 minutes and at most 366 days ahead; on `update()` it only has to be
+in the future, and it travels alone, as an egress proxy does: beside any other
+field it is refused before any request. A host that cannot keep end times
+answers `409` with reason `unsupported`. `c.endsAt` is `undefined` when the
+computer has none. An answer that does not carry the end time asked for (to the
+second, or within a minute for `endsInHours`), or still carries one that was
+cleared, is a `MandalaError` naming the computer;
+the computer is left as it is, so stop it yourself or set the end time again.
+`launch()` with an end time never starts a stopped or suspended computer
+itself, since its end time may have passed (a launch resent under its key
+replays a create that may be hours old): it throws naming the computer, and
+`computer.start()` is yours to call. So `start: false` with an end time is
+refused by `launch()`; use `create()`. `endsInHours` is checked against the
+platform's clock (the answer's `Date` header). An answer replayed under an
+idempotency key was worked out by an earlier call, so its time in hours is
+checked only for being present, readable and no later than asked: **its lower
+bound is unconfirmed**, and a replayed computer may end earlier than this
+call's hours would say. Read `c.endsAt` if that matters. An absolute `endsAt`
+is checked exactly, replayed or not.
+In `ephemeral()`, with or without a block, a computer whose end time was not
+applied is deleted before the error is thrown.
+
 ### A proxy for the browsers
 
 `browserProxy` sends a Linux computer's browsers — Chromium, Chrome and Firefox —
@@ -3389,6 +3426,24 @@ await vault.put('mandala-ci', ci.key); // shown ONCE: store it now
 await client.apiKeys.revoke(ci.id);
 ```
 
+A key can be made to expire, and can be limited to some computers:
+
+```ts
+const temp = await client.apiKeys.create({
+  name: 'one job',
+  expiresInHours: 2,            // or expiresAt: an RFC 3339 time or a Date
+  computerIds: [c.id],          // 1 to 50; it reaches nothing else
+});
+console.log(temp.expiresAt, temp.computerIds);
+```
+
+The expiry is in the future and at most 366 days (8784 hours) ahead; after it,
+every request with the key is answered `401` (`API key expired`). `expiresAt`
+and `computerIds` are `null` on a key without them. A mint whose answer does
+not carry the expiry or computer limit asked for (a later expiry, a computer
+not asked for, or an answer that cannot be read, counts) is revoked at once and a `MandalaError` thrown; the key
+is never returned, and the CLI prints none.
+
 **Every `apiKeys` call needs the calling key to be allowed to manage keys.**
 That permission is off for every key until its holder turns it on in a signed-in
 dashboard session (Settings → Credentials → API keys → the key's menu → **Allow
@@ -4065,7 +4120,7 @@ network access and never prompt for input; `logout` needs no network.
 
 | Command group | Available commands |
 | --- | --- |
-| `computers` | `list`, `create`, `get`, `start`, `stop`, `suspend`, `restart`, `delete`, `clone`, `rename`, `resize`, `move`, `idle-suspend`, `browser-proxy set`, `browser-proxy clear`, `egress-proxy set`, `egress-proxy clear`, `urls list`, `urls create`, `urls update`, `urls rm`, `gateway list`, `gateway create`, `gateway rm`, `secrets get`, `secrets set`, `view`, `screenshot`, `exec`, `exec-poll`, `exec-kill`, `wait` |
+| `computers` | `list`, `create`, `get`, `start`, `stop`, `suspend`, `restart`, `delete`, `clone`, `rename`, `resize`, `move`, `idle-suspend`, `end-time`, `browser-proxy set`, `browser-proxy clear`, `egress-proxy set`, `egress-proxy clear`, `urls list`, `urls create`, `urls update`, `urls rm`, `gateway list`, `gateway create`, `gateway rm`, `secrets get`, `secrets set`, `view`, `screenshot`, `exec`, `exec-poll`, `exec-kill`, `wait` |
 | `sizes` | `list` |
 | `templates` | `list`, `get`, `validate`, `publish`, `build`, `watch`, `retire`, `schema` |
 | `builds` | `list`, `get`, `progress` |
@@ -4122,6 +4177,7 @@ mandala whoami                      # person, account, role, workspace, key
 mandala api-keys list               # your keys this key can reach; never the keys
 mandala api-keys create --name ci   # prints the new key, once, alone on stdout
 mandala api-keys create --name ci --workspace wsp-...
+mandala api-keys create --name job --expires-in 2 --computer vm-...   # or --expires-at TIME
 mandala api-keys revoke key-...
 ```
 
@@ -4163,7 +4219,7 @@ stderr naming them and the command to run next.
 Every command whose call is keyed takes `--idempotency-key KEY` (1 to 255
 printable ASCII characters, no space) and sends it instead of a key of its own:
 `computers create`, `start`, `stop`, `suspend`, `restart`, `clone`, `delete`,
-`rename`, `resize`, `move --ram-mb`, `idle-suspend`, `browser-proxy set` and `clear`,
+`rename`, `resize`, `move --ram-mb`, `idle-suspend`, `end-time`, `browser-proxy set` and `clear`,
 `egress-proxy set` and `clear`, and `snapshots restore` and `clone`. So a
 command whose answer was lost, and whose error named a key, can be sent again
 with that key: the platform does not carry one key out twice. What a resend
@@ -4361,6 +4417,8 @@ mandala computers exec-kill workbench 4242
 mandala computers exec workbench -c 'make test' --retain-output
 mandala computers wait workbench --until desktop
 mandala computers idle-suspend workbench 120                 # or off, or default
+mandala computers create --name scratch --ends-in 4          # or --ends-at 2026-01-31T18:00:00Z
+mandala computers end-time workbench 8                       # hours, a time, or clear
 mandala computers rename workbench build-box
 mandala computers create --name via-proxy --browser-proxy http://proxy.example.com:3128 --browser-proxy-bypass '<local>,*.internal'
 mandala computers create --name direct --template acme/web --no-browser-proxy  # decline a template's default proxy
@@ -4560,6 +4618,10 @@ and `--idempotency-key` before making requests.
 before its host suspends it: a number of minutes up to 10080 (a week), `off`
 never to suspend it (how many computers may be pinned that way depends on the
 plan), or `default` to follow the host's own window again.
+`computers end-time COMPUTER WHEN` sets when the host stops a computer, keeping
+its disk: a number of hours from now (fractions allowed), an RFC 3339 time, or
+`clear` to remove it. `computers create --ends-in HOURS` or `--ends-at TIME` sets
+one at create, at least 10 minutes and at most 366 days ahead.
 `computers view` opens the computer's page in the dashboard, beside the API
 the CLI talks to, and prints its URL; `--no-open` only prints it. The page uses
 your browser's own dashboard sign-in, so the URL carries no credential.
@@ -5264,7 +5326,7 @@ several names. Where a client has no way to do it, the cell says so with —.
 | Delete a computer with its snapshots | `delete({ deleteSnapshots: true, expect })` | `delete(delete_snapshots=True, expect=…)`; `purge_snapshots` is the deprecated name | `delete_computer` with `delete_snapshots` and `expect` | `computers delete --delete-snapshots --expect` | — |
 | Snapshot holdings (count, bytes, fingerprint) | `holdings()`, or its alias `snapshotHoldings()` | `snapshot_holdings()` | `snapshot_holdings` | `snapshots holdings` | — |
 | The usage window | `usage.read({ from, to })` | `usage.read(since=…, until=…)`, or `from_=` and `to=` | `get_usage` with `from` and `to` | `usage --from … --to …` | — |
-| Change a computer (`PATCH`) | `update({ … })` | `rename()`, `resize()`, `set_idle_suspend()`, `set_browser_proxy()`, `set_egress_proxy()` | `update_computer` | `computers rename`, `resize`, `idle-suspend`, `browser-proxy set`/`clear`, `egress-proxy set`/`clear` | `browser-proxy set`/`clear`, `egress-proxy set`/`clear` |
+| Change a computer (`PATCH`) | `update({ … })` | `rename()`, `resize()`, `set_idle_suspend()`, `set_browser_proxy()`, `set_egress_proxy()` | `update_computer` | `computers rename`, `resize`, `idle-suspend`, `end-time`, `browser-proxy set`/`clear`, `egress-proxy set`/`clear` | `browser-proxy set`/`clear`, `egress-proxy set`/`clear` |
 | Wait until the computer is ready | `waitForGuest()`, `waitForDesktop()` | `wait_for_guest()`, `wait_for_desktop()` | `wait_for_computer` with `until: "guest"`, which on Linux also waits for the desktop session | `computers wait --until guest` or `--until desktop` | — |
 | The windows after an input action | `{ context: true }` on an input method, e.g. `click(x, y, [], { context: true })` | `context=True` on an input method, e.g. `click(x, y, context=True)` | `context: true` on an input tool | — | — |
 

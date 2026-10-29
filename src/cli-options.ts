@@ -219,6 +219,15 @@ export const COMMANDS: readonly Command[] = [
       num('disk-gb', 'Disk in GiB'),
       flag('resolution', 'WIDTHxHEIGHT or WIDTHxHEIGHTxDEPTH'),
       bool('no-start', 'Create without starting'),
+      num(
+        'ends-in',
+        'Stop the computer (keeping its disk) this many hours from now; at least 10 minutes, at most 366 days',
+        { conflicts: ['ends-at'] },
+      ),
+      flag(
+        'ends-at',
+        'Stop the computer (keeping its disk) at this RFC 3339 time, e.g. 2026-01-31T18:00:00Z',
+      ),
       flag(
         'workspace',
         "Create it in this workspace ID (default: the saved profile's workspace from workspaces use, else the key's own scope); --secret and --secret-file names are then looked up in that workspace first, then account-wide",
@@ -331,6 +340,12 @@ export const COMMANDS: readonly Command[] = [
     'computers idle-suspend',
     "Set how many idle minutes before the host suspends a computer: a number up to 10080, off (never; capped by plan), or default (the host's own window)",
     ['computer', 'minutes'],
+    keyed,
+  ),
+  command(
+    'computers end-time',
+    'Set when the host stops a computer (keeping its disk): hours from now (fractions allowed), an RFC 3339 time, or clear',
+    ['computer', 'when'],
     keyed,
   ),
   command(
@@ -699,6 +714,13 @@ export const COMMANDS: readonly Command[] = [
         'workspace',
         "Confine the key to this workspace ID (default: the saved profile's workspace from workspaces use, else the calling key's own scope)",
       ),
+      num('expires-in', 'Expire the key this many hours from now (at most 8784, 366 days)', {
+        conflicts: ['expires-at'],
+      }),
+      flag('expires-at', 'Expire the key at this RFC 3339 time, at most 366 days ahead'),
+      flag('computer', 'Limit the key to this computer ID; repeat for more (up to 50)', {
+        repeatable: true,
+      }),
     ],
   ),
   command('api-keys revoke', 'Revoke an API key by id; it is refused from its next request', [

@@ -1233,6 +1233,15 @@ export class Computer {
     return count(this.#data.idle_suspend_min);
   }
 
+  /**
+   * When the host will stop this computer (RFC 3339, UTC), or `undefined` when
+   * it has no end time. Cleared once it has stopped it.
+   */
+  get endsAt(): string | undefined {
+    const at = str(this.#data.ends_at);
+    return at === '' ? undefined : at;
+  }
+
   /** The workspace containing this computer, or `''` when none was reported. */
   get workspaceId(): string {
     return str(this.#data.workspace_id);
@@ -1768,11 +1777,22 @@ export class Computer {
    * the computer, and send the setting again if it stays pending.
    */
   async update(args: P.UpdateArgs, opts: CallOptions & IdempotencyOptions = {}): Promise<this> {
-    const answer = await this.#t.json('PATCH', P.computer(this.id), {
-      body: P.updateBody(args),
-      headers: idempotencyHeaders(opts.idempotencyKey),
-      signal: opts.signal,
-    });
+    const body = P.updateBody(args);
+    const endTime = P.endTimeRequest(args);
+    const timing = P.exchangeClock();
+    // An update resent under its key is answered with the first call's
+    // answer, whose end time was worked out from that call's clock.
+    let replayed = false;
+    const answer = await this.#t.json(
+      'PATCH',
+      P.computer(this.id),
+      { body, headers: idempotencyHeaders(opts.idempotencyKey), signal: opts.signal },
+      (_, headers) => {
+        replayed = headers.get('idempotent-replayed')?.trim().toLowerCase() === 'true';
+        timing.headers(headers);
+      },
+    );
+    const clock = timing.finish();
     this.#operationId = operationIdOf(answer);
     const data = P.computerPayload(answer);
     // #power's guard, for #power's reason: a platform that answered 204 would
@@ -1780,9 +1800,12 @@ export class Computer {
     // and reporting the update as applied.
     if (data.id) {
       this.#data = data;
+      confirmEndTime(this.#data, endTime, 'update', clock, replayed);
       return this;
     }
-    return this.#refreshAfterMutation(`PATCH ${P.computer(this.id)}`, opts);
+    await this.#refreshAfterMutation(`PATCH ${P.computer(this.id)}`, opts);
+    confirmEndTime(this.#data, endTime, 'update', clock, replayed);
+    return this;
   }
 
   /**
@@ -6872,6 +6895,55 @@ type SecretsState = 'delivered' | 'delivering' | 'unreported' | MandalaError;
 type BrowserProxyState = 'applied' | 'applying' | 'unreported' | MandalaError;
 /** Where a computer's egress proxy is, as {@link Computer.waitForEgressProxy} reads it. */
 type EgressProxyState = 'applied' | 'applying' | MandalaError;
+
+/** How far an answered end time may sit from an asked-for absolute one: the platform keeps whole seconds. */
+const END_TIME_SLACK_MS = 1_000;
+
+/**
+ * Hold an answer to the end time that was asked for. A platform that does not
+ * know end times ignores the field and answers as though it had not been sent,
+ * which would leave a computer running with no end, or an old one, believed
+ * to have the new one. So the answer's `ends_at` must be the time asked for:
+ * within a second of an absolute time, or for hours, within
+ * {@link P.relativeBounds} of the request's `clock`. A `replayed` answer is
+ * an earlier call's, worked out from a clock this one cannot see, so for
+ * hours it is held only to the upper bound: present, readable, and no later
+ * than asked. Its lower bound is unconfirmed. After a clear, it
+ * must carry none. Otherwise this is an error naming the computer. Nothing is
+ * stopped or deleted: the computer is as the platform answered.
+ */
+export function confirmEndTime(
+  data: Record<string, unknown>,
+  want: P.EndTimeRequest | undefined,
+  what: 'create' | 'update',
+  clock: P.ExchangeClock,
+  replayed = false,
+): void {
+  if (!want) return;
+  const raw = data.ends_at;
+  const id = str(data.id) || '(no id)';
+  const absent = raw === undefined || raw === null || raw === '';
+  if (want.kind === 'clear') {
+    if (absent) return;
+    throw new MandalaError(
+      `the update of computer ${id} did not clear its end time: the platform's answer still has ${JSON.stringify(raw)}`,
+    );
+  }
+  const got = typeof raw === 'string' ? Date.parse(raw) : Number.NaN;
+  let ok = false;
+  if (want.at !== undefined) {
+    ok = Math.abs(got - Math.floor(want.at / 1000) * 1000) <= END_TIME_SLACK_MS;
+  } else if (want.hours !== undefined) {
+    const [lower, upper] = P.relativeBounds(want.hours * 3_600_000, clock);
+    ok = (replayed || got >= lower) && got <= upper;
+  }
+  if (ok) return;
+  throw new MandalaError(
+    `the ${what} of computer ${id} did not apply the requested end time: the platform's answer has ` +
+      `${absent ? 'none' : JSON.stringify(raw)}. The computer may not be stopped when asked; ` +
+      'stop it yourself, or set the end time again',
+  );
+}
 
 export const strandedText = (id: string, err: unknown): string =>
   `${id} was not deleted at the end of its block and still consumes resources: ` +

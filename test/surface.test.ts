@@ -293,6 +293,8 @@ async function exerciseEverything(client: Client): Promise<void> {
   });
   // Into a workspace, by an account-wide key.
   await client.computers.create({ template: 'base', workspaceId: 'wsp-0123456789ab' });
+  await client.computers.create({ template: 'base', endsAt: '2030-01-01T00:00:00Z' });
+  await client.computers.create({ template: 'base', endsInHours: 2.5 });
   await client.computers.create({
     template: 'base',
     templateTransfer: 'prepare-token',
@@ -334,6 +336,8 @@ async function exerciseEverything(client: Client): Promise<void> {
   await c.update({ browserProxy: null });
   await c.update({ egressProxy: { server: 'socks5://proxy.example.com:1080' } });
   await c.update({ egressProxy: null });
+  await c.update({ endsAt: '2030-01-01T00:00:00Z' });
+  await c.update({ endsInHours: null });
   // All three sizing fields in one call: the platform reads exactly these three
   // off a move body, and the parameter sweep is what proves the SDK sends them.
   // `move` on the class is the mouse pointer — see Computer.relocate.
@@ -704,6 +708,8 @@ async function exerciseEverything(client: Client): Promise<void> {
   await client.account.whoami();
   await client.apiKeys.list();
   const minted = await client.apiKeys.create({ name: 'ci', workspaceId: 'wsp-1' });
+  await client.apiKeys.create({ expiresAt: '2030-01-01T00:00:00Z', computerIds: ['vm-1'] });
+  await client.apiKeys.create({ expiresInHours: 24 });
   await client.apiKeys.revoke(minted.id);
 
   // The account's workspaces (OPL-5057), and their writes (OPL-5473).

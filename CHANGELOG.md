@@ -9,6 +9,38 @@ This is the summary you read to decide whether to upgrade.
 
 ## [Unreleased]
 
+### Added
+
+- Computer end times. `computers.create({ endsAt })` or `{ endsInHours }`
+  gives a new computer a time at which its host stops it, keeping the disk;
+  `computer.update({ endsAt })` or `{ endsInHours }` moves it, and `null`
+  clears it. It happens once and is then cleared. `computer.endsAt` reads it.
+  On `update()` it travels alone, refused beside any other field before any
+  request. An answer that does not carry the end time asked for (none, a
+  different or unreadable one, or one still there after a clear) is a `MandalaError` naming the computer, which
+  is left as it is. `launch()` with an end time never starts a stopped or
+  suspended computer itself: it throws naming it, and `computer.start()` is
+  the caller's to call (so `start: false` with an end time is refused up
+  front). A time given in hours is checked against the platform's clock (its
+  `Date` header) when the answer is fresh. An answer replayed under an
+  idempotency key was worked out by an earlier call, so a time in hours on it
+  is checked only for being present, readable and no later than asked: its
+  lower bound is unconfirmed. An absolute `endsAt` is checked exactly either
+  way. A failed check in `ephemeral()` deletes the
+  computer, with or without a block. The CLI has
+  `computers create --ends-in HOURS` / `--ends-at TIME` and
+  `computers end-time COMPUTER HOURS|TIME|clear`.
+- Expiring and computer-limited API keys. `apiKeys.create()` takes
+  `expiresAt` or `expiresInHours` (at most 366 days) and `computerIds` (1 to
+  50 computers the key may act on), and every `ApiKey` carries `expiresAt` and
+  `computerIds` (`null` when unset). An expired key is answered `401`. A mint
+  whose answer does not carry the expiry or computer limit asked for is
+  revoked and a `MandalaError` thrown; its key is never returned. Once such a
+  mint is sent, a cancellation stops neither it nor that revoke; each runs to
+  a deadline of its own, even on a client with no timeout. The CLI
+  has `api-keys create --expires-in HOURS` / `--expires-at TIME` and a
+  repeatable `--computer ID`, and `api-keys list` shows both.
+
 ## [0.20.0] - 2026-10-29
 
 ### Added
