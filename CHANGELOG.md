@@ -27,7 +27,8 @@ This is the summary you read to decide whether to upgrade.
   50 computers the key may act on), and every `ApiKey` carries `expiresAt` and
   `computerIds` (`null` when unset). An expired key is answered `401`. A mint
   whose answer does not carry the expiry or computer limit asked for is
-  revoked and a `MandalaError` thrown; its key is never returned. The CLI
+  revoked and a `MandalaError` thrown; its key is never returned. Once such a
+  mint is sent, a cancellation stops neither it nor that revoke. The CLI
   has `api-keys create --expires-in HOURS` / `--expires-at TIME` and a
   repeatable `--computer ID`, and `api-keys list` shows both.
 

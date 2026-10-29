@@ -2745,16 +2745,26 @@ export class ApiKeys {
    * Not retried on a 503: a mint that may already have happened is a key
    * nobody holds, so list and revoke rather than send it again. An account
    * holds at most 1000 keys, and the one past that is a 400.
+   *
+   * A mint asking for an expiry or a computer limit is held to its answer: one
+   * that does not carry them is revoked and thrown, the key never returned.
+   * So that a cancellation cannot strand such a key, `signal` is honoured only
+   * until the mint is sent; the request then runs to its own timeout, and the
+   * revoke, if one is needed, to a deadline of its own.
    */
   async create(args: P.ApiKeyCreateArgs = {}, opts: CallOptions = {}): Promise<ApiKeyCreated> {
     const body = P.apiKeyCreateBody(args);
-    // Taken before the request, so the slack below is all the platform's.
-    const before = Date.now();
-    const data = await this.#t.json('POST', P.API_KEYS, { body, signal: opts.signal });
     const limited =
       body.expires_at !== undefined ||
       body.expires_in_hours !== undefined ||
       body.computer_ids !== undefined;
+    opts.signal?.throwIfAborted();
+    // Taken before the request, so the slack below is all the platform's.
+    const before = Date.now();
+    const data = await this.#t.json('POST', P.API_KEYS, {
+      body,
+      signal: limited ? undefined : opts.signal,
+    });
     // Read before the decode, so an answer that cannot be decoded can still
     // be revoked by it when it was meant to be limited.
     const id = P.isRecord(data) && typeof data.id === 'string' ? data.id : '';
@@ -2770,7 +2780,6 @@ export class ApiKeys {
           err instanceof Error ? err.message : String(err),
           secret,
         )}), so the requested limits cannot be confirmed`,
-        opts,
       );
     }
     const missed = unappliedKeyLimits(created, body, before);
@@ -2778,7 +2787,6 @@ export class ApiKeys {
     return this.#refuseUnlimited(
       created.id,
       `the platform did not apply the requested ${missed.join(' and ')} to the new key ${created.id}`,
-      opts,
     );
   }
 
@@ -2787,11 +2795,13 @@ export class ApiKeys {
    * it: one that never expires, or that reaches every computer. Such a key is
    * not handed back; it is revoked, best effort, and never shown.
    */
-  async #refuseUnlimited(id: string, why: string, opts: CallOptions): Promise<never> {
+  async #refuseUnlimited(id: string, why: string): Promise<never> {
     let revoked = false;
     let revokeError = '';
     try {
-      await this.revoke(id, { signal: opts.signal });
+      // Not the caller's signal: a cancellation after the mint must not leave
+      // the unlimited key alive. Bounded on its own instead.
+      await this.revoke(id, { signal: AbortSignal.timeout(KEY_ROLLBACK_TIMEOUT_MS) });
       revoked = true;
     } catch (err) {
       revokeError = err instanceof Error ? err.message : String(err);
@@ -2822,6 +2832,9 @@ export class ApiKeys {
 /** A message with a key's secret taken out, should one ever be quoted in it. */
 const scrub = (message: string, secret: string): string =>
   secret ? message.split(secret).join('[key]') : message;
+
+/** How long the revoke of a key minted without its limits may take. */
+const KEY_ROLLBACK_TIMEOUT_MS = 15_000;
 
 /** Slack on an `expires_in_hours` the platform turned into a time. */
 const KEY_EXPIRY_SLACK_MS = 60_000;

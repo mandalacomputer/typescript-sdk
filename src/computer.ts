@@ -1780,11 +1780,17 @@ export class Computer {
     const body = P.updateBody(args);
     const endTime = P.endTimeRequest(args);
     const started = Date.now();
-    const answer = await this.#t.json('PATCH', P.computer(this.id), {
-      body,
-      headers: idempotencyHeaders(opts.idempotencyKey),
-      signal: opts.signal,
-    });
+    // An update resent under its key is answered with the first call's
+    // answer, whose end time was worked out from that call's clock.
+    let replayed = false;
+    const answer = await this.#t.json(
+      'PATCH',
+      P.computer(this.id),
+      { body, headers: idempotencyHeaders(opts.idempotencyKey), signal: opts.signal },
+      (_, headers) => {
+        replayed = headers.get('idempotent-replayed')?.trim().toLowerCase() === 'true';
+      },
+    );
     this.#operationId = operationIdOf(answer);
     const data = P.computerPayload(answer);
     // #power's guard, for #power's reason: a platform that answered 204 would
@@ -1792,11 +1798,11 @@ export class Computer {
     // and reporting the update as applied.
     if (data.id) {
       this.#data = data;
-      confirmEndTime(this.#data, endTime, 'update', started);
+      confirmEndTime(this.#data, endTime, 'update', started, replayed);
       return this;
     }
     await this.#refreshAfterMutation(`PATCH ${P.computer(this.id)}`, opts);
-    confirmEndTime(this.#data, endTime, 'update', started);
+    confirmEndTime(this.#data, endTime, 'update', started, replayed);
     return this;
   }
 

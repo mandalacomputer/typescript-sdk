@@ -94,6 +94,43 @@ describe('an API key mint the platform did not limit', () => {
     expect(rec.routes()).toEqual([['POST', 'api-keys']]);
   });
 
+  it('still revokes when the caller cancels after the mint was answered', async () => {
+    const controller = new AbortController();
+    const { rec, client } = sdk((call) => {
+      if (call.method === 'POST') {
+        controller.abort(new Error('caller gave up'));
+        return json(API_KEY_CREATED, { status: 201 });
+      }
+      return anyRoute(call);
+    });
+    const error = await client.apiKeys
+      .create({ expiresInHours: 1 }, { signal: controller.signal })
+      .catch((e: unknown) => e);
+    expect((error as Error).message).toContain('it was revoked');
+    expect(rec.last()).toMatchObject({
+      method: 'DELETE',
+      path: `/api-keys/${API_KEY_CREATED.id}`,
+    });
+  });
+
+  it('still revokes when the caller cancels during the revoke', async () => {
+    const controller = new AbortController();
+    const { rec, client } = sdk(async (call) => {
+      if (call.method === 'POST') return json(API_KEY_CREATED, { status: 201 });
+      controller.abort(new Error('caller gave up'));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      return json({ ok: true });
+    });
+    const error = await client.apiKeys
+      .create({ computerIds: ['vm-1'] }, { signal: controller.signal })
+      .catch((e: unknown) => e);
+    expect((error as Error).message).toContain('it was revoked');
+    expect(rec.routes()).toEqual([
+      ['POST', 'api-keys'],
+      ['DELETE', `api-keys/${API_KEY_CREATED.id}`],
+    ]);
+  });
+
   it('says so, and still keeps the key back, when the revoke fails', async () => {
     const { client } = sdk(
       minted({}, () => json({ error: 'upstream down', request_id: 'r1' }, { status: 400 })),
@@ -211,6 +248,27 @@ describe('an end time the platform did not apply', () => {
     await expect(sdk(hours(120_000)).client.computers.create({ endsInHours: 2 })).rejects.toThrow(
       /did not apply/,
     );
+  });
+
+  it('accepts a replayed update whose end time came from the first call', async () => {
+    // The first call was several seconds ago; its answer is replayed as it was.
+    const first = new Date(Date.now() - 5_000 + 7_200_000).toISOString();
+    const { client } = sdk((call) =>
+      call.method === 'PATCH'
+        ? new Response(JSON.stringify({ ...COMPUTER, ends_at: first }), {
+            headers: { 'content-type': 'application/json', 'idempotent-replayed': 'true' },
+          })
+        : anyRoute(call),
+    );
+    const c = await client.computers.get(COMPUTER.id);
+    await c.update({ endsInHours: 2 }, { idempotencyKey: 'k-2' });
+    expect(c.endsAt).toBe(first);
+    // Not replayed, the same answer is too early for this request.
+    const fresh = sdk((call) =>
+      call.method === 'PATCH' ? json({ ...COMPUTER, ends_at: first }) : anyRoute(call),
+    );
+    const d = await fresh.client.computers.get(COMPUTER.id);
+    await expect(d.update({ endsInHours: 2 })).rejects.toThrow(/did not apply/);
   });
 
   it('checks nothing on a create or update that did not ask', async () => {
