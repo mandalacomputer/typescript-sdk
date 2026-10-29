@@ -1779,7 +1779,7 @@ export class Computer {
   async update(args: P.UpdateArgs, opts: CallOptions & IdempotencyOptions = {}): Promise<this> {
     const body = P.updateBody(args);
     const endTime = P.endTimeRequest(args);
-    const timing = P.exchangeClock();
+    const timing = P.exchangeClock(`PATCH ${P.computer(this.id)}`, opts.idempotencyKey);
     // An update resent under its key is answered with the first call's
     // answer, whose end time was worked out from that call's clock.
     let replayed = false;
@@ -1792,7 +1792,7 @@ export class Computer {
         timing.headers(headers);
       },
     );
-    const clock = timing.finish();
+    const held = timing.finish(replayed);
     this.#operationId = operationIdOf(answer);
     const data = P.computerPayload(answer);
     // #power's guard, for #power's reason: a platform that answered 204 would
@@ -1800,11 +1800,11 @@ export class Computer {
     // and reporting the update as applied.
     if (data.id) {
       this.#data = data;
-      confirmEndTime(this.#data, endTime, 'update', clock, replayed);
+      confirmEndTime(this.#data, endTime, 'update', held.clock, held.upperOnly);
       return this;
     }
     await this.#refreshAfterMutation(`PATCH ${P.computer(this.id)}`, opts);
-    confirmEndTime(this.#data, endTime, 'update', clock, replayed);
+    confirmEndTime(this.#data, endTime, 'update', held.clock, held.upperOnly);
     return this;
   }
 
@@ -6905,8 +6905,9 @@ const END_TIME_SLACK_MS = 1_000;
  * which would leave a computer running with no end, or an old one, believed
  * to have the new one. So the answer's `ends_at` must be the time asked for:
  * within a second of an absolute time, or for hours, within
- * {@link P.relativeBounds} of the request's `clock`. A `replayed` answer is an
- * earlier call's, so for hours only the upper bound holds. After a clear, it
+ * {@link P.relativeBounds} of the request's `clock`. With `upperOnly` (a
+ * replayed answer whose first call's timing this process does not hold), for
+ * hours only the upper bound holds. After a clear, it
  * must carry none. Otherwise this is an error naming the computer. Nothing is
  * stopped or deleted: the computer is as the platform answered.
  */
@@ -6915,7 +6916,7 @@ export function confirmEndTime(
   want: P.EndTimeRequest | undefined,
   what: 'create' | 'update',
   clock: P.ExchangeClock,
-  replayed = false,
+  upperOnly = false,
 ): void {
   if (!want) return;
   const raw = data.ends_at;
@@ -6933,7 +6934,7 @@ export function confirmEndTime(
     ok = Math.abs(got - Math.floor(want.at / 1000) * 1000) <= END_TIME_SLACK_MS;
   } else if (want.hours !== undefined) {
     const [lower, upper] = P.relativeBounds(want.hours * 3_600_000, clock);
-    ok = (replayed || got >= lower) && got <= upper;
+    ok = (upperOnly || got >= lower) && got <= upper;
   }
   if (ok) return;
   throw new MandalaError(

@@ -352,28 +352,6 @@ export class Computers {
     return (await this.#create(args, opts)).computer;
   }
 
-  /**
-   * After a launch started a computer that was asked for an end time: read it
-   * again, and if the end time is gone or has passed, stop it and throw. Both
-   * run to a deadline of their own, not the caller's signal, so a
-   * cancellation cannot leave the computer running with no end.
-   */
-  async #holdEndTimeAfterStart(computer: Computer): Promise<void> {
-    await computer.refresh({ signal: AbortSignal.timeout(END_TIME_ROLLBACK_TIMEOUT_MS) });
-    const endsAt = computer.endsAt;
-    if (endsAt !== undefined && Date.parse(endsAt) > Date.now()) return;
-    let stopped = '';
-    try {
-      await computer.stop({ signal: AbortSignal.timeout(END_TIME_ROLLBACK_TIMEOUT_MS) });
-      stopped = 'it was stopped again';
-    } catch (err) {
-      stopped = `stopping it again failed (${err instanceof Error ? err.message : String(err)}): stop ${computer.id} yourself`;
-    }
-    throw new MandalaError(
-      `${computer.id} was started, but its requested end time ${endsAt === undefined ? 'was gone' : `${endsAt} had passed`} by then; ${stopped}`,
-    );
-  }
-
   /** {@link create}, also saying whether the answer was a replay of an earlier call's. */
   async #create(
     args: P.CreateArgs,
@@ -382,7 +360,7 @@ export class Computers {
     let replayed = false;
     const body = P.createBody(args);
     const endTime = P.endTimeRequest(args);
-    const timing = P.exchangeClock();
+    const timing = P.exchangeClock(`POST ${P.COMPUTERS}`, opts.idempotencyKey);
     const data = await this.#t.json(
       'POST',
       P.COMPUTERS,
@@ -397,7 +375,8 @@ export class Computers {
       },
     );
     const computer = oneComputer(this.#t, data, 'POST', P.COMPUTERS);
-    confirmEndTime(computer.raw, endTime, 'create', timing.finish(), replayed);
+    const held = timing.finish(replayed);
+    confirmEndTime(computer.raw, endTime, 'create', held.clock, held.upperOnly);
     return { computer, replayed };
   }
 
@@ -466,6 +445,14 @@ export class Computers {
   ): Promise<Computer> {
     const { timeoutMs = 180_000, pollMs = 3_000, signal, idempotencyKey } = opts;
     checkWait(timeoutMs, pollMs);
+    const endTime = P.endTimeRequest(args);
+    // A launch with an end time never starts the computer itself (see
+    // below), so one that asks to be created stopped could only fail later.
+    if (endTime && args.start === false) {
+      throw new ValidationError(
+        'launch with an end time needs start: create it with computers.create({ start: false }) instead',
+      );
+    }
     signal?.throwIfAborted();
     // Settled here rather than in create, so an error from a later stage can
     // be handed back with the key that replays THIS create.
@@ -528,24 +515,18 @@ export class Computers {
         (computer.runningRamMb === 0 ||
           (args.start === false && computer.runningRamMb === undefined))
       ) {
-        // A launch resent under its key replays a create that may be hours
-        // old. If the end time it asked for has since come, the host stopped
-        // the computer and cleared it; starting it now would bring it back
-        // with no end at all.
-        if (P.endTimeRequest(args)?.kind === 'set') {
-          const endsAt = computer.endsAt;
-          if (endsAt === undefined || !(Date.parse(endsAt) > Date.now())) {
-            throw new MandalaError(
-              `${id} is ${computer.status} and ${endsAt === undefined ? 'has no end time' : `its end time ${endsAt} has passed`}, ` +
-                'though one was asked for; not starting it. Start it yourself, with a new end time if it needs one',
-            );
-          }
+        // A computer asked for an end time is never started here. Stopped,
+        // its end time may already have come (a launch resent under its key
+        // replays a create that may be hours old), and a start would bring it
+        // back with none. Whether to start it is the caller's call.
+        if (endTime) {
+          throw new MandalaError(
+            `${id} is ${computer.status}, and it was asked for an end time that may have passed; ` +
+              'launch does not start it. Call computer.start() if you still want it running',
+          );
         }
         remaining();
         await computer.start({ signal });
-        // The end time can come between the read above and the start, and a
-        // start after it brings the computer back with none.
-        if (P.endTimeRequest(args)?.kind === 'set') await this.#holdEndTimeAfterStart(computer);
       }
       await computer.waitUntilRunning({ timeoutMs: remaining(), pollMs, signal });
       await computer.waitForGuest({ timeoutMs: remaining(), pollMs, signal });
@@ -690,7 +671,7 @@ export class Computers {
     // exists to prevent.
     const body = P.createBody(args);
     const endTime = P.endTimeRequest(args);
-    const timing = P.exchangeClock();
+    const timing = P.exchangeClock(`POST ${P.COMPUTERS}`, opts.idempotencyKey);
     let replayed = false;
     const data = await this.#t.json(
       'POST',
@@ -701,10 +682,10 @@ export class Computers {
         timing.headers(headers);
       },
     );
-    const clock = timing.finish();
+    const held = timing.finish(replayed);
     const computer = new EphemeralComputer(this.#t, computerRecord(data, 'POST', P.COMPUTERS));
     try {
-      confirmEndTime(computer.raw, endTime, 'create', clock, replayed);
+      confirmEndTime(computer.raw, endTime, 'create', held.clock, held.upperOnly);
     } catch (err) {
       // With a block, the computer is this call's to delete, and a block
       // never run is no reason to keep it. Without one, it is the caller's.
@@ -2794,7 +2775,7 @@ export class ApiKeys {
       { body, signal: limited ? undefined : opts.signal },
       (_, headers) => timing.headers(headers),
     );
-    const clock = timing.finish();
+    const { clock } = timing.finish();
     // Read before the decode, so an answer that cannot be decoded can still
     // be revoked by it when it was meant to be limited.
     const id = P.isRecord(data) && typeof data.id === 'string' ? data.id : '';
@@ -2862,9 +2843,6 @@ export class ApiKeys {
 /** A message with a key's secret taken out, should one ever be quoted in it. */
 const scrub = (message: string, secret: string): string =>
   secret ? message.split(secret).join('[key]') : message;
-
-/** How long the re-read and stop after a launch's start may each take. */
-const END_TIME_ROLLBACK_TIMEOUT_MS = 15_000;
 
 /** How long the revoke of a key minted without its limits may take. */
 const KEY_ROLLBACK_TIMEOUT_MS = 15_000;

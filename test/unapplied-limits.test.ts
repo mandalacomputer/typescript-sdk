@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { Client, MandalaError } from '../src/index.js';
+import { Client, MandalaError, ValidationError } from '../src/index.js';
 import {
   API_KEY_CREATED,
   anyRoute,
@@ -366,63 +366,126 @@ describe('an end time the platform did not apply', () => {
   });
 });
 
-describe('a launch whose end time comes during its start', () => {
-  it('stops the computer again and throws', async () => {
-    const soon = new Date(Date.now() + 3_600_000).toISOString();
-    const rec = recorder((call) => {
-      if (call.method === 'POST' && call.path === '/computers')
-        return json({ id: 'launch-42', status: 'stopped', running_ram_mb: 0, ends_at: soon });
-      if (call.path.endsWith('/stop'))
-        return json({ id: 'launch-42', status: 'stopped', running_ram_mb: 0 });
-      // Started just as the end time came: running, and none left.
-      return json({ id: 'launch-42', status: 'running', running_ram_mb: 1024 });
-    });
-    const client = new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: rec.fetch });
-    const error = await client.computers
-      .launch({ template: 'base', endsInHours: 1, start: false }, { pollMs: 1 })
-      .catch((e: unknown) => e);
-    expect(error).toBeInstanceOf(MandalaError);
-    expect((error as Error).message).toContain(
-      'launch-42 was started, but its requested end time was gone by then; it was stopped again',
-    );
-    const routes = rec.routes();
-    expect(routes).toContainEqual(['POST', 'computers/launch-42/start']);
-    expect(routes.at(-1)).toEqual(['POST', 'computers/launch-42/stop']);
-  });
-});
-
-describe('a launch replayed after its end time has come', () => {
+describe('a launch asked for an end time', () => {
   const stopped = (extra: Record<string, unknown> = {}) => ({
     id: 'launch-42',
     status: 'stopped',
     running_ram_mb: 0,
     ...extra,
   });
+  const soon = () => new Date(Date.now() + 3_600_000).toISOString();
 
   it.each([
-    ['cleared it', {}],
-    ['passed', { ends_at: '2001-01-01T00:00:00Z' }],
-  ])('does not start a computer whose end time has %s', async (_what, now) => {
-    // The replayed answer is the first call's: an end time two hours from a
-    // request made an hour ago, still to come when it was answered.
-    const first = new Date(Date.now() + 3_600_000).toISOString();
-    const rec = recorder((call) =>
-      call.method === 'POST' && call.path === '/computers'
-        ? new Response(JSON.stringify(stopped({ ends_at: first })), {
-            headers: { 'content-type': 'application/json', 'idempotent-replayed': 'true' },
-          })
-        : json(stopped(now)),
-    );
+    ['replayed, its end time cleared', true, {}],
+    ['replayed, its end time still to come', true, 'soon'],
+    ['fresh, but not started', false, 'soon'],
+  ])('does not start a stopped computer (%s)', async (_what, replay, now) => {
+    const rec = recorder((call) => {
+      const body = stopped(now === 'soon' ? { ends_at: soon() } : now);
+      if (call.method === 'POST' && call.path === '/computers')
+        return new Response(JSON.stringify(stopped({ ends_at: soon() })), {
+          headers: {
+            'content-type': 'application/json',
+            ...(replay ? { 'idempotent-replayed': 'true' } : {}),
+          },
+        });
+      return json(body);
+    });
     const client = new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: rec.fetch });
     const error = await client.computers
-      .launch({ template: 'base', endsInHours: 2 }, { idempotencyKey: 'k-1', pollMs: 1 })
+      .launch({ template: 'base', endsInHours: 1 }, { idempotencyKey: 'k-1', pollMs: 1 })
       .catch((e: unknown) => e);
     expect(error).toBeInstanceOf(MandalaError);
     expect((error as Error).message).toMatch(/^launch of launch-42 failed: launch-42 is stopped/);
-    expect((error as Error).message).toContain('not starting it');
-    expect(rec.routes()).toEqual([
-      ['POST', 'computers'],
-      ['GET', 'computers/launch-42'],
-    ]);
+    expect((error as Error).message).toContain('Call computer.start()');
+    expect(rec.calls.some((call) => call.path.endsWith('/start'))).toBe(false);
+  });
+
+  it('refuses start: false with an end time before any request', async () => {
+    const rec = recorder(() => json(stopped()));
+    const client = new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: rec.fetch });
+    await expect(
+      client.computers.launch({ template: 'base', endsInHours: 1, start: false }),
+    ).rejects.toBeInstanceOf(ValidationError);
+    expect(rec.calls).toEqual([]);
+  });
+
+  it('starts a stopped computer as before when no end time was asked for', async () => {
+    const rec = recorder((call) => {
+      if (call.path.endsWith('/exec'))
+        return json({ exit_code: 0, stdout_b64: '', stderr_b64: '' });
+      if (call.path.endsWith('/start') || rec.calls.some((c) => c.path.endsWith('/start')))
+        return json({ id: 'launch-42', status: 'running', running_ram_mb: 1024 });
+      return json(stopped());
+    });
+    const client = new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: rec.fetch });
+    await client.computers.launch({ template: 'base', start: false }, { pollMs: 1 });
+    expect(rec.calls.some((call) => call.path.endsWith('/start'))).toBe(true);
+  });
+});
+
+describe('a replayed relative end time', () => {
+  const dated = (body: unknown, replayed: boolean) =>
+    new Response(JSON.stringify(body), {
+      headers: {
+        'content-type': 'application/json',
+        date: new Date().toUTCString(),
+        ...(replayed ? { 'idempotent-replayed': 'true' } : {}),
+      },
+    });
+
+  it.each([
+    ['an unchanged earlier deadline', -30 * 60_000, true],
+    ['the deadline the first call set', 0, false],
+  ])(
+    "holds a replay after a lost answer to the first send's timing: %s",
+    async (_what, offset, refused) => {
+      const firstSent = Date.now();
+      const stored = new Date(firstSent + offset + 7_200_000).toISOString();
+      let calls = 0;
+      const { client } = sdk((call) => {
+        if (call.method !== 'POST' || call.path !== '/computers') return anyRoute(call);
+        calls++;
+        // The first answer is lost on the way back.
+        if (calls === 1) return Promise.reject(new Error('dropped answer'));
+        return dated({ ...COMPUTER, ends_at: stored }, true);
+      });
+      const key = `lost-${offset}-${Date.now()}`;
+      await expect(
+        client.computers.create({ endsInHours: 2 }, { idempotencyKey: key }),
+      ).rejects.toThrow();
+      const retry = client.computers.create({ endsInHours: 2 }, { idempotencyKey: key });
+      if (refused) await expect(retry).rejects.toThrow(/did not apply the requested end time/);
+      else expect((await retry).endsAt).toBe(stored);
+    },
+  );
+
+  it("accepts a replay of a good first answer, judged by the first call's timing", async () => {
+    const good = new Date(Date.now() + 7_200_000).toISOString();
+    let calls = 0;
+    const { client } = sdk((call) => {
+      if (call.method !== 'PATCH') return anyRoute(call);
+      calls++;
+      return dated({ ...COMPUTER, ends_at: good }, calls > 1);
+    });
+    const c = await client.computers.get(COMPUTER.id);
+    const key = `update-${Date.now()}`;
+    await c.update({ endsInHours: 2 }, { idempotencyKey: key });
+    await c.update({ endsInHours: 2 }, { idempotencyKey: key });
+    expect(c.endsAt).toBe(good);
+  });
+
+  it('holds an unknown key only to the upper bound', async () => {
+    const stale = new Date(Date.now() - 30 * 60_000 + 7_200_000).toISOString();
+    const { client } = sdk((call) =>
+      call.method === 'POST' && call.path === '/computers'
+        ? dated({ ...COMPUTER, ends_at: stale }, true)
+        : anyRoute(call),
+    );
+    const c = await client.computers.create(
+      { endsInHours: 2 },
+      { idempotencyKey: `elsewhere-${Date.now()}` },
+    );
+    expect(c.endsAt).toBe(stale);
   });
 });

@@ -2571,9 +2571,15 @@ computer has none. An answer that does not carry the end time asked for (to the
 second, or within a minute for `endsInHours`), or still carries one that was
 cleared, is a `MandalaError` naming the computer;
 the computer is left as it is, so stop it yourself or set the end time again.
-A `launch()` resent under its idempotency key does not start a computer whose
-requested end time has since come and gone, and stops again one whose end time
-came while it was starting.
+`launch()` with an end time never starts a stopped or suspended computer
+itself, since its end time may have passed (a launch resent under its key
+replays a create that may be hours old): it throws naming the computer, and
+`computer.start()` is yours to call. So `start: false` with an end time is
+refused by `launch()`; use `create()`. `endsInHours` is checked against the
+platform's clock, and an answer replayed under an idempotency key against the
+first send of that key, when this process made it (kept for an hour, up to 256
+keys); a replay of a call made elsewhere is checked only for being no later
+than asked.
 
 ### A proxy for the browsers
 

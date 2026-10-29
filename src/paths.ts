@@ -751,25 +751,61 @@ export const RELATIVE_SLACK_MS = 60_000;
 /** Slack around this machine's clock when the answer had no `Date` header. */
 export const RELATIVE_NO_DATE_SLACK_MS = 10 * 60_000;
 
-/** Start timing one request; feed it the answer's headers, then finish it. */
-export function exchangeClock(): {
+/** How many idempotency keys' first sends this process keeps, and for how long. */
+const SENDS_MAX = 256;
+const SENDS_TTL_MS = 3_600_000;
+const firstSends = new Map<string, { t0: number; clientStart: number; until: number }>();
+
+/**
+ * Start timing one request; feed it the answer's headers, then finish it.
+ *
+ * An answer replayed under an idempotency key is the FIRST call's, its time
+ * worked out when that call reached the platform, which may be long before
+ * this one, and that call's own answer may have been lost. So with a `key`,
+ * the first send of each `route` and key is kept (in this process, for an
+ * hour, up to {@link SENDS_MAX} keys), and the timing runs from it. A replay
+ * whose first send this process did not make (another process, or a key
+ * older than that) can be held only to the upper bound: `upperOnly`. With no
+ * key of the caller's, a replay can only be the transport's own retry of this
+ * exchange, which the timing already spans.
+ */
+export function exchangeClock(
+  route?: string,
+  key?: string,
+): {
   headers(h: Headers): void;
-  finish(): ExchangeClock;
+  finish(replayed?: boolean): { clock: ExchangeClock; upperOnly: boolean };
 } {
   const clientStart = Date.now();
   const t0 = performance.now();
+  let earlier: { t0: number; clientStart: number } | undefined;
+  if (route !== undefined && key !== undefined) {
+    for (const [k, v] of firstSends) if (v.until <= clientStart) firstSends.delete(k);
+    const id = `${route} ${key}`;
+    earlier = firstSends.get(id);
+    if (!earlier) {
+      if (firstSends.size >= SENDS_MAX) firstSends.delete(firstSends.keys().next().value as string);
+      firstSends.set(id, { t0, clientStart, until: clientStart + SENDS_TTL_MS });
+    }
+  }
   let serverDate: number | undefined;
   return {
     headers(h) {
       const d = Date.parse(h.get('date') ?? '');
       serverDate = Number.isNaN(d) ? undefined : d;
     },
-    finish: () => ({
-      clientStart,
-      clientEnd: Date.now(),
-      durationMs: performance.now() - t0,
-      serverDate,
-    }),
+    finish(replayed = false) {
+      const from = earlier ?? { t0, clientStart };
+      return {
+        clock: {
+          clientStart: from.clientStart,
+          clientEnd: Date.now(),
+          durationMs: performance.now() - from.t0,
+          serverDate,
+        },
+        upperOnly: replayed && key !== undefined && !earlier,
+      };
+    },
   };
 }
 

@@ -18,10 +18,13 @@ This is the summary you read to decide whether to upgrade.
   On `update()` it travels alone, refused beside any other field before any
   request. An answer that does not carry the end time asked for (none, a
   different or unreadable one, or one still there after a clear) is a `MandalaError` naming the computer, which
-  is left as it is; `launch()` resent under its key does not start a computer
-  whose requested end time has since come, and stops one again whose end
-  time came while it was starting. A time given in hours is checked against
-  the platform's clock (its `Date` header), not this machine's. The CLI has
+  is left as it is. `launch()` with an end time never starts a stopped or
+  suspended computer itself: it throws naming it, and `computer.start()` is
+  the caller's to call (so `start: false` with an end time is refused up
+  front). A time given in hours is checked against the platform's clock (its
+  `Date` header), and a replayed answer against the first send of its
+  idempotency key when this process made it; otherwise only its upper bound
+  is checked. The CLI has
   `computers create --ends-in HOURS` / `--ends-at TIME` and
   `computers end-time COMPUTER HOURS|TIME|clear`.
 - Expiring and computer-limited API keys. `apiKeys.create()` takes
