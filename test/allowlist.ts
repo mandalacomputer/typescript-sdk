@@ -18,7 +18,8 @@ export type Route = [method: string, pattern: string];
 export const ALLOWED: ReadonlySet<string> = new Set(
   (
     [
-      // Credential gateway management is API-first; use direct HTTP until wrappers ship.
+      // A computer's credential gateway bindings: secrets sent upstream for
+      // it, never delivered to it.
       ['GET', 'computers/:id/credential-gateway'],
       ['POST', 'computers/:id/credential-gateway'],
       ['DELETE', 'computers/:id/credential-gateway/:binding'],
@@ -213,11 +214,6 @@ export const ALLOWED: ReadonlySet<string> = new Set(
  * design is that it is enumerable.
  */
 export const UNIMPLEMENTED: ReadonlySet<string> = new Set([
-  // API-first credential gateway management, without SDK wrappers yet.
-  'GET computers/:id/credential-gateway',
-  'POST computers/:id/credential-gateway',
-  'DELETE computers/:id/credential-gateway/:binding',
-
   // The OpenAI-shaped door onto the agent loop. Deliberately not wrapped: a
   // caller who wants it already has an OpenAI client and points its baseURL
   // here, and a second, worse OpenAI client inside this SDK would be a

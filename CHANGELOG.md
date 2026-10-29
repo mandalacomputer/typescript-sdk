@@ -9,6 +9,18 @@ This is the summary you read to decide whether to upgrade.
 
 ## [Unreleased]
 
+### Added
+
+- Credential gateway bindings. `computer.credentialGatewayBindings()`,
+  `createCredentialGatewayBinding({ secretId, origin, pathPrefix, methods })`
+  and `deleteCredentialGatewayBinding(id)`, and the same three by the
+  computer's id on `client.credentialGateway`, let a computer call an HTTPS API
+  with a secret it never holds: the platform sends the secret upstream, and
+  the computer calls the binding's `baseUrl` with its `placeholder` as the
+  Bearer token. Arguments are checked before the call; a listing row whose
+  origin, path prefix, methods or address cannot be read fails the listing.
+  The CLI has `mandala computers gateway list|create|rm`.
+
 ### Changed
 
 - `waitForDesktop` (and so `launch()`) probes the desktop session every 100ms

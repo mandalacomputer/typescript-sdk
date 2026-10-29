@@ -33,6 +33,7 @@ import type {
   ApiKey,
   ApiKeyCreated,
   BuildProgress,
+  CredentialGatewayBinding,
   CreditReport,
   LifecycleAck,
   Move,
@@ -72,6 +73,8 @@ import {
   toApiKey,
   toApiKeyCreated,
   toBuildProgress,
+  toCredentialGatewayBinding,
+  toCredentialGatewayBindings,
   toCreditReport,
   toLifecycleAck,
   toMove,
@@ -2353,6 +2356,53 @@ export class PublicUrls {
    */
   async delete(computerId: string, urlId: string, opts: CallOptions = {}): Promise<void> {
     await this.#t.json('DELETE', P.publicUrl(computerId, urlId), { signal: opts.signal });
+  }
+}
+
+/**
+ * A computer's credential gateway bindings, by the computer's id: the same
+ * three calls as {@link Computer.credentialGatewayBindings} and its siblings,
+ * for when you have the id and no handle. Answered by the control plane, so
+ * they work while the computer's host is down.
+ *
+ * ```ts
+ * await client.credentialGateway.delete('vm-0123456789ab', 'cgw-0123456789abcdef01234567');
+ * ```
+ */
+export class CredentialGateway {
+  #t: Transport;
+
+  /** @internal */
+  constructor(transport: Transport) {
+    this.#t = transport;
+  }
+
+  /** The computer's bindings, oldest first. See {@link Computer.credentialGatewayBindings}. */
+  async list(computerId: string, opts: CallOptions = {}): Promise<CredentialGatewayBinding[]> {
+    const data = await this.#t.json('GET', P.credentialGateway(computerId), {
+      signal: opts.signal,
+    });
+    return toCredentialGatewayBindings(data);
+  }
+
+  /** Bind a secret to an upstream API. See {@link Computer.createCredentialGatewayBinding}. */
+  async create(
+    computerId: string,
+    args: P.CredentialGatewayBindingArgs,
+    opts: CallOptions = {},
+  ): Promise<CredentialGatewayBinding> {
+    const data = await this.#t.json('POST', P.credentialGateway(computerId), {
+      body: P.credentialGatewayBody(args),
+      signal: opts.signal,
+    });
+    return toCredentialGatewayBinding(data);
+  }
+
+  /** Revoke one. See {@link Computer.deleteCredentialGatewayBinding}. */
+  async delete(computerId: string, bindingId: string, opts: CallOptions = {}): Promise<void> {
+    await this.#t.json('DELETE', P.credentialGatewayBinding(computerId, bindingId), {
+      signal: opts.signal,
+    });
   }
 }
 

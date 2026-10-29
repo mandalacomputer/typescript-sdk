@@ -93,6 +93,7 @@ import type {
   ActivityResults,
   BackgroundExec,
   BrowserProxy,
+  CredentialGatewayBinding,
   DeleteResult,
   EgressProxy,
   ExecResult,
@@ -133,6 +134,8 @@ import {
   toActivityResults,
   toBackgroundExec,
   toBrowserProxy,
+  toCredentialGatewayBinding,
+  toCredentialGatewayBindings,
   toDeleteResult,
   toEgressProxy,
   toExecResult,
@@ -6274,6 +6277,74 @@ export class Computer {
    */
   async deletePublicUrl(urlId: string, opts: CallOptions = {}): Promise<void> {
     await this.#t.json('DELETE', P.publicUrl(this.id, urlId), { signal: opts.signal });
+  }
+
+  // --- the credential gateway ------------------------------------------
+
+  /**
+   * This computer's credential gateway bindings, oldest first: where each
+   * sends which secret, and the address and placeholder the computer calls it
+   * with. Never a secret's value. Answered by the control plane, so it works
+   * while the computer's host is down.
+   */
+  async credentialGatewayBindings(opts: CallOptions = {}): Promise<CredentialGatewayBinding[]> {
+    const path = P.credentialGateway(this.id);
+    const data = await this.#t.json('GET', path, { signal: opts.signal });
+    return toCredentialGatewayBindings(data);
+  }
+
+  /**
+   * Let this computer call an HTTPS API with a secret it never holds.
+   *
+   * The platform sends the secret's latest value as `Authorization: Bearer`
+   * to `origin`, over verified TLS, for requests under `pathPrefix` (at a
+   * segment boundary) using one of `methods`. Inside the computer, call the
+   * returned {@link CredentialGatewayBinding.baseUrl} followed by the
+   * provider's path, with `Authorization: Bearer <placeholder>`:
+   *
+   * ```ts
+   * const gw = await computer.createCredentialGatewayBinding({
+   *   secretId: 'csec-0123456789abcdef',
+   *   origin: 'https://api.github.com',
+   *   pathPrefix: '/repos/acme/app',
+   *   methods: ['GET'],
+   * });
+   * await computer.exec(
+   *   `curl -s -H 'Authorization: Bearer ${gw.placeholder}' ${gw.baseUrl}/repos/acme/app/issues`,
+   * );
+   * ```
+   *
+   * Owners only. A computer has at most eight bindings, and a binding never
+   * changes: delete it and make another. Only plain HTTP clients are
+   * supported: no redirects, streaming or WebSocket upgrades. A request is
+   * limited to 1 MiB, a response to 4 MiB and the call to 30 seconds. Clones
+   * do not inherit bindings, and moving the computer to another workspace or
+   * owner removes them. The platform refuses an account without an active
+   * paid plan or trial (`403`), a host whose gateway is not ready (`503`),
+   * a secret outside the computer's scope (`400`) and a ninth binding (`409`).
+   * Use a narrowly scoped provider key: guest code can make any call the
+   * binding allows.
+   */
+  async createCredentialGatewayBinding(
+    args: P.CredentialGatewayBindingArgs,
+    opts: CallOptions = {},
+  ): Promise<CredentialGatewayBinding> {
+    const path = P.credentialGateway(this.id);
+    const data = await this.#t.json('POST', path, {
+      body: P.credentialGatewayBody(args),
+      signal: opts.signal,
+    });
+    return toCredentialGatewayBinding(data);
+  }
+
+  /**
+   * Revoke a binding. Requests not yet sent upstream can no longer use it; one
+   * already sent may finish. A binding that is not there is a `NotFoundError`.
+   */
+  async deleteCredentialGatewayBinding(bindingId: string, opts: CallOptions = {}): Promise<void> {
+    await this.#t.json('DELETE', P.credentialGatewayBinding(this.id, bindingId), {
+      signal: opts.signal,
+    });
   }
 
   // --- secret bindings -------------------------------------------------
