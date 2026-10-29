@@ -1779,7 +1779,7 @@ export class Computer {
   async update(args: P.UpdateArgs, opts: CallOptions & IdempotencyOptions = {}): Promise<this> {
     const body = P.updateBody(args);
     const endTime = P.endTimeRequest(args);
-    const started = Date.now();
+    const timing = P.exchangeClock();
     // An update resent under its key is answered with the first call's
     // answer, whose end time was worked out from that call's clock.
     let replayed = false;
@@ -1789,8 +1789,10 @@ export class Computer {
       { body, headers: idempotencyHeaders(opts.idempotencyKey), signal: opts.signal },
       (_, headers) => {
         replayed = headers.get('idempotent-replayed')?.trim().toLowerCase() === 'true';
+        timing.headers(headers);
       },
     );
+    const clock = timing.finish();
     this.#operationId = operationIdOf(answer);
     const data = P.computerPayload(answer);
     // #power's guard, for #power's reason: a platform that answered 204 would
@@ -1798,11 +1800,11 @@ export class Computer {
     // and reporting the update as applied.
     if (data.id) {
       this.#data = data;
-      confirmEndTime(this.#data, endTime, 'update', started, replayed);
+      confirmEndTime(this.#data, endTime, 'update', clock, replayed);
       return this;
     }
     await this.#refreshAfterMutation(`PATCH ${P.computer(this.id)}`, opts);
-    confirmEndTime(this.#data, endTime, 'update', started, replayed);
+    confirmEndTime(this.#data, endTime, 'update', clock, replayed);
     return this;
   }
 
@@ -6896,16 +6898,14 @@ type EgressProxyState = 'applied' | 'applying' | MandalaError;
 
 /** How far an answered end time may sit from an asked-for absolute one: the platform keeps whole seconds. */
 const END_TIME_SLACK_MS = 1_000;
-/** How much later than the request an end time given in hours may land. */
-const END_HOURS_SLACK_MS = 60_000;
 
 /**
  * Hold an answer to the end time that was asked for. A platform that does not
  * know end times ignores the field and answers as though it had not been sent,
  * which would leave a computer running with no end, or an old one, believed
  * to have the new one. So the answer's `ends_at` must be the time asked for:
- * within a second of an absolute time, or for hours, between `started` plus
- * the hours and now plus the hours and a minute. A `replayed` answer is an
+ * within a second of an absolute time, or for hours, within
+ * {@link P.relativeBounds} of the request's `clock`. A `replayed` answer is an
  * earlier call's, so for hours only the upper bound holds. After a clear, it
  * must carry none. Otherwise this is an error naming the computer. Nothing is
  * stopped or deleted: the computer is as the platform answered.
@@ -6914,7 +6914,7 @@ export function confirmEndTime(
   data: Record<string, unknown>,
   want: P.EndTimeRequest | undefined,
   what: 'create' | 'update',
-  started: number,
+  clock: P.ExchangeClock,
   replayed = false,
 ): void {
   if (!want) return;
@@ -6932,10 +6932,8 @@ export function confirmEndTime(
   if (want.at !== undefined) {
     ok = Math.abs(got - Math.floor(want.at / 1000) * 1000) <= END_TIME_SLACK_MS;
   } else if (want.hours !== undefined) {
-    const span = want.hours * 3_600_000;
-    ok =
-      (replayed || got >= started + span - END_TIME_SLACK_MS) &&
-      got <= Date.now() + span + END_HOURS_SLACK_MS;
+    const [lower, upper] = P.relativeBounds(want.hours * 3_600_000, clock);
+    ok = (replayed || got >= lower) && got <= upper;
   }
   if (ok) return;
   throw new MandalaError(

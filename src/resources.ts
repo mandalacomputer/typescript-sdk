@@ -352,6 +352,28 @@ export class Computers {
     return (await this.#create(args, opts)).computer;
   }
 
+  /**
+   * After a launch started a computer that was asked for an end time: read it
+   * again, and if the end time is gone or has passed, stop it and throw. Both
+   * run to a deadline of their own, not the caller's signal, so a
+   * cancellation cannot leave the computer running with no end.
+   */
+  async #holdEndTimeAfterStart(computer: Computer): Promise<void> {
+    await computer.refresh({ signal: AbortSignal.timeout(END_TIME_ROLLBACK_TIMEOUT_MS) });
+    const endsAt = computer.endsAt;
+    if (endsAt !== undefined && Date.parse(endsAt) > Date.now()) return;
+    let stopped = '';
+    try {
+      await computer.stop({ signal: AbortSignal.timeout(END_TIME_ROLLBACK_TIMEOUT_MS) });
+      stopped = 'it was stopped again';
+    } catch (err) {
+      stopped = `stopping it again failed (${err instanceof Error ? err.message : String(err)}): stop ${computer.id} yourself`;
+    }
+    throw new MandalaError(
+      `${computer.id} was started, but its requested end time ${endsAt === undefined ? 'was gone' : `${endsAt} had passed`} by then; ${stopped}`,
+    );
+  }
+
   /** {@link create}, also saying whether the answer was a replay of an earlier call's. */
   async #create(
     args: P.CreateArgs,
@@ -360,7 +382,7 @@ export class Computers {
     let replayed = false;
     const body = P.createBody(args);
     const endTime = P.endTimeRequest(args);
-    const started = Date.now();
+    const timing = P.exchangeClock();
     const data = await this.#t.json(
       'POST',
       P.COMPUTERS,
@@ -371,10 +393,11 @@ export class Computers {
       },
       (_, headers) => {
         replayed = headers.get('idempotent-replayed')?.trim().toLowerCase() === 'true';
+        timing.headers(headers);
       },
     );
     const computer = oneComputer(this.#t, data, 'POST', P.COMPUTERS);
-    confirmEndTime(computer.raw, endTime, 'create', started, replayed);
+    confirmEndTime(computer.raw, endTime, 'create', timing.finish(), replayed);
     return { computer, replayed };
   }
 
@@ -520,6 +543,9 @@ export class Computers {
         }
         remaining();
         await computer.start({ signal });
+        // The end time can come between the read above and the start, and a
+        // start after it brings the computer back with none.
+        if (P.endTimeRequest(args)?.kind === 'set') await this.#holdEndTimeAfterStart(computer);
       }
       await computer.waitUntilRunning({ timeoutMs: remaining(), pollMs, signal });
       await computer.waitForGuest({ timeoutMs: remaining(), pollMs, signal });
@@ -664,7 +690,7 @@ export class Computers {
     // exists to prevent.
     const body = P.createBody(args);
     const endTime = P.endTimeRequest(args);
-    const started = Date.now();
+    const timing = P.exchangeClock();
     let replayed = false;
     const data = await this.#t.json(
       'POST',
@@ -672,11 +698,13 @@ export class Computers {
       { body, headers: idempotencyHeaders(opts.idempotencyKey), signal: opts.signal },
       (_, headers) => {
         replayed = headers.get('idempotent-replayed')?.trim().toLowerCase() === 'true';
+        timing.headers(headers);
       },
     );
+    const clock = timing.finish();
     const computer = new EphemeralComputer(this.#t, computerRecord(data, 'POST', P.COMPUTERS));
     try {
-      confirmEndTime(computer.raw, endTime, 'create', started, replayed);
+      confirmEndTime(computer.raw, endTime, 'create', clock, replayed);
     } catch (err) {
       // With a block, the computer is this call's to delete, and a block
       // never run is no reason to keep it. Without one, it is the caller's.
@@ -2759,12 +2787,14 @@ export class ApiKeys {
       body.expires_in_hours !== undefined ||
       body.computer_ids !== undefined;
     opts.signal?.throwIfAborted();
-    // Taken before the request, so the slack below is all the platform's.
-    const before = Date.now();
-    const data = await this.#t.json('POST', P.API_KEYS, {
-      body,
-      signal: limited ? undefined : opts.signal,
-    });
+    const timing = P.exchangeClock();
+    const data = await this.#t.json(
+      'POST',
+      P.API_KEYS,
+      { body, signal: limited ? undefined : opts.signal },
+      (_, headers) => timing.headers(headers),
+    );
+    const clock = timing.finish();
     // Read before the decode, so an answer that cannot be decoded can still
     // be revoked by it when it was meant to be limited.
     const id = P.isRecord(data) && typeof data.id === 'string' ? data.id : '';
@@ -2782,7 +2812,7 @@ export class ApiKeys {
         )}), so the requested limits cannot be confirmed`,
       );
     }
-    const missed = unappliedKeyLimits(created, body, before);
+    const missed = unappliedKeyLimits(created, body, clock);
     if (!missed.length) return created;
     return this.#refuseUnlimited(
       created.id,
@@ -2833,23 +2863,29 @@ export class ApiKeys {
 const scrub = (message: string, secret: string): string =>
   secret ? message.split(secret).join('[key]') : message;
 
+/** How long the re-read and stop after a launch's start may each take. */
+const END_TIME_ROLLBACK_TIMEOUT_MS = 15_000;
+
 /** How long the revoke of a key minted without its limits may take. */
 const KEY_ROLLBACK_TIMEOUT_MS = 15_000;
-
-/** Slack on an `expires_in_hours` the platform turned into a time. */
-const KEY_EXPIRY_SLACK_MS = 60_000;
 
 /**
  * The limits a mint asked for that its answer does not carry: an expiry that
  * is missing or later than asked, a computer limit that is missing, empty, or
  * names a computer that was not asked for.
  */
-function unappliedKeyLimits(key: ApiKey, body: Record<string, unknown>, before: number): string[] {
+function unappliedKeyLimits(
+  key: ApiKey,
+  body: Record<string, unknown>,
+  clock: P.ExchangeClock,
+): string[] {
   const missed: string[] = [];
   let latest: number | undefined;
   if (typeof body.expires_at === 'string') latest = Date.parse(body.expires_at);
   if (typeof body.expires_in_hours === 'number') {
-    latest = before + body.expires_in_hours * 3_600_000 + KEY_EXPIRY_SLACK_MS;
+    // An expiry earlier than asked is no wider a key, so only the upper
+    // bound of the window holds.
+    latest = P.relativeBounds(body.expires_in_hours * 3_600_000, clock)[1];
   }
   if (latest !== undefined) {
     const got = key.expiresAt === null ? Number.NaN : Date.parse(key.expiresAt);

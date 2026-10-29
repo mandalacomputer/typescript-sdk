@@ -734,6 +734,65 @@ export type CreateArgs = {
  * of hours from the request, a clear, or nothing (`undefined`). Read off
  * arguments the body builder has already accepted.
  */
+/**
+ * When one request was sent and answered, for holding a time the platform
+ * worked out as "now plus N hours" without trusting this machine's clock.
+ * `serverDate` is the answer's `Date` header (whole seconds), when it had one.
+ */
+export type ExchangeClock = {
+  clientStart: number;
+  clientEnd: number;
+  durationMs: number;
+  serverDate?: number;
+};
+
+/** Slack around the platform's "now" when its `Date` header is known. */
+export const RELATIVE_SLACK_MS = 60_000;
+/** Slack around this machine's clock when the answer had no `Date` header. */
+export const RELATIVE_NO_DATE_SLACK_MS = 10 * 60_000;
+
+/** Start timing one request; feed it the answer's headers, then finish it. */
+export function exchangeClock(): {
+  headers(h: Headers): void;
+  finish(): ExchangeClock;
+} {
+  const clientStart = Date.now();
+  const t0 = performance.now();
+  let serverDate: number | undefined;
+  return {
+    headers(h) {
+      const d = Date.parse(h.get('date') ?? '');
+      serverDate = Number.isNaN(d) ? undefined : d;
+    },
+    finish: () => ({
+      clientStart,
+      clientEnd: Date.now(),
+      durationMs: performance.now() - t0,
+      serverDate,
+    }),
+  };
+}
+
+/**
+ * The window a time of "now plus `spanMs`" worked out by the platform during
+ * one request falls in. With the answer's `Date` as the platform's now:
+ * from it, less the request's duration and a minute, to it plus a minute.
+ * Without one, this machine's clock, a little either side of the request,
+ * widened by ten minutes for the skew between the two.
+ */
+export function relativeBounds(spanMs: number, clock: ExchangeClock): [number, number] {
+  if (clock.serverDate !== undefined) {
+    return [
+      clock.serverDate + spanMs - RELATIVE_SLACK_MS - clock.durationMs,
+      clock.serverDate + spanMs + RELATIVE_SLACK_MS,
+    ];
+  }
+  return [
+    clock.clientStart + spanMs - RELATIVE_NO_DATE_SLACK_MS,
+    clock.clientEnd + spanMs + RELATIVE_NO_DATE_SLACK_MS,
+  ];
+}
+
 export type EndTimeRequest = { kind: 'clear' } | { kind: 'set'; at?: number; hours?: number };
 
 export function endTimeRequest(args: {

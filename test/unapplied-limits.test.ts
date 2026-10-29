@@ -131,6 +131,42 @@ describe('an API key mint the platform did not limit', () => {
     ]);
   });
 
+  it.each([
+    ['5s ahead of', -5_000],
+    ['2 minutes behind', 120_000],
+  ])('accepts an expiry in hours with the client clock %s the platform', async (_what, skew) => {
+    const at = new Date(Date.now() + skew + 3_600_000).toISOString();
+    const { rec, client } = sdk((call) =>
+      call.method === 'POST'
+        ? new Response(JSON.stringify({ ...API_KEY_CREATED, expires_at: at }), {
+            status: 201,
+            headers: {
+              'content-type': 'application/json',
+              date: new Date(Date.now() + skew).toUTCString(),
+            },
+          })
+        : anyRoute(call),
+    );
+    const key = await client.apiKeys.create({ expiresInHours: 1 });
+    expect(key.expiresAt).toBe(at);
+    expect(rec.routes()).toEqual([['POST', 'api-keys']]);
+    const late = new Date(Date.now() + skew + 3_600_000 + 5 * 60_000).toISOString();
+    const wrong = sdk((call) =>
+      call.method === 'POST'
+        ? new Response(JSON.stringify({ ...API_KEY_CREATED, expires_at: late }), {
+            status: 201,
+            headers: {
+              'content-type': 'application/json',
+              date: new Date(Date.now() + skew).toUTCString(),
+            },
+          })
+        : anyRoute(call),
+    );
+    await expect(wrong.client.apiKeys.create({ expiresInHours: 1 })).rejects.toThrow(
+      /did not apply the requested expiry/,
+    );
+  });
+
   it('says so, and still keeps the key back, when the revoke fails', async () => {
     const { client } = sdk(
       minted({}, () => json({ error: 'upstream down', request_id: 'r1' }, { status: 400 })),
@@ -230,34 +266,68 @@ describe('an end time the platform did not apply', () => {
     await expect(later.client.computers.create({ endsAt: AT })).rejects.toThrow(/did not apply/);
   });
 
-  it('accepts hours landing between the request and a minute after it', async () => {
+  // The platform's clock, as its answer's Date header gives it: `skewMs` from
+  // this machine's, so a negative skew is a client clock running ahead.
+  const dated = (body: unknown, skewMs: number, extra: Record<string, string> = {}) =>
+    new Response(JSON.stringify(body), {
+      headers: {
+        'content-type': 'application/json',
+        date: new Date(Date.now() + skewMs).toUTCString(),
+        ...extra,
+      },
+    });
+  const serverHours = (skewMs: number, hours: number, offsetMs = 0) =>
+    new Date(Date.now() + skewMs + hours * 3_600_000 + offsetMs).toISOString();
+
+  it.each([
+    ['5s ahead of', -5_000],
+    ['2 minutes behind', 120_000],
+  ])('accepts hours the platform applied with the client clock %s it', async (_what, skew) => {
+    const applied: Responder = (call) =>
+      call.path === '/computers' || call.method === 'PATCH'
+        ? dated({ ...COMPUTER, ends_at: serverHours(skew, 2) }, skew)
+        : anyRoute(call);
+    const { client } = sdk(applied);
+    const c = await client.computers.create({ endsInHours: 2 });
+    await c.update({ endsInHours: 2 });
+  });
+
+  it.each([
+    ['five minutes late', 5 * 60_000],
+    ['an hour early', -3_600_000],
+  ])('refuses hours the platform answered %s by its own clock', async (_what, offset) => {
+    const wrong: Responder = (call) =>
+      call.path === '/computers' || call.method === 'PATCH'
+        ? dated({ ...COMPUTER, ends_at: serverHours(120_000, 2, offset) }, 120_000)
+        : anyRoute(call);
+    const { client } = sdk(wrong);
+    await expect(client.computers.create({ endsInHours: 2 })).rejects.toThrow(/did not apply/);
+    const c = await client.computers.get(COMPUTER.id);
+    await expect(c.update({ endsInHours: 2 })).rejects.toThrow(/did not apply/);
+  });
+
+  it('without a Date header, allows ten minutes of skew either side', async () => {
     const hours =
       (offsetMs: number): Responder =>
       (call) =>
         call.path === '/computers'
-          ? json({
-              ...COMPUTER,
-              ends_at: new Date(Date.now() + 7_200_000 + offsetMs).toISOString(),
-            })
+          ? json({ ...COMPUTER, ends_at: serverHours(0, 2, offsetMs) })
           : anyRoute(call);
-    await sdk(hours(0)).client.computers.create({ endsInHours: 2 });
-    await sdk(hours(30_000)).client.computers.create({ endsInHours: 2 });
-    await expect(sdk(hours(-10_000)).client.computers.create({ endsInHours: 2 })).rejects.toThrow(
-      /did not apply/,
-    );
-    await expect(sdk(hours(120_000)).client.computers.create({ endsInHours: 2 })).rejects.toThrow(
-      /did not apply/,
-    );
+    await sdk(hours(5 * 60_000)).client.computers.create({ endsInHours: 2 });
+    await sdk(hours(-5 * 60_000)).client.computers.create({ endsInHours: 2 });
+    for (const off of [15 * 60_000, -15 * 60_000]) {
+      await expect(sdk(hours(off)).client.computers.create({ endsInHours: 2 })).rejects.toThrow(
+        /did not apply/,
+      );
+    }
   });
 
   it('accepts a replayed update whose end time came from the first call', async () => {
-    // The first call was several seconds ago; its answer is replayed as it was.
-    const first = new Date(Date.now() - 5_000 + 7_200_000).toISOString();
+    // The first call was minutes ago; its answer is replayed as it was.
+    const first = serverHours(-5 * 60_000, 2);
     const { client } = sdk((call) =>
       call.method === 'PATCH'
-        ? new Response(JSON.stringify({ ...COMPUTER, ends_at: first }), {
-            headers: { 'content-type': 'application/json', 'idempotent-replayed': 'true' },
-          })
+        ? dated({ ...COMPUTER, ends_at: first }, 0, { 'idempotent-replayed': 'true' })
         : anyRoute(call),
     );
     const c = await client.computers.get(COMPUTER.id);
@@ -265,7 +335,7 @@ describe('an end time the platform did not apply', () => {
     expect(c.endsAt).toBe(first);
     // Not replayed, the same answer is too early for this request.
     const fresh = sdk((call) =>
-      call.method === 'PATCH' ? json({ ...COMPUTER, ends_at: first }) : anyRoute(call),
+      call.method === 'PATCH' ? dated({ ...COMPUTER, ends_at: first }, 0) : anyRoute(call),
     );
     const d = await fresh.client.computers.get(COMPUTER.id);
     await expect(d.update({ endsInHours: 2 })).rejects.toThrow(/did not apply/);
@@ -293,6 +363,31 @@ describe('an end time the platform did not apply', () => {
       ['POST', 'computers'],
       ['DELETE', `computers/${COMPUTER.id}`],
     ]);
+  });
+});
+
+describe('a launch whose end time comes during its start', () => {
+  it('stops the computer again and throws', async () => {
+    const soon = new Date(Date.now() + 3_600_000).toISOString();
+    const rec = recorder((call) => {
+      if (call.method === 'POST' && call.path === '/computers')
+        return json({ id: 'launch-42', status: 'stopped', running_ram_mb: 0, ends_at: soon });
+      if (call.path.endsWith('/stop'))
+        return json({ id: 'launch-42', status: 'stopped', running_ram_mb: 0 });
+      // Started just as the end time came: running, and none left.
+      return json({ id: 'launch-42', status: 'running', running_ram_mb: 1024 });
+    });
+    const client = new Client({ apiKey: 'com_test', baseUrl: BASE, fetch: rec.fetch });
+    const error = await client.computers
+      .launch({ template: 'base', endsInHours: 1, start: false }, { pollMs: 1 })
+      .catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(MandalaError);
+    expect((error as Error).message).toContain(
+      'launch-42 was started, but its requested end time was gone by then; it was stopped again',
+    );
+    const routes = rec.routes();
+    expect(routes).toContainEqual(['POST', 'computers/launch-42/start']);
+    expect(routes.at(-1)).toEqual(['POST', 'computers/launch-42/stop']);
   });
 });
 

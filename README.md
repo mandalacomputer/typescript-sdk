@@ -2572,7 +2572,8 @@ second, or within a minute for `endsInHours`), or still carries one that was
 cleared, is a `MandalaError` naming the computer;
 the computer is left as it is, so stop it yourself or set the end time again.
 A `launch()` resent under its idempotency key does not start a computer whose
-requested end time has since come and gone.
+requested end time has since come and gone, and stops again one whose end time
+came while it was starting.
 
 ### A proxy for the browsers
 
