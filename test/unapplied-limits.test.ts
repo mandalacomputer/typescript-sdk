@@ -564,6 +564,29 @@ describe('a replayed relative end time', () => {
     ).rejects.toThrow(/did not apply the requested end time/);
   });
 
+  it('keeps a key first answered here as a replay at the upper bound on every retry', async () => {
+    let shiftMs = 0;
+    const realNow = Date.now.bind(Date);
+    const realPerf = performance.now.bind(performance);
+    vi.spyOn(Date, 'now').mockImplementation(() => realNow() + shiftMs);
+    vi.spyOn(performance, 'now').mockImplementation(() => realPerf() + shiftMs);
+    // The original was sent elsewhere, twenty minutes before the first retry
+    // here: its deadline is earlier than any window this process's retries span.
+    const original = new Date(realNow() - 20 * 60_000 + 7_200_000).toISOString();
+    const { rec, client } = sdk((call) =>
+      call.method === 'POST' && call.path === '/computers'
+        ? dated({ ...COMPUTER, ends_at: original }, true)
+        : anyRoute(call),
+    );
+    const key = `elsewhere-twice-${realNow()}`;
+    const first = await client.computers.create({ endsInHours: 2 }, { idempotencyKey: key });
+    expect(first.endsAt).toBe(original);
+    shiftMs = 5 * 60_000;
+    const second = await client.computers.create({ endsInHours: 2 }, { idempotencyKey: key });
+    expect(second.endsAt).toBe(original);
+    expect(rec.calls.filter((call) => call.path === '/computers')).toHaveLength(2);
+  });
+
   it('holds an unknown key only to the upper bound', async () => {
     const stale = new Date(Date.now() - 30 * 60_000 + 7_200_000).toISOString();
     const { client } = sdk((call) =>
