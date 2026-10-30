@@ -95,7 +95,18 @@ describe('mandala computers gateway', () => {
     expect(result.frame.data).toEqual(GATEWAY_BINDING);
   });
 
+  it('sends --auth-header as auth_header, and nothing without it', async () => {
+    const h = harness();
+    const result = await h.run([...CREATE, '--method', 'POST', '--auth-header', 'x-api-key']);
+    expect(result.code).toBe(0);
+    expect(h.rec.last().body).toMatchObject({ auth_header: 'x-api-key' });
+    const plain = harness();
+    expect((await plain.run([...CREATE, '--method', 'POST'])).code).toBe(0);
+    expect(plain.rec.last().body).not.toHaveProperty('auth_header');
+  });
+
   it.each([
+    [['--method', 'GET', '--auth-header', 'bearer'], 'invalid_arguments'],
     [['--method', 'CONNECT'], 'invalid_arguments'],
     [['--method', 'GET', '--origin2'], 'invalid_arguments'],
   ])('refuses %j before any request', async (extra, code) => {

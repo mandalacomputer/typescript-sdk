@@ -1484,6 +1484,7 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
       methods: (many('method') ?? [])
         .flatMap((m) => m.split(','))
         .map((m) => m.trim().toUpperCase()) as P.CredentialGatewayMethod[],
+      authHeader: s('auth-header') as P.CredentialGatewayAuthHeader | undefined,
     };
     if (path === 'computers gateway create') P.credentialGatewayBody(gatewayArgs);
     if (path === 'scp' || path === 'files upload' || path === 'files download') {

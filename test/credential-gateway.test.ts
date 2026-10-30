@@ -47,11 +47,27 @@ describe('listing a computer’s bindings', () => {
       origin: 'https://api.github.com',
       pathPrefix: '/repos/acme/app',
       methods: ['GET'],
+      authHeader: 'authorization',
       createdAt: '2026-10-29T00:00:00.000Z',
       baseUrl: 'http://gateway.invalid/cgw-0123456789abcdef01234567',
       placeholder: 'mandala-placeholder',
       raw: GATEWAY_BINDING,
     });
+  });
+
+  // A platform from before the field sends nothing, which means a Bearer token.
+  it.each([
+    ['x-api-key', 'x-api-key'],
+    [undefined, 'authorization'],
+    [null, 'authorization'],
+    ['', 'authorization'],
+    ['x-other-key', 'x-other-key'],
+  ])('reads auth_header %j as %j', async (sent, read) => {
+    const { computer } = await handle(
+      gateway({ bindings: [{ ...GATEWAY_BINDING, auth_header: sent }] }),
+    );
+    const [row] = await computer.credentialGatewayBindings();
+    expect(row!.authHeader).toBe(read);
   });
 
   it('reads an empty list', async () => {
@@ -102,6 +118,24 @@ describe('making one', () => {
     expect(made.baseUrl).toBe(GATEWAY_BINDING.base_url);
   });
 
+  it.each(['x-api-key', 'authorization'] as const)(
+    'sends authHeader %j as auth_header',
+    async (authHeader) => {
+      const { rec, computer, client } = await handle();
+      await computer.createCredentialGatewayBinding(args({ authHeader }));
+      expect(rec.last().body).toMatchObject({ auth_header: authHeader });
+      await client.credentialGateway.create('vm-1', args({ authHeader }));
+      expect(rec.last().body).toMatchObject({ auth_header: authHeader });
+    },
+  );
+
+  // Left out, an older platform that does not know the field still takes it.
+  it.each([undefined, null])('sends no auth_header for %j', async (authHeader) => {
+    const { rec, computer } = await handle();
+    await computer.createCredentialGatewayBinding(args({ authHeader }));
+    expect(rec.last().body).not.toHaveProperty('auth_header');
+  });
+
   it('takes / as every path, and an origin with its trailing slash', async () => {
     const { rec, computer } = await handle();
     await computer.createCredentialGatewayBinding(
@@ -140,6 +174,9 @@ describe('making one', () => {
     [{ methods: ['get'] }, 'may be GET'],
     [{ methods: ['CONNECT'] }, 'may be GET'],
     [{ methods: ['GET', 'GET'] }, 'must not repeat'],
+    [{ authHeader: 'X-API-Key' }, 'authHeader must be'],
+    [{ authHeader: 'bearer' }, 'authHeader must be'],
+    [{ authHeader: 7 }, 'authHeader must be'],
   ])('refuses %j before anything is sent', async (over, says) => {
     const { rec, computer, client } = await handle();
     await expect(computer.createCredentialGatewayBinding(args(over))).rejects.toThrow(

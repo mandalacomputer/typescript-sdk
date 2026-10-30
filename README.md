@@ -2914,9 +2914,11 @@ down, and on a lost computer whose labels you want back.
 Let a computer call an HTTPS API with a secret it never holds. A binding names
 a secret from the account's store, one upstream origin, a path prefix and the
 methods allowed; the platform sends the secret's latest value upstream as
-`Authorization: Bearer`, over verified TLS, and nothing of it is delivered to
+`Authorization: Bearer <secret>` (or, with `authHeader: 'x-api-key'`, as
+`x-api-key: <secret>`), over verified TLS, and nothing of it is delivered to
 the computer. Inside the computer, call the binding's `baseUrl` followed by the
-provider's path, with `Authorization: Bearer <placeholder>`:
+provider's path, with the placeholder as the API key, sent as
+`Authorization: Bearer <placeholder>` or `x-api-key: <placeholder>`:
 
 ```ts
 const gw = await c.createCredentialGatewayBinding({
@@ -2933,20 +2935,44 @@ await c.exec(
 Owners only, on an active paid plan or trial. A computer has at most eight
 bindings, and a binding never changes: `deleteCredentialGatewayBinding(id)`
 and make another. `credentialGatewayBindings()` lists them, oldest first,
-with secret ids but never values. Only plain HTTP clients are supported (no
-redirects, streaming or WebSocket upgrades); a request is limited to 1 MiB, a
-response to 4 MiB and a call to 30 seconds. A failed call may still have
+with secret ids, `authHeader`, but never values. Only plain HTTP clients are
+supported (no redirects or WebSocket upgrades). Answers stream as the provider
+sends them, server-sent events included; a request is limited to 7 MiB, an
+answer to 64 MiB and a call to 10 minutes. A failed call may still have
 reached the provider, so check before retrying. Clones do not inherit
 bindings, and moving the computer to another workspace or owner removes them.
 Guest code can make any call a binding allows, so give it a narrowly scoped
 provider key. Origins, path prefixes and methods are checked here before
 anything is sent; whether a host is public is the platform's to answer.
 
+A model key works the same way. Anthropic's API takes its key in `x-api-key`,
+so an Anthropic key binding uses `authHeader: 'x-api-key'`; Claude Code (or an
+Anthropic SDK) inside the computer then uses the binding with
+`ANTHROPIC_BASE_URL=<baseUrl>` and `ANTHROPIC_API_KEY=mandala-placeholder`:
+
+```ts
+const claude = await c.createCredentialGatewayBinding({
+  secretId: anthropicKey.id,
+  origin: 'https://api.anthropic.com',
+  pathPrefix: '/v1',
+  methods: ['POST'],
+  authHeader: 'x-api-key',
+});
+await c.exec(
+  `ANTHROPIC_BASE_URL=${claude.baseUrl} ANTHROPIC_API_KEY=${claude.placeholder} claude -p 'hello'`,
+);
+```
+
+A platform that does not report `auth_header` reads `'authorization'`. A host
+that cannot send `x-api-key` yet refuses the binding with a `409`.
+
 From the CLI:
 
 ```sh
 mandala computers gateway create my-computer --secret-id csec-0123456789abcdef \
   --origin https://api.github.com --path-prefix /repos/acme/app --method GET
+mandala computers gateway create my-computer --secret-id csec-fedcba9876543210 \
+  --origin https://api.anthropic.com --path-prefix /v1 --method POST --auth-header x-api-key
 mandala computers gateway list my-computer
 mandala computers gateway rm my-computer cgw-0123456789abcdef01234567
 ```

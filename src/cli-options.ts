@@ -441,7 +441,7 @@ export const COMMANDS: readonly Command[] = [
   ),
   command(
     'computers gateway create',
-    'Let a computer call an HTTPS API with a secret it never holds: the platform sends the secret as a Bearer token to ORIGIN for the paths and methods given. Inside the computer, call base_url plus the provider path with Authorization: Bearer <placeholder>',
+    'Let a computer call an HTTPS API with a secret it never holds: the platform sends the secret to ORIGIN, as a Bearer token or in x-api-key, for the paths and methods given. Inside the computer, call base_url plus the provider path with the placeholder as the API key (Authorization: Bearer <placeholder> or x-api-key: <placeholder>)',
     ['computer'],
     [
       flag('secret-id', 'The id of the secret to send upstream (csec-…; secrets list shows them)', {
@@ -459,6 +459,11 @@ export const COMMANDS: readonly Command[] = [
         'method',
         'An allowed method: GET, HEAD, POST, PUT, PATCH or DELETE; repeat, or separate with commas, for more',
         { required: true, repeatable: true },
+      ),
+      flag(
+        'auth-header',
+        'Where the secret goes upstream: authorization (default), as Authorization: Bearer; or x-api-key, which Anthropic takes',
+        { choices: ['authorization', 'x-api-key'] },
       ),
     ],
   ),

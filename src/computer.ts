@@ -6319,11 +6319,13 @@ export class Computer {
   /**
    * Let this computer call an HTTPS API with a secret it never holds.
    *
-   * The platform sends the secret's latest value as `Authorization: Bearer`
-   * to `origin`, over verified TLS, for requests under `pathPrefix` (at a
-   * segment boundary) using one of `methods`. Inside the computer, call the
-   * returned {@link CredentialGatewayBinding.baseUrl} followed by the
-   * provider's path, with `Authorization: Bearer <placeholder>`:
+   * The platform sends the secret's latest value to `origin`, over verified
+   * TLS, as `Authorization: Bearer <secret>` or, with `authHeader:
+   * 'x-api-key'`, as `x-api-key: <secret>`, for requests under `pathPrefix`
+   * (at a segment boundary) using one of `methods`. Inside the computer, call
+   * the returned {@link CredentialGatewayBinding.baseUrl} followed by the
+   * provider's path, with the placeholder as the API key
+   * (`Authorization: Bearer <placeholder>` or `x-api-key: <placeholder>`):
    *
    * ```ts
    * const gw = await computer.createCredentialGatewayBinding({
@@ -6337,14 +6339,21 @@ export class Computer {
    * );
    * ```
    *
+   * An Anthropic key takes `authHeader: 'x-api-key'` (origin
+   * `https://api.anthropic.com`, path prefix `/v1`); Claude Code inside the
+   * computer then runs with `ANTHROPIC_BASE_URL=<baseUrl>` and
+   * `ANTHROPIC_API_KEY=mandala-placeholder`.
+   *
    * Owners only. A computer has at most eight bindings, and a binding never
    * changes: delete it and make another. Only plain HTTP clients are
-   * supported: no redirects, streaming or WebSocket upgrades. A request is
-   * limited to 1 MiB, a response to 4 MiB and the call to 30 seconds. Clones
+   * supported: no redirects or WebSocket upgrades. Answers stream as the
+   * provider sends them, server-sent events included. A request is limited to
+   * 7 MiB, an answer to 64 MiB and the call to 10 minutes. Clones
    * do not inherit bindings, and moving the computer to another workspace or
    * owner removes them. The platform refuses an account without an active
    * paid plan or trial (`403`), a host whose gateway is not ready (`503`),
-   * a secret outside the computer's scope (`400`) and a ninth binding (`409`).
+   * a secret outside the computer's scope (`400`), a ninth binding (`409`) and
+   * `x-api-key` on a host that cannot send it yet (`409`).
    * Use a narrowly scoped provider key: guest code can make any call the
    * binding allows.
    */
