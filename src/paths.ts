@@ -3529,6 +3529,16 @@ export const CREDENTIAL_GATEWAY_METHODS: readonly CredentialGatewayMethod[] = [
 ];
 /** How many bindings one computer may have. */
 export const CREDENTIAL_GATEWAY_BINDINGS_MAX = 8;
+/**
+ * Where the gateway puts the secret upstream: `authorization` sends
+ * `Authorization: Bearer <secret>` (most APIs); `x-api-key` sends
+ * `x-api-key: <secret>` (Anthropic's API).
+ */
+export type CredentialGatewayAuthHeader = 'authorization' | 'x-api-key';
+export const CREDENTIAL_GATEWAY_AUTH_HEADERS: readonly CredentialGatewayAuthHeader[] = [
+  'authorization',
+  'x-api-key',
+];
 
 /**
  * What a credential gateway binding is made with
@@ -3538,7 +3548,7 @@ export const CREDENTIAL_GATEWAY_BINDINGS_MAX = 8;
 export type CredentialGatewayBindingArgs = {
   /**
    * The secret in the account's store (`csec-` and sixteen hex characters)
-   * whose value is sent upstream as `Authorization: Bearer <value>`. It must
+   * whose value is sent upstream, in the header {@link authHeader} names. It must
    * be in the computer's workspace or the account's own scope; the latest
    * revision is used on every request.
    */
@@ -3556,6 +3566,14 @@ export type CredentialGatewayBindingArgs = {
   pathPrefix: string;
   /** The methods allowed: one to six of GET, HEAD, POST, PUT, PATCH and DELETE, no repeats. */
   methods: CredentialGatewayMethod[];
+  /**
+   * Where the secret goes upstream: `'authorization'` (the default) as
+   * `Authorization: Bearer <secret>`, or `'x-api-key'` as
+   * `x-api-key: <secret>`, which Anthropic's API takes. Omitted or `null`,
+   * nothing is sent and the platform uses `'authorization'`. A host that
+   * cannot send `x-api-key` yet refuses it with a `409`.
+   */
+  authHeader?: CredentialGatewayAuthHeader | null;
 };
 
 /** A computer's credential gateway bindings: `computers/:id/credential-gateway`. */
@@ -3653,12 +3671,27 @@ export function credentialGatewayBody(args: CredentialGatewayBindingArgs): Json 
   if (!SECRET_ID.test(secretId)) {
     throw new ValidationError("secretId must be a secret's id: csec- and sixteen hex characters");
   }
-  return {
+  const body: Json = {
     secret_id: secretId,
     origin: gatewayOrigin(args.origin),
     path_prefix: gatewayPathPrefix(args.pathPrefix),
     methods: gatewayMethods(args.methods),
   };
+  // Sent only when given, so a platform that predates the field still takes
+  // a binding that does not ask for it.
+  if (args.authHeader !== undefined && args.authHeader !== null) {
+    body.auth_header = gatewayAuthHeader(args.authHeader);
+  }
+  return body;
+}
+
+function gatewayAuthHeader(v: unknown): CredentialGatewayAuthHeader {
+  if (!CREDENTIAL_GATEWAY_AUTH_HEADERS.includes(v as CredentialGatewayAuthHeader)) {
+    throw new ValidationError(
+      `authHeader must be "authorization" or "x-api-key" (got ${typeof v === 'string' ? JSON.stringify(v) : typeof v})`,
+    );
+  }
+  return v as CredentialGatewayAuthHeader;
 }
 
 // --- the secret store -----------------------------------------------------

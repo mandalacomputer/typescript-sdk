@@ -12,6 +12,7 @@
 import { MandalaError, ValidationError } from './errors.js';
 import {
   CREDENTIAL_GATEWAY_METHODS,
+  type CredentialGatewayAuthHeader,
   type CredentialGatewayMethod,
   isExecutionId,
   isRecord,
@@ -3692,7 +3693,8 @@ export function toPublicUrlList(d: Record<string, unknown>): PublicUrlList {
  * The secret's value never reaches the computer.
  *
  * Inside the computer, call {@link baseUrl} followed by the provider's path,
- * with `Authorization: Bearer <placeholder>`:
+ * with the placeholder as the API key, as `Authorization: Bearer <placeholder>`
+ * or `x-api-key: <placeholder>`, whichever the client sends:
  *
  * ```sh
  * curl -H "Authorization: Bearer $PLACEHOLDER" "$BASE_URL/repos/acme/app/issues"
@@ -3710,6 +3712,12 @@ export type CredentialGatewayBinding = {
   pathPrefix: string;
   /** The methods allowed. */
   methods: CredentialGatewayMethod[];
+  /**
+   * Where the secret goes upstream: `'authorization'` as a Bearer token, or
+   * `'x-api-key'`. A platform that does not report it reads `'authorization'`,
+   * which is what it sends.
+   */
+  authHeader: CredentialGatewayAuthHeader | (string & {});
   createdAt: string;
   /**
    * The address to call from inside the computer, with the provider's path
@@ -3718,7 +3726,8 @@ export type CredentialGatewayBinding = {
    */
   baseUrl: string;
   /**
-   * The bearer token to send to {@link baseUrl} in place of the secret; the
+   * The API key to send to {@link baseUrl} in place of the secret, as
+   * `Authorization: Bearer <placeholder>` or `x-api-key: <placeholder>`; the
    * gateway replaces it with the secret's latest value.
    */
   placeholder: string;
@@ -3763,6 +3772,7 @@ export function toCredentialGatewayBinding(d: unknown, at?: number): CredentialG
     origin: d.origin,
     pathPrefix: d.path_prefix,
     methods: [...methods] as CredentialGatewayMethod[],
+    authHeader: nonEmpty(d.auth_header) ? d.auth_header : 'authorization',
     createdAt: str(d.created_at),
     baseUrl: d.base_url,
     placeholder: d.placeholder,

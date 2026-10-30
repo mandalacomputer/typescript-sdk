@@ -40,6 +40,17 @@ This is the summary you read to decide whether to upgrade.
   a deadline of its own, even on a client with no timeout. The CLI
   has `api-keys create --expires-in HOURS` / `--expires-at TIME` and a
   repeatable `--computer ID`, and `api-keys list` shows both.
+- Credential gateway `authHeader`. `createCredentialGatewayBinding({ ...,
+  authHeader: 'x-api-key' })` has the platform send the secret as
+  `x-api-key: <secret>` rather than `Authorization: Bearer <secret>`, which is
+  what an Anthropic key needs; Claude Code inside the computer then runs with
+  `ANTHROPIC_BASE_URL=<baseUrl>` and `ANTHROPIC_API_KEY=mandala-placeholder`.
+  Left out (or `null`), nothing is sent and the default stays `authorization`;
+  any other value is a `ValidationError` before the call. A binding's
+  `authHeader` reads `'authorization'` from a platform that does not report
+  it. The CLI has `computers gateway create --auth-header x-api-key`. The
+  documented gateway limits are now a 7 MiB request, a 64 MiB answer and 10
+  minutes per call, with streamed answers.
 
 ## [0.20.0] - 2026-10-29
 

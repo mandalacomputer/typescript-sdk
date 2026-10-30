@@ -668,6 +668,7 @@ async function exerciseEverything(client: Client): Promise<void> {
     origin: 'https://api.github.com',
     pathPrefix: '/repos/acme/app',
     methods: ['GET', 'POST'],
+    authHeader: 'x-api-key',
   } as const;
   const gw = await c.createCredentialGatewayBinding({ ...gateway, methods: [...gateway.methods] });
   await c.deleteCredentialGatewayBinding(gw.id);

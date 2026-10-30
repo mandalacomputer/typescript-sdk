@@ -1022,6 +1022,7 @@ export const GATEWAY_BINDING = {
   origin: 'https://api.github.com',
   path_prefix: '/repos/acme/app',
   methods: ['GET'],
+  auth_header: 'authorization',
   created_at: '2026-10-29T00:00:00.000Z',
   base_url: 'http://gateway.invalid/cgw-0123456789abcdef01234567',
   placeholder: 'mandala-placeholder',
