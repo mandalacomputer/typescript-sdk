@@ -739,6 +739,13 @@ export function usdMicros(micros: number): string {
   return `${sign}$${abs / 1_000_000n}.${cents.padEnd(2, '0')}`;
 }
 
+/** A runway in words, rounded down: minutes under an hour, so the last hour is not "0 h". */
+export function runwayWords(seconds: number): string {
+  if (seconds < 60) return 'under a minute';
+  if (seconds < 3600) return `about ${Math.floor(seconds / 60)} min`;
+  return `about ${Math.floor(seconds / 3600)} h`;
+}
+
 /**
  * `credits` for a person, one line each, raw, as {@link usageLines}: the caller
  * escapes each line. Amounts are dollars; `--json` keeps the platform's micros.
@@ -755,7 +762,7 @@ function creditLines(r: CreditReport): string[] {
               ? ''
               : r.runwaySeconds === 0
                 ? '; the balance has run out'
-                : `; the balance lasts about ${Math.floor(r.runwaySeconds / 3600)} h at that rate`),
+                : `; the balance lasts ${runwayWords(r.runwaySeconds)} at that rate`),
         ]
       : []),
     ...(r.frozen

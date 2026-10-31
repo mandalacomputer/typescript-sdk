@@ -7,7 +7,13 @@ import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { main } from '../src/cli.js';
-import { dashboardUrl, type LegacyCommands, runCli, usdMicros } from '../src/cli-commands.js';
+import {
+  dashboardUrl,
+  type LegacyCommands,
+  runCli,
+  runwayWords,
+  usdMicros,
+} from '../src/cli-commands.js';
 import { COMMANDS, type Flag, GLOBAL_FLAGS, help, parseArgs } from '../src/cli-options.js';
 import { type CliIO, runtime } from '../src/cli-runtime.js';
 import { looksLikeSecretValue } from '../src/cli-secrets.js';
@@ -6112,4 +6118,16 @@ describe('exec --retain-output, files --no-wake, secrets --keep-revision, wait -
       body: { command: 'true', session: 'desktop' },
     });
   });
+});
+
+// OPL-6261: the runway in words keeps the last hour readable.
+describe('runwayWords', () => {
+  it.each([
+    [1, 'under a minute'],
+    [59, 'under a minute'],
+    [600, 'about 10 min'],
+    [3599, 'about 59 min'],
+    [3600, 'about 1 h'],
+    [272_189, 'about 75 h'],
+  ])('%i seconds is %s', (seconds, words) => expect(runwayWords(seconds)).toBe(words));
 });
