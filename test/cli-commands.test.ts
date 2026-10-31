@@ -2634,7 +2634,14 @@ describe('AI credits and funded agent runs', () => {
     expect(h.rec.last().query).toEqual({});
     const { raw: _raw, ...expected } = { ...CREDITS, raw: undefined };
     expect(result.frames[0]).toMatchObject({ command: 'credits', ok: true });
-    expect(result.frames[0].data).toEqual(expected);
+    // A platform that predates pay as you go sends none of its three fields:
+    // decoded as unknown, and printed as such.
+    expect(result.frames[0].data).toEqual({
+      ...expected,
+      billing_mode: null,
+      burn_micros_per_hour: null,
+      runway_seconds: null,
+    });
   });
 
   it('forwards --before and --limit', async () => {

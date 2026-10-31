@@ -747,6 +747,17 @@ function creditLines(r: CreditReport): string[] {
   return [
     'AI credits (account-wide)',
     `Available: ${usdMicros(r.availableMicros)} (balance ${usdMicros(r.balanceMicros)}; held ${usdMicros(r.heldMicros)}; debt ${usdMicros(r.debtMicros)})`,
+    // Pay as you go spends the same balance on computers.
+    ...(r.billingMode === 'payg'
+      ? [
+          `Pay as you go: computers cost ${r.burnMicrosPerHour === null ? 'an unknown amount' : usdMicros(r.burnMicrosPerHour)} an hour now` +
+            (r.runwaySeconds === null
+              ? ''
+              : r.runwaySeconds === 0
+                ? '; the balance has run out'
+                : `; the balance lasts about ${Math.floor(r.runwaySeconds / 3600)} h at that rate`),
+        ]
+      : []),
     ...(r.frozen
       ? [
           'Frozen: no current plan, or the account is suspended; credits are kept but cannot be spent, and still expire',

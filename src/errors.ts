@@ -495,6 +495,39 @@ export class PlanLimitError extends APIError {
 }
 
 /**
+ * 402 — the account pays as it goes from prepaid credits, and its balance is
+ * too low to start this: a create, start, restart, restore, resume, clone or
+ * build.
+ *
+ * A {@link PlanLimitError}, so code that catches that keeps catching this. Told
+ * apart by the body's `code`, `INSUFFICIENT_BALANCE`. Not a retry: the same
+ * request succeeds once credits are added in Billing. Starting anything needs a
+ * quarter of an hour of what it costs, and never less than $0.25.
+ */
+export class InsufficientBalanceError extends PlanLimitError {
+  override name = 'InsufficientBalanceError';
+  /** The spendable balance the platform saw, in USD micros, when it said. */
+  readonly projectedMicros?: number;
+  /** What starting this needed, in USD micros, when it said. */
+  readonly requiredMicros?: number;
+  constructor(
+    message: string,
+    status: number,
+    body?: unknown,
+    retryAfterMs?: number,
+    metadata: ErrorMetadata = {},
+  ) {
+    super(message, status, body, retryAfterMs, metadata);
+    const safe = (v: unknown) => (typeof v === 'number' && Number.isSafeInteger(v) ? v : undefined);
+    this.projectedMicros = safe(errorRecord(body)?.projected_micros);
+    this.requiredMicros = safe(errorRecord(body)?.required_micros);
+  }
+}
+
+/** The body's `code` on a pay-as-you-go balance refusal. */
+const INSUFFICIENT_BALANCE = 'INSUFFICIENT_BALANCE';
+
+/**
  * A failure on the agent routes that the MODEL PROVIDER answered, not Mandala:
  * a 402, and a 404 or 413 the model API answered.
  *
@@ -1472,6 +1505,9 @@ export function errorForStatus(
   if (status === 429)
     return new RateLimitError(message, status, body, headers.retryAfterMs, headers);
   const Cls = BY_STATUS[status] ?? APIError;
+  // The 402 that is a balance rather than the plan, told apart by its code.
+  if (Cls === PlanLimitError && nonblank(errorRecord(body)?.code) === INSUFFICIENT_BALANCE)
+    return new InsufficientBalanceError(message, status, body, headers.retryAfterMs, headers);
   // The 409 that is an offer, told apart by its body. Never given a substitute
   // message: the platform's sentence here is the whole account of what will not
   // fit and what moving costs, written for whoever has to agree to it.
