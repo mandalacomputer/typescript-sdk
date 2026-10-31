@@ -10,6 +10,7 @@ import {
   type ErrorMetadata,
   FileExistsError,
   GatewayTimeoutError,
+  InsufficientBalanceError,
   isTransient,
   MethodNotAllowedError,
   MoveRequiredError,
@@ -17,6 +18,7 @@ import {
   OriginResponseError,
   OriginTLSError,
   OriginUnreachableError,
+  PlanLimitError,
   RangeNotSatisfiableError,
   RateLimitError,
   TooLargeError,
@@ -541,5 +543,40 @@ describe('the secret store’s refusal words', () => {
       expect((err as APIError).reason).toBe(reason);
       expect(isTransient(err)).toBe(false);
     }
+  });
+});
+
+// OPL-6261: a pay-as-you-go account short of credits is a 402 with its own code.
+describe('a balance too low to start something', () => {
+  it('is an InsufficientBalanceError, and still a PlanLimitError', () => {
+    const err = errorForStatus(402, 'Your credit balance is too low to start this.', {
+      error: 'Your credit balance is too low to start this.',
+      code: 'INSUFFICIENT_BALANCE',
+      projected_micros: 120_000,
+      required_micros: 250_000,
+    });
+    expect(err).toBeInstanceOf(InsufficientBalanceError);
+    expect(err).toBeInstanceOf(PlanLimitError);
+    expect(err.name).toBe('InsufficientBalanceError');
+    expect((err as InsufficientBalanceError).projectedMicros).toBe(120_000);
+    expect((err as InsufficientBalanceError).requiredMicros).toBe(250_000);
+    expect(err.code).toBe('INSUFFICIENT_BALANCE');
+  });
+
+  it('leaves any other 402 a plain PlanLimitError', () => {
+    const err = errorForStatus(402, 'Not enough RAM on your plan.', {
+      error: 'Not enough RAM on your plan.',
+    });
+    expect(err).toBeInstanceOf(PlanLimitError);
+    expect(err).not.toBeInstanceOf(InsufficientBalanceError);
+  });
+
+  it('reads no amounts it was not sent', () => {
+    const err = errorForStatus(402, 'short', {
+      code: 'INSUFFICIENT_BALANCE',
+      projected_micros: 'x',
+    });
+    expect((err as InsufficientBalanceError).projectedMicros).toBeUndefined();
+    expect((err as InsufficientBalanceError).requiredMicros).toBeUndefined();
   });
 });

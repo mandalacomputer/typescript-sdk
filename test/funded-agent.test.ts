@@ -324,6 +324,41 @@ describe('client.credits.read()', () => {
     expect(report.raw).toEqual(CREDITS);
   });
 
+  // OPL-6261: how the account pays, and on pay as you go its burn and runway.
+  it('decodes the billing mode, burn and runway, and reads their absence as unknown', () => {
+    const payg = toCreditReport(
+      { ...CREDITS, billing_mode: 'payg', burn_micros_per_hour: 122_738, runway_seconds: 272_189 },
+      'GET',
+      '/credits',
+    );
+    expect(payg).toMatchObject({
+      billingMode: 'payg',
+      burnMicrosPerHour: 122_738,
+      runwaySeconds: 272_189,
+    });
+    const idle = toCreditReport(
+      { ...CREDITS, billing_mode: 'payg', burn_micros_per_hour: 0, runway_seconds: null },
+      'GET',
+      '/credits',
+    );
+    expect(idle).toMatchObject({ burnMicrosPerHour: 0, runwaySeconds: null });
+    expect(toCreditReport(CREDITS, 'GET', '/credits')).toMatchObject({
+      billingMode: null,
+      burnMicrosPerHour: null,
+      runwaySeconds: null,
+    });
+    expect(() =>
+      toCreditReport(
+        { ...CREDITS, billing_mode: 'payg', burn_micros_per_hour: -1 },
+        'GET',
+        '/credits',
+      ),
+    ).toThrow(/burn_micros_per_hour/);
+    expect(() => toCreditReport({ ...CREDITS, billing_mode: 7 }, 'GET', '/credits')).toThrow(
+      /billing_mode/,
+    );
+  });
+
   it('sends before and limit', async () => {
     const { rec, client } = setup();
     await client.credits.read({ before: 41, limit: 100 });

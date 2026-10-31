@@ -739,6 +739,13 @@ export function usdMicros(micros: number): string {
   return `${sign}$${abs / 1_000_000n}.${cents.padEnd(2, '0')}`;
 }
 
+/** A runway in words, rounded down: minutes under an hour, so the last hour is not "0 h". */
+export function runwayWords(seconds: number): string {
+  if (seconds < 60) return 'under a minute';
+  if (seconds < 3600) return `about ${Math.floor(seconds / 60)} min`;
+  return `about ${Math.floor(seconds / 3600)} h`;
+}
+
 /**
  * `credits` for a person, one line each, raw, as {@link usageLines}: the caller
  * escapes each line. Amounts are dollars; `--json` keeps the platform's micros.
@@ -747,6 +754,17 @@ function creditLines(r: CreditReport): string[] {
   return [
     'AI credits (account-wide)',
     `Available: ${usdMicros(r.availableMicros)} (balance ${usdMicros(r.balanceMicros)}; held ${usdMicros(r.heldMicros)}; debt ${usdMicros(r.debtMicros)})`,
+    // Pay as you go spends the same balance on computers.
+    ...(r.billingMode === 'payg'
+      ? [
+          `Pay as you go: computers cost ${r.burnMicrosPerHour === null ? 'an unknown amount' : usdMicros(r.burnMicrosPerHour)} an hour now` +
+            (r.runwaySeconds === null
+              ? ''
+              : r.runwaySeconds === 0
+                ? '; the balance has run out'
+                : `; the balance lasts ${runwayWords(r.runwaySeconds)} at that rate`),
+        ]
+      : []),
     ...(r.frozen
       ? [
           'Frozen: no current plan, or the account is suspended; credits are kept but cannot be spent, and still expire',

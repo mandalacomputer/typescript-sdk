@@ -1552,6 +1552,8 @@ export type CreditEntryKind =
   | 'expire'
   | 'clawback'
   | 'debt_settle'
+  /** One UTC day of pay-as-you-go computers, charged once the day has closed. */
+  | 'compute'
   | (string & {});
 
 /** One unexpired lot of credits with something left in it. Amounts are USD micros. */
@@ -1628,8 +1630,31 @@ export type CreditReport = {
   entries: CreditEntry[];
   /** Pass as `before` for the next, older page; `null` on the last one. */
   nextBefore: number | null;
+  /**
+   * How the account pays for computers: `subscription`, `trial`, `payg` (pay
+   * as you go, from this same balance) or `none`. An open set. `null` from a
+   * platform that does not say.
+   */
+  billingMode: BillingMode | null;
+  /**
+   * On pay as you go, what the account's computers cost an hour right now, in
+   * USD micros: compute for the running ones, disk for every one that exists.
+   * `null` on any other billing mode, and while the platform cannot read every
+   * computer's state, rather than a figure that would be short.
+   */
+  burnMicrosPerHour: number | null;
+  /**
+   * On pay as you go, how many seconds the balance lasts at
+   * {@link CreditReport.burnMicrosPerHour}. `0` once it has run out (running
+   * computers are then suspended and nothing new starts); `null` when nothing
+   * is burning, when the burn is unknown, and on any other billing mode.
+   */
+  runwaySeconds: number | null;
   raw: Record<string, unknown>;
 };
+
+/** How an account pays for computers. An open set: treat a value you do not know as `none`. */
+export type BillingMode = 'subscription' | 'trial' | 'payg' | 'none' | (string & {});
 
 /**
  * Decode a credit report, refusing rather than guessing.
@@ -1731,6 +1756,17 @@ export function toCreditReport(value: unknown, method: string, path: string): Cr
     lots,
     entries,
     nextBefore: d.next_before === null ? null : positive(d.next_before, 'next_before'),
+    // Absent from a platform that predates pay as you go; read as unknown
+    // rather than refused, so this SDK can be upgraded first.
+    billingMode: d.billing_mode === undefined ? null : text(d.billing_mode, 'billing_mode'),
+    burnMicrosPerHour:
+      d.burn_micros_per_hour === undefined || d.burn_micros_per_hour === null
+        ? null
+        : micros(d.burn_micros_per_hour, 'burn_micros_per_hour'),
+    runwaySeconds:
+      d.runway_seconds === undefined || d.runway_seconds === null
+        ? null
+        : micros(d.runway_seconds, 'runway_seconds'),
     raw: { ...d },
   };
 }
