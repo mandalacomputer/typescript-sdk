@@ -86,7 +86,7 @@ import {
   type Workspace,
 } from './index.js';
 import * as P from './paths.js';
-import { checkWait } from './wait.js';
+import { checkWait, isTransientForPoll } from './wait.js';
 
 /** What one file copy reports: `scp`, `files upload` and `files download` alike. */
 export type CopyResult = {
@@ -760,9 +760,17 @@ export function runwayWords(seconds: number): string {
  * computer now and not the update's reply.
  */
 async function waitForBrowsers(c: Computer, output: Output, signal: AbortSignal): Promise<void> {
-  await c.refresh({ signal });
-  const starting = (c.runningRamMb ?? 0) > 0;
-  if ((c.status === 'stopped' || c.status === 'suspended') && !starting) {
+  const read = await c.refresh({ signal }).then(
+    () => true,
+    (err: unknown) => {
+      // The change is saved, and the wait below rides out what this read just met.
+      if (isTransientForPoll(err)) return false;
+      throw err;
+    },
+  );
+  // Only an explicit 0 says no start is under way: an absent `running_ram_mb`
+  // is unknown, and that computer may be coming up.
+  if (read && (c.status === 'stopped' || c.status === 'suspended') && c.runningRamMb === 0) {
     output.diagnostic(
       `mandala: ${c.name || c.id} is ${c.status}: the change is stored and applied as it starts`,
     );

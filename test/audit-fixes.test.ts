@@ -443,10 +443,56 @@ describe('CLI', () => {
   });
 
   it('browser-proxy clear --wait says a stopped computer gets it as it starts', async () => {
-    const h = harness(computers(() => record({ status: 'stopped' })));
+    const h = harness(computers(() => record({ status: 'stopped', running_ram_mb: 0 })));
     const { code, err } = await h.run(['computers', 'browser-proxy', 'clear', ID, '--wait']);
     expect(code).toBe(0);
     expect(err).toContain('applied as it starts');
+  });
+
+  it('--wait keeps waiting when it cannot say no start is under way', async () => {
+    let reads = 0;
+    const h = harness(
+      computers((call) =>
+        call.method === 'PATCH'
+          ? record({ status: 'stopped', browser_proxy: PROXY })
+          : ++reads < 3
+            ? record({ status: 'stopped', browser_proxy: PROXY })
+            : record({ browser_proxy: PROXY, browser_proxy_pending: false }),
+      ),
+    );
+    const { code, err } = await h.run([
+      'computers',
+      'browser-proxy',
+      'set',
+      ID,
+      PROXY.server,
+      '--no-credentials',
+      '--wait',
+    ]);
+    expect(code).toBe(0);
+    expect(err).not.toContain('applied as it starts');
+    expect(reads).toBeGreaterThanOrEqual(3);
+  });
+
+  it('--wait rides out a transient failure of its first read', async () => {
+    let reads = 0;
+    const h = harness((call) => {
+      if (call.path !== `/computers/${ID}`) return anyRoute(call);
+      if (call.method === 'PATCH') return json(record({ browser_proxy: PROXY }));
+      if (++reads === 2) return json({ error: 'try again' }, { status: 503 });
+      return json(record({ browser_proxy: PROXY, browser_proxy_pending: false }));
+    });
+    const { code } = await h.run([
+      'computers',
+      'browser-proxy',
+      'set',
+      ID,
+      PROXY.server,
+      '--no-credentials',
+      '--wait',
+    ]);
+    expect(code).toBe(0);
+    expect(reads).toBeGreaterThanOrEqual(3);
   });
 
   it('without --wait, browser-proxy set does not wait', async () => {
