@@ -763,13 +763,20 @@ const PROXY_POLL_MS = 2_000;
 /**
  * `--wait` on a browser proxy change: until the computer's browsers have it.
  *
- * A computer that is not running and that no start is under way for runs no
- * browser, and is given the setting as it starts; the change is stored. That is
- * said, rather than reported as a failure of a change that was made or waited
- * on until a start nobody asked for. Read first, so the answer is about the
- * computer now and not the update's reply.
+ * Every read is judged the same way. A running computer is done once nothing is
+ * pending. A stopped or suspended one with an explicit `running_ram_mb` of 0 has
+ * no start under way and runs no browser: the change is stored and it is given
+ * the setting as it starts, which is said rather than reported as a failure of a
+ * change that was made. An absent `running_ram_mb` is unknown and a positive one
+ * is a start admitted, so those are watched, and running out of time on them is a
+ * timeout. Any other state is one only the SDK's own wait reads.
  */
-async function waitForBrowsers(c: Computer, output: Output, signal: AbortSignal): Promise<void> {
+async function waitForBrowsers(
+  c: Computer,
+  output: Output,
+  signal: AbortSignal,
+  expectBrowserProxy: boolean,
+): Promise<void> {
   const deadline = Date.now() + PROXY_WAIT_MS;
   for (let turn = 0; ; turn++) {
     const read = await c.refresh({ signal }).then(
@@ -780,25 +787,30 @@ async function waitForBrowsers(c: Computer, output: Output, signal: AbortSignal)
         throw err;
       },
     );
-    const down = read && (c.status === 'stopped' || c.status === 'suspended');
-    if (read && !down) break;
-    // Only an explicit 0 says no start is under way. An absent `running_ram_mb`
-    // is unknown and that computer may be coming up, so it is given the wait.
-    if (down && c.runningRamMb === 0) {
-      output.diagnostic(
-        `mandala: ${c.name || c.id} is ${c.status}: the change is stored and applied as it starts`,
-      );
-      return;
+    if (read) {
+      if (c.status === 'running') {
+        if (!c.browserProxyPending && (!expectBrowserProxy || c.browserProxy)) return;
+      } else if (c.status !== 'stopped' && c.status !== 'suspended') {
+        await c.waitForBrowserProxy({
+          signal,
+          expectBrowserProxy,
+          timeoutMs: Math.max(deadline - Date.now(), 0),
+        });
+        return;
+      } else if (c.runningRamMb === 0) {
+        output.diagnostic(
+          `mandala: ${c.name || c.id} is ${c.status}: the change is stored and applied as it starts`,
+        );
+        return;
+      }
     }
     if (Date.now() >= deadline) {
-      if (!down) break;
       throw new TimeoutError(
-        `${c.id} was still ${c.status} after ${PROXY_WAIT_MS}ms, so whether its browsers have this change is unknown`,
+        `${c.id} was not confirmed within ${PROXY_WAIT_MS}ms (last read ${c.status || 'unknown'}), so whether its browsers have this change is unknown`,
       );
     }
     await sleepUntilNextPoll(rampDelay(turn, PROXY_POLL_MS), deadline, signal);
   }
-  await c.waitForBrowserProxy({ signal, timeoutMs: Math.max(deadline - Date.now(), 0) });
 }
 
 /** `computers browser-proxy get`, for a person. */
@@ -1958,7 +1970,7 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
           }
         }
         await c.update(change, keyed);
-        if (b('wait')) await waitForBrowsers(c, output, signal);
+        if (b('wait')) await waitForBrowsers(c, output, signal, true);
         return output.result(computerData(c));
       }
       case 'computers egress-proxy set': {
@@ -1983,7 +1995,7 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
       case 'computers browser-proxy clear': {
         const c = await computer();
         await c.update(proxy!, keyed);
-        if (b('wait')) await waitForBrowsers(c, output, signal);
+        if (b('wait')) await waitForBrowsers(c, output, signal, false);
         return output.result(computerData(c));
       }
       case 'computers egress-proxy clear':

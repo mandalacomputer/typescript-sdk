@@ -522,10 +522,50 @@ describe('CLI', () => {
       const { code, err } = await h.run(['computers', 'browser-proxy', 'clear', ID, '--wait']);
       expect(code).not.toBe(0);
       expect(err).not.toContain('applied as it starts');
-      expect(err).toContain('still stopped');
+      expect(err).toContain('last read stopped');
     } finally {
       clock.mockRestore();
     }
+  });
+
+  it.each([
+    ['set', { running_ram_mb: 0 }, 'applied as it starts'],
+    ['clear', { running_ram_mb: 0 }, 'applied as it starts'],
+  ])('%s --wait reports a computer suspended part-way as stored', async (verb, ram, said) => {
+    let reads = 0;
+    const set = verb === 'set' ? { browser_proxy: PROXY } : {};
+    const h = harness(
+      computers((call) =>
+        call.method === 'PATCH' || ++reads < 2
+          ? record({ ...set, browser_proxy_pending: true })
+          : record({ ...set, status: 'suspended', ...ram }),
+      ),
+    );
+    const args = verb === 'set' ? ['set', ID, PROXY.server, '--no-credentials'] : ['clear', ID];
+    const { code, err } = await h.run(['computers', 'browser-proxy', ...args, '--wait']);
+    expect(code).toBe(0);
+    expect(err).toContain(said);
+  });
+
+  it('--wait hands a computer still building to the SDK wait', async () => {
+    let reads = 0;
+    const h = harness(
+      computers((call) =>
+        call.method === 'PATCH' || ++reads < 2
+          ? record({ status: 'starting', browser_proxy: PROXY, browser_proxy_pending: true })
+          : record({ browser_proxy: PROXY, browser_proxy_pending: false }),
+      ),
+    );
+    const { code } = await h.run([
+      'computers',
+      'browser-proxy',
+      'set',
+      ID,
+      PROXY.server,
+      '--no-credentials',
+      '--wait',
+    ]);
+    expect(code).toBe(0);
   });
 
   it('--wait rides out a transient failure of its first read', async () => {
