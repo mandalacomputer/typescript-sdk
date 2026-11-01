@@ -92,7 +92,15 @@ import {
   type Workspace,
 } from './index.js';
 import * as P from './paths.js';
-import { checkWait, isTransientForPoll, rampDelay, sleepUntilNextPoll } from './wait.js';
+import {
+  checkWait,
+  deadlineSignal,
+  isDeadlineAbort,
+  isTransientForPoll,
+  rampDelay,
+  retryDelay,
+  sleepUntilNextPoll,
+} from './wait.js';
 
 /** What one file copy reports: `scp`, `files upload` and `files download` alike. */
 export type CopyResult = {
@@ -779,14 +787,21 @@ async function waitForBrowsers(
 ): Promise<void> {
   const deadline = Date.now() + PROXY_WAIT_MS;
   for (let turn = 0; ; turn++) {
-    const read = await c.refresh({ signal }).then(
-      () => true,
-      (err: unknown) => {
-        // The change is saved, and a read that failed says nothing about it.
-        if (isTransientForPoll(err)) return false;
-        throw err;
-      },
-    );
+    if (Date.now() >= deadline) {
+      throw new TimeoutError(
+        `${c.id} was not confirmed within ${PROXY_WAIT_MS}ms (last read ${c.status || 'unknown'}), so whether its browsers have this change is unknown`,
+      );
+    }
+    let failure: unknown;
+    let read = false;
+    try {
+      await c.refresh({ signal: deadlineSignal(deadline - Date.now(), signal) });
+      read = true;
+    } catch (err) {
+      // The change is saved, and a read that failed says nothing about it.
+      if (!isDeadlineAbort(err) && !isTransientForPoll(err)) throw err;
+      failure = err;
+    }
     if (read) {
       if (c.status === 'running') {
         if (!c.browserProxyPending && (!expectBrowserProxy || c.browserProxy)) return;
@@ -804,12 +819,9 @@ async function waitForBrowsers(
         return;
       }
     }
-    if (Date.now() >= deadline) {
-      throw new TimeoutError(
-        `${c.id} was not confirmed within ${PROXY_WAIT_MS}ms (last read ${c.status || 'unknown'}), so whether its browsers have this change is unknown`,
-      );
-    }
-    await sleepUntilNextPoll(rampDelay(turn, PROXY_POLL_MS), deadline, signal);
+    const delay =
+      failure === undefined ? rampDelay(turn, PROXY_POLL_MS) : retryDelay(PROXY_POLL_MS, failure);
+    await sleepUntilNextPoll(delay, deadline, signal);
   }
 }
 

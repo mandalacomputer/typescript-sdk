@@ -568,6 +568,46 @@ describe('CLI', () => {
     expect(code).toBe(0);
   });
 
+  it('--wait waits as long as a 429 asks', async () => {
+    const at: number[] = [];
+    let patched = false;
+    const h = harness((call) => {
+      if (call.path !== `/computers/${ID}`) return anyRoute(call);
+      if (call.method === 'PATCH') {
+        patched = true;
+        return json(record());
+      }
+      if (!patched) return json(record());
+      at.push(Date.now());
+      return at.length === 1
+        ? json({ error: 'slow down' }, { status: 429, headers: { 'Retry-After': '1' } })
+        : json(record());
+    });
+    const { code } = await h.run(['computers', 'browser-proxy', 'clear', ID, '--wait']);
+    expect(code).toBe(0);
+    expect((at[1] ?? 0) - (at[0] ?? 0)).toBeGreaterThanOrEqual(2000);
+  });
+
+  it('--wait sends no read past its deadline', async () => {
+    const start = Date.now();
+    let ticks = 0;
+    let reads = 0;
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => start + 60_000 * ticks++);
+    try {
+      const h = harness(
+        computers((call) => {
+          if (call.method === 'GET') reads++;
+          return record({ status: 'stopped' });
+        }),
+      );
+      const { code } = await h.run(['computers', 'browser-proxy', 'clear', ID, '--wait']);
+      expect(code).not.toBe(0);
+      expect(reads).toBeLessThanOrEqual(4);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
   it('--wait rides out a transient failure of its first read', async () => {
     let reads = 0;
     const h = harness((call) => {
