@@ -1958,8 +1958,8 @@ last three may have done more than they reported.
 `agent()` holds a connection for as long as the run goes. A background run does
 not: start it, and read it back by id while it goes and after it ends.
 Background runs accept `maxSteps` from 1 to 500 (default 20). The local wait
-budget defaults to 30 minutes; pass a longer `timeoutMs` to wait for a run
-that approaches the fixed 60-minute server limit.
+budget defaults to 65 minutes, just past the fixed 60-minute server limit, so a
+default wait sees even a full-length run end.
 
 ```ts
 const run = await c.startAgentRun({ prompt: 'Tidy the desktop.', maxSteps: 40 });
@@ -1998,7 +1998,7 @@ The `signal` you pass to the start aborts that request only.
 - `client.agentRuns.wait(id, { timeoutMs, pollMs, signal })` — polls (every 3
   seconds by default) until the run has ended, and answers it whatever the
   ending: it does not throw for `failed`, `cancelled` or `interrupted`, whose
-  steps are on the desktop all the same. Past `timeoutMs` (30 minutes by
+  steps are on the desktop all the same. Past `timeoutMs` (65 minutes by
   default) it throws `TimeoutError`, and the run goes on: cancel it to stop it.
 
 `finished` is true only for a run that `completed` with `result.stop ===
@@ -4941,7 +4941,7 @@ ended and prints it then, and exits 0 only when it finished: `status:
 "completed"` with `result.stop` `end_turn`. Any other ending exits 1 — it
 completed at another stop, `failed` (see `error`), was `cancelled`, or was
 `interrupted` by a platform restart, which is not resumed — and human output
-says which on stderr. Past `--timeout-ms` (default 30 minutes) the wait fails
+says which on stderr. Past `--timeout-ms` (default 65 minutes) the wait fails
 with `timeout`, exit 1, and the run goes on; Ctrl-C stops the wait, not the run.
 `agent runs cancel` stops a run where it is, and exits 0 even for one that had
 already ended, which it prints unchanged; what a run did and cost stands.

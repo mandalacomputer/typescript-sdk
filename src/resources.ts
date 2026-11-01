@@ -815,6 +815,9 @@ export class Computers {
  * nothing to say about a host that is not answering.
  */
 const SNAP_DELETE_WAIT_MS = 1_800_000;
+
+/** Longer than a run may last, so a default wait sees even a full-length run end. */
+export const AGENT_RUN_WAIT_MS = 3_900_000;
 const SNAP_DELETE_POLL_MS = 5_000;
 const SNAP_DELETE_FIRST_POLL_MS = 250;
 
@@ -3326,14 +3329,14 @@ export class AgentRuns {
    * check most callers want; `status`, `error` and `result.stop` say the rest.
    *
    * Polls every `pollMs` (default 3 seconds; a step takes at least that long)
-   * until `timeoutMs` (default 30 minutes; a run may last 60) runs out, then
+   * until `timeoutMs` (default 65 minutes; a run may last 60) runs out, then
    * throws {@link TimeoutError}. THE RUN IS NOT STOPPED BY THAT, only the waiting is:
    * {@link cancel} stops it. A transient failure of a poll is ridden out, as
    * every wait in this SDK does; a run this key cannot see is a
    * {@link NotFoundError} at once. `signal` aborts the wait, not the run.
    */
   async wait(run: AgentRun | string, opts: WaitOptions = {}): Promise<AgentRun> {
-    const { timeoutMs = 1_800_000, pollMs = 3_000, signal } = opts;
+    const { timeoutMs = AGENT_RUN_WAIT_MS, pollMs = 3_000, signal } = opts;
     checkWait(timeoutMs, pollMs);
     const id = typeof run === 'string' ? run : run?.id;
     if (typeof id !== 'string' || !id) {

@@ -46,6 +46,8 @@ This is the summary you read to decide whether to upgrade.
 
 ### Changed
 
+- `agentRuns.wait()` and `mandala agent runs get --wait` now wait 65 minutes by default, up from 30, so a default wait
+  sees even a full-length run end. A run may last 60 minutes.
 - `endsInHours` above 8784 is refused before any request, as `expiresInHours`
   already was.
 - `endsAt` and `expiresAt` strings must be RFC 3339 with a zone, naming a date and

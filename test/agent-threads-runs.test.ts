@@ -19,6 +19,8 @@ import {
   TimeoutError,
   ValidationError,
 } from '../src/index.js';
+import { LIMITS } from '../src/limits.js';
+import { AGENT_RUN_WAIT_MS } from '../src/resources.js';
 import {
   AGENT_RESULT,
   AGENT_RUN,
@@ -736,6 +738,10 @@ describe('client.agentRuns reads', () => {
 });
 
 describe('client.agentRuns.wait', () => {
+  it('by default outlasts the longest run the platform allows', () => {
+    expect(AGENT_RUN_WAIT_MS).toBeGreaterThan(LIMITS['agent.runTimeoutSeconds'] * 1000);
+  });
+
   const running = () => json(AGENT_RUN_STARTED);
   const ended =
     (extra: Record<string, unknown> = {}) =>
