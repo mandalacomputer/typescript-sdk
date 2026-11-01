@@ -70,7 +70,13 @@ import {
   saveWorkspaceDefault,
   workspaceDefault,
 } from './defaults.js';
-import { MandalaError, MoveRequiredError, NotFoundError, ValidationError } from './errors.js';
+import {
+  MandalaError,
+  MoveRequiredError,
+  NotFoundError,
+  TimeoutError,
+  ValidationError,
+} from './errors.js';
 import {
   type AccountQuota,
   type AgentArgs,
@@ -778,16 +784,21 @@ async function waitForBrowsers(c: Computer, output: Output, signal: AbortSignal)
     if (read && !down) break;
     // Only an explicit 0 says no start is under way. An absent `running_ram_mb`
     // is unknown and that computer may be coming up, so it is given the wait.
-    if ((down && c.runningRamMb === 0) || (down && Date.now() >= deadline)) {
+    if (down && c.runningRamMb === 0) {
       output.diagnostic(
         `mandala: ${c.name || c.id} is ${c.status}: the change is stored and applied as it starts`,
       );
       return;
     }
-    if (Date.now() >= deadline) break;
+    if (Date.now() >= deadline) {
+      if (!down) break;
+      throw new TimeoutError(
+        `${c.id} was still ${c.status} after ${PROXY_WAIT_MS}ms, so whether its browsers have this change is unknown`,
+      );
+    }
     await sleepUntilNextPoll(rampDelay(turn, PROXY_POLL_MS), deadline, signal);
   }
-  await c.waitForBrowserProxy({ signal });
+  await c.waitForBrowserProxy({ signal, timeoutMs: Math.max(deadline - Date.now(), 0) });
 }
 
 /** `computers browser-proxy get`, for a person. */

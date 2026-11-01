@@ -8,7 +8,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { main } from '../src/cli.js';
 import type { CliIO } from '../src/cli-runtime.js';
 import { errorForStatus } from '../src/errors.js';
@@ -508,6 +508,24 @@ describe('CLI', () => {
     ]);
     expect(code).toBe(0);
     expect(err).toContain('applied as it starts');
+  });
+
+  it.each([
+    ['admitted', { running_ram_mb: 4096 }],
+    ['unknown', {}],
+  ])('--wait times out on a stopped computer whose start is %s', async (_what, ram) => {
+    const start = Date.now();
+    let ticks = 0;
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => start + 60_000 * ticks++);
+    try {
+      const h = harness(computers(() => record({ status: 'stopped', ...ram })));
+      const { code, err } = await h.run(['computers', 'browser-proxy', 'clear', ID, '--wait']);
+      expect(code).not.toBe(0);
+      expect(err).not.toContain('applied as it starts');
+      expect(err).toContain('still stopped');
+    } finally {
+      clock.mockRestore();
+    }
   });
 
   it('--wait rides out a transient failure of its first read', async () => {
