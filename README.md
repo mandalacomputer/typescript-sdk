@@ -2963,9 +2963,10 @@ methods allowed; the platform sends the secret's latest value upstream as
 `Authorization: Bearer <secret>` (or, with `authHeader: 'x-api-key'`, as
 `x-api-key: <secret>`), over verified TLS, and nothing of it is delivered to
 the computer. The secret's value must be printable ASCII with no spaces or line
-breaks, and a trailing newline counts: any other value binds, and every call
-through the gateway then answers 503. Replace the value to fix it; the binding
-does not need remaking. Inside the computer, call the binding's `baseUrl` followed by the
+breaks, and a trailing newline counts: any other value is refused with a 400
+when the binding is created. A later replace with such a value is not refused,
+and every call through the gateway then answers 503 until it is replaced again;
+the binding does not need remaking. Inside the computer, call the binding's `baseUrl` followed by the
 provider's path, with the placeholder as the API key, sent as
 `Authorization: Bearer <placeholder>` or `x-api-key: <placeholder>`:
 

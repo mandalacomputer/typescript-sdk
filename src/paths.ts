@@ -3705,8 +3705,8 @@ export type CredentialGatewayBindingArgs = {
    * whose value is sent upstream, in the header {@link authHeader} names. It must
    * be in the computer's workspace or the account's own scope; the latest
    * revision is used on every request. Its value must be printable ASCII with
-   * no spaces or line breaks, and a trailing newline counts: any other value
-   * binds, and every call through the gateway then answers 503.
+   * no spaces or line breaks, and a trailing newline counts: any other value is
+   * refused with a 400 here, and one set later makes every call answer 503.
    */
   secretId: string;
   /**
