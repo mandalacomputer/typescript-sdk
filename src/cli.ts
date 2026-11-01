@@ -551,6 +551,18 @@ async function cmdTerminal(target: string, session: string, io: CliIO): Promise<
     if (c.status !== 'running' && c.status !== 'suspended') {
       die(`${c.name} is ${c.status || 'not running'} — start it, then retry`);
     }
+    // Asked rather than assumed: a key that expires is never given a computer's
+    // terminal credential. A whoami that fails leaves the general sentence.
+    const key = await io
+      .createClient()
+      .account.whoami()
+      .then((who) => who.key)
+      .catch(() => null);
+    if (key?.expiresAt != null) {
+      die(
+        `this API key expires, and a key that expires is not given a terminal for ${c.name}; use an API key with no expiry`,
+      );
+    }
     die(`${c.name} has no terminal endpoint (platform too old?)`);
   }
   // Measured here rather than left to the first resize frame: the broker sizes
@@ -969,6 +981,7 @@ const cmdScp: LegacyCommands['scp'] = async (srcArg, dstArg, io, signal, opts = 
   // file, which that option says nothing about, and quietly ignoring the flag
   // there would replace a file the caller asked to keep.
   if (src && !overwrite) die('--no-overwrite applies to an upload, not a download');
+  if (src && opts.uploadId) die('--upload-id applies to an upload, not a download');
   if (src) {
     if (!src.path) die(`say which file: ${src.target}:/absolute/path`);
     return copyOut(src.target, src.path, dstArg, io, signal);

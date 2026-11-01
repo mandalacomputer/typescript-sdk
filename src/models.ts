@@ -2557,6 +2557,13 @@ export type ScreenshotInfo = {
 export type ExecResult = {
   /** Confirmed optional retained synchronous output; absent on older servers or unconfirmed capture. */
   resultId?: string;
+  /**
+   * `'unavailable'` when `retainOutput` was asked for and the platform says no
+   * retained result was published. The command's own answer is unchanged. Absent
+   * when one was published, when retention was not asked for, and on a platform
+   * that does not say. Never send the command again to repair retention.
+   */
+  retainedOutput?: 'unavailable';
   exitCode: number;
   /** What the command wrote to stdout, byte for byte. */
   stdout: Uint8Array;
@@ -2659,6 +2666,8 @@ export type BackgroundExec = {
   pid: number;
   /** Stable identity when supported; PID routes remain shared, consuming reads. */
   executionId?: string;
+  /** When it started, RFC 3339. */
+  startedAt?: string;
   /**
    * The command line, echoed back. On a command that was already running when
    * the service on the computer's host restarted, it is the platform's kept
@@ -2794,6 +2803,7 @@ export function toBackgroundExec(d: Record<string, unknown>): BackgroundExec {
     ...(isExecutionId(d.execution_id) ? { executionId: d.execution_id } : {}),
     command: typeof d.command === 'string' ? d.command : '',
     commandTruncated: caveat(d.command_truncated),
+    ...(typeof d.started_at === 'string' && d.started_at ? { startedAt: d.started_at } : {}),
     running: stillRunning(d),
     // Absent and null are "did not send one" and read `undefined`; anything
     // else that `count` cannot read as a number — `"killed"`, `"signal:9"`, an
@@ -4310,6 +4320,11 @@ export type InputBatchActionResult = {
   ok: boolean;
   /** On a completed `type`: how it was typed, as {@link TypeResult.mechanism}. */
   mechanism?: 'physical' | 'unicode' | 'mixed' | (string & {});
+  /**
+   * On a passed `wait_for` check: how long it waited, in milliseconds. A failed
+   * check is not in `results`, so its wait is not reported.
+   */
+  waitedMs?: number;
   raw: Record<string, unknown>;
 };
 
@@ -4365,8 +4380,14 @@ export function toInputBatchResult(d: unknown, what: string, asked = false): Inp
     const r = row as Record<string, unknown>;
     if (r.mechanism !== undefined && typeof r.mechanism !== 'string')
       refuse(`results[${i}].mechanism`, 'a string when present');
+    if (
+      r.waited_ms !== undefined &&
+      (typeof r.waited_ms !== 'number' || !Number.isSafeInteger(r.waited_ms) || r.waited_ms < 0)
+    )
+      refuse(`results[${i}].waited_ms`, 'a nonnegative whole number when present');
     const out: InputBatchActionResult = { ok: r.ok as boolean, raw: { ...r } };
     if (typeof r.mechanism === 'string' && r.mechanism) out.mechanism = r.mechanism;
+    if (typeof r.waited_ms === 'number') out.waitedMs = r.waited_ms;
     return out;
   });
   const result: InputBatchResult = {

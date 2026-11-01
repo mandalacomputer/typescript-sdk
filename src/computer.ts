@@ -2,6 +2,7 @@ import {
   type FileUpload,
   parseFileUpload,
   UploadInterruptedError,
+  UploadProgressError,
   type UploadSource,
 } from './uploads.js';
 /** The Computer handle — a cloud desktop and everything you can do to it. */
@@ -155,6 +156,7 @@ import {
   toSshAccess,
   toTypeResult,
   toVncConnect,
+  toWhoami,
   toWindowListing,
   toWindowResult,
   unmatchableRows,
@@ -185,6 +187,7 @@ import {
   idempotencyHeaders,
   MODEL_KEY_HEADER,
   type Query,
+  retainedOutputUnavailable,
   type Transport,
 } from './transport.js';
 
@@ -906,6 +909,8 @@ export class Computer {
   // answer is the only place it appears, and a start or stop that answers an
   // acknowledgement is followed by a refresh that replaces #data.
   #operationId: string | undefined;
+  /** Whether this handle's key expires, once `whoami` has said. */
+  #keyExpires: boolean | undefined;
 
   /**
    * Obtain one from a {@link Client} — `client.computers.create()`, `.get()`, or
@@ -3553,6 +3558,13 @@ export class Computer {
     const url = this.vnc?.eventsUrl || vncEventsUrl(this.#data.vnc);
     if (url) return url;
     if (!P.isRecord(this.#data.vnc)) {
+      // A key that expires is answered every computer without the desktop
+      // credentials this URL is made of, however the computer is doing, so no
+      // number of reconnects can open the stream. The answer alone cannot say
+      // that happened, so the key is asked.
+      if (!this.unreachable && (await this.#keyExpiresNow(signal))) {
+        throw settled(new MandalaError(EXPIRING_KEY_NO_STREAM(this.id)));
+      }
       // The platform could not reach the host holding this computer, so it sent
       // no connect surface at all. Weather, and the stream's own backoff is the
       // right response to it — deliberately NOT settled.
@@ -3579,6 +3591,24 @@ export class Computer {
           'credential may be a watch-only one, which is not given window titles.',
       ),
     );
+  }
+
+  /**
+   * Whether the key this client holds expires, from `whoami`.
+   *
+   * A definite answer is kept, since a key's expiry does not change. One that
+   * could not be read says false: the stream goes on retrying, which is what it
+   * did before asking, and the next attempt asks again.
+   */
+  async #keyExpiresNow(signal?: AbortSignal): Promise<boolean> {
+    if (this.#keyExpires !== undefined) return this.#keyExpires;
+    try {
+      const who = toWhoami(await this.#t.json('GET', P.WHOAMI, { signal }), 'GET', P.WHOAMI);
+      this.#keyExpires = who.key?.expiresAt != null;
+      return this.#keyExpires;
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -4465,6 +4495,19 @@ export class Computer {
    * refuse a non-integer with a {@link ValidationError}. Round them yourself if
    * you want nearest-pixel.
    *
+   * A batch may also hold checks, which are not OpenAI's:
+   * `{ type: 'wait_for', until: 'screen_stable' }` waits up to `timeout_ms`
+   * (default 10000, at most 30000, `0` checks once) for a condition, and stops
+   * the batch there when it does not hold. `until` is `screen_changed` (the
+   * screen, or `region`, differs from just before the previous action),
+   * `screen_stable` (unchanged for `stable_ms`, 100 to 10000, default 500) or
+   * `window_title` (the focused window's title contains `contains`, 1 to 256
+   * bytes, ignoring case; Linux computers). A batch's check timeouts and
+   * one-second waits together are at most 60 seconds. A passed check's result
+   * carries `waitedMs`. A check that is not met is an {@link InputBatchError}
+   * with status 400, whose `result.error` names the condition: unlike most
+   * 400s it is not final, so take a fresh screenshot and decide.
+   *
    * A batch REFUSED before any action ran — a malformed one, a computer that is
    * not running, the input lane busy — throws the ordinary error for its status,
    * and nothing happened. The exception is a 503 (`UnavailableError`): the
@@ -4483,15 +4526,15 @@ export class Computer {
    * default: the platform's proxy allows the batch 93.
    */
   inputBatch(
-    actions: readonly P.OpenAIComputerAction[],
+    actions: readonly P.InputBatchAction[],
     opts: InputOptions & { context: true },
   ): Promise<InputBatchResult & { context: InputContext }>;
   inputBatch(
-    actions: readonly P.OpenAIComputerAction[],
+    actions: readonly P.InputBatchAction[],
     opts?: InputOptions,
   ): Promise<InputBatchResult>;
   async inputBatch(
-    actions: readonly P.OpenAIComputerAction[],
+    actions: readonly P.InputBatchAction[],
     opts: InputOptions = {},
   ): Promise<InputBatchResult> {
     const context = P.flag(opts?.context, 'context');
@@ -4753,6 +4796,7 @@ export class Computer {
       ...(retained === undefined ? {} : { retain_output: retained }),
     };
     let responseStatus = 0;
+    let retainedUnavailable = false;
     const minTimeoutMs = (timeoutS + 30) * 1_000;
     const data = await this.#t.json<Record<string, unknown>>(
       'POST',
@@ -4762,8 +4806,9 @@ export class Computer {
         minTimeoutMs,
         signal: opts.signal,
       },
-      (status) => {
+      (status, headers) => {
         responseStatus = status;
+        retainedUnavailable = retainedOutputUnavailable(headers);
       },
     );
     // Checked rather than defaulted to `{}`. A 204 or an empty body decodes to
@@ -4777,6 +4822,7 @@ export class Computer {
     const result = toExecResult(data);
     const resultId = responseStatus === 200 ? synchronousResultId(data) : undefined;
     if (resultId !== undefined) result.resultId = resultId;
+    if (retainedUnavailable) result.retainedOutput = 'unavailable';
     return result;
   }
 
@@ -5423,7 +5469,10 @@ export class Computer {
    * {@link CreateOnlyConflictError}, with `reason` undefined and a message
    * saying the reason is unknown: final, and not a claim that the path is
    * taken. The default, `true`, replaces
-   * whatever is at `path`, as this method always has. Linux computers only: a
+   * whatever is at `path` directly: an existing file is truncated as the body
+   * starts, and a failed or cut-off write leaves only the bytes that arrived.
+   * Use `overwrite: false` or {@link uploadFile} when a partial file must never
+   * appear there. Linux computers only: a
    * Windows computer refuses `overwrite: false` with a 400. A host that cannot
    * do create-only yet refuses it with a 409 whose `reason` is `unsupported`,
    * and one whose support could not be confirmed with a 503; in both cases
@@ -5583,7 +5632,7 @@ export class Computer {
       progress.offset !== opts.offset + data.byteLength ||
       progress.complete !== (progress.offset === opts.size)
     )
-      throw new Error(
+      throw new UploadProgressError(
         'Upload progress does not confirm this chunk; read upload status before retrying.',
       );
     return progress;
@@ -5708,7 +5757,11 @@ export class Computer {
         }
       }
       if (opts.signal?.aborted) throw failure;
-      if (error instanceof MandalaError || error instanceof ValidationError) throw error;
+      if (
+        (error instanceof MandalaError && !(error instanceof UploadProgressError)) ||
+        error instanceof ValidationError
+      )
+        throw error;
       throw new UploadInterruptedError(uploadId, error);
     }
   }
@@ -6907,6 +6960,11 @@ type EgressProxyState = 'applied' | 'applying' | MandalaError;
 
 /** How far an answered end time may sit from an asked-for absolute one: the platform keeps whole seconds. */
 const END_TIME_SLACK_MS = 1_000;
+
+/** Why an event stream cannot open on a key that expires. */
+const EXPIRING_KEY_NO_STREAM = (id: string): string =>
+  `${id} has no event stream for this API key: a key that expires is not given a computer's ` +
+  'desktop and event credentials, and retrying does not change that. Use an API key with no expiry.';
 
 /**
  * Hold an answer to the end time that was asked for. A platform that does not

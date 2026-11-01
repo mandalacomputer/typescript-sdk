@@ -565,6 +565,34 @@ points and waits) before it wakes a suspended computer. It runs on one input
 lane, so no other API input interleaves. `{ context: true }` adds the desktop
 after the batch, as `type` does.
 
+A batch can also hold checks, which are this platform's rather than OpenAI's. A
+`wait_for` step waits for a condition and stops the batch there when it does not
+hold, so the next action never runs against a screen that has not caught up:
+
+```ts
+const done = await c.inputBatch([
+  { type: 'click', x: 640, y: 400, button: 'left' },
+  { type: 'wait_for', until: 'screen_stable', stable_ms: 500, timeout_ms: 5000 },
+  { type: 'wait_for', until: 'window_title', contains: 'Settings' },
+  { type: 'type', text: 'hello' },
+]);
+console.log(done.results[1].waitedMs); // how long that check waited, in milliseconds
+```
+
+`until` is `screen_changed` (the screen, or `region` `{ x, y, width, height }`,
+differs from just before the previous action, so a change that action caused is
+seen however fast), `screen_stable` (unchanged for `stable_ms`, 100 to 10000,
+default 500) or `window_title` (the focused window's title contains `contains`,
+1 to 256 bytes, ignoring case; Linux computers). `timeout_ms` is 0 to 30000,
+default 10000, and `0` checks once. A batch's check timeouts and one-second waits
+together are at most 60 seconds. A step is a `ValidationError` before anything is
+sent if it breaks these, or carries a field its `until` does not read.
+
+A check that is not met is an `InputBatchError` with status 400, and
+`err.result.error` names the condition. Unlike most 400s it is not final: the
+actions before it ran, so take a fresh screenshot and decide. To wait on something
+inside the computer, poll `exec` between batches. Checks are for batches only.
+
 Coordinates in a batch are numbers, as OpenAI sends them. The platform drops a
 fraction toward zero (`x: 100.7` clicks at 100), while the single-action
 methods such as `click` refuse a non-integer with a `ValidationError`. Round
@@ -1046,8 +1074,11 @@ if (finished.resultId) {
 
 `retainOutput` is synchronous exec only: absent or `false` keeps the ordinary
 request; `true` or `{ maxBytesPerStream, retentionSeconds }` requests retention.
-Older servers and unconfirmed optional capture leave `resultId` absent. Missing or
-malformed optional retention metadata does not invalidate the executed command.
+Older servers and unconfirmed optional capture leave `resultId` absent. When the
+platform says no result was published, `retainedOutput` reads `'unavailable'`, on
+the `ExecResult` or on the `APIError` of a refused answer: that says nothing about
+whether the command ran. Missing or malformed optional retention metadata does not
+invalidate the executed command.
 No helper retries a capture or replays a command after an uncertain response.
 
 `RetainedResult` distinguishes `background-output` from `synchronous-output`.
@@ -1441,14 +1472,24 @@ Timestamp verification alone does not prevent processing retries twice.
 **Acknowledge with a 2xx before doing the work.** An attempt is cut at ten
 seconds and counted as a failure. Anything else — a non-2xx, a timeout, a
 redirect (never followed) — is tried again, eight attempts (seven retries) over
-about fourteen hours, then the delivery is `exhausted` and visible in `deliveries()`, never dropped
-silently. No ordering is promised: order by `seq` per computer if you care. An
+about fourteen hours, then the delivery is `exhausted` and visible in `deliveries()`.
+While the account is active, nothing is dropped without a record. No ordering is promised: order by `seq` per computer if you care. An
 endpoint that runs out of attempts and has accepted nothing for a day is
 disabled with `disabledReason: 'failing'`; `update(id, { enabled: true })`
 starts it fresh. When the account moves to a plan without webhooks, its
 subscriptions are disabled with `disabledReason: 'plan'` and `enabled: true` is
-refused (402); choosing a plan with webhooks enables them again, oldest first,
-as many as the plan allows.
+refused (402). Deliveries already queued are still made, and for 24 hours so is
+`computer.stopped`, so you hear about computers stopped because the plan ended;
+choosing a plan with webhooks enables them again, oldest first, as many as the
+plan allows.
+
+A receiver also gets `gap` deliveries, which say events were lost, whatever
+`events` filters on: read on from the computer's event stream with `since:` the
+`cursor`. **While the account is suspended nothing is queued or sent, and events
+the platform reads then are skipped for good**, with no `gap` or `computer.stopped`
+standing in for them. Deliveries already pending wait, and writes to a
+subscription are refused with `reason: 'revoked'`. After reactivation, reconcile
+with a listing and each computer's event stream.
 
 ```ts
 const d = await client.webhooks.test(hook.id);            // one synthetic delivery, 202
@@ -1466,8 +1507,8 @@ and an **open set**: show it, do not switch on it.
 to the stream: a job woken by `process.exited` that wants everything since can
 open the socket with `since:` that cursor. `file.changed` never arrives here; it
 exists only because a socket nominated a tree, and a subscription has nothing to
-nominate against. Every paid plan allows ten subscriptions; the eleventh is a
-`ConflictError` naming the cap. Deleting one drops its pending deliveries with
+nominate against. A paid plan or pay as you go allows ten subscriptions, and a
+trial none (402); the eleventh is a `ConflictError` naming the cap. Deleting one drops its pending deliveries with
 it.
 
 ### Secrets
@@ -1588,8 +1629,13 @@ says it wrote, or `undefined` if it did not say. Every transfer takes a
 `timeoutMs` for the one request, since a big file can legitimately outlive the
 default 60 seconds; `0` disables the deadline for that transfer.
 
-An upload replaces whatever is at the path. Pass `overwrite: false` to create
-the file only if nothing is there:
+An upload replaces whatever is at the path, and by default it does so in place:
+an existing file is truncated as the body starts, and a failed or cut-off upload
+leaves only the bytes that arrived. A body cut off part-way is a 400 that can be
+sent again, unlike most 400s, and so is a stopped computer's once it has been
+started. Pass `overwrite: false` to create the file only if nothing is there,
+which stages the bytes beside the path and publishes them once they are complete,
+or use `uploadFile` when a partial file must never appear:
 
 ```ts
 try {
@@ -1709,8 +1755,8 @@ console.log(`charged $${result.costUsd}`);
 A funded run is Anthropic only. It uses the platform's own system prompt, so
 `system` is refused, and it allows `claude-sonnet-5-5` (the default) or
 `claude-opus-5-5`. The account needs a plan, a supported billing country, and
-at least $0.25 of credits for the first model call. Each model call reserves
-$0.25 and then settles what it actually cost. `maxCostUsd` caps the run: it
+at least $0.02 of credits for the first model call. Each model call reserves
+$0.25 (or all that remains, when less) and then settles what it actually cost. `maxCostUsd` caps the run: it
 ends with `stop: 'max_cost'` rather than start a call the cap cannot cover,
 and the last call can take the total past it. A run that runs out of credits
 part-way ends with `stop: 'credits_exhausted'`. Neither is an error, and the
@@ -2916,7 +2962,10 @@ a secret from the account's store, one upstream origin, a path prefix and the
 methods allowed; the platform sends the secret's latest value upstream as
 `Authorization: Bearer <secret>` (or, with `authHeader: 'x-api-key'`, as
 `x-api-key: <secret>`), over verified TLS, and nothing of it is delivered to
-the computer. Inside the computer, call the binding's `baseUrl` followed by the
+the computer. The secret's value must be printable ASCII with no spaces or line
+breaks, and a trailing newline counts: any other value binds, and every call
+through the gateway then answers 503. Replace the value to fix it; the binding
+does not need remaking. Inside the computer, call the binding's `baseUrl` followed by the
 provider's path, with the placeholder as the API key, sent as
 `Authorization: Bearer <placeholder>` or `x-api-key: <placeholder>`:
 
@@ -3470,6 +3519,17 @@ not carry the expiry or computer limit asked for (a later expiry, a computer
 not asked for, or an answer that cannot be read, counts) is revoked at once and a `MandalaError` thrown; the key
 is never returned, and the CLI prints none.
 
+Nothing a key that expires opens outlives it. It cannot add SSH keys or create or
+change public URLs or webhooks (403), and it does not open a private public URL.
+Computers are answered to it without `vnc`, since the desktop and terminal
+credentials are the computer's own, so `c.vnc` is `undefined` and `c.events()`,
+`c.waitFor()` and `mandala terminal` end with an error saying so rather than
+retrying: use a key with no expiry for those. A browser session it opens needs a
+`maxDurationSeconds` within its remaining lifetime; the default is 7200, a 400 for
+a key with less than two hours left. A key limited to computers makes only the
+calls on those computers that stay within them, plus `whoami` and the listing;
+anything else is a 403 with no `reason`, and another computer is a 404.
+
 **Every `apiKeys` call needs the calling key to be allowed to manage keys.**
 That permission is off for every key until its holder turns it on in a signed-in
 dashboard session (Settings → Credentials → API keys → the key's menu → **Allow
@@ -3557,8 +3617,10 @@ the original fields, as does the CLI's normal and `--json` member output.
 
 What the account has used: running hours weighted by cores and memory, and
 storage held over time. Use this to monitor resource use across a batch of
-computers. These measurements do not add a runtime or storage usage charge to
-the monthly subscription; AI-credit usage is separate.
+computers. On a subscription these measurements add no runtime or storage charge;
+AI-credit usage is separate. On pay as you go they are what compute and disk are
+priced from, by closed UTC day, and `client.credits.read()` is the record of what
+was charged.
 
 ```ts
 const u = await client.usage.read();
@@ -3614,7 +3676,7 @@ Two more fields worth knowing:
 
 - `reportedThrough` — the last UTC day whose usage has settled for metering, as a
   contiguous prefix. Not a caveat on the totals, which are live and true through
-  `to`; settlement does not imply a usage charge on the subscription.
+  `to`; settlement does not imply a usage charge on a subscription.
   `undefined` while none of the window has settled.
 - `breakdown` — false when the API key is scoped to a workspace. Usage is metered
   per **account**, so `usage.computers` would name computers outside
@@ -3646,8 +3708,8 @@ credits held for model calls in flight. It can be negative, and it is zero while
 still expire). `grant` is this plan period's grant, or `null`. `lots` are the
 unexpired lots with something left, earliest expiry first. `entries` is one
 page of the journal: each entry's amount is unsigned, so read its direction from
-`kind` (`credit`, `debit`, `expire`, `clawback`, `debt_settle`), and `debtMicros`
-is the new debt that entry created. Both `kind`s are kept as sent, so a kind
+`kind` (`credit`, `debit`, `expire`, `clawback`, `debt_settle`, and on pay as you
+go `compute`), and `debtMicros` is the new debt that entry created. Both `kind`s are kept as sent, so a kind
 this version does not know arrives rather than failing the read.
 
 `before` and `limit` (1 to 100, default 50) are checked before anything is
@@ -3655,6 +3717,12 @@ sent. The balances and lots are current on every page, not pinned to the first.
 The report is decoded strictly: a missing or mistyped field is a `MandalaError`
 rather than a zero. A workspace-scoped key is refused with
 `PermissionDeniedError`, because the ledger belongs to the whole account.
+
+`billingMode` says how the account is billed: `subscription`, `trial`, `payg` or
+`none`, an open set, and `null` from a platform that does not send it. On pay as
+you go, `burnMicrosPerHour` is what its computers cost an hour now and
+`runwaySeconds` how long the balance lasts at that rate, `0` once it has run out.
+A positive runway does not promise a start: see `InsufficientBalanceError` below.
 
 ### Partial listings
 
@@ -3825,12 +3893,17 @@ import {
   APIError,            //   any unsuccessful response
   AuthenticationError, //     401 — a credential was refused
   PlanLimitError,      //     402 — your plan will not allow this. Not a retry.
+  InsufficientBalanceError,//   402 — pay as you go: the balance is too low to start
+                       //           this. Add credits; a retry alone answers the
+                       //           same. err.projectedMicros, err.requiredMicros.
   ModelProviderError,  //     402 from agent()/agentOnce() — the model key's account
                        //           refused billing; not your plan. Not a retry.
   InsufficientCreditsError,// 402 from agent()/agentOnce() with no modelKey — the
                        //           account's AI credits cannot start the run;
                        //           err.topUpUrl is where to add more.
-  PermissionDeniedError,//    403 — the key's role is too low
+  PermissionDeniedError,//    403 — not permitted: a role too low, a suspended
+                       //           account, an unverified email, or a call this
+                       //           key's own terms rule out. The message says which.
   NotFoundError,       //     404 — no such computer, snapshot, guest file, or route
   MethodNotAllowedError,//    405 — method unsupported; see err.allow
   ConflictError,       //     409 — refused for the state something is in.
@@ -3864,6 +3937,7 @@ import {
   TimeoutError,        //   a wait helper gave up
   ValidationError,     // a TypeError: your argument, refused before it was sent
   isTransient,
+  trialUnavailable,    // a trial's 503 that was refused before it was sent anywhere
 } from 'mandala-computer';
 
 try {
@@ -3874,6 +3948,25 @@ try {
   else throw err;
 }
 ```
+
+`err.code` tells the plan and trial refusals apart, and each wants a different
+next step:
+
+| `code` | Status | What it means, and what to do |
+|---|---|---|
+| `PLAN_REQUIRED` | 402 | No plan, or a trial that has ended. Choose a plan. |
+| `INSUFFICIENT_BALANCE` | 402 | Pay as you go, balance too low to start this. Add credits. |
+| `TRIAL_LIMIT` | 402 | The trial does not allow this: a clone, a snapshot, another template or size, a proxy, a longer idle window. |
+| `TRIAL_CREATES_USED` | 402 | The trial has launched all it may. Use the computer it has, or choose a plan. |
+| `TRIAL_CREATE_PENDING` | 409 | The trial's computer is still being created. It carries no `reason` and `isTransient` answers false, on purpose: wait for that computer. Never create again on a timer, which can make a second one and spend another launch. |
+| `TRIAL_FULL` | 503 | Every trial slot is taken and nothing was used up. `retryAfterMs` says when to ask again. |
+| `TRIAL_UNAVAILABLE` | 503 | Trials are paused and nothing was used up. It does not clear in seconds. |
+
+A 503 answering a change usually means its outcome is unknown. The last two are the
+exception, and `trialUnavailable(err)` recognises them: the call was refused before
+it was sent anywhere, so there is nothing to look for or clean up. `isTransient`
+still answers false, because only one of them clears soon and sending a create again
+is your decision.
 
 Every `APIError` exposes optional `requestId`, `allow` and `wwwAuthenticate`
 properties. `requestId` uses a nonblank `X-Request-ID` response header first,
@@ -4146,7 +4239,7 @@ network access and never prompt for input; `logout` needs no network.
 
 | Command group | Available commands |
 | --- | --- |
-| `computers` | `list`, `create`, `get`, `start`, `stop`, `suspend`, `restart`, `delete`, `clone`, `rename`, `resize`, `move`, `idle-suspend`, `end-time`, `browser-proxy set`, `browser-proxy clear`, `egress-proxy set`, `egress-proxy clear`, `urls list`, `urls create`, `urls update`, `urls rm`, `gateway list`, `gateway create`, `gateway rm`, `secrets get`, `secrets set`, `view`, `screenshot`, `exec`, `exec-poll`, `exec-kill`, `wait` |
+| `computers` | `list`, `create`, `get`, `start`, `stop`, `suspend`, `restart`, `delete`, `clone`, `rename`, `resize`, `move`, `idle-suspend`, `end-time`, `browser-proxy set`, `browser-proxy clear`, `browser-proxy get`, `egress-proxy set`, `egress-proxy clear`, `egress-proxy get`, `urls list`, `urls create`, `urls update`, `urls rm`, `gateway list`, `gateway create`, `gateway rm`, `secrets get`, `secrets set`, `view`, `screenshot`, `exec`, `exec-poll`, `exec-kill`, `wait` |
 | `sizes` | `list` |
 | `templates` | `list`, `get`, `validate`, `publish`, `build`, `watch`, `retire`, `schema` |
 | `builds` | `list`, `get`, `progress` |
@@ -4549,7 +4642,11 @@ it.
 `--browser-proxy URL` sends the new computer's browsers through a proxy, and
 `--browser-proxy-bypass` lists the hosts they reach directly, comma-separated or
 repeated. `computers browser-proxy set COMPUTER URL [--bypass LIST]` replaces a
-computer's proxy and `computers browser-proxy clear COMPUTER` removes it. The
+computer's proxy and `computers browser-proxy clear COMPUTER` removes it. With
+`--wait` either returns once the computer's browsers have the change; a stopped or
+suspended computer gets it as it starts, which is said on stderr. `computers
+browser-proxy get COMPUTER` and `computers egress-proxy get COMPUTER` read the
+setting, and whether it is in effect yet. The
 platform decides which URLs and entries it accepts, and its refusal is printed
 as it is.
 
@@ -5397,7 +5494,7 @@ await computer.cancelFileUpload(done.path, done.upload_id); // removes receipt, 
 
 `MandalaError.uploadId` identifies an interrupted transfer. Pass it as `uploadId` with the same source to resume from server status. `writeFileChunk`, `fileUpload`, and `cancelFileUpload` expose the underlying protocol; each chunk is at most 8 MiB. Staging and completion receipts consume guest disk until cancelled and do not expire automatically. Older hosts refuse the dedicated endpoint, with no destructive fallback. Ordinary `writeFile` is unchanged.
 
-`mandala files upload COMPUTER LOCAL_FILE /absolute/guest/path` and upload-side `scp` automatically use resumable uploads above 64 MiB. Resume with `mandala files upload ... --upload-id ID` using the unchanged local file. The CLI attempts receipt cleanup without waking a suspended computer again; if cleanup is unconfirmed, JSON output includes `cleanup_upload_id` and human output prints a warning. Resume an interrupted `scp` with `files upload --upload-id`, too. `--no-overwrite` and `--no-wake` apply to both transfer modes.
+`mandala files upload COMPUTER LOCAL_FILE /absolute/guest/path` and upload-side `scp` automatically use resumable uploads above 64 MiB. Resume with `mandala files upload ... --upload-id ID` or `mandala scp --upload-id ID ...` using the unchanged local file. The CLI attempts receipt cleanup without waking a suspended computer again; if cleanup is unconfirmed, JSON output includes `cleanup_upload_id` and human output prints a warning. Resume an interrupted `scp` with `files upload --upload-id`, too. `--no-overwrite` and `--no-wake` apply to both transfer modes.
 
 
 Supplied upload IDs must already exist: a missing receipt or unsupported host is a 404, never an implicit restart. Typed API refusals and local validation errors keep their classes; API/transport errors carry `uploadId`. Cancellation preserves the signal reason (with `uploadId` added when the reason is an extensible `Error`). If multiple uploads share that reason, `uploadId` retains the first ID and `uploadIds` collects all affected IDs; wait for all uploads to settle before reading that list. For guaranteed cancellation recovery, create an ID and stage the first chunk with `writeFileChunk`, then pass that ID to `uploadFile`.

@@ -116,6 +116,10 @@ export const IDEMPOTENCY_KEY_FLAG = flag(
   'Send this Idempotency-Key (1-255 printable ASCII, no space) instead of a new one; resending a command under the key an error named does not carry it out twice',
 );
 const keyed = [IDEMPOTENCY_KEY_FLAG];
+const proxyWait = bool(
+  'wait',
+  "Return once the computer's browsers have it (a stopped one gets it as it starts)",
+);
 /** What every run takes, from `agent run` and from each line of `agent chat` and `resume`. */
 const agentFlags = [
   num('max-steps', 'Maximum desktop actions'),
@@ -361,6 +365,7 @@ export const COMMANDS: readonly Command[] = [
         'The id of a secret holding user:password for the proxy, bound to the computer as a file',
       ),
       bool('no-credentials', "Remove the proxy's credentials rather than keep them"),
+      proxyWait,
       ...keyed,
     ],
   ),
@@ -368,7 +373,12 @@ export const COMMANDS: readonly Command[] = [
     'computers browser-proxy clear',
     "Remove a computer's browser proxy; its browsers go out directly",
     ['computer'],
-    keyed,
+    [proxyWait, ...keyed],
+  ),
+  command(
+    'computers browser-proxy get',
+    "Read a computer's browser proxy, and whether its browsers have it yet",
+    ['computer'],
   ),
   command(
     'computers egress-proxy set',
@@ -388,6 +398,11 @@ export const COMMANDS: readonly Command[] = [
     "Remove a computer's egress proxy; its traffic goes out directly",
     ['computer'],
     keyed,
+  ),
+  command(
+    'computers egress-proxy get',
+    "Read a computer's egress proxy, and whether it is in effect yet",
+    ['computer'],
   ),
   command('computers urls list', "List a computer's public URLs, and whether they can answer", [
     'computer',
@@ -504,7 +519,10 @@ export const COMMANDS: readonly Command[] = [
     [
       flag('output', 'Destination file', { alias: 'o', required: true }),
       num('width', 'Image width', { conflicts: ['scale'] }),
-      bool('fresh', 'Request a fresh screenshot'),
+      bool('fresh', 'Request a fresh screenshot', { conflicts: ['capture'] }),
+      flag('capture', 'Answer from this earlier screenshot, by the capture name it reported', {
+        conflicts: ['fresh'],
+      }),
       flag('region', 'Crop to X,Y,WIDTH,HEIGHT in screen pixels, before any scaling'),
       num('scale', 'Shrink by this factor, greater than 0 and at most 1', {
         conflicts: ['width'],
@@ -985,7 +1003,13 @@ export const COMMANDS: readonly Command[] = [
     'scp',
     'Copy one file; exactly one side is computer:/path',
     ['src', 'dst'],
-    [bool('no-overwrite', 'Upload only: create the guest file, refusing if something is there')],
+    [
+      bool('no-overwrite', 'Upload only: create the guest file, refusing if something is there'),
+      flag(
+        'upload-id',
+        'Upload only: resume a large Linux upload with this 32-character lowercase hex ID (no dashes); keep the source unchanged',
+      ),
+    ],
   ),
   command('manifest', 'Print the machine-readable command contract'),
   {
@@ -994,6 +1018,17 @@ export const COMMANDS: readonly Command[] = [
   },
 ];
 
+/**
+ * Routes with no command, on purpose. The route table has a list of its
+ * exclusions and this is the CLI's: these work one step at a time from code,
+ * and a shell gives them no state to carry between calls.
+ *
+ * - `input`, `clipboard` and `windows`: driving a desktop, which is for a program
+ *   holding a screenshot, or the MCP server.
+ * - `signals` and `activities`: paged, cursored reads for a program. `executions`,
+ *   `results` and `retained-output` follow from `--retain-output` the same way.
+ * - `browser-connections`: a lease that has to be renewed while it is in use.
+ */
 export class CliError extends Error {
   constructor(
     public readonly code: string,

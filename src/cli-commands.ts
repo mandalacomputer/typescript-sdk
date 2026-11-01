@@ -70,7 +70,13 @@ import {
   saveWorkspaceDefault,
   workspaceDefault,
 } from './defaults.js';
-import { MandalaError, MoveRequiredError, NotFoundError, ValidationError } from './errors.js';
+import {
+  MandalaError,
+  MoveRequiredError,
+  NotFoundError,
+  TimeoutError,
+  ValidationError,
+} from './errors.js';
 import {
   type AccountQuota,
   type AgentArgs,
@@ -86,7 +92,15 @@ import {
   type Workspace,
 } from './index.js';
 import * as P from './paths.js';
-import { checkWait } from './wait.js';
+import {
+  checkWait,
+  deadlineSignal,
+  isDeadlineAbort,
+  isTransientForPoll,
+  rampDelay,
+  retryDelay,
+  sleepUntilNextPoll,
+} from './wait.js';
 
 /** What one file copy reports: `scp`, `files upload` and `files download` alike. */
 export type CopyResult = {
@@ -105,7 +119,7 @@ export type LegacyCommands = {
     destination: string,
     io: CliIO,
     signal: AbortSignal,
-    opts?: { overwrite?: boolean },
+    opts?: { overwrite?: boolean; uploadId?: string },
   ) => Promise<CopyResult>;
   /** One local file to a guest path: scp's upload half, with the computer named apart. */
   upload: (
@@ -750,6 +764,105 @@ export function runwayWords(seconds: number): string {
  * `credits` for a person, one line each, raw, as {@link usageLines}: the caller
  * escapes each line. Amounts are dollars; `--json` keeps the platform's micros.
  */
+/** How long `--wait` watches a computer that may be starting, and how often. */
+const PROXY_WAIT_MS = 180_000;
+const PROXY_POLL_MS = 2_000;
+
+/**
+ * `--wait` on a browser proxy change: until the computer's browsers have it.
+ *
+ * Every read is judged the same way. A running computer is done once nothing is
+ * pending. A stopped or suspended one with an explicit `running_ram_mb` of 0 has
+ * no start under way and runs no browser: the change is stored and it is given
+ * the setting as it starts, which is said rather than reported as a failure of a
+ * change that was made. An absent `running_ram_mb` is unknown and a positive one
+ * is a start admitted, so those are watched, and running out of time on them is a
+ * timeout. Any other state is one only the SDK's own wait reads.
+ */
+async function waitForBrowsers(
+  c: Computer,
+  output: Output,
+  signal: AbortSignal,
+  expectBrowserProxy: boolean,
+): Promise<void> {
+  const deadline = Date.now() + PROXY_WAIT_MS;
+  for (let turn = 0; ; turn++) {
+    if (Date.now() >= deadline) {
+      throw new TimeoutError(
+        `${c.id} was not confirmed within ${PROXY_WAIT_MS}ms (last read ${c.status || 'unknown'}), so whether its browsers have this change is unknown`,
+      );
+    }
+    let failure: unknown;
+    let read = false;
+    try {
+      await c.refresh({ signal: deadlineSignal(deadline - Date.now(), signal) });
+      read = true;
+    } catch (err) {
+      // The change is saved, and a read that failed says nothing about it.
+      if (!isDeadlineAbort(err) && !isTransientForPoll(err)) throw err;
+      failure = err;
+    }
+    if (read) {
+      if (c.status === 'running') {
+        if (!c.browserProxyPending && (!expectBrowserProxy || c.browserProxy)) return;
+      } else if (c.status !== 'stopped' && c.status !== 'suspended') {
+        await c.waitForBrowserProxy({
+          signal,
+          expectBrowserProxy,
+          timeoutMs: Math.max(deadline - Date.now(), 0),
+        });
+        return;
+      } else if (c.runningRamMb === 0) {
+        output.diagnostic(
+          `mandala: ${c.name || c.id} is ${c.status}: the change is stored and applied as it starts`,
+        );
+        return;
+      }
+    }
+    const delay =
+      failure === undefined ? rampDelay(turn, PROXY_POLL_MS) : retryDelay(PROXY_POLL_MS, failure);
+    await sleepUntilNextPoll(delay, deadline, signal);
+  }
+}
+
+/** `computers browser-proxy get`, for a person. */
+function browserProxyLines(c: Computer, pending: boolean): string[] {
+  const proxy = c.browserProxy;
+  const label = c.name || c.id;
+  if (!proxy)
+    return [
+      `${label}: no browser proxy; its browsers go out directly`,
+      ...(pending ? ["  pending: the computer's browsers do not have this setting yet"] : []),
+    ];
+  return [
+    `${label}: browsers through ${proxy.server}`,
+    ...(proxy.bypass?.length ? [`  bypass: ${proxy.bypass.join(', ')}`] : []),
+    ...(proxy.credentialsSecretId ? [`  credentials: secret ${proxy.credentialsSecretId}`] : []),
+    ...(pending ? ["  pending: the computer's browsers do not have this setting yet"] : []),
+  ];
+}
+
+/** `computers egress-proxy get`, for a person. */
+function egressProxyLines(c: Computer, pending: boolean): string[] {
+  const proxy = c.egressProxy;
+  const label = c.name || c.id;
+  return [
+    ...(proxy
+      ? [
+          `${label}: all outbound TCP through ${proxy.server}`,
+          ...(proxy.credentialsSecretId
+            ? [`  credentials: secret ${proxy.credentialsSecretId}`]
+            : []),
+        ]
+      : [`${label}: no egress proxy; its traffic goes out directly`]),
+    ...(pending
+      ? [
+          "  pending: its host does not hold the proxy's credentials yet; connections are closed until it does",
+        ]
+      : []),
+  ];
+}
+
 function creditLines(r: CreditReport): string[] {
   return [
     'AI credits (account-wide)',
@@ -1379,7 +1492,12 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
       format: s('format') as P.ScreenshotFormat | undefined,
       quality: n('quality'),
     };
-    if (path === 'computers screenshot') P.screenshotQuery(n('width'), b('fresh'), shot);
+    if (path === 'computers screenshot') {
+      P.screenshotQuery(n('width'), b('fresh'), shot, s('capture'));
+    }
+    /** One line per entry, safe for a terminal: see the `credits` command. */
+    const printable = (lines: string[]) =>
+      lines.map((line) => terminalSafe(redact(line, io.env, io.secrets) as string)).join('\n');
     const capture = { memory: b('memory'), name: s('name'), wait: !b('no-wait'), ...wait };
     if (path === 'snapshots create') P.snapshotBody(capture.memory, capture.name);
     const schedule = { enabled: !b('disabled'), hour: n('hour'), minute: n('minute'), tz: s('tz') };
@@ -1512,7 +1630,10 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
       const wake = b('no-wake') ? { noWake: true } : {};
       const result =
         path === 'scp'
-          ? await legacy.scp(target, args[1]!, io, signal, overwrite)
+          ? await legacy.scp(target, args[1]!, io, signal, {
+              ...overwrite,
+              ...(s('upload-id') ? { uploadId: s('upload-id') } : {}),
+            })
           : path === 'files upload'
             ? await legacy.upload(target, args[1]!, args[2]!, io, signal, {
                 ...overwrite,
@@ -1860,7 +1981,9 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
             change = { browserProxy: { ...change.browserProxy!, credentialsSecretId: kept } };
           }
         }
-        return output.result(computerData(await c.update(change, keyed)));
+        await c.update(change, keyed);
+        if (b('wait')) await waitForBrowsers(c, output, signal, true);
+        return output.result(computerData(c));
       }
       case 'computers egress-proxy set': {
         const c = await computer();
@@ -1881,9 +2004,40 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
         }
         return output.result(computerData(await c.update(change, keyed)));
       }
-      case 'computers browser-proxy clear':
+      case 'computers browser-proxy clear': {
+        const c = await computer();
+        await c.update(proxy!, keyed);
+        if (b('wait')) await waitForBrowsers(c, output, signal, false);
+        return output.result(computerData(c));
+      }
       case 'computers egress-proxy clear':
         return output.result(computerData(await (await computer()).update(proxy!, keyed)));
+      case 'computers browser-proxy get': {
+        const c = await (await computer()).refresh(call);
+        const pending = c.browserProxyPending;
+        if (json)
+          return output.result({
+            id: c.id,
+            name: c.name,
+            browser_proxy: c.raw.browser_proxy ?? null,
+            browser_proxy_pending: pending,
+          });
+        io.stdout.write(`${printable(browserProxyLines(c, pending))}\n`);
+        return 0;
+      }
+      case 'computers egress-proxy get': {
+        const c = await (await computer()).refresh(call);
+        const pending = c.egressProxyPending;
+        if (json)
+          return output.result({
+            id: c.id,
+            name: c.name,
+            egress_proxy: c.raw.egress_proxy ?? null,
+            egress_proxy_pending: pending,
+          });
+        io.stdout.write(`${printable(egressProxyLines(c, pending))}\n`);
+        return 0;
+      }
       case 'computers secrets get':
         return await computerSecretsGet(await computer(), output, signal);
       case 'computers secrets set':
@@ -1969,6 +2123,7 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
       case 'computers screenshot': {
         const shotInfo = await (await computer()).screenshotWithInfo(n('width'), {
           fresh: b('fresh'),
+          capture: s('capture'),
           ...shot,
           signal,
         });
@@ -2028,6 +2183,8 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
         if ('timedOut' in result && result.timedOut)
           output.diagnostic('mandala: command timed out');
         if (result.exitCode === -1) output.diagnostic('mandala: remote exit status is unknown');
+        if ('retainedOutput' in result && result.retainedOutput)
+          output.diagnostic('mandala: no retained result was published for this command');
         if ('resultId' in result && result.resultId !== undefined)
           output.diagnostic(`mandala: the output is retained as result ${result.resultId}`);
         return code;

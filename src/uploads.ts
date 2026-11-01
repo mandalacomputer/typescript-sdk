@@ -26,6 +26,10 @@ export class UploadInterruptedError extends MandalaError {
     );
   }
 }
+/** An answer to an upload call that does not confirm what it should. */
+export class UploadProgressError extends MandalaError {
+  override name = 'UploadProgressError';
+}
 export function parseFileUpload(value: unknown, path: string, id: string): FileUpload {
   const p = value as Partial<FileUpload> | null;
   if (
@@ -41,6 +45,8 @@ export function parseFileUpload(value: unknown, path: string, id: string): FileU
     typeof p.complete !== 'boolean' ||
     (p.complete && p.offset !== p.size)
   )
-    throw new Error('Server returned invalid upload progress; read upload status before retrying.');
+    throw new UploadProgressError(
+      'Server returned invalid upload progress; read upload status before retrying.',
+    );
   return p as FileUpload;
 }
