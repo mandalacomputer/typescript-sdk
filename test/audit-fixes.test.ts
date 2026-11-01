@@ -474,6 +474,42 @@ describe('CLI', () => {
     expect(reads).toBeGreaterThanOrEqual(3);
   });
 
+  it('clear --wait follows a stopped computer of unknown start through to applied', async () => {
+    let reads = 0;
+    const h = harness(
+      computers((call) => {
+        if (call.method === 'PATCH') return record({ status: 'stopped' });
+        reads++;
+        if (reads < 2) return record({ status: 'stopped' });
+        return record({ browser_proxy_pending: reads < 4 });
+      }),
+    );
+    const { code } = await h.run(['computers', 'browser-proxy', 'clear', ID, '--wait']);
+    expect(code).toBe(0);
+    expect(reads).toBeGreaterThanOrEqual(4);
+  });
+
+  it('--wait applies the stopped rule after a failed read too', async () => {
+    let reads = 0;
+    const h = harness((call) => {
+      if (call.path !== `/computers/${ID}`) return anyRoute(call);
+      if (call.method === 'PATCH') return json(record({ browser_proxy: PROXY }));
+      if (++reads === 2) return json({ error: 'try again' }, { status: 503 });
+      return json(record({ status: 'stopped', running_ram_mb: 0, browser_proxy: PROXY }));
+    });
+    const { code, err } = await h.run([
+      'computers',
+      'browser-proxy',
+      'set',
+      ID,
+      PROXY.server,
+      '--no-credentials',
+      '--wait',
+    ]);
+    expect(code).toBe(0);
+    expect(err).toContain('applied as it starts');
+  });
+
   it('--wait rides out a transient failure of its first read', async () => {
     let reads = 0;
     const h = harness((call) => {

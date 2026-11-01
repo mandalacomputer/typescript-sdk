@@ -86,7 +86,7 @@ import {
   type Workspace,
 } from './index.js';
 import * as P from './paths.js';
-import { checkWait, isTransientForPoll } from './wait.js';
+import { checkWait, isTransientForPoll, rampDelay, sleepUntilNextPoll } from './wait.js';
 
 /** What one file copy reports: `scp`, `files upload` and `files download` alike. */
 export type CopyResult = {
@@ -750,6 +750,10 @@ export function runwayWords(seconds: number): string {
  * `credits` for a person, one line each, raw, as {@link usageLines}: the caller
  * escapes each line. Amounts are dollars; `--json` keeps the platform's micros.
  */
+/** How long `--wait` watches a computer that may be starting, and how often. */
+const PROXY_WAIT_MS = 180_000;
+const PROXY_POLL_MS = 2_000;
+
 /**
  * `--wait` on a browser proxy change: until the computer's browsers have it.
  *
@@ -760,21 +764,28 @@ export function runwayWords(seconds: number): string {
  * computer now and not the update's reply.
  */
 async function waitForBrowsers(c: Computer, output: Output, signal: AbortSignal): Promise<void> {
-  const read = await c.refresh({ signal }).then(
-    () => true,
-    (err: unknown) => {
-      // The change is saved, and the wait below rides out what this read just met.
-      if (isTransientForPoll(err)) return false;
-      throw err;
-    },
-  );
-  // Only an explicit 0 says no start is under way: an absent `running_ram_mb`
-  // is unknown, and that computer may be coming up.
-  if (read && (c.status === 'stopped' || c.status === 'suspended') && c.runningRamMb === 0) {
-    output.diagnostic(
-      `mandala: ${c.name || c.id} is ${c.status}: the change is stored and applied as it starts`,
+  const deadline = Date.now() + PROXY_WAIT_MS;
+  for (let turn = 0; ; turn++) {
+    const read = await c.refresh({ signal }).then(
+      () => true,
+      (err: unknown) => {
+        // The change is saved, and a read that failed says nothing about it.
+        if (isTransientForPoll(err)) return false;
+        throw err;
+      },
     );
-    return;
+    const down = read && (c.status === 'stopped' || c.status === 'suspended');
+    if (read && !down) break;
+    // Only an explicit 0 says no start is under way. An absent `running_ram_mb`
+    // is unknown and that computer may be coming up, so it is given the wait.
+    if ((down && c.runningRamMb === 0) || (down && Date.now() >= deadline)) {
+      output.diagnostic(
+        `mandala: ${c.name || c.id} is ${c.status}: the change is stored and applied as it starts`,
+      );
+      return;
+    }
+    if (Date.now() >= deadline) break;
+    await sleepUntilNextPoll(rampDelay(turn, PROXY_POLL_MS), deadline, signal);
   }
   await c.waitForBrowserProxy({ signal });
 }
