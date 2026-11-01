@@ -928,7 +928,7 @@ export const COMMANDS: readonly Command[] = [
     [
       bool(
         'wait',
-        'Poll until the run has ended, then print it (default deadline 30 minutes; the run goes on past it)',
+        'Poll until the run has ended, then print it (default deadline 65 minutes; the run goes on past it)',
       ),
       ...waits,
     ],
