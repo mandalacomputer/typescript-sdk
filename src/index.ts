@@ -177,6 +177,7 @@ export {
   RateLimitError,
   TimeoutError,
   TooLargeError,
+  trialUnavailable,
   UnavailableError,
   ValidationError,
 } from './errors.js';
@@ -307,6 +308,8 @@ export type {
   CreditsArgs,
   EgressProxyArgs,
   ExecArgs,
+  InputBatchAction,
+  InputWaitForAction,
   MoveArgs,
   OpenAIComputerAction,
   OperationListArgs,
@@ -418,6 +421,11 @@ export type {
   SynchronousResult,
   SynchronousResultPrefix,
 } from './results.js';
-export { type FileUpload, UploadInterruptedError, type UploadSource } from './uploads.js';
+export {
+  type FileUpload,
+  UploadInterruptedError,
+  UploadProgressError,
+  type UploadSource,
+} from './uploads.js';
 /** Re-exported so a caller can build a URL against the same default. */
 export { DEFAULT_BASE_URL as BASE_URL };

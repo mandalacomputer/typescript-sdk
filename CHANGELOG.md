@@ -26,6 +26,52 @@ This is the summary you read to decide whether to upgrade.
   build. `projectedMicros` and `requiredMicros` carry the balance and what
   starting needed. The CLI reports it as `insufficient_balance`. Code that
   catches `PlanLimitError` still catches it.
+- Batch checks. `inputBatch()` now takes `{ type: 'wait_for', until, ... }`
+  beside OpenAI's actions: `until` is `screen_changed`, `screen_stable` or
+  `window_title`, with `timeout_ms`, `stable_ms`, `region` and `contains` checked
+  before anything is sent. It used to refuse the step as an unknown type. A passed
+  check's result carries `waitedMs`. A check that is not met is an
+  `InputBatchError` with status 400 that is not final: look at a fresh screenshot.
+- `trialUnavailable(err)`: true for a `503` whose `code` is `TRIAL_FULL` or
+  `TRIAL_UNAVAILABLE`, which was refused before it was sent anywhere, so nothing
+  happened. `isTransient()` still answers false for both. The README lists the
+  plan and trial codes and what to do about each.
+- `ExecResult.retainedOutput` and `APIError.retainedOutput` read `'unavailable'`
+  when `retainOutput` was asked for and the platform says no result was published.
+  The CLI's `computers exec` says so too.
+- `BackgroundExec.startedAt`, and `agent.runTimeoutSeconds` in the mirrored limits.
+- CLI: `computers browser-proxy get`, `computers egress-proxy get`,
+  `computers browser-proxy set --wait` and `clear --wait`, `scp --upload-id` and
+  `computers screenshot --capture`.
+
+### Changed
+
+- `endsInHours` above 8784 is refused before any request, as `expiresInHours`
+  already was.
+- `endsAt` and `expiresAt` strings must be RFC 3339 with a zone, naming a date and
+  time that exist. A bare date, a zoneless time or `2026-11-31` is now a
+  `ValidationError` before any request, where the platform refused most of them
+  with a 400.
+- An upload answer that cannot be read as progress is `UploadProgressError`, a
+  `MandalaError`, from `writeFileChunk` and `fileUpload`, not a plain `Error`.
+  `uploadFile` still reports it as `UploadInterruptedError`.
+
+### Fixed
+
+- `computer.events()` and `waitFor()` on an API key that expires, which is never
+  given a computer's desktop or event credentials, retried forever blaming the
+  host. They now end with a `MandalaError` saying so, after one read of `whoami`.
+  `mandala terminal` says the same.
+
+### Documentation
+
+- The funded minimum is $0.02 available, not $0.25. `maxCostUsd`'s floor of 0.25
+  is a separate number and has not changed.
+- Added or corrected: the default `writeFile` overwriting in place, webhook `gap`
+  deliveries, the plan-end `computer.stopped` notice and account suspension, what
+  a key that expires cannot do, the printable ASCII rule for gateway secrets, what
+  a 403 can mean, a funded run's cancel, and pay as you go in Errors, Credits and
+  Usage.
 
 ## [0.21.0] - 2026-10-30
 

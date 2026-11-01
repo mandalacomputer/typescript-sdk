@@ -197,6 +197,8 @@ export type ErrorMetadata = {
   method?: string;
   /** The `RateLimit-*` headers, where the response carried readable ones. */
   rateLimit?: RateLimitInfo;
+  /** `unavailable` when an exec that asked for retention published no result. */
+  retainedOutput?: 'unavailable';
 };
 
 /**
@@ -272,6 +274,12 @@ export class APIError extends MandalaError {
    * a response. `undefined` on one constructed by hand.
    */
   readonly method?: string;
+  /**
+   * `'unavailable'` on the answer to an `exec` that asked for `retainOutput`:
+   * no retained result was published. As {@link ExecResult.retainedOutput}, and
+   * no evidence the command did not run.
+   */
+  readonly retainedOutput?: 'unavailable';
   constructor(
     message: string,
     readonly status: number,
@@ -296,6 +304,7 @@ export class APIError extends MandalaError {
       typeof metadata.method === 'string' && metadata.method
         ? metadata.method.toUpperCase()
         : undefined;
+    this.retainedOutput = metadata.retainedOutput;
   }
 }
 
@@ -433,6 +442,30 @@ export function refusedWhileDraining(err: unknown): err is APIError {
 }
 
 /**
+ * Whether this is a free trial's create, start or restart refused before it was
+ * sent anywhere: a `503` whose `code` is `TRIAL_FULL` (every trial slot is in
+ * use; `retryAfterMs` says when to ask again) or `TRIAL_UNAVAILABLE` (trials are
+ * paused). Nothing happened and nothing was used up, unlike every other `503`
+ * answered to a change, whose outcome is unknown, so there is nothing to look
+ * for or clean up.
+ *
+ * {@link isTransient} still answers false: only one of the two clears in
+ * seconds, and sending a create again is the caller's decision. A body that
+ * names an `operation_id` is evidence something was sent, and is not this.
+ */
+export function trialUnavailable(err: unknown): err is UnavailableError {
+  if (!(err instanceof UnavailableError) || err.status !== 503 || viaRedirect.has(err)) {
+    return false;
+  }
+  const body = errorRecord(err.body);
+  return (
+    (body?.code === 'TRIAL_FULL' || body?.code === 'TRIAL_UNAVAILABLE') &&
+    typeof body.error === 'string' &&
+    (body.operation_id === undefined || body.operation_id === null)
+  );
+}
+
+/**
  * The fields a body reports a run with — what it spent, what it did, the
  * thread it was kept in, the chat route's `agent` record. The draining refusal
  * is answered before any run and carries none of them, so a body with one is
@@ -486,6 +519,11 @@ export class AuthenticationError extends APIError {
  * platform's explanation of which limit was hit, and a person has to act on
  * it. The API rate budget is not one of these: running out of it is a `429`,
  * {@link RateLimitError}.
+ *
+ * {@link APIError.code} says which refusal this is where the platform named
+ * one: `PLAN_REQUIRED` (no plan, or a trial that has ended), `TRIAL_LIMIT` (the
+ * trial does not allow this) and `TRIAL_CREATES_USED` (its launches are spent).
+ * None clears by sending it again.
  *
  * Never raised by the agent routes: their 402 is {@link ModelProviderError}
  * on your own model key and {@link InsufficientCreditsError} on AI credits.
@@ -922,6 +960,11 @@ export class MethodNotAllowedError extends APIError {
  * without a transient `reason` final unless its {@link APIError.code} is one
  * that clears by itself (`idempotency_in_progress`, `WORKSPACE_MOVING`) —
  * OPL-5973. Read {@link APIError.code} to tell the decisions apart.
+ *
+ * One reasonless 409 does clear: a trial's `TRIAL_CREATE_PENDING`, while its
+ * computer is being created. {@link isTransient} still answers false, because
+ * the remedy is to wait for that computer and not to create again: a resend
+ * after it finishes makes a second one.
  */
 export class ConflictError extends APIError {
   override name = 'ConflictError';
@@ -990,7 +1033,9 @@ export class MoveRequiredError extends ConflictError {
  * overwriting.
  *
  * Raised only for the platform's explicit `reason: "exists"`, so the class is
- * the claim: something is at the path. A create-only 409 whose reason could
+ * the claim: something is at the path. `POST /templates` sends the same word for
+ * a ref already spoken for, which is this class too: there the path is the ref,
+ * and the fix is a new `metadata.version`. A create-only 409 whose reason could
  * not be read is {@link CreateOnlyConflictError} instead, which claims nothing
  * about the path.
  */
@@ -1169,6 +1214,10 @@ export class RateLimitError extends APIError {
  * and {@link isTransient} answers true for it: send the same request again
  * after `retryAfterMs`. A client constructed with `retries` does that itself,
  * within the same budget.
+ *
+ * A 503 with a `code` of `TRIAL_FULL` or `TRIAL_UNAVAILABLE` is a trial's create,
+ * start or restart refused before it was sent anywhere: see
+ * {@link trialUnavailable}.
  */
 export class UnavailableError extends APIError {
   override name = 'UnavailableError';

@@ -815,8 +815,9 @@ export function endTimeRequest(args: {
 
 /**
  * An end time as the wire takes it: a `Date` becomes its RFC 3339 form, and a
- * string is checked for shape only. Which times are allowed (how soon, how
- * far ahead) is the platform's rule, answered with a `400` that says why.
+ * string must be RFC 3339 with a zone, and a date and time that exist. Which
+ * times are allowed (how soon, how far ahead) is the platform's rule, answered
+ * with a `400` that says why: its clock decides, and this one may be wrong.
  */
 export function endTimeArg(v: unknown, what: string): string {
   if (v instanceof Date) {
@@ -824,7 +825,7 @@ export function endTimeArg(v: unknown, what: string): string {
     return v.toISOString();
   }
   const t = requireString(v, what);
-  if (!t.trim() || t !== t.trim() || Number.isNaN(Date.parse(t))) {
+  if (!isRealStamp(t)) {
     throw new ValidationError(
       `${what} must be an RFC 3339 time such as 2026-01-31T18:00:00Z (got ${JSON.stringify(t)})`,
     );
@@ -832,14 +833,53 @@ export function endTimeArg(v: unknown, what: string): string {
   return t;
 }
 
-/** A number of hours from now: finite and above zero, fractions allowed. */
-export function hoursArg(v: unknown, what: string, max?: number): number {
+/**
+ * RFC 3339 with a zone, naming a moment that exists.
+ *
+ * `Date.parse` alone will not do: it reads a bare date or a zoneless time as
+ * well, which the platform refuses, and it rolls `2026-11-31` over to December
+ * rather than refusing a day that month does not have.
+ */
+function isRealStamp(t: string): boolean {
+  if (!RFC3339.test(t)) return false;
+  const [year, month, day, hour, minute, second] = t.split(/[-T:tZz+.]/).map(Number) as [
+    number,
+    number,
+    number,
+    number,
+    number,
+    number,
+  ];
+  const offset = /([+-])(\d{2}):(\d{2})$/.exec(t.slice(19));
+  if (offset && (Number(offset[2]) > 23 || Number(offset[3]) > 59)) return false;
+  const lastDay = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  return (
+    month >= 1 &&
+    month <= 12 &&
+    day >= 1 &&
+    day <= lastDay &&
+    hour <= 23 &&
+    minute <= 59 &&
+    second <= 59 &&
+    !Number.isNaN(Date.parse(t))
+  );
+}
+
+/** The most hours ahead an end time or a key's expiry may be: 366 days. */
+export const MAX_HOURS_AHEAD = 366 * 24;
+
+/**
+ * A number of hours from now: finite, above zero and at most `max`, fractions
+ * allowed. The ceiling is here as well as on the platform so that a number too
+ * large to be a time never reaches a request, or the checks on its answer.
+ */
+export function hoursArg(v: unknown, what: string, max: number = MAX_HOURS_AHEAD): number {
   if (typeof v !== 'number') {
     throw new ValidationError(`${what} must be a number of hours (got ${typeof v})`);
   }
   const h = finite(v, what);
   if (!(h > 0)) throw new ValidationError(`${what} must be more than 0 hours (got ${h})`);
-  if (max !== undefined && h > max) {
+  if (h > max) {
     throw new ValidationError(`${what} must be at most ${max} hours (got ${h})`);
   }
   return h;
@@ -2052,6 +2092,119 @@ export type OpenAIComputerAction =
   | { type: 'wait' }
   | { type: 'screenshot' };
 
+/** What a batch's `wait_for` check can wait on. */
+export const WAIT_FOR_CONDITIONS = ['screen_changed', 'screen_stable', 'window_title'] as const;
+export type WaitForCondition = (typeof WAIT_FOR_CONDITIONS)[number];
+/** The longest one check waits, in milliseconds. */
+export const WAIT_FOR_TIMEOUT_MAX_MS = 30_000;
+/** How long `screen_stable` may ask the screen to stay unchanged, in milliseconds. */
+export const WAIT_FOR_STABLE_MIN_MS = 100;
+export const WAIT_FOR_STABLE_MAX_MS = 10_000;
+/** The most text a `window_title` check matches, in UTF-8 bytes. */
+export const WAIT_FOR_CONTAINS_MAX_BYTES = 256;
+/** The largest coordinate an input action takes. */
+const INPUT_MAX_COORDINATE = 10_000_000;
+
+/**
+ * A check inside a batch: wait until a condition holds, and stop the batch
+ * there as a failure if it does not within `timeout_ms` (default 10000; `0`
+ * checks once). Batches only: a single action cannot be one.
+ *
+ * - `screen_changed`: the screen, or `region`, differs from just before the
+ *   previous action, so a change that action caused is seen however fast.
+ * - `screen_stable`: unchanged for `stable_ms` (default 500).
+ * - `window_title`: the focused window's title contains `contains`, ignoring
+ *   case. Linux computers.
+ */
+export type InputWaitForAction = { type: 'wait_for'; timeout_ms?: number } & (
+  | { until: 'screen_changed'; region?: ScreenshotRegion }
+  | { until: 'screen_stable'; region?: ScreenshotRegion; stable_ms?: number }
+  | { until: 'window_title'; contains: string }
+);
+
+/** One step of {@link Computer.inputBatch}: an OpenAI action or a check. */
+export type InputBatchAction = OpenAIComputerAction | InputWaitForAction;
+
+/** The fields each `wait_for` condition reads, beside `type`, `until` and `timeout_ms`. */
+const WAIT_FOR_FIELDS: Readonly<Record<WaitForCondition, readonly string[]>> = {
+  screen_changed: ['region'],
+  screen_stable: ['region', 'stable_ms'],
+  window_title: ['contains'],
+};
+
+/** A whole number from `min` to `max`, or a refusal naming the field. */
+function wholeWithin(v: unknown, min: number, max: number, what: string): number {
+  if (typeof v !== 'number' || !Number.isInteger(v) || v < min || v > max) {
+    throw new ValidationError(`${what} must be a whole number from ${min} to ${max}`);
+  }
+  return v;
+}
+
+/** A `wait_for` step, checked as the platform checks one before anything runs. */
+function waitForStep(action: Record<string, unknown>, at: string): Json {
+  const until = action.until;
+  if (!WAIT_FOR_CONDITIONS.includes(until as WaitForCondition)) {
+    throw new ValidationError(`${at}.until must be one of ${WAIT_FOR_CONDITIONS.join(', ')}`);
+  }
+  const reads = WAIT_FOR_FIELDS[until as WaitForCondition];
+  for (const key of Object.keys(action)) {
+    if (
+      !['type', 'until', 'timeout_ms'].includes(key) &&
+      action[key] !== undefined &&
+      !reads.includes(key)
+    ) {
+      throw new ValidationError(`${at}: wait_for ${String(until)} does not take ${key}`);
+    }
+  }
+  const body: Json = { type: 'wait_for', until };
+  if (action.timeout_ms !== undefined) {
+    body.timeout_ms = wholeWithin(
+      action.timeout_ms,
+      0,
+      WAIT_FOR_TIMEOUT_MAX_MS,
+      `${at}.timeout_ms`,
+    );
+  }
+  if (action.region !== undefined) {
+    const region = action.region;
+    if (!isRecord(region)) throw new ValidationError(`${at}.region must be {x, y, width, height}`);
+    for (const key of Object.keys(region)) {
+      if (!['x', 'y', 'width', 'height'].includes(key) && region[key] !== undefined) {
+        throw new ValidationError(`${at}.region takes only x, y, width and height, not ${key}`);
+      }
+    }
+    body.region = {
+      x: wholeWithin(region.x, 0, INPUT_MAX_COORDINATE, `${at}.region.x`),
+      y: wholeWithin(region.y, 0, INPUT_MAX_COORDINATE, `${at}.region.y`),
+      width: wholeWithin(region.width, 1, INPUT_MAX_COORDINATE, `${at}.region.width`),
+      height: wholeWithin(region.height, 1, INPUT_MAX_COORDINATE, `${at}.region.height`),
+    };
+  }
+  if (action.stable_ms !== undefined) {
+    body.stable_ms = wholeWithin(
+      action.stable_ms,
+      WAIT_FOR_STABLE_MIN_MS,
+      WAIT_FOR_STABLE_MAX_MS,
+      `${at}.stable_ms`,
+    );
+  }
+  if (until === 'window_title') {
+    const contains = action.contains;
+    if (
+      typeof contains !== 'string' ||
+      !contains ||
+      utf8Length(contains) > WAIT_FOR_CONTAINS_MAX_BYTES ||
+      /\p{Surrogate}/u.test(contains)
+    ) {
+      throw new ValidationError(
+        `${at}.contains must be text of 1 to ${WAIT_FOR_CONTAINS_MAX_BYTES} bytes of UTF-8`,
+      );
+    }
+    body.contains = contains;
+  }
+  return body;
+}
+
 /** The fields each OpenAI action reads, beside `type`: the platform's own table. */
 const OPENAI_FIELDS: Readonly<Record<string, readonly string[]>> = {
   click: ['x', 'y', 'button', 'keys'],
@@ -2067,8 +2220,8 @@ const OPENAI_FIELDS: Readonly<Record<string, readonly string[]>> = {
 const OPENAI_BUTTONS: readonly string[] = ['left', 'right', 'wheel', 'back', 'forward'];
 
 /**
- * The body of an OpenAI batch: the actions as a JSON array, each checked
- * before anything is sent.
+ * The body of a batch: the actions as a JSON array, each checked before
+ * anything is sent.
  *
  * Checked for SHAPE — a known `type`, the fields that type needs with the
  * right types, and no field it does not read — rather than for the platform's
@@ -2078,7 +2231,7 @@ const OPENAI_BUTTONS: readonly string[] = ['left', 'right', 'wheel', 'back', 'fo
  * no part of a model's action silently disappears on the way. `keys: null` is
  * OpenAI's "no keys" and is left off the wire.
  */
-export function inputBatchBody(actions: readonly OpenAIComputerAction[]): Json[] {
+export function inputBatchBody(actions: readonly InputBatchAction[]): Json[] {
   if (!Array.isArray(actions)) throw new ValidationError('actions must be an array');
   if (actions.length < 1 || actions.length > INPUT_BATCH_MAX) {
     throw new ValidationError(
@@ -2089,10 +2242,11 @@ export function inputBatchBody(actions: readonly OpenAIComputerAction[]): Json[]
     const at = `actions[${i}]`;
     if (!isRecord(action)) throw new ValidationError(`${at} must be an object`);
     const type = action.type;
+    if (type === 'wait_for') return waitForStep(action, at);
     const reads = typeof type === 'string' ? OPENAI_FIELDS[type] : undefined;
     if (typeof type !== 'string' || !Object.hasOwn(OPENAI_FIELDS, type) || !reads) {
       throw new ValidationError(
-        `${at}.type must be one of ${Object.keys(OPENAI_FIELDS).join(', ')} (got ${JSON.stringify(type)})`,
+        `${at}.type must be one of ${[...Object.keys(OPENAI_FIELDS), 'wait_for'].join(', ')} (got ${JSON.stringify(type)})`,
       );
     }
     for (const key of Object.keys(action)) {
@@ -3550,7 +3704,9 @@ export type CredentialGatewayBindingArgs = {
    * The secret in the account's store (`csec-` and sixteen hex characters)
    * whose value is sent upstream, in the header {@link authHeader} names. It must
    * be in the computer's workspace or the account's own scope; the latest
-   * revision is used on every request.
+   * revision is used on every request. Its value must be printable ASCII with
+   * no spaces or line breaks, and a trailing newline counts: any other value
+   * binds, and every call through the gateway then answers 503.
    */
   secretId: string;
   /**
@@ -3897,7 +4053,7 @@ export type ApiKeyCreateArgs = {
 };
 
 /** The most hours ahead an API key's expiry may be: 366 days. */
-export const API_KEY_EXPIRY_MAX_HOURS = 8784;
+export const API_KEY_EXPIRY_MAX_HOURS = MAX_HOURS_AHEAD;
 /** The most computers one API key may be limited to. */
 export const API_KEY_COMPUTERS_MAX = 50;
 
@@ -3948,7 +4104,7 @@ export function apiKeyCreateBody(args: ApiKeyCreateArgs = {}): Json {
     expires_in_hours:
       args.expiresInHours === undefined
         ? undefined
-        : hoursArg(args.expiresInHours, 'expiresInHours', API_KEY_EXPIRY_MAX_HOURS),
+        : hoursArg(args.expiresInHours, 'expiresInHours'),
     computer_ids: computerIds,
   });
 }

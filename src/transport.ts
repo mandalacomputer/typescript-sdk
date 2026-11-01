@@ -624,6 +624,10 @@ export function rateLimitInfo(headers: Headers): RateLimitInfo | undefined {
   return Object.keys(info).length ? info : undefined;
 }
 
+/** Whether an exec's answer says no retained result was published. */
+export const retainedOutputUnavailable = (headers: Headers): boolean =>
+  headers.get('x-gc-retained-output')?.trim().toLowerCase() === 'unavailable';
+
 /** A Retry-After header, in milliseconds from now. */
 const retryAfterMs = (header: string | null, cap = true): number | undefined => {
   if (!header) return undefined;
@@ -1178,6 +1182,9 @@ export class Transport {
       wwwAuthenticate: resp.headers.get('www-authenticate') ?? undefined,
       retryAfterMs: retryAfterMs(resp.headers.get('retry-after')),
       rateLimit: rateLimitInfo(resp.headers),
+      ...(retainedOutputUnavailable(resp.headers)
+        ? { retainedOutput: 'unavailable' as const }
+        : {}),
       // Only ever set on a 416, which is the one status that answers with a
       // Content-Range naming the file rather than a window of it.
       rangeTotal: unsatisfiedTotal(resp.headers.get('content-range')),

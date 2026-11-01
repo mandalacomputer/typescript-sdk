@@ -266,6 +266,8 @@ export function errorInfo(error: unknown): {
       // Retry-After (OPL-5973): the one number a script retrying a 429 or a
       // 503 needs, which the error object had and this envelope dropped.
       ...(error.retryAfterMs === undefined ? {} : { retry_after_ms: error.retryAfterMs }),
+      // An exec that asked for retention and whose answer says none was kept.
+      ...(error.retainedOutput === undefined ? {} : { retained_output: error.retainedOutput }),
       // The billing link, where the agent's own error frame puts it, so a
       // refusal reads the same whether it was the response or a frame.
       ...(error instanceof InsufficientCreditsError && error.topUpUrl !== undefined

@@ -2129,8 +2129,10 @@ export class Usage {
    * Running hours weighted by cores and memory, the storage held, and the
    * per-computer breakdown behind the totals.
    *
-   * Use this to monitor resource use. These measurements do not add a usage
-   * charge to the monthly subscription; AI-credit usage is separate.
+   * Use this to monitor resource use. On a subscription these measurements add
+   * no usage charge; AI-credit usage is separate. On pay as you go they are what
+   * compute and disk are priced from, and `credits.read()` is the record of
+   * what was charged.
    *
    * With no arguments the window is the account's current billing period.
    * Name both `from` and `to` for a window that has closed.
@@ -2242,15 +2244,16 @@ export class Webhooks {
    * await vault.put('mandala-webhook-secret', hook.secret);
    * ```
    *
-   * Every paid plan allows ten subscriptions per account; the eleventh is a
-   * `ConflictError` naming the cap, and an account with no plan gets a
-   * `PlanLimitError`. Acknowledge each delivery with a 2xx before doing the
+   * A paid plan or pay as you go allows ten subscriptions per account; the
+   * eleventh is a `ConflictError` naming the cap, and a trial or an account with
+   * no plan gets a `PlanLimitError`. Acknowledge each delivery with a 2xx before doing the
    * work: an attempt is cut at ten seconds, and anything but a 2xx is tried
    * again — eight attempts (seven retries) over about fourteen hours — before
-   * the delivery is `exhausted`
-   * — visible in {@link deliveries}, never dropped silently. An endpoint that
-   * keeps failing is disabled after a day; `update({ enabled: true })` starts
-   * it again.
+   * the delivery is `exhausted`, visible in {@link deliveries}. While the
+   * account is active nothing is dropped without a record; events the platform
+   * reads while the account is suspended are skipped for good, with no `gap`
+   * standing in for them. An endpoint that keeps failing is disabled after a
+   * day; `update({ enabled: true })` starts it again.
    */
   async create(args: P.WebhookCreateArgs, opts: CallOptions = {}): Promise<WebhookCreated> {
     const data = await this.#t.json('POST', P.WEBHOOKS, {
@@ -3295,9 +3298,12 @@ export class AgentRuns {
   }
 
   /**
-   * Stop a running run where it is: the model call in flight is abandoned and
-   * no further action is taken. What it already did to the desktop stands, and
-   * so does what it cost. Answers the run, `cancelled`; cancelling one that
+   * Stop a running run where it is: no further action is taken, and a model
+   * call in flight on your own key is abandoned. A model call in flight on AI
+   * credits is left to finish and is charged, though nothing of its reply is
+   * acted on, so `costUsd` and `updatedAt` can change after this answers: read
+   * the run again for the final cost. What it already did to the desktop stands,
+   * and so does what it cost. Answers the run, `cancelled`; cancelling one that
    * already ended answers it as it is, unchanged.
    */
   async cancel(runId: string, opts: CallOptions = {}): Promise<AgentRun> {
@@ -3320,8 +3326,8 @@ export class AgentRuns {
    * check most callers want; `status`, `error` and `result.stop` say the rest.
    *
    * Polls every `pollMs` (default 3 seconds; a step takes at least that long)
-   * until `timeoutMs` (default 30 minutes) runs out, then throws
-   * {@link TimeoutError}. THE RUN IS NOT STOPPED BY THAT, only the waiting is:
+   * until `timeoutMs` (default 30 minutes; a run may last 60) runs out, then
+   * throws {@link TimeoutError}. THE RUN IS NOT STOPPED BY THAT, only the waiting is:
    * {@link cancel} stops it. A transient failure of a poll is ridden out, as
    * every wait in this SDK does; a run this key cannot see is a
    * {@link NotFoundError} at once. `signal` aborts the wait, not the run.

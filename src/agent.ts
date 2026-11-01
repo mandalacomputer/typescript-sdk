@@ -208,7 +208,7 @@ export type AgentArgs = {
    * funded run is Anthropic only, uses the platform's system prompt (so
    * `system` is refused), and allows `claude-sonnet-5-5` (its default) or
    * `claude-opus-5-5`. It needs a plan, a supported billing country, and
-   * at least $0.25 of credits for its first model call; short of that it is
+   * at least $0.02 of credits for its first model call; short of that it is
    * refused before it starts with `InsufficientCreditsError`. Running
    * out part-way ends the run with `stop: 'credits_exhausted'`.
    *
