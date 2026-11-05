@@ -83,7 +83,7 @@ const ACCOUNT = {
     snapshot_storage_bytes: 107374182400,
   },
   per_computer: { max_vcpu: 16, max_ram_mb: 16384, max_disk_gb: 200 },
-  capabilities: { windows: false },
+  capabilities: { windows: false, macos: false },
   complete: { computers: true, snapshots: true },
   usage: {
     kept_computers: 3,

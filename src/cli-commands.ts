@@ -734,6 +734,7 @@ function accountText(q: AccountQuota): string {
     'Snapshot storage excludes in-flight capture reservations; its headroom does not predict capture admission.',
     `Per-computer maxima: ${q.perComputer.maxVcpu} vCPU; ${q.perComputer.maxRamMb} MiB RAM; ${q.perComputer.maxDiskGb} GiB disk`,
     `Windows capability: ${q.capabilities.windows ? 'yes' : 'no'}`,
+    `macOS capability: ${q.capabilities.macos ? 'yes' : 'no'}`,
   ]
     .map((line) => terminalSafe(line))
     .join('\n');

@@ -1079,6 +1079,11 @@ export class Computer {
     return P.isRecord(b) ? str(b.failed) : '';
   }
 
+  /**
+   * The guest operating system: `'linux'`, `'windows'` or `'macos'`, or `''`
+   * where the platform did not say. An open set; compare rather than assume
+   * these are the only values.
+   */
   get os(): string {
     return str(this.#data.os);
   }

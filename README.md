@@ -3460,6 +3460,11 @@ inventory has numeric zeros. Missing or malformed required fields raise
 `MandalaError`; the SDK never turns them into an empty account. Unknown future
 fields remain available in `raw`.
 
+`capabilities.windows` says whether the plan permits Windows computers.
+`capabilities.macos` says whether this account may create macOS computers
+(`os: 'macos'`), which are available on request rather than with a plan; it
+reads `false` against a platform that does not send it.
+
 Configured vCPU and disk GB include all kept computers, including stopped ones;
 disk is provisioned capacity, not filesystem occupancy. Running/reserved RAM MB
 includes pending reservations and excludes released stopped RAM. The separate
@@ -4453,7 +4458,7 @@ withheld for the credential). With `--json`, `data` is `{ "account": ...,
 
 `account` reads instantaneous account-wide quota through `client.account.read()`.
 It takes no arguments or account/computer selectors. The report includes the
-plan, pool ceilings, per-computer maxima, Windows capability, observed consumption,
+plan, pool ceilings, per-computer maxima, Windows and macOS capability, observed consumption,
 and remaining headroom. Configured vCPU and disk include stopped computers;
 running/reserved RAM is a separate pool. Disk is in GiB, RAM in MiB, and indexed
 snapshot storage in exact bytes. Snapshot storage excludes in-flight capture

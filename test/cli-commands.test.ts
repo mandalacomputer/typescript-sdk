@@ -262,6 +262,7 @@ describe('account and historical usage commands', () => {
     expect(result.out).toContain('excludes in-flight capture reservations');
     expect(result.out).toContain('Per-computer maxima: 16 vCPU; 16384 MiB RAM; 200 GiB disk');
     expect(result.out).toContain('Windows capability: no');
+    expect(result.out).toContain('macOS capability: no');
     expect(result.out).not.toContain('\u001b');
     expect(result.err).toBe('');
   });
@@ -799,7 +800,7 @@ function accountReport() {
       snapshot_storage_bytes: 107374182400,
     },
     per_computer: { max_vcpu: 16, max_ram_mb: 16384, max_disk_gb: 200 },
-    capabilities: { windows: false },
+    capabilities: { windows: false, macos: false },
     complete: { computers: true, snapshots: true },
     usage: {
       kept_computers: 3,
