@@ -9,6 +9,14 @@ This is the summary you read to decide whether to upgrade.
 
 ## [Unreleased]
 
+### Added
+
+- macOS computers, available on request. `AccountQuota.capabilities` gains
+  `macos`: `true` only when this account may create macOS computers. Against a
+  platform that does not send it, it reads `false`. A computer's or template's
+  `os` can now be `macos` as well as `linux` and `windows`. `mandala account`
+  prints the macOS capability beside the Windows one.
+
 ## [0.22.0] - 2026-11-01
 
 ### Added

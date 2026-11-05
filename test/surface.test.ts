@@ -69,7 +69,7 @@ const executionRoutes = (call: Call): Response | Promise<Response> => {
         snapshot_storage_bytes: 0,
       },
       per_computer: { max_vcpu: 0, max_ram_mb: 0, max_disk_gb: 0 },
-      capabilities: { windows: false },
+      capabilities: { windows: false, macos: false },
       complete: { computers: true, snapshots: true },
       usage: {
         kept_computers: 0,

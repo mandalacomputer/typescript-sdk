@@ -1158,6 +1158,19 @@ describe('a template row says which display protocol it speaks', () => {
     expect('desktop' in row).toBe(false);
   });
 
+  it('carries a macos template and a macos computer through as listed', async () => {
+    const { client: c } = client((call) =>
+      call.method === 'GET' && call.path === '/templates'
+        ? json([{ name: 'mac', label: 'macOS', os: 'macos', cpu: 4, ram_mb: 8192, disk_gb: 80 }])
+        : call.method === 'GET' && call.path === '/computers/vm-1'
+          ? json({ id: 'vm-1', name: 'mac-1', status: 'running', os: 'macos' })
+          : anyRoute(call),
+    );
+    const rows = await c.templates.list();
+    expect((rows[0] as Template).os).toBe('macos');
+    expect((await c.computers.get('vm-1')).os).toBe('macos');
+  });
+
   /**
    * An explicit `x11` is passed through as itself.
    *

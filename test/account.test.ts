@@ -26,7 +26,7 @@ const report = () => ({
     snapshot_storage_bytes: 107374182400,
   },
   per_computer: { max_vcpu: 16, max_ram_mb: 16384, max_disk_gb: 200 },
-  capabilities: { windows: false },
+  capabilities: { windows: false, macos: false },
   complete: { computers: true, snapshots: true },
   usage: {
     kept_computers: 3,
@@ -113,6 +113,15 @@ it.each([
   },
 );
 
+it('reads an absent macos capability as false and a granted one as true', () => {
+  const older: Wire = report();
+  older.capabilities = { windows: true };
+  expect(toAccountQuota(older).capabilities).toEqual({ windows: true, macos: false });
+  const granted: Wire = report();
+  granted.capabilities = { windows: false, macos: true };
+  expect(toAccountQuota(granted).capabilities).toEqual({ windows: false, macos: true });
+});
+
 it('keeps unknown fields only in a shallow raw copy and leaves input unchanged', () => {
   const data = {
     ...report(),
@@ -196,12 +205,16 @@ describe('malformed reports', () => {
     },
   );
 
-  it.each(fields)('requires %s.%s', (section, key) => {
-    const data: Wire = report();
-    if (key) delete (data[section] as Wire)[key];
-    else delete data[section];
-    expect(() => toAccountQuota(data)).toThrow(/expected an account quota report/);
-  });
+  // `capabilities.macos` is the one optional field: older platforms omit it.
+  it.each(fields.filter(([s, k]) => !(s === 'capabilities' && k === 'macos')))(
+    'requires %s.%s',
+    (section, key) => {
+      const data: Wire = report();
+      if (key) delete (data[section] as Wire)[key];
+      else delete data[section];
+      expect(() => toAccountQuota(data)).toThrow(/expected an account quota report/);
+    },
+  );
 
   it.each(numericFields)('checks the numeric domain of %s.%s', (section, key) => {
     for (const bad of [
@@ -244,6 +257,8 @@ describe('malformed reports', () => {
       ['plan', 'id', ''],
       ['plan', 'label', 0],
       ['capabilities', 'windows', 'false'],
+      ['capabilities', 'macos', 'true'],
+      ['capabilities', 'macos', null],
       ['complete', 'computers', 1],
       ['complete', 'snapshots', null],
       ...['yesterday', '2026-09-16', '2026-09-16T12:00:00', '2026-02-30T00:00:00Z'].map(

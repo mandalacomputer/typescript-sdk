@@ -633,6 +633,7 @@ export type Template = {
    */
   ref?: string;
   label: string;
+  /** `'linux'`, `'windows'` or `'macos'`; an open set. */
   os: string;
   /**
    * The display protocol this template's desktop speaks: `'wayland'`, `'x11'`,
@@ -1199,7 +1200,14 @@ export type AccountLimits = {
 };
 
 export type AccountPerComputer = { maxVcpu: number; maxRamMb: number; maxDiskGb: number };
-export type AccountCapabilities = { windows: boolean };
+/**
+ * What the account may create beyond Linux computers.
+ *
+ * `windows`: whether the plan permits Windows computers. `macos`: whether this
+ * account may create macOS computers, which are granted per account on request
+ * rather than by a plan. A platform that does not send `macos` reads `false`.
+ */
+export type AccountCapabilities = { windows: boolean; macos: boolean };
 /** Independent inventory observations; false means that group's figures are null. */
 export type AccountCompleteness = { computers: boolean; snapshots: boolean };
 
@@ -1304,7 +1312,10 @@ export function toAccountQuota(value: unknown): AccountQuota {
       maxRamMb: quantity(per.max_ram_mb, 'per_computer.max_ram_mb'),
       maxDiskGb: quantity(per.max_disk_gb, 'per_computer.max_disk_gb'),
     },
-    capabilities: { windows: flag(caps.windows, 'capabilities.windows') },
+    capabilities: {
+      windows: flag(caps.windows, 'capabilities.windows'),
+      macos: caps.macos === undefined ? false : flag(caps.macos, 'capabilities.macos'),
+    },
     complete: { computers, snapshots },
     usage: {
       keptComputers: observed(usage.kept_computers, 'usage.kept_computers', computers),
