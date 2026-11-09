@@ -81,9 +81,11 @@ export const ALLOWED: ReadonlySet<string> = new Set(
       ['GET', 'computers/:id/executions/:executionId'],
       ['GET', 'computers/:id/executions/:executionId/output'],
       ['POST', 'computers/:id/executions/:executionId/retained-output'],
+      ['GET', 'computers/:id/results'],
       ['GET', 'computers/:id/results/:resultId'],
       ['GET', 'computers/:id/results/:resultId/output'],
       ['DELETE', 'computers/:id/results/:resultId'],
+      ['GET', 'computers/:id/artifacts'],
       ['POST', 'computers/:id/artifacts'],
       ['GET', 'computers/:id/artifacts/:artifactId'],
       ['GET', 'computers/:id/artifacts/:artifactId/download'],
@@ -219,6 +221,13 @@ export const UNIMPLEMENTED: ReadonlySet<string> = new Set([
   // here, and a second, worse OpenAI client inside this SDK would be a
   // maintenance obligation with no user.
   'POST chat/completions',
+
+  // Not yet wrapped (platform OPL-6465): the platform now lists a computer's
+  // retained artifacts and retained results, each with the computer's and the
+  // account's quota usage. Neither takes a parameter. A gap to close, not a
+  // decision: remove these two when the SDK lists them.
+  'GET computers/:id/artifacts',
+  'GET computers/:id/results',
 ]);
 
 /**
@@ -402,9 +411,11 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
     'POST computers/:id/executions/:executionId/retained-output',
     ['body:max_bytes_per_stream', 'body:retention_seconds'],
   ],
+  ['GET computers/:id/results', []],
   ['GET computers/:id/results/:resultId', []],
   ['GET computers/:id/results/:resultId/output', ['query:stream', 'query:offset', 'query:limit']],
   ['DELETE computers/:id/results/:resultId', []],
+  ['GET computers/:id/artifacts', []],
   [
     'POST computers/:id/artifacts',
     [
