@@ -39,6 +39,7 @@ export const ALLOWED: ReadonlySet<string> = new Set(
       ['POST', 'builds'],
       ['GET', 'builds'],
       ['GET', 'builds/:id'],
+      ['POST', 'builds/:id/cancel'],
       ['GET', 'builds/:id/progress'],
       ['GET', 'builds/:id/events'],
       ['GET', 'sizes'],
@@ -234,6 +235,10 @@ export const UNIMPLEMENTED: ReadonlySet<string> = new Set([
   // signs to prove it holds an SSH key's private half before adding it. Leaves
   // this set in the change that adds the method.
   'POST ssh-keys/challenge',
+
+  // No client method yet (platform OPL-6467): stops one of the account's
+  // running builds. Leaves this set in the change that adds the method.
+  'POST builds/:id/cancel',
 ]);
 
 /**
@@ -289,6 +294,7 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
   // and only documented the way out of it in OPL-3840.
   ['GET builds', ['query:allow_partial']],
   ['GET builds/:id', []],
+  ['POST builds/:id/cancel', []],
   ['GET builds/:id/progress', []],
   ['GET builds/:id/events', []],
   ['GET sizes', []],
