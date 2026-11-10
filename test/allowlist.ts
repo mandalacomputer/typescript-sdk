@@ -162,6 +162,7 @@ export const ALLOWED: ReadonlySet<string> = new Set(
       // rather than the account, and whether SSH is on for one computer.
       ['GET', 'ssh-keys'],
       ['POST', 'ssh-keys'],
+      ['POST', 'ssh-keys/challenge'],
       ['DELETE', 'ssh-keys/:id'],
       ['GET', 'computers/:id/ssh'],
       ['PUT', 'computers/:id/ssh'],
@@ -228,6 +229,11 @@ export const UNIMPLEMENTED: ReadonlySet<string> = new Set([
   // decision: remove these two when the SDK lists them.
   'GET computers/:id/artifacts',
   'GET computers/:id/results',
+
+  // No client method yet (platform OPL-6531): issues the challenge a caller
+  // signs to prove it holds an SSH key's private half before adding it. Leaves
+  // this set in the change that adds the method.
+  'POST ssh-keys/challenge',
 ]);
 
 /**
@@ -547,7 +553,8 @@ export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
 
   // A key is one OpenSSH public key line; `name` is optional.
   ['GET ssh-keys', []],
-  ['POST ssh-keys', ['body:public_key', 'body:name']],
+  ['POST ssh-keys', ['body:public_key', 'body:name', 'body:challenge', 'body:signature']],
+  ['POST ssh-keys/challenge', []],
   ['DELETE ssh-keys/:id', []],
   ['GET computers/:id/ssh', []],
   ['PUT computers/:id/ssh', ['body:enabled']],
@@ -627,6 +634,14 @@ export const UNIMPLEMENTED_PARAMETERS: ReadonlySet<string> = new Set([
   'GET webhooks/:id/deliveries  query:before',
   'GET webhooks/:id/deliveries  query:limit',
   'GET webhooks/:id/deliveries  query:state',
+
+  // Not yet sent (platform OPL-6531): adding a key can carry a signature over a
+  // challenge from `POST ssh-keys/challenge`, proving the caller holds the
+  // private half. A key added without one still registers, as before, and
+  // connects to a computer named by its id. A gap to close, not a decision:
+  // remove these two when the key method takes them.
+  'POST ssh-keys  body:challenge',
+  'POST ssh-keys  body:signature',
 ]);
 
 /**
@@ -652,7 +667,9 @@ export function patternFor(path: string): string {
       prev === 'snapshots' ||
       prev === 'builds' ||
       prev === 'webhooks' ||
-      prev === 'ssh-keys' ||
+      // `challenge` is a literal after `ssh-keys` (platform OPL-6531); no key
+      // id is one, since every key id starts `sshk-`.
+      (prev === 'ssh-keys' && seg !== 'challenge') ||
       prev === 'api-keys' ||
       // The account's store, and only there: `computers/:id/secrets` is a
       // literal at the end of a computer's path and has nothing after it.
