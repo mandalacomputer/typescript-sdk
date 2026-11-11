@@ -19,6 +19,7 @@ import {
   MandalaError,
   markRedirected,
   type RateLimitInfo,
+  type RetainedOutputReason,
   refusedWhileDraining,
   ValidationError,
 } from './errors.js';
@@ -628,6 +629,18 @@ export function rateLimitInfo(headers: Headers): RateLimitInfo | undefined {
 export const retainedOutputUnavailable = (headers: Headers): boolean =>
   headers.get('x-gc-retained-output')?.trim().toLowerCase() === 'unavailable';
 
+/**
+ * Why no retained result was published, when a limit is why: `computer_quota`
+ * or `account_quota` (full until objects expire or are deleted) or `capacity`
+ * (shared capacity, which clears by itself). Read only beside
+ * {@link retainedOutputUnavailable}; `undefined` for any other reason.
+ */
+export const retainedOutputReason = (headers: Headers): RetainedOutputReason | undefined => {
+  if (!retainedOutputUnavailable(headers)) return undefined;
+  const reason = headers.get('x-gc-retained-output-reason')?.trim().toLowerCase();
+  return reason ? reason : undefined;
+};
+
 /** A Retry-After header, in milliseconds from now. */
 const retryAfterMs = (header: string | null, cap = true): number | undefined => {
   if (!header) return undefined;
@@ -1185,6 +1198,9 @@ export class Transport {
       ...(retainedOutputUnavailable(resp.headers)
         ? { retainedOutput: 'unavailable' as const }
         : {}),
+      ...(retainedOutputReason(resp.headers) === undefined
+        ? {}
+        : { retainedOutputReason: retainedOutputReason(resp.headers) }),
       // Only ever set on a 416, which is the one status that answers with a
       // Content-Range naming the file rather than a window of it.
       rangeTotal: unsatisfiedTotal(resp.headers.get('content-range')),

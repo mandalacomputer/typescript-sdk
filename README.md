@@ -367,10 +367,18 @@ retrying. `builds.get(id)` is the job, `builds.progress(id)` is what it is doing
 and stays readable after it has finished, and `builds.list()` is every build the
 fleet still holds a record of.
 
+`builds.cancel(id)` stops a build that is still running. It answers the build
+as it stands, still `running`; read it again (or `wait` on it) to see it end,
+usually within seconds, as `failed` with an `error` that says it was cancelled.
+Nothing is published. Until it has ended it still counts as the account's
+running build, so `builds.start()` is refused until then. A build that has
+already finished is a `ConflictError`, and one that finished publishing before
+the stop reached it stays `succeeded`.
+
 Builds are the account's, like the templates they build, and need an
 account-wide key: an API key confined to a workspace gets a
 `PermissionDeniedError` (`403`) from every `builds` method — `start`, `list`,
-`get`, `progress`, `events` and `wait` alike. It launches a computer from a
+`get`, `progress`, `events`, `cancel` and `wait` alike. It launches a computer from a
 published template by its ref instead.
 
 A build's steps can read secrets: list them under `spec.secrets` (on by
@@ -1077,7 +1085,10 @@ request; `true` or `{ maxBytesPerStream, retentionSeconds }` requests retention.
 Older servers and unconfirmed optional capture leave `resultId` absent. When the
 platform says no result was published, `retainedOutput` reads `'unavailable'`, on
 the `ExecResult` or on the `APIError` of a refused answer: that says nothing about
-whether the command ran. Missing or malformed optional retention metadata does not
+whether the command ran. When a limit is why, `retainedOutputReason` says which:
+`computer_quota` or `account_quota` is a full retained quota, which clears only
+when objects expire or are deleted, and `capacity` is full shared capacity, which
+clears by itself. Missing or malformed optional retention metadata does not
 invalidate the executed command.
 No helper retries a capture or replays a command after an uncertain response.
 
@@ -1132,8 +1143,27 @@ request allowance; a larger configured client timeout remains larger, and
 This is a per-request allowance, not a deadline for a multi-request operation.
 A lost publication response leaves its commit unconfirmed. Do not automatically
 repeat the POST. `deleteResult` and `deleteArtifact` make one DELETE each; 204
-returns void, while a repeated 404 remains unavailable. Activities and their
-result-detail convenience methods remain outside this SDK surface.
+returns void, while a repeated 404 remains unavailable.
+
+`c.results()` and `c.artifacts()` list what the computer holds, oldest first,
+with `usage`: how full the computer's and the account's retained quotas are
+(`objects`, `bytes`, `maxObjects`, `maxBytes`). This is where to look when a quota
+is full: delete what you no longer need with `deleteResult` and `deleteArtifact`.
+
+```ts
+const { results, usage } = await c.results({ signal });
+if (usage.account.objects >= usage.account.maxObjects) {
+  for (const r of results.slice(0, 10)) await c.deleteResult(r.resultId, { signal });
+}
+const { artifacts } = await c.artifacts({ signal });
+```
+
+Each listing is complete in one answer. Captures in progress and deleted objects
+awaiting cleanup are not listed but are charged in `usage`. A row whose
+`workspaceId` differs from the computer's current workspace was recorded before
+a move: nobody may read it, and only an account owner on an account-wide
+credential may delete it. Activities and the retained objects linked to them are
+under [Retained history and platform signals](#retained-history-and-platform-signals).
 
 ### Events
 
@@ -1497,7 +1527,28 @@ const rows = await client.webhooks.deliveries(hook.id);   // newest hundred, new
 for (const row of rows) {
   if (row.state === 'exhausted') console.warn(row.id, row.eventType, row.lastError);
 }
+
+// Page back, or ask for one state: a page shorter than `limit` is the last one.
+let page = await client.webhooks.deliveries(hook.id, { state: 'exhausted', limit: 50 });
+while (page.length === 50) {
+  const before = page[page.length - 1].id;
+  page = await client.webhooks.deliveries(hook.id, { state: 'exhausted', limit: 50, before });
+}
 ```
+
+A delivery exhausts about fourteen hours after it was queued, so on a busy
+subscription it is far from the newest hundred: ask for `state: 'exhausted'`, or
+page back with `before`, the `id` of the last delivery of the page before.
+`state` is `pending`, `in_flight`, `delivered`, `exhausted` or `dropped`; `limit`
+is 1 to 100.
+
+A subscription's own `lastError` is why its newest attempt failed: `at`,
+`status` (`null` for no answer), `error` and the `deliveryId` it was for.
+`createdBy` is who created it or last changed its `url` (an email, or `apikey:`
+and a key id), whose removal from the account, demotion to viewer, or leaked key
+disables it with `disabledReason` `creator_removed` or `key_revoked`. Neither of
+those comes back on its own: an owner or member enables it with
+`update({ enabled: true })`.
 
 `lastError` is one line for a person — `timeout`, `dns`, `refused`, `reset`,
 `unreachable`, `tls`, `redirect`, `address refused`, `status 503` and so on —
@@ -1581,6 +1632,13 @@ const older = page.nextCursor && (await c.activities({ cursor: page.nextCursor }
 const since = await c.activities({ cursor: page.changesCursor, changes: true });
 if (since.gap) { /* the journal could not be honoured: read history afresh */ }
 
+const linked = await c.activityResults(page.items[0].activityId); // retained objects of one
+for (const item of linked.items) {
+  if (item.availability !== 'available') continue;
+  if (item.kind === 'artifact') await c.artifact(item.id);   // an art_ id
+  else await c.result(item.id);                              // a res_ id
+}
+
 let sig = await c.signals();                        // a baseline: starts at the head
 sig = await c.signals({ since: sig.cursor });       // then replay from each cursor
 if (sig.gap) { /* events happened that can no longer be replayed */ }
@@ -1591,6 +1649,13 @@ window, clipboard — kept for up to seven days with no command, output or typed
 text. `signals` are the daemon's ephemeral observations: process exits, starts,
 stops, suspends. Neither wakes the computer, neither is complete coverage, and
 an accepted background request is not its completion.
+
+`activityResults` lists the newest retained objects linked to one activity, up
+to eight (`more` says whether there are others). Each item's `kind` says which
+reader takes its `id`: `background-output` and `synchronous-output` are `res_`
+ids for `c.result()`, and `artifact` is an `art_` id for `c.artifact()`. An
+available item carries `capturedAt` and `expiresAt`; its per-kind details are in
+`raw`.
 
 ### Files
 
@@ -2686,6 +2751,7 @@ const c = await client.computers.create({
 
 c.egressProxy;          // { server: 'https://proxy.example.com:3128', credentialsSecretId: 'csec-…' }
 c.egressProxyPending;   // true until the host holds the credentials
+c.egressProxyLastError; // { reason, at, count } while proxied connections are failing
 await c.update({ egressProxy: { server: 'socks5://proxy.example.com:1080' } }); // no credentials now
 await c.update({ egressProxy: null }); // traffic goes out directly again
 ```
@@ -2716,6 +2782,15 @@ running computer's host does not hold the value yet — just after a create or a
 change, after the host restarts, or once the secret is deleted —
 `egressProxyPending` is true and every connection is closed; it usually clears
 within seconds.
+
+Inside the computer a connection the proxy path refused reads as the
+destination closing it at once, so `egressProxyLastError` is where to look: its
+`reason` is one of `credentials_refused`, `credentials_required`,
+`credentials_unusable`, `proxy_refused`, `dns`, `proxy_unreachable`,
+`refused_address`, `tls`, `proxy_error`, `budget_full` or `port_blocked` (an open
+set), with when the last one failed and how many have failed since one last
+opened. It is `undefined` while connections are not failing, and goes when one
+next opens, when the setting changes, and when the computer stops.
 
 In `update()` the setting travels alone (anything beside it is a
 `ValidationError` before a request is sent) and replaces the setting whole, so
@@ -3160,12 +3235,19 @@ is spent, so read `client.operations.list({ idempotencyKey })` or
 A replayed answer — the first call's, sent back with `Idempotent-Replayed:
 true` — is stored without the desktop credentials the original carried. A
 computer returned by a replayed create, clone, update or rename therefore has
-no `vnc`; `await c.refresh()` fetches it.
+no `vnc`; `await c.refresh()` fetches it. A keyed create or clone whose first
+answer was lost, or too large to keep, is replayed as the call's operation
+(`{ operation_id, operation }`) rather than as the computer: `create()`,
+`ephemeral()` and `snapshots.clone()` then read the computer the operation names
+and return it, with its `vnc`. One whose operation names no computer is a
+`MandalaError` naming the operation: read it with `client.operations.get()`.
 
 Every `APIError` carries the platform's machine-readable `code` (from the
 body's `code`, e.g. `idempotency_in_progress`) and, where the answer named one,
 the `operationId` of the lifecycle operation it is about; both are `undefined`
-when the platform sent none.
+when the platform sent none. A keyed create or clone refused as
+`idempotency_in_progress` also carries `err.computerId` once its host has listed
+the computer the call made: read that computer rather than creating another.
 
 ### Snapshots
 
@@ -3504,8 +3586,13 @@ belongs to, on the account it acts on:
 const keys = await client.apiKeys.list(); // newest first; never a raw key
 const ci = await client.apiKeys.create({ name: 'ci' });
 await vault.put('mandala-ci', ci.key); // shown ONCE: store it now
-await client.apiKeys.revoke(ci.id);
+const { webhooks } = await client.apiKeys.revoke(ci.id);
 ```
+
+Webhook subscriptions made through a key keep sending after it is revoked, so
+that rotating a key does not end the integrations it set up. `revoke()` answers
+them in `webhooks` (`id`, `url`, `enabled`): disable or delete the ones you no
+longer want. It is empty from a platform that does not list them.
 
 A key can be made to expire, and can be limited to some computers:
 
@@ -3967,6 +4054,8 @@ next step:
 | `TRIAL_CREATE_PENDING` | 409 | The trial's computer is still being created. It carries no `reason` and `isTransient` answers false, on purpose: wait for that computer. Never create again on a timer, which can make a second one and spend another launch. |
 | `TRIAL_FULL` | 503 | Every trial slot is taken and nothing was used up. `retryAfterMs` says when to ask again. |
 | `TRIAL_UNAVAILABLE` | 503 | Trials are paused and nothing was used up. It does not clear in seconds. |
+| `STORAGE_OVER_PLAN` | 402 | The account stores more than its plan includes, past the notice period after a plan change: computers cannot be started or restored until it fits. Final until then: delete computers or snapshots you no longer need, or choose a larger plan. |
+| `MACOS_LICENCE_REQUIRED` | 403 | A macOS computer on an account that has not accepted Apple's macOS licence. An owner accepts it on the Billing page; then send the call again. |
 
 A 503 answering a change usually means its outcome is unknown. The last two are the
 exception, and `trialUnavailable(err)` recognises them: the call was refused before
@@ -4153,7 +4242,7 @@ you set, so they can ride out 502, 504 and 520-523. They stop on 524 (a proxy
 timeout that retrying unchanged will not fix) and 525/526 (TLS failures), as well
 as permanent request failures. A `409` is judged by its word: a permanent
 `reason` (`unavailable`, `unsupported`, `revoked`, `exists`, `running`,
-`name_taken`, `stale_revision`, `stale_capture`) or the code
+`name_taken`, `stale_revision`, `stale_capture`, `unsupported_on_macos`) or the code
 `template_image_preparing` or `idempotency_outcome_unknown` ends the wait with
 that error, while `contention`, `starting` and the reasonless codes
 `idempotency_in_progress` and `WORKSPACE_MOVING` keep it polling. Any other `409`
@@ -5344,20 +5433,33 @@ const key = await client.sshKeys.add({ publicKey: line, name: 'ci' }); // SshKey
 const keys = await client.sshKeys.list();
 await client.sshKeys.remove(key.id);
 
+// Prove you hold the private half, so the key connects to computers by name too.
+const c = await client.sshKeys.challenge(); // { challenge, namespace, expiresAt, signCommand }
+// printf '%s' "<challenge>" | ssh-keygen -Y sign -n "<namespace>" -f ~/.ssh/id_ed25519
+const proven = await client.sshKeys.add({ publicKey: line, challenge: c.challenge, signature });
+
 const dev = await client.computers.get('vm-…');
 const access = await dev.setSshAccess(true); // or dev.sshAccess() to read
 ```
 
 `SshKey.reach` is `'everywhere'`, `'this_account'` or `'another_account'`
 (`null` from a platform that does not report it); this account's computers
-refuse a key whose reach is `'another_account'`. `client.sshKeys.remove()`
+refuse a key whose reach is `'another_account'`. `SshKey.possession` is
+`'proven'` (added with a signature over a challenge), `'unproven'` (added from
+the public line alone: it connects to a computer named by its id, and one named
+by its name is refused) or `'legacy'` (added before proof was asked for), or
+`null` from a platform that does not report it. `challenge` and `signature` go
+together, both or neither. A challenge works once and expires; adding an
+`unproven` or `legacy` key again with a valid signature replaces that
+registration, even one somebody else made, and makes it `proven`. `client.sshKeys.remove()`
 removes only a key whose reach is `'this_account'`; any other key is a
 `NotFoundError`, as for an unknown id, and is removed from the dashboard.
 `SshAccess` has `enabled`,
 `available`, `pending`, `keyCount`, `keysPushed` and `error`. `available` is `false` for a computer made from a template that
 predates SSH, and `null` until the computer has been asked, which happens when
 it next starts. Registering a key that is already registered is a
-`ConflictError`.
+`ConflictError`, unless it was registered without a signature and this add
+carries a valid one.
 
 ## Design notes
 

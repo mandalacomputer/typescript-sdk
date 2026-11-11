@@ -114,6 +114,11 @@ const executionRoutes = (call: Call): Response | Promise<Response> => {
   const resultId = 'res_0123456789abcdef0123456789abcdef';
   const artifactId = 'art_0123456789abcdef0123456789abcdef';
   const hash = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
+  const quota = { objects: 0, bytes: 0, max_objects: 256, max_bytes: 134217728 };
+  if (call.method === 'GET' && /^\/computers\/[^/]+\/results$/.test(call.path))
+    return json({ results: [], usage: { computer: quota, account: quota } });
+  if (call.method === 'GET' && /^\/computers\/[^/]+\/artifacts$/.test(call.path))
+    return json({ artifacts: [], usage: { computer: quota, account: quota } });
   if (call.path.includes('/results/') || call.path.endsWith('/retained-output')) {
     if (call.method === 'DELETE') return new Response(null, { status: 204 });
     if (call.path.endsWith('/output'))
@@ -245,6 +250,7 @@ async function exerciseEverything(client: Client): Promise<void> {
   // the entry point was ever driven — see ./surface-inventory.ts, which can.
   await client.builds.listWithStatus({ allowPartial: true });
   await client.builds.get('bld-1');
+  await client.builds.cancel('bld-1');
   await client.builds.progress('bld-1');
   // The poll on top of progress, which shares `GET builds/:id/progress` with
   // the call above and is therefore invisible to the route check.
@@ -438,6 +444,8 @@ async function exerciseEverything(client: Client): Promise<void> {
     limit: 1024,
   });
   await c.deleteResult('res_0123456789abcdef0123456789abcdef');
+  await c.results();
+  await c.artifacts();
   await c.publishArtifact('/tmp/report', {
     expectedSize: 0,
     expectedSha256: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
@@ -630,11 +638,22 @@ async function exerciseEverything(client: Client): Promise<void> {
   await client.webhooks.rotate('whk-1');
   await client.webhooks.test('whk-1');
   await client.webhooks.deliveries('whk-1');
+  await client.webhooks.deliveries('whk-1', {
+    before: 'whd-9f3c1a7e5b2d4c80',
+    limit: 50,
+    state: 'exhausted',
+  });
   await client.webhooks.delete('whk-1');
 
   // SSH: the caller's keys, and one computer's switch — both bodies in full.
   await client.sshKeys.list();
   await client.sshKeys.add({ publicKey: 'ssh-ed25519 AAAAC3Nz laptop', name: 'laptop' });
+  await client.sshKeys.challenge();
+  await client.sshKeys.add({
+    publicKey: 'ssh-ed25519 AAAAC3Nz laptop',
+    challenge: `sshkc-${'a'.repeat(64)}`,
+    signature: '-----BEGIN SSH SIGNATURE-----\nU1NIU0lH\n-----END SSH SIGNATURE-----',
+  });
   await client.sshKeys.remove('sshk-1');
   const browserConnection = await c.createBrowserConnection({
     sessionPolicy: { leaseSeconds: 1800, maxDurationSeconds: 7200 },

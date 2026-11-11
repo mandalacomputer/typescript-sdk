@@ -223,22 +223,6 @@ export const UNIMPLEMENTED: ReadonlySet<string> = new Set([
   // here, and a second, worse OpenAI client inside this SDK would be a
   // maintenance obligation with no user.
   'POST chat/completions',
-
-  // Not yet wrapped (platform OPL-6465): the platform now lists a computer's
-  // retained artifacts and retained results, each with the computer's and the
-  // account's quota usage. Neither takes a parameter. A gap to close, not a
-  // decision: remove these two when the SDK lists them.
-  'GET computers/:id/artifacts',
-  'GET computers/:id/results',
-
-  // No client method yet (platform OPL-6531): issues the challenge a caller
-  // signs to prove it holds an SSH key's private half before adding it. Leaves
-  // this set in the change that adds the method.
-  'POST ssh-keys/challenge',
-
-  // No client method yet (platform OPL-6467): stops one of the account's
-  // running builds. Leaves this set in the change that adds the method.
-  'POST builds/:id/cancel',
 ]);
 
 /**
@@ -632,22 +616,6 @@ export const UNIMPLEMENTED_PARAMETERS: ReadonlySet<string> = new Set([
   'POST computers/:id/input  body:key',
   // `amount` is sent instead. Same value, two names.
   'POST computers/:id/input  body:scroll_amount',
-
-  // Not yet sent (platform OPL-6466): the deliveries listing gained paging
-  // (`before`, `limit`) and a `state` filter. This SDK still reads the first
-  // page only, which is the newest deliveries, as before. A gap to close, not a
-  // decision: remove these three when the listing takes them.
-  'GET webhooks/:id/deliveries  query:before',
-  'GET webhooks/:id/deliveries  query:limit',
-  'GET webhooks/:id/deliveries  query:state',
-
-  // Not yet sent (platform OPL-6531): adding a key can carry a signature over a
-  // challenge from `POST ssh-keys/challenge`, proving the caller holds the
-  // private half. A key added without one still registers, as before, and
-  // connects to a computer named by its id. A gap to close, not a decision:
-  // remove these two when the key method takes them.
-  'POST ssh-keys  body:challenge',
-  'POST ssh-keys  body:signature',
 ]);
 
 /**

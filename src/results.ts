@@ -347,3 +347,110 @@ export function synchronousResultId(v: Record<string, unknown>): string | undefi
   };
   return canonical(v.stdout_b64) && canonical(v.stderr_b64) ? v.result_id : undefined;
 }
+
+/** How full one retained quota is: what is charged now, and the most it holds. */
+export type RetainedQuota = {
+  /** Objects charged now, including captures in progress and deleted objects not yet cleaned up. */
+  objects: number;
+  /** Bytes charged now, on the same terms. */
+  bytes: number;
+  maxObjects: number;
+  maxBytes: number;
+};
+
+/**
+ * The two retained quotas the next capture or publication on a computer would
+ * meet. A full one clears only when objects expire or are deleted, so this is
+ * where to look after an exec reports `retainedOutputReason` `computer_quota`
+ * or `account_quota`.
+ */
+export type RetainedUsage = {
+  /** This computer's quota. Objects recorded before a workspace move are not charged here. */
+  computer: RetainedQuota;
+  /** The account's, across every computer and workspace. */
+  account: RetainedQuota;
+};
+
+/** One retained result as {@link Computer.results} lists it. Read it whole with `result()`. */
+export type RetainedResultSummary = {
+  resultId: string;
+  /** `background-output` or `synchronous-output`. Open: the platform may add a kind. */
+  kind: string;
+  /** Bytes charged for it: its retained stdout, stderr and diagnostic. */
+  bytes: number;
+  /**
+   * The workspace it was recorded in. One that differs from the computer's
+   * current workspace was recorded before a move: nobody may read it, and only
+   * an account owner on an account-wide credential may delete it.
+   */
+  workspaceId: string | null;
+  /** The background execution it froze; `null` for synchronous output. */
+  executionId: string | null;
+  /** When its capture began; expiry counts from here. */
+  startedAt: string;
+  expiresAt: string;
+};
+
+/** A computer's retained results, oldest first, and how full its quotas are. */
+export type RetainedResultListing = {
+  results: RetainedResultSummary[];
+  usage: RetainedUsage;
+};
+
+const invalidListing = (what: string): never => {
+  throw new MandalaError(`invalid retained ${what} listing response`);
+};
+
+/**
+ * Strict: a quota read as 0 objects of 0 would tell a caller with a full quota
+ * there is room, so a usage this client cannot read refuses the answer.
+ */
+export function toRetainedUsage(v: unknown, what: string): RetainedUsage {
+  const quota = (q: unknown): RetainedQuota => {
+    if (
+      !isRecord(q) ||
+      !integer(q.objects, 0) ||
+      !integer(q.bytes, 0) ||
+      !integer(q.max_objects, 1) ||
+      !integer(q.max_bytes, 1)
+    )
+      return invalidListing(what);
+    return { objects: q.objects, bytes: q.bytes, maxObjects: q.max_objects, maxBytes: q.max_bytes };
+  };
+  if (!isRecord(v)) return invalidListing(what);
+  return { computer: quota(v.computer), account: quota(v.account) };
+}
+
+/**
+ * Strict about every row, as a listing a caller deletes from should be: a row
+ * dropped is an object it never frees, and a row coerced is one it cannot name.
+ */
+export function toRetainedResultListing(v: unknown): RetainedResultListing {
+  if (!isRecord(v) || !Array.isArray(v.results)) return invalidListing('result');
+  const results = v.results.map((r): RetainedResultSummary => {
+    if (
+      !isRecord(r) ||
+      !isResultId(r.result_id) ||
+      typeof r.kind !== 'string' ||
+      !r.kind ||
+      !integer(r.bytes, 0) ||
+      !(r.workspace_id === null || scopeId(r.workspace_id)) ||
+      !(r.execution_id === null || isExecutionId(r.execution_id)) ||
+      typeof r.started_at !== 'string' ||
+      !Number.isFinite(Date.parse(r.started_at)) ||
+      typeof r.expires_at !== 'string' ||
+      !Number.isFinite(Date.parse(r.expires_at))
+    )
+      return invalidListing('result');
+    return {
+      resultId: r.result_id,
+      kind: r.kind,
+      bytes: r.bytes,
+      workspaceId: r.workspace_id,
+      executionId: r.execution_id,
+      startedAt: r.started_at,
+      expiresAt: r.expires_at,
+    };
+  });
+  return { results, usage: toRetainedUsage(v.usage, 'result') };
+}

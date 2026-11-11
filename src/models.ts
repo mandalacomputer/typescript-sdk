@@ -9,7 +9,7 @@
  * place that has nothing to do with the response that was wrong.
  */
 
-import { MandalaError, ValidationError } from './errors.js';
+import { MandalaError, type RetainedOutputReason, ValidationError } from './errors.js';
 import {
   CREDENTIAL_GATEWAY_METHODS,
   type CredentialGatewayAuthHeader,
@@ -2575,6 +2575,13 @@ export type ExecResult = {
    * that does not say. Never send the command again to repair retention.
    */
   retainedOutput?: 'unavailable';
+  /**
+   * Why, beside {@link retainedOutput}, when a limit is why: `computer_quota`
+   * or `account_quota` (full until objects expire or are deleted: list them
+   * with `results()` and `artifacts()`) or `capacity` (clears by itself).
+   * Absent for any other reason, and on a platform that does not say.
+   */
+  retainedOutputReason?: RetainedOutputReason;
   exitCode: number;
   /** What the command wrote to stdout, byte for byte. */
   stdout: Uint8Array;
@@ -3308,10 +3315,11 @@ export type Webhook = {
   computers: string[];
   /**
    * Whether deliveries are made. Set `false` by the platform when the endpoint
-   * has failed for a day, or when the account moves to a plan without
-   * webhooks — see {@link disabledReason}. Back to `true` by you with an
-   * update, which starts fresh, or, for `plan`, by the platform when you choose
-   * a plan that includes webhooks.
+   * has failed for a day, when the account moves to a plan without webhooks,
+   * or when the person or key in {@link createdBy} loses access — see
+   * {@link disabledReason}. Back to `true` by you with an update, which starts
+   * fresh, or, for `plan`, by the platform when you choose a plan that includes
+   * webhooks.
    */
   enabled: boolean;
   /**
@@ -3319,7 +3327,11 @@ export type Webhook = {
    * when the platform did after a day of failures, `plan` when the account
    * moved to a plan without webhooks. A `plan` subscription is enabled again,
    * oldest first, as many as the plan allows, when the account chooses a plan
-   * that includes webhooks; until then `enabled: true` is refused (402). A
+   * that includes webhooks; until then `enabled: true` is refused (402).
+   * `creator_removed` when the person in {@link createdBy} was removed from the
+   * account, left it, or was made a viewer, and `key_revoked` when the API key
+   * in {@link createdBy} was revoked as leaked from the dashboard: neither comes
+   * back on its own, and an owner or member enables it again with an update. A
    * plain string, not a closed set: the platform may add reasons. Absent while
    * enabled.
    */
@@ -3331,12 +3343,58 @@ export type Webhook = {
   lastFailureAt?: string;
   /** The HTTP status of the newest attempt. Absent before any, or when the newest got no answer. */
   lastStatus?: number;
+  /**
+   * Why the newest attempt failed, and the delivery it was for. Absent before
+   * any attempt has failed, once the newest attempt was accepted, and on a
+   * platform that does not send it. An attempt still in flight does not count.
+   */
+  lastError?: WebhookLastError;
   /** Present only on a subscription confined to a workspace. */
   workspaceId?: string;
+  /**
+   * Who created it, or last changed its `url`: the email of the person signed
+   * in to the dashboard, or `apikey:` and the `key-` id of the API key used.
+   * Theirs is the removal, demotion or leaked key that disables it with
+   * {@link disabledReason} `creator_removed` or `key_revoked`. `null` to a
+   * workspace-scoped key when it was a person, whose address such a key is not
+   * told. Absent on a platform that does not send it.
+   */
+  createdBy?: string | null;
   createdAt: string;
   updatedAt: string;
   raw: Record<string, unknown>;
 };
+
+/** Why a subscription's newest delivery attempt failed. */
+export type WebhookLastError = {
+  /** When the failure was recorded: the answer, or the 10-second cut for a timeout. */
+  at: string;
+  /** The HTTP status the endpoint answered, or `null` when it gave no answer. */
+  status: number | null;
+  /** The one-line error, as on the delivery: `timeout`, `dns`, `refused`, `tls`, `status 503`, ... */
+  error: string;
+  /** The `whd-` id of the delivery the attempt was for, as {@link Webhooks.deliveries} lists it. */
+  deliveryId: string;
+};
+
+/**
+ * A webhook's `last_error`: `undefined` for absent or `null`, and a refusal for
+ * one this client cannot read rather than reading it as no failure.
+ */
+function toWebhookLastError(v: unknown, which: string): WebhookLastError | undefined {
+  if (v === undefined || v === null) return undefined;
+  const what = `${which}'s last_error`;
+  if (!isRecord(v)) throw new MandalaError(`expected ${what} to be an object`);
+  if (typeof v.at !== 'string' || !v.at) throw new MandalaError(`expected ${what} to say when`);
+  if (v.status !== null && !(typeof v.status === 'number' && Number.isInteger(v.status))) {
+    throw new MandalaError(`expected ${what}'s status to be a number or null`);
+  }
+  if (typeof v.error !== 'string') throw new MandalaError(`expected ${what} to carry its error`);
+  if (typeof v.delivery !== 'string' || !v.delivery) {
+    throw new MandalaError(`expected ${what} to name its delivery`);
+  }
+  return { at: v.at, status: v.status, error: v.error, deliveryId: v.delivery };
+}
 
 /** {@link Webhook} with the one thing only a create or a rotate answers. */
 export type WebhookCreated = Webhook & {
@@ -3410,6 +3468,7 @@ export function toWebhook(d: Record<string, unknown>, which = 'a webhook'): Webh
   const disabledAt = stamp(d.disabled_at);
   const lastSuccessAt = stamp(d.last_success_at);
   const lastFailureAt = stamp(d.last_failure_at);
+  const lastError = toWebhookLastError(d.last_error, which);
   return {
     id,
     url: str(d.url),
@@ -3422,7 +3481,11 @@ export function toWebhook(d: Record<string, unknown>, which = 'a webhook'): Webh
     ...(lastSuccessAt === undefined ? {} : { lastSuccessAt }),
     ...(lastFailureAt === undefined ? {} : { lastFailureAt }),
     ...(lastStatus === undefined ? {} : { lastStatus }),
+    ...(lastError === undefined ? {} : { lastError }),
     ...(d.workspace_id == null ? {} : { workspaceId: str(d.workspace_id) }),
+    ...(d.created_by === undefined
+      ? {}
+      : { createdBy: nullableText(d.created_by, `${which}'s created_by`) }),
     createdAt: str(d.created_at),
     updatedAt: str(d.updated_at),
     raw: { ...d },
@@ -3540,6 +3603,20 @@ export function toWebhookDelivery(
 export type SshKeyReach = 'everywhere' | 'this_account' | 'another_account' | (string & {});
 
 /**
+ * Whether whoever registered an SSH key proved they hold its private half.
+ * `proven`: it was added with a signature over a challenge
+ * ({@link SshKeys.challenge}), and connects to a computer named by its id or
+ * its name. `unproven`: it was added from the public line alone, and connects
+ * to a computer named by its id; a computer named by its name is refused,
+ * because anybody can copy a public key and register it first. `legacy`: it
+ * was added before proof was asked for, and connects by id or name as it
+ * always did. Adding an `unproven` or `legacy` key again with a signature
+ * replaces that registration and makes it `proven`. Open, so a value a newer
+ * platform adds reads as itself.
+ */
+export type SshKeyPossession = 'proven' | 'unproven' | 'legacy' | (string & {});
+
+/**
  * One OpenSSH public key registered to the person the credential belongs to.
  *
  * A key is a person's, and is listed whichever account the credential acts on.
@@ -3568,6 +3645,11 @@ export type SshKey = {
    * listed. `null` from a platform that does not report it.
    */
   reach: SshKeyReach | null;
+  /**
+   * Whether the key was proven to be its registrant's: see
+   * {@link SshKeyPossession}. `null` from a platform that does not report it.
+   */
+  possession: SshKeyPossession | null;
   raw: Record<string, unknown>;
 };
 
@@ -3581,6 +3663,43 @@ export function toSshKey(d: Record<string, unknown>, which = 'an SSH key'): SshK
     createdAt: str(d.created_at),
     lastUsedAt: stamp(d.last_used_at) ?? null,
     reach: nullableText(d.reach, "an SSH key's reach"),
+    possession: nullableText(d.possession, "an SSH key's possession"),
+    raw: { ...d },
+  };
+}
+
+/** A challenge to sign with a key's private half before adding it. */
+export type SshKeyChallenge = {
+  /** `sshkc-` and 64 hex characters. Sign exactly this text. */
+  challenge: string;
+  /** The signature namespace, as `ssh-keygen -Y sign -n` takes it. */
+  namespace: string;
+  /** When it expires, RFC 3339. Add the key before then. */
+  expiresAt: string;
+  /**
+   * A shell command that signs the challenge and prints the signature. It names
+   * `~/.ssh/id_ed25519`: replace that with your private key file.
+   */
+  signCommand: string;
+  raw: Record<string, unknown>;
+};
+
+/**
+ * Strict about the two fields a signature is made from: a challenge or a
+ * namespace read as `''` would be signed, and refused, with nothing saying why.
+ */
+export function toSshKeyChallenge(d: unknown, where: string): SshKeyChallenge {
+  if (!isRecord(d)) throw new MandalaError(`expected a challenge from ${where}`);
+  for (const key of ['challenge', 'namespace'] as const) {
+    if (typeof d[key] !== 'string' || !d[key]) {
+      throw new MandalaError(`expected the challenge from ${where} to carry its ${key}`);
+    }
+  }
+  return {
+    challenge: d.challenge as string,
+    namespace: d.namespace as string,
+    expiresAt: str(d.expires_at),
+    signCommand: str(d.sign_command),
     raw: { ...d },
   };
 }
@@ -3934,6 +4053,97 @@ export type EgressProxy = {
  * refused by its upstream. Fields this client does not know are left out
  * rather than refused, so a platform that grows the setting is still readable.
  */
+/**
+ * Why a running computer's proxied connections are failing: the reason the
+ * last one was closed without a tunnel, when, and how many have failed since
+ * one last opened through the proxy.
+ */
+export type EgressProxyLastError = {
+  /**
+   * `credentials_refused`, `credentials_required`, `credentials_unusable`,
+   * `proxy_refused`, `dns`, `proxy_unreachable`, `refused_address`, `tls`,
+   * `proxy_error`, `budget_full` or `port_blocked`. Open: the platform may add
+   * a reason.
+   */
+  reason:
+    | 'credentials_refused'
+    | 'credentials_required'
+    | 'credentials_unusable'
+    | 'proxy_refused'
+    | 'dns'
+    | 'proxy_unreachable'
+    | 'refused_address'
+    | 'tls'
+    | 'proxy_error'
+    | 'budget_full'
+    | 'port_blocked'
+    | (string & {});
+  /** When the last one failed, RFC 3339. */
+  at: string;
+  /** How many have failed since a connection last opened, the setting changed or the computer started. */
+  count: number;
+};
+
+/**
+ * Why a running computer is held paused by its host: `disk_low`,
+ * `disk_emergency`, `disk_full` or `disk_recovery`, and since when.
+ */
+export type HostPaused = {
+  /**
+   * `disk_low`: among the computers writing fastest while the host was low on
+   * disk space. `disk_emergency`: the host was critically low and paused every
+   * running computer on it. `disk_full`: a write the full disk refused paused
+   * it. `disk_recovery`: a suspend or memory snapshot that failed for want of
+   * space left it held until the host resumes it. Open: the platform may add a
+   * reason.
+   */
+  reason: 'disk_low' | 'disk_emergency' | 'disk_full' | 'disk_recovery' | (string & {});
+  /** When it was paused, RFC 3339. */
+  since: string;
+};
+
+/**
+ * One of the computer's nested diagnostics: `undefined` when absent or `null`,
+ * and a refusal when present in a shape this client cannot read, rather than
+ * reading it as nothing wrong.
+ */
+const nestedRecord = (v: unknown, what: string): Record<string, unknown> | undefined => {
+  if (v === undefined || v === null) return undefined;
+  if (!isRecord(v)) throw new MandalaError(`expected ${what} to be an object`);
+  return v;
+};
+
+const nonEmptyText = (d: Record<string, unknown>, key: string, what: string): string => {
+  const v = d[key];
+  if (typeof v !== 'string' || !v) throw new MandalaError(`expected ${what} to carry its ${key}`);
+  return v;
+};
+
+export function toEgressProxyLastError(
+  d: unknown,
+  id = 'the computer',
+): EgressProxyLastError | undefined {
+  const what = `${id}'s egress_proxy_last_error`;
+  const v = nestedRecord(d, what);
+  if (!v) return undefined;
+  const failures = v.count;
+  if (typeof failures !== 'number' || !Number.isInteger(failures) || failures < 0) {
+    throw new MandalaError(`expected ${what} to carry its count`);
+  }
+  return {
+    reason: nonEmptyText(v, 'reason', what),
+    at: nonEmptyText(v, 'at', what),
+    count: failures,
+  };
+}
+
+export function toHostPaused(d: unknown, id = 'the computer'): HostPaused | undefined {
+  const what = `${id}'s host_paused`;
+  const v = nestedRecord(d, what);
+  if (!v) return undefined;
+  return { reason: nonEmptyText(v, 'reason', what), since: nonEmptyText(v, 'since', what) };
+}
+
 export function toEgressProxy(d: unknown, id = 'the computer'): EgressProxy | undefined {
   if (d === undefined || d === null) return undefined;
   if (!isRecord(d)) throw new MandalaError(`expected ${id}'s egress_proxy to be an object`);
@@ -4573,15 +4783,31 @@ export type ActivityPage = {
   raw: Record<string, unknown>;
 };
 
-/** One retained result version linked to an activity. */
+/**
+ * One retained object linked to an activity: a retained result, or an
+ * artifact the caller selected.
+ *
+ * The {@link kind} says which reader takes the {@link id}: a
+ * `background-output` or `synchronous-output` item is a `res_` id that
+ * {@link Computer.result} reads, and an `artifact` item is an `art_` id that
+ * {@link Computer.artifact} reads. Passing an `art_` id to the result reader
+ * is a 404. The per-kind details of an available item (stream byte counts and
+ * truncation flags, the exit observation, an artifact's `bytes`) are in
+ * {@link raw}.
+ */
 export type ActivityResultItem = {
-  /** `res_` and 32 hex characters — what {@link Computer.result} reads. */
+  /** `res_` and 32 hex characters for an output, `art_` and 32 for an artifact. */
   id: string;
-  /** `background-output` or `synchronous-output`. */
+  /** `background-output`, `synchronous-output` or `artifact`. Open: the platform may add a kind. */
   kind: string;
+  /** `background_execution_output`, `synchronous_exec_response` or `caller_selected_artifact`. */
   association: string;
   /** `available` or `unavailable`. */
   availability: string;
+  /** When an available item was captured, RFC 3339. Absent on an unavailable one. */
+  capturedAt?: string;
+  /** When an available item expires, RFC 3339. Absent on an unavailable one. */
+  expiresAt?: string;
   raw: Record<string, unknown>;
 };
 
@@ -4733,13 +4959,16 @@ export function toActivityResults(d: unknown, method: string, path: string): Act
       if (!isRecord(row) || typeof row.id !== 'string' || !row.id) {
         throw new MandalaError(`expected result ${i} from ${where} to carry its id`);
       }
-      return {
+      const item: ActivityResultItem = {
         id: row.id,
         kind: str(row.kind),
         association: str(row.association),
         availability: str(row.availability),
         raw: { ...row },
       };
+      if (typeof row.captured_at === 'string' && row.captured_at) item.capturedAt = row.captured_at;
+      if (typeof row.expires_at === 'string' && row.expires_at) item.expiresAt = row.expires_at;
+      return item;
     }),
     raw: { ...d },
   };
@@ -4905,6 +5134,59 @@ export type ApiKeyCreated = ApiKey & {
    */
   key: string;
 };
+
+/** A webhook subscription made through a key, as its revoke lists it. */
+export type ApiKeyRevokedWebhook = {
+  /** The subscription, as {@link Webhooks.list} lists it. */
+  id: string;
+  /** Where it delivers. */
+  url: string;
+  /** Whether it is on. The revoke does not change it. */
+  enabled: boolean;
+};
+
+/** What revoking an API key answers. */
+export type ApiKeyRevoked = {
+  /**
+   * The webhook subscriptions on this account made, or turned back on, through
+   * the revoked key, oldest first; for a workspace-scoped key, only those in its
+   * workspace. THE REVOKE LEAVES THEM SENDING: disable or delete any you no
+   * longer want with `webhooks.update()` or `webhooks.delete()`. Empty when
+   * there are none, and from a platform that does not list them.
+   */
+  webhooks: ApiKeyRevokedWebhook[];
+  raw: Record<string, unknown>;
+};
+
+/**
+ * The answer to a revoke. The key is revoked by the time this runs, so a list
+ * this client cannot read is refused with that said, rather than read as
+ * empty: an empty list tells a key-rotation script there is nothing left to
+ * re-own or delete.
+ */
+export function toApiKeyRevoked(d: unknown, keyId: string): ApiKeyRevoked {
+  const unreadable = (why: string): never => {
+    throw new MandalaError(
+      `${keyId} was revoked, but the webhooks made through it could not be read from the answer ` +
+        `(${why}): list them with webhooks.list()`,
+    );
+  };
+  const body = isRecord(d) ? d : {};
+  const rows = body.webhooks;
+  if (rows === undefined || rows === null) return { webhooks: [], raw: { ...body } };
+  if (!Array.isArray(rows)) return unreadable('webhooks is not a list');
+  const webhooks = rows.map((row, i): ApiKeyRevokedWebhook => {
+    if (!isRecord(row) || typeof row.id !== 'string' || !row.id) {
+      return unreadable(`webhook ${i} has no id`);
+    }
+    const enabled = wire(row.enabled);
+    if (enabled !== WIRE.TRUE && enabled !== WIRE.FALSE) {
+      return unreadable(`webhook ${i} does not say whether it is enabled`);
+    }
+    return { id: row.id, url: str(row.url), enabled: enabled === WIRE.TRUE };
+  });
+  return { webhooks, raw: { ...body } };
+}
 
 const nullableText = (v: unknown, what: string): string | null => {
   if (v === null || v === undefined) return null;

@@ -2185,7 +2185,12 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
           output.diagnostic('mandala: command timed out');
         if (result.exitCode === -1) output.diagnostic('mandala: remote exit status is unknown');
         if ('retainedOutput' in result && result.retainedOutput)
-          output.diagnostic('mandala: no retained result was published for this command');
+          output.diagnostic(
+            'mandala: no retained result was published for this command' +
+              ('retainedOutputReason' in result && result.retainedOutputReason
+                ? ` (${result.retainedOutputReason})`
+                : ''),
+          );
         if ('resultId' in result && result.resultId !== undefined)
           output.diagnostic(`mandala: the output is retained as result ${result.resultId}`);
         return code;

@@ -78,6 +78,8 @@ export const WEBHOOKS = 'webhooks';
  * removed when the credential is revoked.
  */
 export const SSH_KEYS = 'ssh-keys';
+/** Where a challenge to prove an SSH key's possession is issued. */
+export const SSH_KEY_CHALLENGE = `${SSH_KEYS}/challenge`;
 /**
  * The account's secret store (platform OPL-4984): named values a computer can
  * be bound to with `PUT computers/:id/secrets`. Account-scoped, or confined to
@@ -298,6 +300,7 @@ export function result(id: string, resultId: string): string {
 export const resultOutput = (id: string, resultId: string): string =>
   `${result(id, resultId)}/output`;
 export const artifacts = (id: string): string => `${computer(id)}/artifacts`;
+export const results = (id: string): string => `${computer(id)}/results`;
 export function artifact(id: string, artifactId: string): string {
   if (!isArtifactId(artifactId))
     throw new ValidationError(
@@ -574,7 +577,7 @@ export const workspaceMembers = (id: string): string => `${workspace(id)}/member
 export const webhookAction = (id: string, action: 'rotate' | 'test' | 'deliveries'): string =>
   `${webhook(id)}/${action}`;
 
-export const buildAction = (id: string, action: 'progress' | 'events'): string =>
+export const buildAction = (id: string, action: 'progress' | 'events' | 'cancel'): string =>
   `${build(id)}/${action}`;
 
 export const snapshot = (id: string): string => `snapshots/${pathId(id, 'snapshot id')}`;
@@ -3496,6 +3499,71 @@ export function webhookUpdateBody(args: WebhookUpdateArgs): Json {
   return body;
 }
 
+/** The most one page of `GET webhooks/:id/deliveries` holds, and its default. */
+export const WEBHOOK_DELIVERIES_PAGE_MAX = 100;
+
+/** A delivery's state, as the deliveries listing can be filtered by it. Open, as the platform may add one. */
+export type WebhookDeliveryState =
+  | 'pending'
+  | 'in_flight'
+  | 'delivered'
+  | 'exhausted'
+  | 'dropped'
+  | (string & {});
+
+/** What one page of `GET webhooks/:id/deliveries` asks for. */
+export type WebhookDeliveriesArgs = {
+  /**
+   * The `id` of the last delivery of the previous page: this page is the
+   * deliveries queued before it. An id that is not a delivery to this
+   * subscription, or one pruned since, is a 400.
+   */
+  before?: string;
+  /** At most this many, 1 to {@link WEBHOOK_DELIVERIES_PAGE_MAX}. The platform's default is 100. */
+  limit?: number;
+  /** Only deliveries in this state. */
+  state?: WebhookDeliveryState;
+};
+
+/**
+ * The query for `GET webhooks/:id/deliveries`.
+ *
+ * An empty `before` or `state` is refused rather than sent or dropped: dropped,
+ * it would answer the newest page to a caller who asked for an older one, or
+ * every state to one who asked for one.
+ */
+export function webhookDeliveriesQuery(args: WebhookDeliveriesArgs = {}): Query {
+  if (!isRecord(args)) throw new ValidationError(`options must be an object (got ${typeof args})`);
+  const q: Query = {};
+  if (args.before !== undefined) {
+    const before = requireString(args.before, 'before');
+    if (!before || before !== before.trim()) {
+      throw new ValidationError('before must be a delivery id, with no spaces around it');
+    }
+    q.before = before;
+  }
+  if (args.limit !== undefined) {
+    if (
+      !Number.isInteger(args.limit) ||
+      args.limit < 1 ||
+      args.limit > WEBHOOK_DELIVERIES_PAGE_MAX
+    ) {
+      throw new ValidationError(
+        `limit must be a whole number from 1 to ${WEBHOOK_DELIVERIES_PAGE_MAX} (got ${args.limit})`,
+      );
+    }
+    q.limit = args.limit;
+  }
+  if (args.state !== undefined) {
+    const state = requireString(args.state, 'state');
+    if (!state || state !== state.trim()) {
+      throw new ValidationError('state must be a delivery state, with no spaces around it');
+    }
+    q.state = state;
+  }
+  return q;
+}
+
 // --- SSH ------------------------------------------------------------------
 
 /** What a key is registered with. */
@@ -3504,6 +3572,18 @@ export type SshKeyAddArgs = {
   publicKey: string;
   /** A label. The platform defaults it to the key line's comment. */
   name?: string;
+  /**
+   * A challenge from `sshKeys.challenge()`, exactly as it was issued. Send it
+   * with {@link signature} to prove you hold the key's private half, or leave
+   * both out.
+   */
+  challenge?: string;
+  /**
+   * The armored signature `ssh-keygen -Y sign` printed for {@link challenge},
+   * from `-----BEGIN SSH SIGNATURE-----` to `-----END SSH SIGNATURE-----`, made
+   * with this key in the challenge's `namespace`.
+   */
+  signature?: string;
 };
 
 /**
@@ -3529,7 +3609,23 @@ export function sshKeyBody(args: SshKeyAddArgs): Json {
   if (args.name !== undefined && !requireString(args.name, 'name').trim()) {
     throw new ValidationError('name must not be empty');
   }
-  return omitUndefined({ public_key: key, name: args.name });
+  // Both or neither: the platform refuses one without the other, and a
+  // signature sent without its challenge proves nothing.
+  if ((args.challenge === undefined) !== (args.signature === undefined)) {
+    throw new ValidationError('challenge and signature go together: give both, or neither');
+  }
+  if (args.challenge !== undefined && !requireString(args.challenge, 'challenge').trim()) {
+    throw new ValidationError('challenge must not be empty');
+  }
+  if (args.signature !== undefined && !requireString(args.signature, 'signature').trim()) {
+    throw new ValidationError('signature must not be empty');
+  }
+  return omitUndefined({
+    public_key: key,
+    name: args.name,
+    challenge: args.challenge,
+    signature: args.signature,
+  });
 }
 
 /** The body for `PUT computers/:id/ssh`. */

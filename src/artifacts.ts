@@ -7,8 +7,10 @@ import {
   integer,
   optionRecord,
   RETENTION_MAX_S,
+  type RetainedUsage,
   retainedTime,
   scopeId,
+  toRetainedUsage,
 } from './results.js';
 export const ARTIFACT_MANIFEST_BYTES = 4096;
 export const ARTIFACT_DEFAULT_BYTES = 8 * 1024 * 1024;
@@ -161,4 +163,59 @@ export async function verifyArtifact(
   const hex = Array.from(new Uint8Array(hash), (b) => b.toString(16).padStart(2, '0')).join('');
   if (hex !== manifest.sha256) throw new MandalaError('artifact download SHA-256 mismatch');
   return bytes;
+}
+
+/** One artifact as {@link Computer.artifacts} lists it. Read it whole with `artifact()`. */
+export type ArtifactSummary = {
+  artifactId: string;
+  /** Its size in bytes. */
+  size: number;
+  /**
+   * The workspace it was recorded in. One that differs from the computer's
+   * current workspace was recorded before a move: nobody may read it, and only
+   * an account owner on an account-wide credential may delete it.
+   */
+  workspaceId: string | null;
+  /** The execution it was published with, or `null`. */
+  executionId: string | null;
+  /** When its reservation began; expiry counts from here. */
+  startedAt: string;
+  expiresAt: string;
+};
+
+/** A computer's artifacts, oldest first, and how full its quotas are. */
+export type ArtifactListing = {
+  artifacts: ArtifactSummary[];
+  usage: RetainedUsage;
+};
+
+/** Strict about every row, for {@link toRetainedResultListing}'s reason. */
+export function toArtifactListing(v: unknown): ArtifactListing {
+  const invalidRow = (): never => {
+    throw new MandalaError('invalid retained artifact listing response');
+  };
+  if (!isRecord(v) || !Array.isArray(v.artifacts)) return invalidRow();
+  const artifacts = v.artifacts.map((r): ArtifactSummary => {
+    if (
+      !isRecord(r) ||
+      !isArtifactId(r.artifact_id) ||
+      !integer(r.size, 0, ARTIFACT_MAX_BYTES) ||
+      !(r.workspace_id === null || scopeId(r.workspace_id)) ||
+      !(r.execution_id === null || isExecutionId(r.execution_id)) ||
+      typeof r.started_at !== 'string' ||
+      !Number.isFinite(Date.parse(r.started_at)) ||
+      typeof r.expires_at !== 'string' ||
+      !Number.isFinite(Date.parse(r.expires_at))
+    )
+      return invalidRow();
+    return {
+      artifactId: r.artifact_id,
+      size: r.size,
+      workspaceId: r.workspace_id,
+      executionId: r.execution_id,
+      startedAt: r.started_at,
+      expiresAt: r.expires_at,
+    };
+  });
+  return { artifacts, usage: toRetainedUsage(v.usage, 'artifact') };
 }

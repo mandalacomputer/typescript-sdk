@@ -520,7 +520,7 @@ describe('mandala api-keys', () => {
     const h = cli();
     const r = await h.run(['api-keys', 'revoke', 'key-a1b2c3d4e5f6', '--json']);
     expect(h.rec.routes()).toEqual([['DELETE', 'api-keys/key-a1b2c3d4e5f6']]);
-    expect(r.json.data).toEqual({ id: 'key-a1b2c3d4e5f6', revoked: true });
+    expect(r.json.data).toEqual({ id: 'key-a1b2c3d4e5f6', revoked: true, webhooks: [] });
   });
 
   it.each([

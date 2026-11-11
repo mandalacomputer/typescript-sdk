@@ -2252,6 +2252,7 @@ describe('SSH SDK methods', () => {
         createdAt: SSH_KEY.created_at,
         lastUsedAt: null,
         reach: 'everywhere',
+        possession: 'proven',
         raw: SSH_KEY,
       },
     ]);
