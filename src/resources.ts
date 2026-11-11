@@ -266,9 +266,20 @@ async function replayedComputer(
   path: string,
   signal: AbortSignal | undefined,
 ): Promise<unknown> {
-  if (!P.isRecord(data) || P.isRecord(data.computer) || data.id) return data;
+  const computerId = replayedComputerId(data, method, path);
+  if (computerId === undefined) return data;
+  return t.json('GET', P.computer(computerId), { signal });
+}
+
+/**
+ * The id of the computer a replayed `{ operation_id, operation }` answer
+ * names, before anything is read: `undefined` for any other answer, and a
+ * refusal naming the operation when the replay names no computer.
+ */
+function replayedComputerId(data: unknown, method: string, path: string): string | undefined {
+  if (!P.isRecord(data) || P.isRecord(data.computer) || data.id) return undefined;
   const operationId = data.operation_id;
-  if (typeof operationId !== 'string' || !operationId || !('operation' in data)) return data;
+  if (typeof operationId !== 'string' || !operationId || !('operation' in data)) return undefined;
   const operation = data.operation;
   const computerId = P.isRecord(operation) ? operation.computer_id : undefined;
   if (typeof computerId !== 'string' || !computerId) {
@@ -277,7 +288,7 @@ async function replayedComputer(
         `computer: read operations.get('${operationId}') to learn how the call ended`,
     );
   }
-  return t.json('GET', P.computer(computerId), { signal });
+  return computerId;
 }
 
 export class Computers {
@@ -721,8 +732,38 @@ export class Computers {
       },
     );
     const clock = timing.finish();
-    const answer = await replayedComputer(this.#t, data, 'POST', P.COMPUTERS, opts.signal);
-    const computer = new EphemeralComputer(this.#t, computerRecord(answer, 'POST', P.COMPUTERS));
+    const replayId = replayedComputerId(data, 'POST', P.COMPUTERS);
+    let record: Record<string, unknown>;
+    if (replayId === undefined) {
+      record = computerRecord(data, 'POST', P.COMPUTERS);
+    } else {
+      // A replay names the computer before it is read, so the computer is
+      // this call's to delete from here on: a read that fails or is
+      // cancelled must not leave it running with nothing naming it. The
+      // delete carries no signal, for the same reason the cleanup below
+      // carries none.
+      try {
+        record = computerRecord(
+          await this.#t.json('GET', P.computer(replayId), { signal: opts.signal }),
+          'POST',
+          P.COMPUTERS,
+        );
+      } catch (err) {
+        try {
+          await this.#t.json('DELETE', P.computer(replayId), { query: P.deleteQuery({}) });
+        } catch (cleanupErr) {
+          if (!(cleanupErr instanceof NotFoundError)) {
+            throw suppressing(
+              new MandalaError(strandedText(replayId, cleanupErr)),
+              err,
+              strandedText(replayId, cleanupErr),
+            );
+          }
+        }
+        throw err;
+      }
+    }
+    const computer = new EphemeralComputer(this.#t, record);
     try {
       confirmEndTime(computer.raw, endTime, 'create', clock, replayed);
     } catch (err) {

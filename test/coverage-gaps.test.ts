@@ -495,6 +495,73 @@ describe('a keyed create replayed as its operation', () => {
     expect(e.id).toBe('vm-7');
   });
 
+  describe('an ephemeral computer whose replayed read does not arrive', () => {
+    const failing = (get: () => Response, del: () => Response) => {
+      const { rec, client } = setup((call) => {
+        if (call.method === 'POST' && call.path === '/computers')
+          return json(replay, { headers: { 'Idempotent-Replayed': 'true' } });
+        if (call.method === 'GET' && call.path === '/computers/vm-7') return get();
+        if (call.method === 'DELETE' && call.path === '/computers/vm-7') return del();
+        return anyRoute(call);
+      });
+      return { rec, client };
+    };
+    const refused = () => json({ error: 'no' }, { status: 403 });
+    const deleted = () => json({ snapshots_deleted: 0 });
+
+    it.each([
+      ['a refused read', refused],
+      ['a body that is not a computer', () => json({})],
+    ])('deletes the computer after %s and throws the read error', async (_, get) => {
+      const { rec, client } = failing(get, deleted);
+      await expect(client.computers.ephemeral({}, { idempotencyKey: 'k' })).rejects.toThrow();
+      expect(rec.routes()).toEqual([
+        ['POST', 'computers'],
+        ['GET', 'computers/vm-7'],
+        ['DELETE', 'computers/vm-7'],
+      ]);
+    });
+
+    it('deletes the computer when the caller cancels the read', async () => {
+      const controller = new AbortController();
+      const { rec, client } = setup((call) => {
+        if (call.method === 'POST' && call.path === '/computers')
+          return json(replay, { headers: { 'Idempotent-Replayed': 'true' } });
+        if (call.method === 'GET' && call.path === '/computers/vm-7') {
+          controller.abort();
+          throw new DOMException('aborted', 'AbortError');
+        }
+        if (call.method === 'DELETE' && call.path === '/computers/vm-7') return deleted();
+        return anyRoute(call);
+      });
+      await expect(
+        client.computers.ephemeral({}, { idempotencyKey: 'k', signal: controller.signal }),
+      ).rejects.toThrow();
+      expect(rec.routes()).toEqual([
+        ['POST', 'computers'],
+        ['GET', 'computers/vm-7'],
+        ['DELETE', 'computers/vm-7'],
+      ]);
+    });
+
+    it('treats a 404 from that delete as already gone', async () => {
+      const { rec, client } = failing(refused, () => json({ error: 'gone' }, { status: 404 }));
+      const err = await client.computers.ephemeral({}, { idempotencyKey: 'k' }).catch((e) => e);
+      expect(err).toMatchObject({ status: 403 });
+      expect(err.name).not.toBe('SuppressedError');
+      expect(rec.routes().at(-1)).toEqual(['DELETE', 'computers/vm-7']);
+    });
+
+    it('names the stranded computer when that delete fails too', async () => {
+      const { client } = failing(refused, refused);
+      const err = await client.computers.ephemeral({}, { idempotencyKey: 'k' }).catch((e) => e);
+      expect(err.name).toBe('SuppressedError');
+      expect(err.error).toBeInstanceOf(MandalaError);
+      expect(err.error.message).toContain('vm-7');
+      expect(err.suppressed).toMatchObject({ status: 403 });
+    });
+  });
+
   it.each([
     ['a null operation', { operation_id: 'op_0123456789abcdef01234567', operation: null }],
     ['an operation naming no computer', { ...replay, operation: operation(null) }],

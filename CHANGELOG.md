@@ -62,6 +62,9 @@ This is the summary you read to decide whether to upgrade.
   to throw `expected a computer`; it now reads the computer the operation names
   and returns it. A replay whose operation names no computer throws naming the
   operation to read.
+  For `ephemeral()`, the computer a replay names is deleted if reading it fails
+  or is cancelled, as when the block throws; if that delete fails too, the
+  error is a `SuppressedError` whose `.error` names the computer.
 
 ## [0.22.0] - 2026-11-01
 
