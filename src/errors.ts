@@ -199,7 +199,19 @@ export type ErrorMetadata = {
   rateLimit?: RateLimitInfo;
   /** `unavailable` when an exec that asked for retention published no result. */
   retainedOutput?: 'unavailable';
+  /** Why, beside {@link retainedOutput}, when a limit is why. See {@link RetainedOutputReason}. */
+  retainedOutputReason?: RetainedOutputReason;
 };
+
+/**
+ * Why an exec that asked for `retainOutput` published no retained result,
+ * when a limit is why. `computer_quota` or `account_quota`: that retained quota
+ * is full, which clears only when objects expire or are deleted (list them with
+ * `results()` and `artifacts()` on the computer), so sending the command again
+ * will not help until then. `capacity`: shared store capacity was full, which
+ * clears by itself. Open: the platform may add a reason.
+ */
+export type RetainedOutputReason = 'computer_quota' | 'account_quota' | 'capacity' | (string & {});
 
 /**
  * The budget a metered response reported in its `RateLimit-Limit`,
@@ -264,6 +276,13 @@ export class APIError extends MandalaError {
    * how the call ended.
    */
   readonly operationId?: string;
+  /**
+   * The computer a keyed create or clone made, from the body's `computer_id`,
+   * when it named one: a `409` `idempotency_in_progress` carries it once the
+   * computer's host has listed the computer the call made. Read that computer
+   * rather than creating another.
+   */
+  readonly computerId?: string;
   /** Correlation for this response, when supplied; not an idempotency key. */
   readonly requestId?: string;
   /** The received Allow and WWW-Authenticate headers, when supplied. */
@@ -280,6 +299,11 @@ export class APIError extends MandalaError {
    * no evidence the command did not run.
    */
   readonly retainedOutput?: 'unavailable';
+  /**
+   * Why no retained result was published, beside {@link retainedOutput}, when
+   * a limit is why: see {@link RetainedOutputReason}.
+   */
+  readonly retainedOutputReason?: RetainedOutputReason;
   constructor(
     message: string,
     readonly status: number,
@@ -291,6 +315,7 @@ export class APIError extends MandalaError {
     this.reason = refusalReason(body);
     this.code = nonblank(errorRecord(body)?.code);
     this.operationId = nonblank(errorRecord(body)?.operation_id);
+    this.computerId = nonblank(errorRecord(body)?.computer_id);
     // Only an id the next run could be sent with: non-empty, and with no space
     // around it, which the agent methods refuse as a `threadId`.
     const thread = errorRecord(body)?.thread_id;
@@ -305,6 +330,7 @@ export class APIError extends MandalaError {
         ? metadata.method.toUpperCase()
         : undefined;
     this.retainedOutput = metadata.retainedOutput;
+    this.retainedOutputReason = metadata.retainedOutputReason;
   }
 }
 
@@ -368,6 +394,11 @@ const REASON_CLEARS: ReadonlySet<string> = new Set(['contention', 'starting']);
  * kept, and the next one replaced it. The same request never works again, so it
  * is permanent; take a new screenshot and name its capture.
  */
+/**
+ * `unsupported_on_macos` is something a macOS computer does not support, such
+ * as SSH. It never clears by waiting: the computer would have to be a
+ * different one.
+ */
 const REASON_PERMANENT: ReadonlySet<string> = new Set([
   'unavailable',
   'unsupported',
@@ -377,6 +408,7 @@ const REASON_PERMANENT: ReadonlySet<string> = new Set([
   'name_taken',
   'stale_revision',
   'stale_capture',
+  'unsupported_on_macos',
 ]);
 
 /**

@@ -21,12 +21,14 @@ import {
 import {
   ARTIFACT_MANIFEST_BYTES,
   type Artifact,
+  type ArtifactListing,
   artifactBody,
   artifactCrypto,
   artifactDownloadCap,
   type DownloadArtifactOptions,
   type PublishArtifactOptions,
   toArtifact,
+  toArtifactListing,
   verifyArtifact,
 } from './artifacts.js';
 import {
@@ -97,10 +99,12 @@ import type {
   CredentialGatewayBinding,
   DeleteResult,
   EgressProxy,
+  EgressProxyLastError,
   ExecResult,
   GuestDirectory,
   GuestWindow,
   Holdings,
+  HostPaused,
   InputBatchResult,
   InputContext,
   Move,
@@ -139,9 +143,11 @@ import {
   toCredentialGatewayBindings,
   toDeleteResult,
   toEgressProxy,
+  toEgressProxyLastError,
   toExecResult,
   toGuestDirectory,
   toHoldings,
+  toHostPaused,
   toInputBatchResult,
   toInputContext,
   toMove,
@@ -174,12 +180,14 @@ import {
   type ResultOutput,
   type ResultOutputOptions,
   type RetainedResult,
+  type RetainedResultListing,
   type RetainOutputOptions,
   resultOutputQuery,
   synchronousResultId,
   syncRetentionBody,
   toResultOutput,
   toRetainedResult,
+  toRetainedResultListing,
 } from './results.js';
 import {
   type Bytes,
@@ -187,6 +195,7 @@ import {
   idempotencyHeaders,
   MODEL_KEY_HEADER,
   type Query,
+  retainedOutputReason,
   retainedOutputUnavailable,
   type Transport,
 } from './transport.js';
@@ -1311,6 +1320,22 @@ export class Computer {
   }
 
   /**
+   * Why this computer's host is holding it paused to recover disk space, and
+   * since when, or `undefined` when it is not (and on a platform that predates
+   * the field).
+   *
+   * ITS {@link status} STAYS `running` meanwhile, while screenshots, input and
+   * commands stall or fail: this is what explains a running computer whose
+   * calls time out. It resumes by itself once the host has space again, and the
+   * field goes; nothing needs doing. Its run time is not counted while it is
+   * held. A stop meanwhile discards the paused session, and starting it again is
+   * refused with a `503` while the host is still low on disk space.
+   */
+  get hostPaused(): HostPaused | undefined {
+    return toHostPaused(this.#data.host_paused, this.id);
+  }
+
+  /**
    * Credentials and URLs for this computer's live desktop, or `undefined`.
    *
    * What makes it possible to show somebody their own screen — in your page, not
@@ -1555,6 +1580,20 @@ export class Computer {
       throw new MandalaError(`expected ${this.id}'s egress_proxy_pending to be a boolean`);
     }
     return v;
+  }
+
+  /**
+   * Why this running computer's proxied connections are failing: the reason the
+   * last one was closed without a tunnel, when, and how many have failed since
+   * one last opened. Inside the computer such a connection reads as the
+   * destination closing it at once, so this is where to look. `undefined` while
+   * connections are not failing, on a computer that is not running, and on a
+   * platform that predates the field. It goes when a connection next opens
+   * through the proxy, when {@link egressProxy} changes, and when the computer
+   * stops.
+   */
+  get egressProxyLastError(): EgressProxyLastError | undefined {
+    return toEgressProxyLastError(this.#data.egress_proxy_last_error, this.id);
   }
 
   /** The API response verbatim, including any fields this SDK predates. */
@@ -4802,6 +4841,7 @@ export class Computer {
     };
     let responseStatus = 0;
     let retainedUnavailable = false;
+    let retainedReason: string | undefined;
     const minTimeoutMs = (timeoutS + 30) * 1_000;
     const data = await this.#t.json<Record<string, unknown>>(
       'POST',
@@ -4814,6 +4854,7 @@ export class Computer {
       (status, headers) => {
         responseStatus = status;
         retainedUnavailable = retainedOutputUnavailable(headers);
+        retainedReason = retainedOutputReason(headers);
       },
     );
     // Checked rather than defaulted to `{}`. A 204 or an empty body decodes to
@@ -4827,7 +4868,10 @@ export class Computer {
     const result = toExecResult(data);
     const resultId = responseStatus === 200 ? synchronousResultId(data) : undefined;
     if (resultId !== undefined) result.resultId = resultId;
-    if (retainedUnavailable) result.retainedOutput = 'unavailable';
+    if (retainedUnavailable) {
+      result.retainedOutput = 'unavailable';
+      if (retainedReason !== undefined) result.retainedOutputReason = retainedReason;
+    }
     return result;
   }
 
@@ -5000,6 +5044,22 @@ export class Computer {
     return toResultOutput(data, resultId, query);
   }
 
+  /**
+   * This computer's published, unexpired retained results, oldest first, with
+   * how full the computer's and the account's retained quotas are. Complete in
+   * one answer. Captures in progress and deleted results awaiting cleanup are
+   * not listed, but are charged in `usage`.
+   *
+   * What to read when an exec's `retainedOutputReason` says a quota is full:
+   * that clears only when objects expire or are deleted, with
+   * {@link deleteResult} and {@link deleteArtifact}. A workspace-scoped
+   * credential lists only what was recorded in its workspace.
+   */
+  async results(opts: CallOptions = {}): Promise<RetainedResultListing> {
+    const data = await this.#t.json('GET', P.results(this.id), { signal: opts.signal });
+    return toRetainedResultListing(data);
+  }
+
   /** Delete one retained result. A repeated 404 remains unavailable. */
   async deleteResult(resultId: string, opts: CallOptions = {}): Promise<void> {
     const path = P.result(this.id, resultId);
@@ -5066,6 +5126,16 @@ export class Computer {
       maxBytes: manifest.size,
     });
     return verifyArtifact(content.bytes, manifest, subtle, signal);
+  }
+
+  /**
+   * This computer's published, unexpired artifacts, oldest first, with how full
+   * the computer's and the account's retained quotas are: the same quotas
+   * {@link results} reports. Complete in one answer.
+   */
+  async artifacts(opts: CallOptions = {}): Promise<ArtifactListing> {
+    const data = await this.#t.json('GET', P.artifacts(this.id), { signal: opts.signal });
+    return toArtifactListing(data);
   }
 
   /** Delete one artifact without a preflight. A repeated 404 remains unavailable. */

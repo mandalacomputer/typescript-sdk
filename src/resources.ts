@@ -38,6 +38,7 @@ import type {
   AccountQuota,
   ApiKey,
   ApiKeyCreated,
+  ApiKeyRevoked,
   BuildProgress,
   CredentialGatewayBinding,
   CreditReport,
@@ -55,6 +56,7 @@ import type {
   Size,
   Snapshot,
   SshKey,
+  SshKeyChallenge,
   Template,
   TemplateBuild,
   TemplateCheck,
@@ -78,6 +80,7 @@ import {
   toAccountQuota,
   toApiKey,
   toApiKeyCreated,
+  toApiKeyRevoked,
   toBuildProgress,
   toCredentialGatewayBinding,
   toCredentialGatewayBindings,
@@ -96,6 +99,7 @@ import {
   toSize,
   toSnapshot,
   toSshKey,
+  toSshKeyChallenge,
   toTemplate,
   toTemplateBuild,
   toTemplateCheck,
@@ -243,6 +247,39 @@ const computerRecord = (data: unknown, method: string, path: string): Record<str
 const oneComputer = (t: Transport, data: unknown, method: string, path: string): Computer =>
   new Computer(t, computerRecord(data, method, path));
 
+/**
+ * The computer a keyed create or clone made, when its answer was replayed as
+ * `{ operation_id, operation }` rather than as the computer: the shape the
+ * platform replays when the first answer was lost and the call's operation has
+ * since named its computer, and when the first answer was too large to keep.
+ * The computer is read afresh by the id the operation names, which also
+ * brings back the desktop credentials a replayed body never carries.
+ *
+ * Any other answer is handed back as it came, for {@link computerRecord} to
+ * accept or refuse. A replay whose operation names no computer is refused
+ * naming the operation, which is where its outcome is read.
+ */
+async function replayedComputer(
+  t: Transport,
+  data: unknown,
+  method: string,
+  path: string,
+  signal: AbortSignal | undefined,
+): Promise<unknown> {
+  if (!P.isRecord(data) || P.isRecord(data.computer) || data.id) return data;
+  const operationId = data.operation_id;
+  if (typeof operationId !== 'string' || !operationId || !('operation' in data)) return data;
+  const operation = data.operation;
+  const computerId = P.isRecord(operation) ? operation.computer_id : undefined;
+  if (typeof computerId !== 'string' || !computerId) {
+    throw new MandalaError(
+      `the answer to ${method} ${path} was a replay naming operation ${operationId} and no ` +
+        `computer: read operations.get('${operationId}') to learn how the call ended`,
+    );
+  }
+  return t.json('GET', P.computer(computerId), { signal });
+}
+
 export class Computers {
   #t: Transport;
 
@@ -374,8 +411,10 @@ export class Computers {
         timing.headers(headers);
       },
     );
-    const computer = oneComputer(this.#t, data, 'POST', P.COMPUTERS);
-    confirmEndTime(computer.raw, endTime, 'create', timing.finish(), replayed);
+    const clock = timing.finish();
+    const answer = await replayedComputer(this.#t, data, 'POST', P.COMPUTERS, opts.signal);
+    const computer = oneComputer(this.#t, answer, 'POST', P.COMPUTERS);
+    confirmEndTime(computer.raw, endTime, 'create', clock, replayed);
     return { computer, replayed };
   }
 
@@ -682,7 +721,8 @@ export class Computers {
       },
     );
     const clock = timing.finish();
-    const computer = new EphemeralComputer(this.#t, computerRecord(data, 'POST', P.COMPUTERS));
+    const answer = await replayedComputer(this.#t, data, 'POST', P.COMPUTERS, opts.signal);
+    const computer = new EphemeralComputer(this.#t, computerRecord(answer, 'POST', P.COMPUTERS));
     try {
       confirmEndTime(computer.raw, endTime, 'create', clock, replayed);
     } catch (err) {
@@ -1103,7 +1143,8 @@ export class Snapshots {
       headers: idempotencyHeaders(opts.idempotencyKey),
       signal: opts.signal,
     });
-    return oneComputer(this.#t, data, 'POST', path);
+    const answer = await replayedComputer(this.#t, data, 'POST', path, opts.signal);
+    return oneComputer(this.#t, answer, 'POST', path);
   }
 
   /**
@@ -1728,6 +1769,31 @@ export class Builds {
   }
 
   /**
+   * Stop one of the account's builds that is still running.
+   *
+   * Answers the build as it stands, still `running`: it is stopped on its
+   * hypervisor and its record says what became of it once it has ended,
+   * usually within seconds, so read it with {@link get} or {@link wait}. A
+   * cancelled build is `failed`, its `error` says it was cancelled, and nothing
+   * is published. Until it has ended it still counts as the account's running
+   * build, so {@link start} is refused until then.
+   *
+   * A cancelled build counts against the daily build allowance like any build
+   * that failed, unless it was stopped before its hypervisor began copying its
+   * base image. A build that has already finished, or is finishing, is a
+   * {@link ConflictError}: there is nothing to stop, so read it for its
+   * outcome. A build that finished publishing before the stop reached it stays
+   * `succeeded`. Needs an account-wide key: one confined to a workspace is a
+   * {@link PermissionDeniedError}.
+   */
+  async cancel(id: string, opts: CallOptions = {}): Promise<TemplateBuild> {
+    const path = P.buildAction(id, 'cancel');
+    const data = await this.#t.json('POST', path, { signal: opts.signal });
+    if (!P.isRecord(data)) throw new MandalaError(`expected a build from POST ${path}`);
+    return toTemplateBuild(data);
+  }
+
+  /**
    * What a build is DOING, as against what became of it.
    *
    * The polling half; {@link events} is the same record as a stream. Use this
@@ -2339,18 +2405,38 @@ export class Webhooks {
   }
 
   /**
-   * The newest hundred deliveries to this subscription, newest first, each
-   * with its state, its attempt count and the status or one-line error of its
-   * newest attempt.
+   * One page of deliveries to this subscription, newest first by when they were
+   * queued, each with its state, its attempt count and the status or one-line
+   * error of its newest attempt: the newest hundred, unless `limit` says fewer.
    *
    * This is where an `exhausted` delivery shows up — nothing is dropped
    * silently — and where a receiver that logged a `webhook-id` it refused can
-   * find out what it was. Finished deliveries are kept for seven days; pending
-   * ones until they finish.
+   * find out what it was. Finished deliveries are kept until seven days after
+   * they were queued; pending ones until they finish. A delivery exhausts about
+   * fourteen hours after it was queued, so on a busy subscription it is far
+   * from the newest: ask for `state: 'exhausted'`, or page back with `before`.
+   *
+   * The answer is a plain list. A page shorter than `limit` (100 when not
+   * given) is the last one; otherwise pass the `id` of its last delivery as
+   * `before` for the page after it.
+   *
+   * ```ts
+   * let page = await client.webhooks.deliveries(id, { state: 'exhausted' });
+   * while (page.length === 100) {
+   *   page = await client.webhooks.deliveries(id, { state: 'exhausted', before: page.at(-1)!.id });
+   * }
+   * ```
    */
-  async deliveries(webhookId: string, opts: CallOptions = {}): Promise<WebhookDelivery[]> {
+  async deliveries(
+    webhookId: string,
+    opts: P.WebhookDeliveriesArgs & CallOptions = {},
+  ): Promise<WebhookDelivery[]> {
     const path = P.webhookAction(webhookId, 'deliveries');
-    const data = await this.#t.jsonArray('GET', path, { signal: opts.signal });
+    const { signal, ...args } = opts;
+    const data = await this.#t.jsonArray('GET', path, {
+      query: P.webhookDeliveriesQuery(args),
+      signal,
+    });
     return data.map((row, i) => listRow(row, i, 'webhook delivery', toWebhookDelivery));
   }
 }
@@ -2503,6 +2589,30 @@ export class SshKeys {
   }
 
   /**
+   * A challenge to sign with the private half of a key you are about to
+   * {@link add}, so that it is registered as `proven` ({@link SshKey.possession}).
+   *
+   * ```ts
+   * const c = await client.sshKeys.challenge();
+   * // printf '%s' "$CHALLENGE" | ssh-keygen -Y sign -n "$NAMESPACE" -f ~/.ssh/id_ed25519
+   * const key = await client.sshKeys.add({ publicKey, challenge: c.challenge, signature });
+   * ```
+   *
+   * Sign it with `signCommand`, replacing the key file with yours, or with
+   * `ssh-keygen -Y sign -n <namespace>` over exactly the challenge text. A
+   * challenge is yours alone, works once, and expires at `expiresAt`; asking for
+   * more than eight at once drops the oldest. Refused where adding a key is, with
+   * a {@link PermissionDeniedError}: an API key confined to a workspace, one
+   * that expires, one limited to computers, or a holder who has not verified
+   * their email address.
+   */
+  async challenge(opts: CallOptions = {}): Promise<SshKeyChallenge> {
+    const path = P.SSH_KEY_CHALLENGE;
+    const data = await this.#t.json('POST', path, { signal: opts.signal });
+    return toSshKeyChallenge(data, `POST ${path}`);
+  }
+
+  /**
    * Register one public key, bound to the account this client's credential
    * acts on and removed when that credential is revoked.
    *
@@ -2512,7 +2622,19 @@ export class SshKeys {
    * });
    * ```
    *
-   * Registering a key that is already registered is a `ConflictError`. A
+   * PROOF THAT THE KEY IS YOURS is optional: pass `challenge` (from
+   * {@link challenge}) and the `signature` over it, both or neither. A key
+   * added with one is `proven` and connects to computers named by id or by
+   * name; one added without is `unproven` and connects by id only (see
+   * {@link SshKey.possession}). With a valid signature, a key already
+   * registered without one, to you or to anybody, is not a conflict: that
+   * registration is removed and the key is registered to you. A signature that
+   * does not verify, or a challenge not issued to you, used or expired, is a
+   * `400` from the platform; the challenge is used up only when the key is
+   * registered.
+   *
+   * Registering a key that is already registered is a `ConflictError`, unless
+   * it was registered without a signature and this call carries a valid one. A
    * matching {@link SshKey.fingerprint} in {@link list} proves only that the
    * key is registered to you, not that this account accepts it: {@link list}
    * shows every key you hold, including one bound to another account's
@@ -2865,9 +2987,15 @@ export class ApiKeys {
    * It revokes that one key only. The plain keys it minted keep working after
    * it is revoked: find them by {@link ApiKey.mintedByKeyId} and revoke them
    * too (the dashboard can revoke a key's children in one step).
+   *
+   * Webhook subscriptions made through the key keep sending, so that rotating
+   * a key does not end the integrations it set up. The answer lists them in
+   * `webhooks`, so you can decide what to do with each: disable or delete the
+   * ones you no longer want. Empty from a platform that does not list them.
    */
-  async revoke(keyId: string, opts: CallOptions = {}): Promise<void> {
-    await this.#t.json('DELETE', P.apiKey(keyId), { signal: opts.signal });
+  async revoke(keyId: string, opts: CallOptions = {}): Promise<ApiKeyRevoked> {
+    const data = await this.#t.json('DELETE', P.apiKey(keyId), { signal: opts.signal });
+    return toApiKeyRevoked(data, keyId);
   }
 }
 

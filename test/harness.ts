@@ -896,6 +896,16 @@ export const SSH_KEY = {
   created_at: '2026-09-16T12:00:00.000Z',
   last_used_at: null,
   reach: 'everywhere',
+  possession: 'proven',
+};
+
+/** A challenge to sign before adding a key, as the platform issues one. */
+export const SSH_KEY_CHALLENGE = {
+  challenge: `sshkc-${'c'.repeat(64)}`,
+  namespace: 'ssh-key-registration@mandala.computer',
+  expires_at: '2026-09-16T12:10:00.000Z',
+  sign_command:
+    "printf '%s' 'sshkc-…' | ssh-keygen -Y sign -n ssh-key-registration@mandala.computer -f ~/.ssh/id_ed25519",
 };
 
 /** One API key, as `GET api-keys` lists it (OPL-5053): never the raw key. */
@@ -1228,6 +1238,8 @@ export const anyRoute: Responder = (call) => {
   if (path === '/builds')
     return json(get ? [TEMPLATE_BUILD] : TEMPLATE_BUILD, get ? {} : { status: 202 });
   if (/^\/builds\/[^/]+$/.test(path)) return json(TEMPLATE_BUILD);
+  // A cancel is a 202 of the build as it stands: still running.
+  if (/^\/builds\/[^/]+\/cancel$/.test(path)) return json(TEMPLATE_BUILD, { status: 202 });
   if (path.endsWith('/snapshots')) {
     // GET computers/:id/snapshots is the holdings triple, not a listing.
     if (get && path !== '/snapshots') return json({ count: 0, size_bytes: 0, fingerprint: 'f' });
@@ -1280,6 +1292,7 @@ export const anyRoute: Responder = (call) => {
     );
   if (/^\/api-keys\/[^/]+$/.test(path)) return json({ ok: true });
   if (path === '/ssh-keys') return json(get ? [SSH_KEY] : SSH_KEY, get ? {} : { status: 201 });
+  if (path === '/ssh-keys/challenge') return json(SSH_KEY_CHALLENGE, { status: 201 });
   if (/^\/ssh-keys\/[^/]+$/.test(path)) return new Response(null, { status: 204 });
   if (path.endsWith('/ssh')) return json(SSH_ACCESS);
   // The listing is an envelope and the create a 201 of one URL; the delete an ack.

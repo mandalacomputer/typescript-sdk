@@ -107,8 +107,14 @@ export async function apiKeysRevoke(
   id: string,
   signal: AbortSignal,
 ): Promise<number> {
-  await client.apiKeys.revoke(id, { signal });
-  return output.result({ id, revoked: true });
+  const { webhooks } = await client.apiKeys.revoke(id, { signal });
+  if (webhooks.length) {
+    output.diagnostic(
+      `${webhooks.length} webhook subscription${webhooks.length === 1 ? ' was' : 's were'} made ` +
+        'through this key and keep sending: disable or delete any you no longer want.',
+    );
+  }
+  return output.result({ id, revoked: true, webhooks });
 }
 
 /**

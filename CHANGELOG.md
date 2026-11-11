@@ -16,6 +16,52 @@ This is the summary you read to decide whether to upgrade.
   platform that does not send it, it reads `false`. A computer's or template's
   `os` can now be `macos` as well as `linux` and `windows`. `mandala account`
   prints the macOS capability beside the Windows one.
+- `builds.cancel(id)` stops a build that is still running. It answers the build
+  as it stands, still `running`; a build that has already finished is a
+  `ConflictError`.
+- SSH key proof of possession. `sshKeys.challenge()` issues a challenge to sign
+  with `ssh-keygen -Y sign`, and `sshKeys.add()` takes `challenge` and
+  `signature` (both or neither, checked before sending). `SshKey.possession`
+  reads `proven`, `unproven` or `legacy`, and `null` from a platform that does
+  not report it.
+- `webhooks.deliveries(id, { before, limit, state })` pages back past the newest
+  hundred and filters by state. A page shorter than `limit` is the last one.
+- `Webhook.lastError` (why the newest attempt failed: `at`, `status`, `error`,
+  `deliveryId`) and `Webhook.createdBy`. The `disabledReason` docs now cover
+  `creator_removed` and `key_revoked`.
+- `Computer.results()` and `Computer.artifacts()` list a computer's retained
+  results and artifacts, with the computer's and the account's quota `usage`.
+- `Computer.hostPaused`: why a computer whose status stays `running` is held
+  paused by its host to recover disk space. `Computer.egressProxyLastError`:
+  why its proxied connections are failing.
+- `ExecResult.retainedOutputReason` and `APIError.retainedOutputReason`:
+  `computer_quota`, `account_quota` or `capacity` when a limit is why no
+  retained result was published. The CLI's `computers exec` and its error
+  envelope say so too.
+- `APIError.computerId`: the computer a keyed create or clone made, which an
+  `idempotency_in_progress` refusal names once its host has listed it.
+- `ActivityResultItem.capturedAt` and `expiresAt`. An item's `kind` can be
+  `artifact`, whose `id` is an `art_` id for `Computer.artifact()`, not
+  `Computer.result()`.
+- The README's error-code table lists `STORAGE_OVER_PLAN` (402) and
+  `MACOS_LICENCE_REQUIRED` (403).
+
+### Changed
+
+- `apiKeys.revoke()` now answers `{ webhooks }`: the webhook subscriptions made
+  through the key, which keep sending after it is revoked. It used to answer
+  nothing. A platform that does not list them answers an empty list.
+  `mandala api-keys revoke --json` includes them.
+- `isTransient()` reads the refusal reason `unsupported_on_macos` as final.
+
+### Fixed
+
+- A keyed `create()`, `ephemeral()` or `snapshots.clone()` resent after its
+  answer was lost, or whose answer was too large to keep, is replayed by the
+  platform as `{ operation_id, operation }` rather than as the computer. It used
+  to throw `expected a computer`; it now reads the computer the operation names
+  and returns it. A replay whose operation names no computer throws naming the
+  operation to read.
 
 ## [0.22.0] - 2026-11-01
 
