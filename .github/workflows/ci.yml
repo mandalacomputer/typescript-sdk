@@ -10,7 +10,7 @@ jobs:
     # Hosted runners: with the repository public, minutes are free and the
     # matrix runs genuinely in parallel. A runner of our own on a public repo
     # would execute any fork's pull request on our own machine.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       matrix:
         # 22 is the floor the package declares; 24 is what most people are on.
