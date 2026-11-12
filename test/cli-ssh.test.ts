@@ -620,8 +620,8 @@ async function cli(
     ssh?: string | null;
     exit?: number;
     env?: NodeJS.ProcessEnv;
-    /** ssh-keygen and what it answers; absent, there is no ssh-keygen. */
-    keygen?: (argv: string[], input: string) => Captured | Promise<Captured>;
+    /** ssh-keygen and what it answers (its signature as stdout); absent, there is no ssh-keygen. */
+    keygen?: (argv: string[], input: string) => FakeSigned | Promise<FakeSigned>;
   } = {},
 ) {
   const home = opts.home ?? (await tempDir());
@@ -646,9 +646,16 @@ async function cli(
     ...(opts.keygen
       ? {
           keygen: () => '/usr/bin/ssh-keygen',
-          capture: async (argv: string[], input: string) => {
-            signed.push({ argv, input });
-            return opts.keygen!(argv, input);
+          // Like ssh-keygen with a file: the challenge is read from the last
+          // argument and the signature written beside it.
+          capture: async (argv: string[]) => {
+            const file = argv.at(-1)!;
+            const input = fs.readFileSync(file, 'utf8');
+            const call = { argv: argv.slice(0, -1), input };
+            signed.push(call);
+            const got = await opts.keygen!(call.argv, input);
+            if (got.stdout) fs.writeFileSync(`${file}.sig`, got.stdout);
+            return { status: got.status, stderr: got.stderr };
           },
         }
       : {}),
@@ -2327,7 +2334,8 @@ const CHALLENGE = {
   expires_at: '2026-09-16T00:10:00Z',
   sign_command: 'printf ...',
 };
-const signs = (): Captured => ({
+type FakeSigned = Captured & { stdout: string };
+const signs = (): FakeSigned => ({
   status: 0,
   stdout: SIGNATURE,
   stderr: 'Signing data on standard input\n',
@@ -2660,9 +2668,9 @@ describe('registering a key with proof of possession', () => {
       run: async () => 0,
       keygen: () => '/usr/bin/ssh-keygen',
       capture: async (argv) => {
-        calls.push(argv.at(-1)!);
+        calls.push(argv.at(-2)!);
         ctl.abort(new Error('cancelled'));
-        return { status: 130, stdout: '', stderr: '' };
+        return { status: 130, stderr: '' };
       },
     };
     await expect(signChallenge(rt, {}, pub, 'ns', 'c', ctl.signal)).rejects.toThrow('cancelled');
@@ -2673,7 +2681,7 @@ describe('registering a key with proof of possession', () => {
     const again = new AbortController();
     rt.capture = async () => {
       again.abort(new Error('cancelled'));
-      return { status: 130, stdout: '', stderr: '' };
+      return { status: 130, stderr: '' };
     };
     await expect(
       registerKey(client, rt, {}, { line: PUBLIC, file: pub, noProof: false }, again.signal),
@@ -2683,7 +2691,7 @@ describe('registering a key with proof of possession', () => {
 
   it('the real capture ends ssh-keygen when cancelled', async () => {
     const ctl = new AbortController();
-    const sleeping = defaultSshRuntime.capture!(['/bin/sh', '-c', 'sleep 30'], '', ctl.signal);
+    const sleeping = defaultSshRuntime.capture!(['/bin/sh', '-c', 'sleep 30'], ctl.signal);
     setTimeout(() => ctl.abort(new Error('cancelled')), 50);
     await expect(sleeping).rejects.toThrow('cancelled');
   });

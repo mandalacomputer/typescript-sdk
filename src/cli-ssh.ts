@@ -67,16 +67,17 @@ export type SshRuntime = {
    */
   keygen?: (env: NodeJS.ProcessEnv) => string | undefined;
   /**
-   * Run `argv` with `input` on its standard input and collect what it prints.
-   * The terminal stays its controlling one, so a passphrase prompt still
-   * reaches the person.
+   * Run `argv` and collect its exit status and what it prints on stderr. Its
+   * standard input stays this terminal: ssh-keygen asks for a passphrase on
+   * the terminal only when its stdin is one, and otherwise runs an askpass
+   * program (when a display is set), which may not exist.
    */
-  capture?: (argv: string[], input: string, signal?: AbortSignal) => Promise<Captured>;
+  capture?: (argv: string[], signal?: AbortSignal) => Promise<Captured>;
   windows: boolean;
 };
 
 /** What {@link SshRuntime.capture} collects. */
-export type Captured = { status: number; stdout: string; stderr: string };
+export type Captured = { status: number; stderr: string };
 
 /** The first executable called one of `names` in a PATH directory. */
 function onPath(env: NodeJS.ProcessEnv, names: readonly string[]): string | undefined {
@@ -99,29 +100,22 @@ export const defaultSshRuntime: SshRuntime = {
   which: (env) => onPath(env, process.platform === 'win32' ? ['ssh.exe', 'ssh'] : ['ssh']),
   keygen: (env) =>
     onPath(env, process.platform === 'win32' ? ['ssh-keygen.exe', 'ssh-keygen'] : ['ssh-keygen']),
-  capture: ([file, ...args], input, signal) =>
+  capture: ([file, ...args], signal) =>
     new Promise((resolve, reject) => {
       if (signal?.aborted) return reject(signal.reason);
-      // stderr is collected rather than shown: ssh-keygen says "Signing data on
-      // standard input" there even when it works. A passphrase prompt is read
-      // from the terminal itself, not from these pipes.
+      // stderr is collected rather than shown: ssh-keygen says "Signing file"
+      // there even when it works. A passphrase prompt goes to the terminal.
       // Cancelled, the child is ended and the wait rejects with the reason.
-      const child = spawn(file!, args, { stdio: ['pipe', 'pipe', 'pipe'], signal });
-      const out: Buffer[] = [];
+      const child = spawn(file!, args, { stdio: ['inherit', 'ignore', 'pipe'], signal });
       const err: Buffer[] = [];
-      child.stdout.on('data', (b: Buffer) => out.push(b));
       child.stderr.on('data', (b: Buffer) => err.push(b));
       child.on('error', (error) => reject(signal?.aborted ? signal.reason : error));
-      // A child that exits before reading its input must not crash this process.
-      child.stdin.on('error', () => {});
       child.on('close', (code, killed) =>
         resolve({
           status: code ?? 128 + (killed ? (os.constants.signals[killed] ?? 0) : 0),
-          stdout: Buffer.concat(out).toString('utf8'),
           stderr: Buffer.concat(err).toString('utf8'),
         }),
       );
-      child.stdin.end(input);
     }),
   // Node cannot replace its own process, so ssh runs as a child on this
   // terminal and its status becomes this one's.
@@ -895,7 +889,7 @@ function lastLine(text: string): string | undefined {
   const lines = text
     .split(/\r?\n/)
     .map((l) => l.trim())
-    .filter((l) => l && !/^Signing data on standard input$/.test(l));
+    .filter((l) => l && !/^Signing (data on standard input|file .*)$/.test(l));
   const last = lines.at(-1);
   return last === undefined ? undefined : terminalSafe(last);
 }
@@ -923,26 +917,44 @@ export async function signChallenge(
       if (fs.statSync(priv).isFile()) files.push(priv);
     } catch {}
   }
+  // The challenge goes in a file of its own, in a directory only this user
+  // can read, so ssh-keygen's stdin can stay the terminal; it writes the
+  // signature beside it as `<file>.sig`.
+  let dir: string;
+  try {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mandala-sign-'));
+  } catch (error) {
+    return {
+      reason: `cannot make a temporary file: ${(error as NodeJS.ErrnoException).code ?? String(error)}`,
+    };
+  }
+  const data = path.join(dir, 'challenge');
+  const sig = `${data}.sig`;
   let reason = 'ssh-keygen could not sign';
-  for (const file of files) {
-    let got: Captured;
-    try {
-      got = await rt.capture(
-        [keygen, '-Y', 'sign', '-n', namespace, '-f', file],
-        challenge,
-        signal,
-      );
-    } catch (error) {
-      // A cancelled signing ends the command: nothing is registered after it.
+  try {
+    fs.writeFileSync(data, challenge, { mode: 0o600, flag: 'wx' });
+    for (const file of files) {
+      fs.rmSync(sig, { force: true });
+      let got: Captured;
+      try {
+        got = await rt.capture([keygen, '-Y', 'sign', '-n', namespace, '-f', file, data], signal);
+      } catch (error) {
+        // A cancelled signing ends the command: nothing is registered after it.
+        signal?.throwIfAborted();
+        return {
+          reason: `cannot run ssh-keygen: ${(error as NodeJS.ErrnoException).code ?? String(error)}`,
+        };
+      }
       signal?.throwIfAborted();
-      return {
-        reason: `cannot run ssh-keygen: ${(error as NodeJS.ErrnoException).code ?? String(error)}`,
-      };
+      let signature: string | undefined;
+      try {
+        signature = fs.readFileSync(sig, 'utf8');
+      } catch {}
+      if (got.status === 0 && signature?.startsWith(SIGNATURE_BEGIN)) return { signature };
+      reason = lastLine(got.stderr) ?? `ssh-keygen exited ${got.status}`;
     }
-    signal?.throwIfAborted();
-    if (got.status === 0 && got.stdout.startsWith(SIGNATURE_BEGIN))
-      return { signature: got.stdout };
-    reason = lastLine(got.stderr) ?? `ssh-keygen exited ${got.status}`;
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
   }
   return { reason };
 }
