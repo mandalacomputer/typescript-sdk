@@ -20,6 +20,10 @@ This is the summary you read to decide whether to upgrade.
   hold as it is; `ssh-key add` proves one you hold `unproven` on this account
   (rebinding it to that API key). `--no-proof` on either skips the signing. A
   signature the platform refuses is an error rather than a quiet unproven add.
+  The CLI signs only in the `ssh-key-registration@mandala.computer` namespace
+  and only a challenge shaped `sshkc-` plus 64 hex digits; anything else the
+  server asks it to sign is refused (`unexpected_challenge`) and nothing is
+  registered.
 
 ## [0.23.0] - 2026-11-11
 

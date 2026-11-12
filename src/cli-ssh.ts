@@ -878,6 +878,14 @@ export function fingerprint(publicKey: string): string {
 // --- proof of possession --------------------------------------------------
 
 const SIGNATURE_BEGIN = '-----BEGIN SSH SIGNATURE-----';
+/**
+ * The only namespace this CLI signs in, and the only challenge shape. Both
+ * come from the server, and a signature is valid for whatever its namespace
+ * names: a server that asked for `git` and a commit's bytes would get a commit
+ * signature from a key that also signs commits. So neither is taken on trust.
+ */
+export const REGISTRATION_NAMESPACE = 'ssh-key-registration@mandala.computer';
+const CHALLENGE_SHAPE = /^sshkc-[0-9a-f]{64}$/;
 
 /** A signature over a registration challenge, or why there is none. */
 export type Proof = { challenge: string; signature: string } | { reason: string };
@@ -961,6 +969,12 @@ export async function prove(
     throw error;
   }
   signal?.throwIfAborted();
+  if (issued.namespace !== REGISTRATION_NAMESPACE || !CHALLENGE_SHAPE.test(issued.challenge))
+    throw new CliError(
+      'unexpected_challenge',
+      `refusing to sign: the server asked for a signature in namespace ${JSON.stringify(terminalSafe(issued.namespace))}` +
+        ` over ${JSON.stringify(terminalSafe(issued.challenge.slice(0, 80)))}, not a key registration challenge; nothing was registered`,
+    );
   const signed = await signChallenge(rt, env, pubFile, issued.namespace, issued.challenge, signal);
   return 'signature' in signed
     ? { challenge: issued.challenge, signature: signed.signature }

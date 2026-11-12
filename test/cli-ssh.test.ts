@@ -2323,7 +2323,7 @@ describe('SSH SDK methods', () => {
 const SIGNATURE = '-----BEGIN SSH SIGNATURE-----\nU1NIU0lH\n-----END SSH SIGNATURE-----\n';
 const CHALLENGE = {
   challenge: `sshkc-${'a'.repeat(64)}`,
-  namespace: 'ssh-key-registration@example.test',
+  namespace: 'ssh-key-registration@mandala.computer',
   expires_at: '2026-09-16T00:10:00Z',
   sign_command: 'printf ...',
 };
@@ -2582,6 +2582,26 @@ describe('registering a key with proof of possession', () => {
       ['POST', 'ssh-keys'],
     ]);
     expect(add.rec.last().body).toEqual({ public_key: PUBLIC });
+  });
+
+  it('signs nothing outside the registration namespace and challenge shape', async () => {
+    const { home } = await keyHome();
+    for (const issued of [
+      { ...CHALLENGE, namespace: 'git' },
+      { ...CHALLENGE, challenge: 'tree 4b825dc642cb6eb9a060e54bf8d69288fbee4904\n' },
+      { ...CHALLENGE, challenge: `sshkc-${'A'.repeat(64)}` },
+    ]) {
+      const r = await cli(['ssh-key', 'add'], {
+        home,
+        keygen: signs,
+        respond: (call) =>
+          call.path === '/ssh-keys/challenge' ? json(issued, { status: 201 }) : proving()(call),
+      });
+      expect(r.code).toBe(1);
+      expect(r.signed).toEqual([]);
+      expect(writes(r)).toEqual([['POST', 'ssh-keys/challenge']]);
+      expect(r.err).toContain('refusing to sign');
+    }
   });
 
   it('never signs for a held key bound elsewhere, which a signed add would rebind', async () => {
