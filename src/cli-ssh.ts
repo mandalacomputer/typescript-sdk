@@ -975,7 +975,7 @@ export const unprovenMessage = (key: SshKey, reason: string | undefined, setup: 
   // Adding a key again with a signature binds it to this credential's
   // account, so that is the advice only for a key already bound here.
   (key.reach === 'this_account'
-    ? '. Run mandala ssh-key add again where ssh-keygen can use the private key to prove it'
+    ? '. To prove it, run mandala ssh-key add for it where ssh-keygen can use the private key; that binds it to the API key it runs with'
     : '. To prove it, remove it and add it again from the dashboard');
 
 // --- commands -------------------------------------------------------------
@@ -1102,9 +1102,7 @@ export const unsignedConflictMessage = (reason: string) =>
 /**
  * Register `src.line` unless the caller already has it. A duplicate-key
  * conflict is a race with another `add` when a second listing shows the key is
- * now the caller's, and somebody else's key otherwise. A key the caller holds
- * unproven is added again with a signature when one can be made, which makes
- * it proven; when none can, the registration it has stands.
+ * now the caller's, and somebody else's key otherwise.
  */
 async function ensureKey(
   client: Client,
@@ -1118,29 +1116,10 @@ async function ensureKey(
   const mine = async () =>
     (await client.sshKeys.list({ signal })).find((k) => k.fingerprint === print);
   const existing = await mine();
-  if (existing) {
-    // A signed add replaces the registration with one bound to this
-    // credential's account, so only a key already bound here is upgraded: one
-    // that reaches every account would lose the others, and one bound to
-    // another account would move (it is refused below instead).
-    if (existing.possession !== 'unproven' || existing.reach !== 'this_account' || src.noProof)
-      return { key: existing, added: false };
-    const proof = await prove(client, rt, env, src.file, signal);
-    if (!('signature' in proof)) return { key: existing, added: false, reason: proof.reason };
-    try {
-      const key = await client.sshKeys.add(
-        { publicKey: src.line, challenge: proof.challenge, signature: proof.signature },
-        { signal },
-      );
-      return { key, added: false };
-    } catch (error) {
-      // Another --setup proved it first: a proven key is not replaced again.
-      if (!(error instanceof ConflictError)) throw error;
-      const raced = await mine();
-      if (raced && raced.possession !== 'unproven') return { key: raced, added: false };
-      throw error;
-    }
-  }
+  // A key already held is kept as it is, proven or not: adding it again with a
+  // signature would rebind it to this credential, whose revocation then
+  // removes it, so that is left to an explicit ssh-key add.
+  if (existing) return { key: existing, added: false };
   let unsigned: string | undefined;
   try {
     const got = await registerKey(client, rt, env, src, signal, (reason) => {

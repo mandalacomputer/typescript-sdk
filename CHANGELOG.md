@@ -16,8 +16,9 @@ This is the summary you read to decide whether to upgrade.
   (the agent's key, or the private file beside the `.pub`), so the key is
   registered `proven` and connects to a computer named by its name as well as
   its id. Where ssh-keygen cannot sign, the key is registered `unproven` as
-  before and a line on stderr says why. `--setup` re-adds a key you hold
-  `unproven` with a signature. `--no-proof` on either skips the signing. A
+  before and a line on stderr says why. `--setup` leaves a key you already
+  hold as it is; `ssh-key add` proves one you hold `unproven` on this account
+  (rebinding it to that API key). `--no-proof` on either skips the signing. A
   signature the platform refuses is an error rather than a quiet unproven add.
 
 ## [0.23.0] - 2026-11-11

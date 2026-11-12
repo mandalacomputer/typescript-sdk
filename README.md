@@ -5283,8 +5283,10 @@ either way, but plain `ssh` to a computer's name is refused. `--no-proof` skips
 the signing and that line.
 
 `--setup` is safe to repeat: a key whose fingerprint is already registered is
-not uploaded again, except that one you hold `unproven` is added again with a
-signature when one can be made, which makes it `proven`. It stops instead (`ssh_key_elsewhere`, exit 1, SSH left as
+not uploaded again, proven or not. To prove a key you already hold `unproven`,
+run `mandala ssh-key add` for it: adding it again with a signature makes it
+`proven`, and binds it to the API key that command runs with, so revoking that
+key removes it. It stops instead (`ssh_key_elsewhere`, exit 1, SSH left as
 it was) when that key is bound to another of your accounts, because this
 account's computers would refuse it: remove it and add it again from the
 dashboard to use it on every account, or pass `--key` with a separate key. With

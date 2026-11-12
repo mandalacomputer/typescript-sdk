@@ -2411,7 +2411,7 @@ describe('registering a key with proof of possession', () => {
     ]);
     expect(r.rec.last().body).toEqual({ public_key: PUBLIC });
     expect(r.err).toBe(
-      `mandala: key ${SSH_KEY.fingerprint} is registered without proof that it is yours (No private key found for public key "x.pub"), so it connects to a computer named by its id only. Run mandala ssh-key add again where ssh-keygen can use the private key to prove it\n`,
+      `mandala: key ${SSH_KEY.fingerprint} is registered without proof that it is yours (No private key found for public key "x.pub"), so it connects to a computer named by its id only. To prove it, run mandala ssh-key add for it where ssh-keygen can use the private key; that binds it to the API key it runs with\n`,
     );
   });
 
@@ -2496,37 +2496,42 @@ describe('registering a key with proof of possession', () => {
     expect(r.err).toBe('');
   });
 
-  it('ssh --setup re-adds a key it holds unproven with a signature, and keeps a proven one', async () => {
+  it('ssh --setup keeps a key it already holds, proven or not, and signs nothing', async () => {
     const { home } = await keyHome();
     const route = (keys: unknown[]) => (call: Call) =>
       call.path === '/computers/vm-1/ssh'
         ? json(call.method === 'PUT' ? { ...SSH_ACCESS, enabled: true } : SSH_ACCESS)
         : proving(keys)(call);
-    const upgrade = await cli(['ssh', '--setup', 'demo', '--json'], {
-      home,
-      keygen: signs,
-      respond: route([{ ...SSH_KEY, possession: 'unproven', reach: 'this_account' }]),
-    });
-    expect(upgrade.code).toBe(0);
-    expect(writes(upgrade)).toEqual([
-      ['POST', 'ssh-keys/challenge'],
-      ['POST', 'ssh-keys'],
-      ['PUT', 'computers/vm-1/ssh'],
-    ]);
-    const data = JSON.parse(upgrade.out).data;
-    expect(data.key_added).toBe(false);
-    expect(data.key.possession).toBe('proven');
-
-    for (const possession of ['proven', 'legacy']) {
+    for (const possession of ['proven', 'legacy', 'unproven']) {
       const kept = await cli(['ssh', '--setup', 'demo'], {
         home,
         keygen: signs,
-        respond: route([{ ...SSH_KEY, possession }]),
+        respond: route([{ ...SSH_KEY, possession, reach: 'this_account' }]),
       });
       expect(kept.code).toBe(0);
       expect(kept.signed).toEqual([]);
       expect(writes(kept)).toEqual([['PUT', 'computers/vm-1/ssh']]);
+      if (possession === 'unproven')
+        expect(kept.err).toContain(
+          'To prove it, run mandala ssh-key add for it where ssh-keygen can use the private key; that binds it to the API key it runs with',
+        );
+      else expect(kept.err).toBe('');
     }
+  });
+
+  it('ssh-key add proves a key held unproven on this account', async () => {
+    const { home } = await keyHome();
+    const r = await cli(['ssh-key', 'add'], {
+      home,
+      keygen: signs,
+      respond: proving([{ ...SSH_KEY, possession: 'unproven', reach: 'this_account' }]),
+    });
+    expect(r.code).toBe(0);
+    expect(r.signed).toHaveLength(1);
+    expect(r.rec.last().body).toMatchObject({
+      challenge: CHALLENGE.challenge,
+      signature: SIGNATURE,
+    });
   });
 
   it('ssh --setup keeps an unproven key it cannot sign for, and says plain ssh by name is refused', async () => {
@@ -2541,35 +2546,8 @@ describe('registering a key with proof of possession', () => {
     expect(r.code).toBe(0);
     expect(writes(r)).toEqual([['PUT', 'computers/vm-1/ssh']]);
     expect(r.err).toContain(
-      "(no ssh-keygen command found on PATH), so it connects to a computer named by its id only; mandala ssh connects by id, but plain ssh to a computer's name is refused",
+      "so it connects to a computer named by its id only; mandala ssh connects by id, but plain ssh to a computer's name is refused",
     );
-  });
-
-  it('ssh --setup carries on when a concurrent setup proved the key first', async () => {
-    const { home } = await keyHome();
-    let listed = 0;
-    const r = await cli(['ssh', '--setup', 'demo'], {
-      home,
-      keygen: signs,
-      respond: (call) => {
-        if (call.path === '/computers/vm-1/ssh')
-          return json(call.method === 'PUT' ? { ...SSH_ACCESS, enabled: true } : SSH_ACCESS);
-        if (call.path === '/ssh-keys' && call.method === 'GET')
-          return json([
-            { ...SSH_KEY, reach: 'this_account', possession: listed++ ? 'proven' : 'unproven' },
-          ]);
-        if (call.path === '/ssh-keys' && call.method === 'POST')
-          return json({ error: 'That key is already registered.' }, { status: 409 });
-        return proving()(call);
-      },
-    });
-    expect(r.code).toBe(0);
-    expect(writes(r)).toEqual([
-      ['POST', 'ssh-keys/challenge'],
-      ['POST', 'ssh-keys'],
-      ['PUT', 'computers/vm-1/ssh'],
-    ]);
-    expect(r.err).toBe('');
   });
 
   it('never signs for a held key bound elsewhere, which a signed add would rebind', async () => {
