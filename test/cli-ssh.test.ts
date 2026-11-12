@@ -2545,6 +2545,33 @@ describe('registering a key with proof of possession', () => {
     );
   });
 
+  it('ssh --setup carries on when a concurrent setup proved the key first', async () => {
+    const { home } = await keyHome();
+    let listed = 0;
+    const r = await cli(['ssh', '--setup', 'demo'], {
+      home,
+      keygen: signs,
+      respond: (call) => {
+        if (call.path === '/computers/vm-1/ssh')
+          return json(call.method === 'PUT' ? { ...SSH_ACCESS, enabled: true } : SSH_ACCESS);
+        if (call.path === '/ssh-keys' && call.method === 'GET')
+          return json([
+            { ...SSH_KEY, reach: 'this_account', possession: listed++ ? 'proven' : 'unproven' },
+          ]);
+        if (call.path === '/ssh-keys' && call.method === 'POST')
+          return json({ error: 'That key is already registered.' }, { status: 409 });
+        return proving()(call);
+      },
+    });
+    expect(r.code).toBe(0);
+    expect(writes(r)).toEqual([
+      ['POST', 'ssh-keys/challenge'],
+      ['POST', 'ssh-keys'],
+      ['PUT', 'computers/vm-1/ssh'],
+    ]);
+    expect(r.err).toBe('');
+  });
+
   it('never signs for a held key bound elsewhere, which a signed add would rebind', async () => {
     const { home } = await keyHome();
     const route = (keys: unknown[]) => (call: Call) =>

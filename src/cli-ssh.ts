@@ -1127,11 +1127,19 @@ async function ensureKey(
       return { key: existing, added: false };
     const proof = await prove(client, rt, env, src.file, signal);
     if (!('signature' in proof)) return { key: existing, added: false, reason: proof.reason };
-    const key = await client.sshKeys.add(
-      { publicKey: src.line, challenge: proof.challenge, signature: proof.signature },
-      { signal },
-    );
-    return { key, added: false };
+    try {
+      const key = await client.sshKeys.add(
+        { publicKey: src.line, challenge: proof.challenge, signature: proof.signature },
+        { signal },
+      );
+      return { key, added: false };
+    } catch (error) {
+      // Another --setup proved it first: a proven key is not replaced again.
+      if (!(error instanceof ConflictError)) throw error;
+      const raced = await mine();
+      if (raced && raced.possession !== 'unproven') return { key: raced, added: false };
+      throw error;
+    }
   }
   let unsigned: string | undefined;
   try {
