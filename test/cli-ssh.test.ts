@@ -2323,6 +2323,30 @@ describe('SSH SDK methods', () => {
     );
     await expect(c.sshKeys.add({ publicKey: OTHER_KEY })).rejects.toBeInstanceOf(ConflictError);
   });
+
+  it('sends replaces, null included, and leaves it out when not given', async () => {
+    const { client: c, rec } = client(() => json(SSH_KEY, { status: 201 }));
+    await c.sshKeys.add({ publicKey: OTHER_KEY, replaces: null });
+    expect(rec.last().body).toEqual({ public_key: OTHER_KEY, replaces: null });
+    await c.sshKeys.add({ publicKey: OTHER_KEY, replaces: SSH_KEY.id });
+    expect(rec.last().body).toEqual({ public_key: OTHER_KEY, replaces: SSH_KEY.id });
+    await c.sshKeys.add({ publicKey: OTHER_KEY });
+    expect(rec.last().body).toEqual({ public_key: OTHER_KEY });
+    const before = rec.calls.length;
+    await expect(c.sshKeys.add({ publicKey: OTHER_KEY, replaces: ' ' })).rejects.toThrow(
+      ValidationError,
+    );
+    expect(rec.calls.length).toBe(before);
+  });
+
+  it('carries registration_changed as the conflict code', async () => {
+    const { client: c } = client(() =>
+      json({ error: 'changed', code: 'registration_changed' }, { status: 409 }),
+    );
+    await expect(c.sshKeys.add({ publicKey: OTHER_KEY, replaces: null })).rejects.toMatchObject({
+      code: 'registration_changed',
+    });
+  });
 });
 
 // --- proof of possession (OPL-6541) -------------------------------------------
@@ -2377,10 +2401,12 @@ describe('registering a key with proof of possession', () => {
         input: CHALLENGE.challenge,
       },
     ]);
+    // Signed on condition that no registration of the key landed meanwhile.
     expect(r.rec.last().body).toEqual({
       public_key: PUBLIC,
       challenge: CHALLENGE.challenge,
       signature: SIGNATURE,
+      replaces: null,
     });
     expect(r.err).toBe('');
   });
@@ -2537,10 +2563,96 @@ describe('registering a key with proof of possession', () => {
     });
     expect(r.code).toBe(0);
     expect(r.signed).toHaveLength(1);
+    // Naming the unproven registration it saw, so only that one is replaced.
     expect(r.rec.last().body).toMatchObject({
       challenge: CHALLENGE.challenge,
       signature: SIGNATURE,
+      replaces: SSH_KEY.id,
     });
+  });
+
+  it('ssh --setup signs on condition that the key is still not registered', async () => {
+    const { home } = await keyHome();
+    const r = await cli(['ssh', '--setup', 'demo'], {
+      home,
+      keygen: signs,
+      respond: (call) =>
+        call.path === '/computers/vm-1/ssh'
+          ? json(call.method === 'PUT' ? { ...SSH_ACCESS, enabled: true } : SSH_ACCESS)
+          : proving()(call),
+    });
+    expect(r.code).toBe(0);
+    const add = r.rec.calls.find((c) => c.method === 'POST' && c.path === '/ssh-keys');
+    expect(add?.body).toMatchObject({ signature: SIGNATURE, replaces: null });
+  });
+
+  it('a registration_changed refusal re-lists, says what the key is now, and retries nothing', async () => {
+    const { home } = await keyHome();
+    let posted = false;
+    const meanwhile = {
+      ...SSH_KEY,
+      id: 'sshk-0000000000000099',
+      possession: 'unproven',
+      reach: 'another_account',
+    };
+    const respond = (call: Call) => {
+      if (call.path === '/computers/vm-1/ssh')
+        return json(call.method === 'PUT' ? { ...SSH_ACCESS, enabled: true } : SSH_ACCESS);
+      if (call.path === '/ssh-keys' && call.method === 'GET')
+        return json(posted ? [meanwhile] : []);
+      if (call.path === '/ssh-keys' && call.method === 'POST') {
+        posted = true;
+        return json(
+          { error: 'Your registration of this key changed.', code: 'registration_changed' },
+          { status: 409 },
+        );
+      }
+      return proving()(call);
+    };
+    const add = await cli(['ssh-key', 'add'], { home, keygen: signs, respond });
+    expect(add.code).toBe(1);
+    expect(writes(add)).toEqual([
+      ['POST', 'ssh-keys/challenge'],
+      ['POST', 'ssh-keys'],
+    ]);
+    expect(add.rec.routes().at(-1)).toEqual(['GET', 'ssh-keys']);
+    expect(add.err).toContain(
+      'registered or removed elsewhere while it was being signed, so nothing was replaced',
+    );
+    expect(add.err).toContain(
+      `it is now ${meanwhile.id} (unproven, reach another account (refused here))`,
+    );
+
+    // --setup keeps the key it now finds, and stops as for any key bound elsewhere.
+    posted = false;
+    const setup = await cli(['ssh', '--setup', 'demo'], { home, keygen: signs, respond });
+    expect(setup.code).toBe(1);
+    expect(writes(setup)).toEqual([
+      ['POST', 'ssh-keys/challenge'],
+      ['POST', 'ssh-keys'],
+    ]);
+    expect(setup.err).toContain('is registered for another of your accounts');
+
+    // One this account accepts is used as a key held from the start would be:
+    // nothing was replaced, and SSH is switched on with it.
+    for (const reach of ['this_account', 'everywhere']) {
+      posted = false;
+      Object.assign(meanwhile, { reach, possession: 'proven' });
+      const used = await cli(['ssh', '--setup', 'demo'], { home, keygen: signs, respond });
+      expect(used.code).toBe(0);
+      expect(writes(used)).toEqual([
+        ['POST', 'ssh-keys/challenge'],
+        ['POST', 'ssh-keys'],
+        ['PUT', 'computers/vm-1/ssh'],
+      ]);
+    }
+
+    // Gone again by the time it looks: says so, and the conflict is the error.
+    const gone = (call: Call) =>
+      call.path === '/ssh-keys' && call.method === 'GET' ? json([]) : respond(call);
+    const lost = await cli(['ssh-key', 'add'], { home, keygen: signs, respond: gone });
+    expect(lost.code).toBe(1);
+    expect(lost.err).toContain('you hold no registration of it now');
   });
 
   it('ssh --setup keeps an unproven key it cannot sign for, and says plain ssh by name is refused', async () => {

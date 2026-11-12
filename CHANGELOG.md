@@ -9,6 +9,14 @@ This is the summary you read to decide whether to upgrade.
 
 ## [Unreleased]
 
+### Added
+
+- `sshKeys.add()` takes `replaces`: the id of your registration of the key
+  that the add may replace, or `null` when you hold none. If yours has changed
+  by the time the add runs, it is a `ConflictError` with `code`
+  `registration_changed` and nothing is replaced. Left out, the add is
+  unconditional, as before.
+
 ### Changed
 
 - `mandala ssh-key add` and `mandala ssh --setup` now prove the key is yours:
@@ -23,7 +31,14 @@ This is the summary you read to decide whether to upgrade.
   The CLI signs only in the `ssh-key-registration@mandala.computer` namespace
   and only a challenge shaped `sshkc-` plus 64 hex digits; anything else the
   server asks it to sign is refused (`unexpected_challenge`) and nothing is
-  registered.
+  registered. The signed add names the registration the CLI saw (`replaces`),
+  so a registration of the same key made meanwhile, say through another of
+  your accounts, is not replaced. `ssh-key add` then lists your keys again,
+  says what the key is registered as now, and exits non-zero without
+  retrying. `--setup` treats the key it now finds as one it already held: kept
+  as it is, used when this account accepts it, refused when it is bound to
+  another account. Against a platform that does not know `replaces` yet, the
+  add behaves as before.
 
 ## [0.23.0] - 2026-11-11
 

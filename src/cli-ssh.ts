@@ -1093,6 +1093,26 @@ export type KeySource = {
   name?: string;
 };
 
+/** What {@link registerKey}'s `recheck` found once the challenge was signed. */
+export type Recheck = { keep: SshKey } | { unsigned: true } | { replaces: string | null };
+
+/** A signed add the platform refused because the key's registration changed under it. */
+export const registrationChanged = (error: unknown): error is ConflictError =>
+  error instanceof ConflictError && error.code === 'registration_changed';
+
+/**
+ * What the CLI says when a signed add was refused because the key's
+ * registration changed while it was being signed: nothing was replaced, and
+ * `now` is the caller's registration of it after (undefined: none).
+ */
+export const registrationChangedMessage = (now: SshKey | undefined) =>
+  'mandala: this key was registered or removed elsewhere while it was being signed, so nothing ' +
+  'was replaced; ' +
+  (now
+    ? `it is now ${now.id} (${now.possession ?? 'possession unknown'}, reach ${reachLabel(now.reach)}). `
+    : 'you hold no registration of it now. ') +
+  'Check "mandala ssh-key list" and run the command again';
+
 /**
  * Register `src` with proof of possession when ssh-keygen can sign for it,
  * and from the public line alone otherwise. `reason` says why a key went
@@ -1109,17 +1129,22 @@ export async function registerKey(
   /**
    * Asked once the challenge is signed, which can take a passphrase prompt's
    * time: a signed add replaces whatever registration the key has by then, so
-   * this looks again. A key returned is kept as it is; `'unsigned'` sends the
-   * add without the signature, so a key held elsewhere stays a conflict.
+   * this looks again. `keep` is a key kept as it is; `unsigned` sends the add
+   * without the signature, so a key held elsewhere stays a conflict;
+   * `replaces` signs, naming the registration of yours that was seen (or
+   * `null` for none), so the platform refuses the add with a
+   * `registration_changed` conflict if another lands before it runs.
    */
-  recheck?: () => Promise<SshKey | 'unsigned' | undefined>,
+  recheck?: () => Promise<Recheck>,
 ): Promise<{ key: SshKey; reason?: string }> {
   let proof: Proof = src.noProof ? { reason: '' } : await prove(client, rt, env, src.file, signal);
+  let replaces: string | null | undefined;
   if ('signature' in proof && recheck) {
     const now = await recheck();
     signal?.throwIfAborted();
-    if (now === 'unsigned') proof = { reason: '' };
-    else if (now) return { key: now };
+    if ('keep' in now) return { key: now.keep };
+    if ('unsigned' in now) proof = { reason: '' };
+    else replaces = now.replaces;
   }
   if ('signature' in proof) {
     const key = await client.sshKeys.add(
@@ -1128,6 +1153,7 @@ export async function registerKey(
         name: src.name,
         challenge: proof.challenge,
         signature: proof.signature,
+        replaces,
       },
       { signal },
     );
@@ -1183,14 +1209,24 @@ async function ensureKey(
       (reason) => {
         unsigned = reason;
       },
-      mine,
+      // Held by now: kept as it is. Not held: signed on condition that it
+      // still is not, so a registration made meanwhile is never replaced.
+      async () => {
+        const now = await mine();
+        return now ? { keep: now } : { replaces: null };
+      },
     );
     return { ...got, added: true };
   } catch (error) {
     if (!(error instanceof ConflictError)) throw error;
     const raced = await mine();
+    // A key of the caller's found now, whichever conflict it was (a
+    // registration_changed one included: nothing was replaced), is taken as
+    // one held from the start would have been: kept as it is, used when this
+    // account accepts it, and refused by the caller when bound elsewhere.
     if (raced) return { key: raced, added: false };
-    if (unsigned !== undefined) diagnostic(unsignedConflictMessage(unsigned));
+    if (registrationChanged(error)) diagnostic(registrationChangedMessage(undefined));
+    else if (unsigned !== undefined) diagnostic(unsignedConflictMessage(unsigned));
     throw error;
   }
 }
@@ -1353,25 +1389,43 @@ export async function sshKeyAdd(
   // bound to this account: one reaching every account would lose the others,
   // and one bound to another account would move.
   const print = fingerprint(line);
-  const replaceable = async (): Promise<'unsigned' | undefined> => {
-    const held = (await client.sshKeys.list({ signal })).find((k) => k.fingerprint === print);
-    return held && !(held.possession === 'unproven' && held.reach === 'this_account')
-      ? 'unsigned'
-      : undefined;
+  const held = async () =>
+    (await client.sshKeys.list({ signal })).find((k) => k.fingerprint === print);
+  // The signed add names the registration it may replace (the unproven one
+  // seen here, or none), so one that changes before it runs is refused rather
+  // than replaced.
+  const replaceable = async (): Promise<Recheck> => {
+    const now = await held();
+    if (!now) return { replaces: null };
+    return now.possession === 'unproven' && now.reach === 'this_account'
+      ? { replaces: now.id }
+      : { unsigned: true };
   };
   let skipProof = noProof;
   // Without ssh-keygen nothing is signed, so there is nothing to look up.
   if (!noProof && rt.keygen?.(io.env) && rt.capture)
-    skipProof = (await replaceable()) === 'unsigned';
-  const { key, reason } = await registerKey(
-    client,
-    rt,
-    io.env,
-    { line, file, name, noProof: skipProof },
-    signal,
-    (why) => output.diagnostic(unsignedConflictMessage(why), { keepNewlines: false }),
-    replaceable,
-  );
+    skipProof = 'unsigned' in (await replaceable());
+  let registered: Awaited<ReturnType<typeof registerKey>>;
+  try {
+    registered = await registerKey(
+      client,
+      rt,
+      io.env,
+      { line, file, name, noProof: skipProof },
+      signal,
+      (why) => output.diagnostic(unsignedConflictMessage(why), { keepNewlines: false }),
+      replaceable,
+    );
+  } catch (error) {
+    // Re-listed so the message says what the key is registered as now;
+    // nothing is retried: whatever changed it may have meant to.
+    if (registrationChanged(error))
+      output.diagnostic(registrationChangedMessage(await held().catch(() => undefined)), {
+        keepNewlines: false,
+      });
+    throw error;
+  }
+  const { key, reason } = registered;
   if (output.json) output.result(key.raw);
   else io.stdout.write(`${terminalSafe(`added ${key.id}  ${key.fingerprint}  ${key.name}`)}\n`);
   if (key.possession === 'unproven' && !noProof)

@@ -3584,6 +3584,17 @@ export type SshKeyAddArgs = {
    * with this key in the challenge's `namespace`.
    */
   signature?: string;
+  /**
+   * Makes the add conditional on the registration you last saw: the
+   * {@link SshKey.id} of your registration of this key that the add may
+   * replace, or `null` when you hold none. If yours is anything else by the
+   * time the add runs (registered meanwhile, say through another of your
+   * accounts, or removed), the add is a `ConflictError` whose `code` is
+   * `registration_changed` and nothing changes; the challenge stays usable.
+   * Left out, the add does not check. Mainly for a signed add, which replaces
+   * an unproven registration.
+   */
+  replaces?: string | null;
 };
 
 /**
@@ -3620,11 +3631,20 @@ export function sshKeyBody(args: SshKeyAddArgs): Json {
   if (args.signature !== undefined && !requireString(args.signature, 'signature').trim()) {
     throw new ValidationError('signature must not be empty');
   }
+  if (
+    args.replaces !== undefined &&
+    args.replaces !== null &&
+    !requireString(args.replaces, 'replaces').trim()
+  ) {
+    throw new ValidationError('replaces must be an SSH key id, or null');
+  }
   return omitUndefined({
     public_key: key,
     name: args.name,
     challenge: args.challenge,
     signature: args.signature,
+    // null is sent: it means "I hold no registration of this key".
+    replaces: args.replaces,
   });
 }
 

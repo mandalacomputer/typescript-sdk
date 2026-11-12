@@ -653,6 +653,7 @@ async function exerciseEverything(client: Client): Promise<void> {
     publicKey: 'ssh-ed25519 AAAAC3Nz laptop',
     challenge: `sshkc-${'a'.repeat(64)}`,
     signature: '-----BEGIN SSH SIGNATURE-----\nU1NIU0lH\n-----END SSH SIGNATURE-----',
+    replaces: null,
   });
   await client.sshKeys.remove('sshk-1');
   const browserConnection = await c.createBrowserConnection({
