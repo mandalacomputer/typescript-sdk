@@ -1282,6 +1282,13 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
           undefined,
           2,
         );
+      if (f['no-proof'] !== undefined)
+        throw new CliError(
+          'invalid_arguments',
+          '--no-proof goes with --setup, which is where a key is registered',
+          undefined,
+          2,
+        );
       // The lookups are cancellable; once ssh runs, Ctrl-C is ssh's.
       process.on('SIGINT', cancel);
       process.on('SIGTERM', cancel);
@@ -2543,11 +2550,29 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
         await (await computer()).deleteArtifact(args[1]!, call);
         return output.result({ artifact_id: args[1], deleted: true });
       case 'ssh':
-        return await sshSetup(client, io, output, ssh, target, s('key'), signal);
+        return await sshSetup(
+          client,
+          io,
+          output,
+          ssh,
+          target,
+          s('key'),
+          signal,
+          b('no-proof') === true,
+        );
       case 'ssh-key list':
         return await sshKeyList(client, io, output);
       case 'ssh-key add':
-        return await sshKeyAdd(client, io, output, ssh, args[0], s('name'));
+        return await sshKeyAdd(
+          client,
+          io,
+          output,
+          ssh,
+          args[0],
+          s('name'),
+          b('no-proof') === true,
+          signal,
+        );
       case 'ssh-key rm':
         return await sshKeyRemove(client, io, output, target);
       case 'ssh-access':

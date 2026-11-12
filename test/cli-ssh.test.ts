@@ -9,8 +9,10 @@ import { main } from '../src/cli.js';
 import { CliError, parseArgs } from '../src/cli-options.js';
 import type { CliIO } from '../src/cli-runtime.js';
 import {
+  type Captured,
   configSnippet,
   configValue,
+  defaultSshRuntime,
   ensureKnownHosts,
   fingerprint,
   GATEWAY_KEY,
@@ -25,8 +27,10 @@ import {
   proxyCommand,
   readPublicKey,
   readsAsIPv4,
+  registerKey,
   type SshRuntime,
   shellWord,
+  signChallenge,
   sshArgv,
   writeConfig,
   writtenHosts,
@@ -616,6 +620,8 @@ async function cli(
     ssh?: string | null;
     exit?: number;
     env?: NodeJS.ProcessEnv;
+    /** ssh-keygen and what it answers (its signature as stdout); absent, there is no ssh-keygen. */
+    keygen?: (argv: string[], input: string) => FakeSigned | Promise<FakeSigned>;
   } = {},
 ) {
   const home = opts.home ?? (await tempDir());
@@ -625,6 +631,7 @@ async function cli(
       : (opts.respond ?? anyRoute)(call),
   );
   const ran: string[][] = [];
+  const signed: { argv: string[]; input: string }[] = [];
   let out = '';
   let err = '';
   let clients = 0;
@@ -636,6 +643,22 @@ async function cli(
       ran.push(argv);
       return opts.exit ?? 0;
     },
+    ...(opts.keygen
+      ? {
+          keygen: () => '/usr/bin/ssh-keygen',
+          // Like ssh-keygen with a file: the challenge is read from the last
+          // argument and the signature written beside it.
+          capture: async (argv: string[]) => {
+            const file = argv.at(-1)!;
+            const input = fs.readFileSync(file, 'utf8');
+            const call = { argv: argv.slice(0, -1), input };
+            signed.push(call);
+            const got = await opts.keygen!(call.argv, input);
+            if (got.stdout) fs.writeFileSync(`${file}.sig`, got.stdout);
+            return { status: got.status, stderr: got.stderr };
+          },
+        }
+      : {}),
   };
   const io: Partial<CliIO> = {
     env: { MANDALA_API_KEY: 'com_cli_test', ...opts.env },
@@ -660,7 +683,7 @@ async function cli(
     ssh: runtime,
   };
   const code = await main(args, io);
-  return { code, out, err, ran, rec, home, clients };
+  return { code, out, err, ran, rec, home, clients, signed };
 }
 
 /** anyRoute, with the SSH answers replaced. */
@@ -963,7 +986,8 @@ describe('mandala ssh --setup', () => {
     expect(r.code).toBe(1);
     expect(r.out).toBe('');
     expect(r.err).toBe(
-      'mandala: That key is already registered. A key can belong to one person only. (HTTP 409)\n',
+      'mandala: a key registered without proof is replaced by adding it again with a signature, but this one could not be signed (no ssh-keygen command found on PATH)\n' +
+        'mandala: That key is already registered. A key can belong to one person only. (HTTP 409)\n',
     );
     expect(writes(r)).toEqual([['POST', 'ssh-keys']]);
   });
@@ -2299,4 +2323,448 @@ describe('SSH SDK methods', () => {
     );
     await expect(c.sshKeys.add({ publicKey: OTHER_KEY })).rejects.toBeInstanceOf(ConflictError);
   });
+});
+
+// --- proof of possession (OPL-6541) -------------------------------------------
+
+const SIGNATURE = '-----BEGIN SSH SIGNATURE-----\nU1NIU0lH\n-----END SSH SIGNATURE-----\n';
+const CHALLENGE = {
+  challenge: `sshkc-${'a'.repeat(64)}`,
+  namespace: 'ssh-key-registration@mandala.computer',
+  expires_at: '2026-09-16T00:10:00Z',
+  sign_command: 'printf ...',
+};
+type FakeSigned = Captured & { stdout: string };
+const signs = (): FakeSigned => ({
+  status: 0,
+  stdout: SIGNATURE,
+  stderr: 'Signing data on standard input\n',
+});
+
+/** anyRoute with a challenge to hand out and a key listing. */
+const proving =
+  (keys: unknown[] = [], added: Record<string, unknown> = { ...SSH_KEY, possession: 'proven' }) =>
+  (call: Call): Response | Promise<Response> => {
+    if (call.path === '/ssh-keys/challenge') return json(CHALLENGE, { status: 201 });
+    if (call.path === '/ssh-keys' && call.method === 'GET') return json(keys);
+    if (call.path === '/ssh-keys' && call.method === 'POST') return json(added, { status: 201 });
+    return anyRoute(call);
+  };
+
+async function keyHome(): Promise<{ home: string; pub: string; priv: string }> {
+  const home = await tempDir();
+  fs.mkdirSync(join(home, '.ssh'));
+  const pub = join(home, '.ssh', 'id_ed25519.pub');
+  const priv = join(home, '.ssh', 'id_ed25519');
+  fs.writeFileSync(pub, `${PUBLIC}\n`);
+  return { home, pub, priv };
+}
+
+describe('registering a key with proof of possession', () => {
+  it('ssh-key add signs a fresh challenge with the .pub file and sends both', async () => {
+    const { home, pub } = await keyHome();
+    const r = await cli(['ssh-key', 'add'], { home, respond: proving(), keygen: signs });
+    expect(r.code).toBe(0);
+    expect(r.rec.routes()).toEqual([
+      ['GET', 'ssh-keys'],
+      ['POST', 'ssh-keys/challenge'],
+      ['GET', 'ssh-keys'],
+      ['POST', 'ssh-keys'],
+    ]);
+    expect(r.signed).toEqual([
+      {
+        argv: ['/usr/bin/ssh-keygen', '-Y', 'sign', '-n', CHALLENGE.namespace, '-f', pub],
+        input: CHALLENGE.challenge,
+      },
+    ]);
+    expect(r.rec.last().body).toEqual({
+      public_key: PUBLIC,
+      challenge: CHALLENGE.challenge,
+      signature: SIGNATURE,
+    });
+    expect(r.err).toBe('');
+  });
+
+  it('asks again with the private file beside the .pub when the first try fails', async () => {
+    const { home, pub, priv } = await keyHome();
+    fs.writeFileSync(priv, 'private');
+    const r = await cli(['ssh-key', 'add'], {
+      home,
+      respond: proving(),
+      keygen: (argv) =>
+        argv.at(-1) === pub
+          ? { status: 255, stdout: '', stderr: "Couldn't sign with that key\n" }
+          : signs(),
+    });
+    expect(r.code).toBe(0);
+    expect(r.signed.map((c) => c.argv.at(-1))).toEqual([pub, priv]);
+    expect(r.rec.last().body).toMatchObject({ signature: SIGNATURE });
+  });
+
+  it('falls back to an unproven add, and says why, when ssh-keygen cannot sign', async () => {
+    const { home } = await keyHome();
+    const r = await cli(['ssh-key', 'add'], {
+      home,
+      respond: proving([], { ...SSH_KEY, possession: 'unproven', reach: 'this_account' }),
+      keygen: () => ({
+        status: 255,
+        stdout: '',
+        stderr: 'Signing data on standard input\nNo private key found for public key "x.pub"\n',
+      }),
+    });
+    expect(r.code).toBe(0);
+    expect(r.rec.routes()).toEqual([
+      ['GET', 'ssh-keys'],
+      ['POST', 'ssh-keys/challenge'],
+      ['POST', 'ssh-keys'],
+    ]);
+    expect(r.rec.last().body).toEqual({ public_key: PUBLIC });
+    expect(r.err).toBe(
+      `mandala: key ${SSH_KEY.fingerprint} is registered without proof that it is yours (No private key found for public key "x.pub"), so it connects to a computer named by its id only. To prove it, run mandala ssh-key add for it where ssh-keygen can use the private key; that binds it to the API key it runs with\n`,
+    );
+  });
+
+  it('spends no challenge without ssh-keygen, and takes a stdout that is not a signature as a failure', async () => {
+    const { home } = await keyHome();
+    const none = await cli(['ssh-key', 'add'], {
+      home,
+      respond: proving([], { ...SSH_KEY, possession: 'unproven' }),
+    });
+    expect(none.rec.routes()).toEqual([['POST', 'ssh-keys']]);
+    expect(none.err).toContain('(no ssh-keygen command found on PATH)');
+    const odd = await cli(['ssh-key', 'add'], {
+      home,
+      respond: proving(),
+      keygen: () => ({ status: 0, stdout: 'hello\n', stderr: '' }),
+    });
+    expect(odd.rec.last().body).toEqual({ public_key: PUBLIC });
+  });
+
+  it('adds as before on a platform that issues no challenges', async () => {
+    const { home } = await keyHome();
+    const r = await cli(['ssh-key', 'add'], {
+      home,
+      keygen: signs,
+      respond: (call) =>
+        call.path === '/ssh-keys/challenge'
+          ? json({ error: 'not found' }, { status: 404 })
+          : anyRoute(call),
+    });
+    expect(r.code).toBe(0);
+    expect(r.signed).toEqual([]);
+    expect(r.rec.last().body).toEqual({ public_key: PUBLIC });
+  });
+
+  it('a refused signature is an error, not a quiet unproven add', async () => {
+    const { home } = await keyHome();
+    const r = await cli(['ssh-key', 'add'], {
+      home,
+      keygen: signs,
+      respond: (call) =>
+        call.path === '/ssh-keys' && call.method === 'POST'
+          ? json({ error: 'The signature does not verify.' }, { status: 400 })
+          : proving()(call),
+    });
+    expect(r.code).not.toBe(0);
+    expect(writes(r)).toEqual([
+      ['POST', 'ssh-keys/challenge'],
+      ['POST', 'ssh-keys'],
+    ]);
+    expect(r.err).toContain('The signature does not verify.');
+  });
+
+  it('--no-proof runs no ssh-keygen, asks for no challenge, and prints no warning', async () => {
+    const { home } = await keyHome();
+    const r = await cli(['ssh-key', 'add', '--no-proof'], {
+      home,
+      keygen: signs,
+      respond: proving([], { ...SSH_KEY, possession: 'unproven' }),
+    });
+    expect(r.code).toBe(0);
+    expect(r.signed).toEqual([]);
+    expect(r.rec.routes()).toEqual([['POST', 'ssh-keys']]);
+    expect(r.err).toBe('');
+  });
+
+  it('ssh --setup proves a new key, and switches SSH on', async () => {
+    const { home } = await keyHome();
+    const r = await cli(['ssh', '--setup', 'demo'], {
+      home,
+      keygen: signs,
+      respond: (call) =>
+        call.path === '/computers/vm-1/ssh'
+          ? json(call.method === 'PUT' ? { ...SSH_ACCESS, enabled: true } : SSH_ACCESS)
+          : proving()(call),
+    });
+    expect(r.code).toBe(0);
+    expect(writes(r)).toEqual([
+      ['POST', 'ssh-keys/challenge'],
+      ['POST', 'ssh-keys'],
+      ['PUT', 'computers/vm-1/ssh'],
+    ]);
+    expect(r.err).toBe('');
+  });
+
+  it('ssh --setup keeps a key it already holds, proven or not, and signs nothing', async () => {
+    const { home } = await keyHome();
+    const route = (keys: unknown[]) => (call: Call) =>
+      call.path === '/computers/vm-1/ssh'
+        ? json(call.method === 'PUT' ? { ...SSH_ACCESS, enabled: true } : SSH_ACCESS)
+        : proving(keys)(call);
+    for (const possession of ['proven', 'legacy', 'unproven']) {
+      const kept = await cli(['ssh', '--setup', 'demo'], {
+        home,
+        keygen: signs,
+        respond: route([{ ...SSH_KEY, possession, reach: 'this_account' }]),
+      });
+      expect(kept.code).toBe(0);
+      expect(kept.signed).toEqual([]);
+      expect(writes(kept)).toEqual([['PUT', 'computers/vm-1/ssh']]);
+      if (possession === 'unproven')
+        expect(kept.err).toContain(
+          'To prove it, run mandala ssh-key add for it where ssh-keygen can use the private key; that binds it to the API key it runs with',
+        );
+      else expect(kept.err).toBe('');
+    }
+  });
+
+  it('ssh-key add proves a key held unproven on this account', async () => {
+    const { home } = await keyHome();
+    const r = await cli(['ssh-key', 'add'], {
+      home,
+      keygen: signs,
+      respond: proving([{ ...SSH_KEY, possession: 'unproven', reach: 'this_account' }]),
+    });
+    expect(r.code).toBe(0);
+    expect(r.signed).toHaveLength(1);
+    expect(r.rec.last().body).toMatchObject({
+      challenge: CHALLENGE.challenge,
+      signature: SIGNATURE,
+    });
+  });
+
+  it('ssh --setup keeps an unproven key it cannot sign for, and says plain ssh by name is refused', async () => {
+    const { home } = await keyHome();
+    const r = await cli(['ssh', '--setup', 'demo'], {
+      home,
+      respond: (call) =>
+        call.path === '/computers/vm-1/ssh'
+          ? json(call.method === 'PUT' ? { ...SSH_ACCESS, enabled: true } : SSH_ACCESS)
+          : proving([{ ...SSH_KEY, possession: 'unproven', reach: 'this_account' }])(call),
+    });
+    expect(r.code).toBe(0);
+    expect(writes(r)).toEqual([['PUT', 'computers/vm-1/ssh']]);
+    expect(r.err).toContain(
+      "so it connects to a computer named by its id only; mandala ssh connects by id, but plain ssh to a computer's name is refused",
+    );
+  });
+
+  it('looks again after signing, and keeps a key registered meanwhile', async () => {
+    const { home } = await keyHome();
+    let signedYet = false;
+    const meanwhile = { ...SSH_KEY, possession: 'unproven', reach: 'another_account' };
+    const respond = (call: Call) => {
+      if (call.path === '/computers/vm-1/ssh')
+        return json(call.method === 'PUT' ? { ...SSH_ACCESS, enabled: true } : SSH_ACCESS);
+      if (call.path === '/ssh-keys' && call.method === 'GET')
+        return json(signedYet ? [meanwhile] : []);
+      if (call.path === '/ssh-keys' && call.method === 'POST')
+        return json({ error: 'That key is already registered.' }, { status: 409 });
+      return proving()(call);
+    };
+    const keygen = () => {
+      signedYet = true;
+      return signs();
+    };
+    const setup = await cli(['ssh', '--setup', 'demo'], { home, keygen, respond });
+    // Kept, not replaced: and since it is bound elsewhere, refused as before.
+    expect(setup.code).toBe(1);
+    expect(writes(setup)).toEqual([['POST', 'ssh-keys/challenge']]);
+    expect(setup.err).toContain('is registered for another of your accounts');
+
+    signedYet = false;
+    const add = await cli(['ssh-key', 'add'], { home, keygen, respond });
+    expect(add.code).toBe(1);
+    expect(writes(add)).toEqual([
+      ['POST', 'ssh-keys/challenge'],
+      ['POST', 'ssh-keys'],
+    ]);
+    expect(add.rec.last().body).toEqual({ public_key: PUBLIC });
+  });
+
+  it('signs nothing outside the registration namespace and challenge shape', async () => {
+    const { home } = await keyHome();
+    for (const issued of [
+      { ...CHALLENGE, namespace: 'git' },
+      { ...CHALLENGE, challenge: 'tree 4b825dc642cb6eb9a060e54bf8d69288fbee4904\n' },
+      { ...CHALLENGE, challenge: `sshkc-${'A'.repeat(64)}` },
+    ]) {
+      const r = await cli(['ssh-key', 'add'], {
+        home,
+        keygen: signs,
+        respond: (call) =>
+          call.path === '/ssh-keys/challenge' ? json(issued, { status: 201 }) : proving()(call),
+      });
+      expect(r.code).toBe(1);
+      expect(r.signed).toEqual([]);
+      expect(writes(r)).toEqual([['POST', 'ssh-keys/challenge']]);
+      expect(r.err).toContain('refusing to sign');
+    }
+  });
+
+  it('never signs for a held key bound elsewhere, which a signed add would rebind', async () => {
+    const { home } = await keyHome();
+    const route = (keys: unknown[]) => (call: Call) =>
+      call.path === '/computers/vm-1/ssh'
+        ? json(call.method === 'PUT' ? { ...SSH_ACCESS, enabled: true } : SSH_ACCESS)
+        : proving(keys)(call);
+    const everywhere = { ...SSH_KEY, possession: 'unproven', reach: 'everywhere' };
+    const kept = await cli(['ssh', '--setup', 'demo'], {
+      home,
+      keygen: signs,
+      respond: route([everywhere]),
+    });
+    expect(kept.code).toBe(0);
+    expect(kept.signed).toEqual([]);
+    expect(writes(kept)).toEqual([['PUT', 'computers/vm-1/ssh']]);
+    expect(kept.err).toContain('To prove it, remove it and add it again from the dashboard');
+
+    const elsewhere = { ...SSH_KEY, possession: 'unproven', reach: 'another_account' };
+    const refused = await cli(['ssh', '--setup', 'demo'], {
+      home,
+      keygen: signs,
+      respond: route([elsewhere]),
+    });
+    expect(refused.code).toBe(1);
+    expect(refused.signed).toEqual([]);
+    expect(writes(refused)).toEqual([]);
+
+    for (const held of [everywhere, elsewhere, { ...SSH_KEY, possession: 'proven' }]) {
+      const add = await cli(['ssh-key', 'add'], {
+        home,
+        keygen: signs,
+        respond: (call) =>
+          call.path === '/ssh-keys' && call.method === 'POST'
+            ? json({ error: 'That key is already registered.' }, { status: 409 })
+            : proving([held])(call),
+      });
+      expect(add.code).toBe(1);
+      expect(add.signed).toEqual([]);
+      expect(writes(add)).toEqual([['POST', 'ssh-keys']]);
+      expect(add.rec.last().body).toEqual({ public_key: PUBLIC });
+      expect(add.err).not.toContain('could not be signed');
+    }
+  });
+
+  it('a cancelled signing ends there: no retry, no unsigned add', async () => {
+    const { home, pub, priv } = await keyHome();
+    fs.writeFileSync(priv, 'private');
+    const ctl = new AbortController();
+    const calls: string[] = [];
+    const rt: SshRuntime = {
+      home: () => home,
+      windows: false,
+      which: () => '/usr/bin/ssh',
+      run: async () => 0,
+      keygen: () => '/usr/bin/ssh-keygen',
+      capture: async (argv) => {
+        calls.push(argv.at(-2)!);
+        ctl.abort(new Error('cancelled'));
+        return { status: 130, stderr: '' };
+      },
+    };
+    await expect(signChallenge(rt, {}, pub, 'ns', 'c', ctl.signal)).rejects.toThrow('cancelled');
+    expect(calls).toEqual([pub]);
+
+    const rec = recorder(proving());
+    const client = new Client({ apiKey: 'com_cli_test', baseUrl: BASE, fetch: rec.fetch });
+    const again = new AbortController();
+    rt.capture = async () => {
+      again.abort(new Error('cancelled'));
+      return { status: 130, stderr: '' };
+    };
+    await expect(
+      registerKey(client, rt, {}, { line: PUBLIC, file: pub, noProof: false }, again.signal),
+    ).rejects.toThrow('cancelled');
+    expect(rec.routes()).toEqual([['POST', 'ssh-keys/challenge']]);
+  });
+
+  it('the real capture shows a prompt as it comes, and keeps routine lines back', async () => {
+    const shown: string[] = [];
+    const write = process.stderr.write;
+    process.stderr.write = ((chunk: unknown) => {
+      shown.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      const running = defaultSshRuntime.capture!([
+        '/bin/sh',
+        '-c',
+        'echo "Signing file /tmp/x" >&2; echo "Confirm user presence for key ED25519-SK" >&2; sleep 1; echo "Write signature to /tmp/x.sig" >&2',
+      ]);
+      await new Promise((r) => setTimeout(r, 500));
+      // Before ssh-keygen is done: the prompt the person has to act on.
+      expect(shown).toEqual(['Confirm user presence for key ED25519-SK\n']);
+      const got = await running;
+      expect(shown).toEqual(['Confirm user presence for key ED25519-SK\n']);
+      expect(got.stderr).toContain('Write signature to');
+    } finally {
+      process.stderr.write = write;
+    }
+  });
+
+  it('the real capture ends ssh-keygen when cancelled', async () => {
+    const ctl = new AbortController();
+    const sleeping = defaultSshRuntime.capture!(['/bin/sh', '-c', 'sleep 30'], ctl.signal);
+    setTimeout(() => ctl.abort(new Error('cancelled')), 50);
+    await expect(sleeping).rejects.toThrow('cancelled');
+  });
+
+  it('--no-proof goes with --setup only', async () => {
+    const r = await cli(['ssh', '--no-proof', 'demo']);
+    expect(r.code).toBe(2);
+    expect(r.err).toContain('--no-proof goes with --setup');
+  });
+});
+
+describe('signChallenge with the real ssh-keygen', () => {
+  const keygen = defaultSshRuntime.keygen?.(process.env);
+  it.skipIf(!keygen)(
+    'signs exactly the challenge, verifiable with ssh-keygen -Y check-novalidate',
+    async () => {
+      const dir = await tempDir();
+      const key = join(dir, 'k');
+      expect(
+        spawnSync(keygen!, ['-q', '-t', 'ed25519', '-N', '', '-C', 'test', '-f', key]).status,
+      ).toBe(0);
+      const env = { ...process.env, SSH_AUTH_SOCK: '' };
+      const got = await signChallenge(
+        defaultSshRuntime,
+        env,
+        `${key}.pub`,
+        'ns@example.test',
+        'sshkc-abc',
+      );
+      expect('signature' in got).toBe(true);
+      const sig = join(dir, 'sig');
+      fs.writeFileSync(sig, (got as { signature: string }).signature);
+      const check = spawnSync(
+        keygen!,
+        ['-Y', 'check-novalidate', '-n', 'ns@example.test', '-s', sig],
+        {
+          input: 'sshkc-abc',
+          encoding: 'utf8',
+        },
+      );
+      expect(check.status).toBe(0);
+      const missing = await signChallenge(
+        defaultSshRuntime,
+        env,
+        join(dir, 'absent.pub'),
+        'ns@example.test',
+        'x',
+      );
+      expect('reason' in missing && missing.reason.length > 0).toBe(true);
+    },
+  );
 });

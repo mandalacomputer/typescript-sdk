@@ -61,26 +61,75 @@ export type SshRuntime = {
   which: (env: NodeJS.ProcessEnv) => string | undefined;
   /** Run `argv` on this terminal and return its exit status. */
   run: (argv: string[]) => Promise<number>;
+  /**
+   * The absolute path of `ssh-keygen` on PATH, or undefined. Without it (or
+   * without {@link capture}) a key is registered without proof of possession.
+   */
+  keygen?: (env: NodeJS.ProcessEnv) => string | undefined;
+  /**
+   * Run `argv` and collect its exit status and what it prints on stderr. Its
+   * standard input stays this terminal: ssh-keygen asks for a passphrase on
+   * the terminal only when its stdin is one, and otherwise runs an askpass
+   * program (when a display is set), which may not exist.
+   */
+  capture?: (argv: string[], signal?: AbortSignal) => Promise<Captured>;
   windows: boolean;
 };
+
+/** What {@link SshRuntime.capture} collects. */
+export type Captured = { status: number; stderr: string };
+
+/** The first executable called one of `names` in a PATH directory. */
+function onPath(env: NodeJS.ProcessEnv, names: readonly string[]): string | undefined {
+  for (const dir of (env.PATH ?? '').split(path.delimiter)) {
+    if (!dir) continue;
+    for (const name of names) {
+      const candidate = path.join(dir, name);
+      try {
+        fs.accessSync(candidate, fs.constants.X_OK);
+        if (fs.statSync(candidate).isFile()) return candidate;
+      } catch {}
+    }
+  }
+  return undefined;
+}
 
 export const defaultSshRuntime: SshRuntime = {
   home: () => os.homedir(),
   windows: process.platform === 'win32',
-  which: (env) => {
-    const names = process.platform === 'win32' ? ['ssh.exe', 'ssh'] : ['ssh'];
-    for (const dir of (env.PATH ?? '').split(path.delimiter)) {
-      if (!dir) continue;
-      for (const name of names) {
-        const candidate = path.join(dir, name);
-        try {
-          fs.accessSync(candidate, fs.constants.X_OK);
-          if (fs.statSync(candidate).isFile()) return candidate;
-        } catch {}
-      }
-    }
-    return undefined;
-  },
+  which: (env) => onPath(env, process.platform === 'win32' ? ['ssh.exe', 'ssh'] : ['ssh']),
+  keygen: (env) =>
+    onPath(env, process.platform === 'win32' ? ['ssh-keygen.exe', 'ssh-keygen'] : ['ssh-keygen']),
+  capture: ([file, ...args], signal) =>
+    new Promise((resolve, reject) => {
+      if (signal?.aborted) return reject(signal.reason);
+      // A passphrase prompt goes to the terminal itself. stderr is collected,
+      // for the reason a signing failed, and shown line by line as it comes,
+      // because a hardware key's "Confirm user presence" waits on a touch the
+      // person has to be told about; only ssh-keygen's routine lines are kept
+      // back. Cancelled, the child is ended and the wait rejects.
+      const child = spawn(file!, args, { stdio: ['inherit', 'ignore', 'pipe'], signal });
+      const err: Buffer[] = [];
+      let pending = '';
+      const show = (line: string) => {
+        if (line.trim() && !ROUTINE.test(line.trim()))
+          process.stderr.write(`${terminalSafe(line.replace(/\r$/, ''))}\n`);
+      };
+      child.stderr.on('data', (b: Buffer) => {
+        err.push(b);
+        const lines = (pending + b.toString('utf8')).split('\n');
+        pending = lines.pop()!;
+        for (const line of lines) show(line);
+      });
+      child.stderr.on('end', () => show(pending));
+      child.on('error', (error) => reject(signal?.aborted ? signal.reason : error));
+      child.on('close', (code, killed) =>
+        resolve({
+          status: code ?? 128 + (killed ? (os.constants.signals[killed] ?? 0) : 0),
+          stderr: Buffer.concat(err).toString('utf8'),
+        }),
+      );
+    }),
   // Node cannot replace its own process, so ssh runs as a child on this
   // terminal and its status becomes this one's.
   run: ([file, ...args]) =>
@@ -833,6 +882,143 @@ export function fingerprint(publicKey: string): string {
   return `SHA256:${digest.replace(/=+$/, '')}`;
 }
 
+// --- proof of possession --------------------------------------------------
+
+const SIGNATURE_BEGIN = '-----BEGIN SSH SIGNATURE-----';
+/** What ssh-keygen says on every signing, kept off the terminal. */
+const ROUTINE = /^(Signing (data on standard input|file .*)|Write signature to .*)$/;
+/**
+ * The only namespace this CLI signs in, and the only challenge shape. Both
+ * come from the server, and a signature is valid for whatever its namespace
+ * names: a server that asked for `git` and a commit's bytes would get a commit
+ * signature from a key that also signs commits. So neither is taken on trust.
+ */
+export const REGISTRATION_NAMESPACE = 'ssh-key-registration@mandala.computer';
+const CHALLENGE_SHAPE = /^sshkc-[0-9a-f]{64}$/;
+
+/** A signature over a registration challenge, or why there is none. */
+export type Proof = { challenge: string; signature: string } | { reason: string };
+
+/** The last line ssh-keygen wrote that says something, made safe to print. */
+function lastLine(text: string): string | undefined {
+  const lines = text
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l && !ROUTINE.test(l));
+  const last = lines.at(-1);
+  return last === undefined ? undefined : terminalSafe(last);
+}
+
+/**
+ * Sign `challenge` with the private half of the key in `pubFile`, as
+ * `ssh-keygen -Y sign` does. Given the `.pub` file, ssh-keygen uses the key
+ * from the agent or, failing that, the private file beside it; an older
+ * ssh-keygen that does only the first is asked again with the private file.
+ */
+export async function signChallenge(
+  rt: SshRuntime,
+  env: NodeJS.ProcessEnv,
+  pubFile: string,
+  namespace: string,
+  challenge: string,
+  signal?: AbortSignal,
+): Promise<{ signature: string } | { reason: string }> {
+  const keygen = rt.keygen?.(env);
+  if (!keygen || !rt.capture) return { reason: 'no ssh-keygen command found on PATH' };
+  const files = [pubFile];
+  if (pubFile.endsWith('.pub')) {
+    const priv = pubFile.slice(0, -'.pub'.length);
+    try {
+      if (fs.statSync(priv).isFile()) files.push(priv);
+    } catch {}
+  }
+  // The challenge goes in a file of its own, in a directory only this user
+  // can read, so ssh-keygen's stdin can stay the terminal; it writes the
+  // signature beside it as `<file>.sig`.
+  let dir: string;
+  try {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mandala-sign-'));
+  } catch (error) {
+    return {
+      reason: `cannot make a temporary file: ${(error as NodeJS.ErrnoException).code ?? String(error)}`,
+    };
+  }
+  const data = path.join(dir, 'challenge');
+  const sig = `${data}.sig`;
+  let reason = 'ssh-keygen could not sign';
+  try {
+    fs.writeFileSync(data, challenge, { mode: 0o600, flag: 'wx' });
+    for (const file of files) {
+      fs.rmSync(sig, { force: true });
+      let got: Captured;
+      try {
+        got = await rt.capture([keygen, '-Y', 'sign', '-n', namespace, '-f', file, data], signal);
+      } catch (error) {
+        // A cancelled signing ends the command: nothing is registered after it.
+        signal?.throwIfAborted();
+        return {
+          reason: `cannot run ssh-keygen: ${(error as NodeJS.ErrnoException).code ?? String(error)}`,
+        };
+      }
+      signal?.throwIfAborted();
+      let signature: string | undefined;
+      try {
+        signature = fs.readFileSync(sig, 'utf8');
+      } catch {}
+      if (got.status === 0 && signature?.startsWith(SIGNATURE_BEGIN)) return { signature };
+      reason = lastLine(got.stderr) ?? `ssh-keygen exited ${got.status}`;
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+  return { reason };
+}
+
+/**
+ * A challenge from the platform signed with the key in `pubFile`, or why the
+ * key goes without one. Asked for only once ssh-keygen is known to be there,
+ * so a machine without it spends no challenge. A platform that issues no
+ * challenges is not an error: the key is added as before.
+ */
+export async function prove(
+  client: Client,
+  rt: SshRuntime,
+  env: NodeJS.ProcessEnv,
+  pubFile: string,
+  signal?: AbortSignal,
+): Promise<Proof> {
+  if (!rt.keygen?.(env) || !rt.capture) return { reason: 'no ssh-keygen command found on PATH' };
+  let issued: Awaited<ReturnType<Client['sshKeys']['challenge']>>;
+  try {
+    issued = await client.sshKeys.challenge({ signal });
+  } catch (error) {
+    if (error instanceof NotFoundError) return { reason: 'this platform does not ask for proof' };
+    throw error;
+  }
+  signal?.throwIfAborted();
+  if (issued.namespace !== REGISTRATION_NAMESPACE || !CHALLENGE_SHAPE.test(issued.challenge))
+    throw new CliError(
+      'unexpected_challenge',
+      `refusing to sign: the server asked for a signature in namespace ${JSON.stringify(terminalSafe(issued.namespace))}` +
+        ` over ${JSON.stringify(terminalSafe(issued.challenge.slice(0, 80)))}, not a key registration challenge; nothing was registered`,
+    );
+  const signed = await signChallenge(rt, env, pubFile, issued.namespace, issued.challenge, signal);
+  return 'signature' in signed
+    ? { challenge: issued.challenge, signature: signed.signature }
+    : signed;
+}
+
+/** What an unproven key cannot do, for the diagnostic that follows one. */
+export const unprovenMessage = (key: SshKey, reason: string | undefined, setup: boolean) =>
+  `mandala: key ${key.fingerprint} is registered without proof that it is yours` +
+  `${reason ? ` (${reason})` : ''}, so it connects to a computer named by its id only` +
+  (setup ? "; mandala ssh connects by id, but plain ssh to a computer's name is refused" : '') +
+  // Adding a key again with a signature binds it to this credential's
+  // account, so that is the advice only for a key already bound here.
+  (key.reach === 'this_account'
+    ? '. To prove it, run mandala ssh-key add for it where ssh-keygen can use the private key; that binds it to the API key it runs with'
+    : '. To prove it, remove it and add it again from the dashboard');
+
 // --- commands -------------------------------------------------------------
 
 const terminalHint = (target: string) =>
@@ -897,27 +1083,114 @@ export async function sshConnect(
   );
 }
 
+/** How `--setup` and `ssh-key add` register a key. */
+export type KeySource = {
+  line: string;
+  /** The `.pub` file the line came from, which ssh-keygen signs with. */
+  file: string;
+  /** `--no-proof`: register from the public line alone, without ssh-keygen. */
+  noProof: boolean;
+  name?: string;
+};
+
 /**
- * Register `line` unless the caller already has it. A duplicate-key conflict
- * is a race with another `add` when a second listing shows the key is now the
- * caller's, and somebody else's key otherwise.
+ * Register `src` with proof of possession when ssh-keygen can sign for it,
+ * and from the public line alone otherwise. `reason` says why a key went
+ * without proof; it is undefined when `--no-proof` asked for that.
+ */
+export async function registerKey(
+  client: Client,
+  rt: SshRuntime,
+  env: NodeJS.ProcessEnv,
+  src: KeySource,
+  signal?: AbortSignal,
+  /** Told why the key went unsigned when the unsigned add is a conflict. */
+  onUnsignedConflict?: (reason: string) => void,
+  /**
+   * Asked once the challenge is signed, which can take a passphrase prompt's
+   * time: a signed add replaces whatever registration the key has by then, so
+   * this looks again. A key returned is kept as it is; `'unsigned'` sends the
+   * add without the signature, so a key held elsewhere stays a conflict.
+   */
+  recheck?: () => Promise<SshKey | 'unsigned' | undefined>,
+): Promise<{ key: SshKey; reason?: string }> {
+  let proof: Proof = src.noProof ? { reason: '' } : await prove(client, rt, env, src.file, signal);
+  if ('signature' in proof && recheck) {
+    const now = await recheck();
+    signal?.throwIfAborted();
+    if (now === 'unsigned') proof = { reason: '' };
+    else if (now) return { key: now };
+  }
+  if ('signature' in proof) {
+    const key = await client.sshKeys.add(
+      {
+        publicKey: src.line,
+        name: src.name,
+        challenge: proof.challenge,
+        signature: proof.signature,
+      },
+      { signal },
+    );
+    return { key };
+  }
+  signal?.throwIfAborted();
+  try {
+    const key = await client.sshKeys.add({ publicKey: src.line, name: src.name }, { signal });
+    return { key, reason: proof.reason || undefined };
+  } catch (error) {
+    if (error instanceof ConflictError && proof.reason) onUnsignedConflict?.(proof.reason);
+    throw error;
+  }
+}
+
+/**
+ * Somebody may hold this key without having proved it is theirs; only a signed
+ * add replaces that registration, so say what stopped this one being signed.
+ */
+export const unsignedConflictMessage = (reason: string) =>
+  'mandala: a key registered without proof is replaced by adding it again with a signature, ' +
+  `but this one could not be signed (${reason})`;
+
+/**
+ * Register `src.line` unless the caller already has it. A duplicate-key
+ * conflict is a race with another `add` when a second listing shows the key is
+ * now the caller's, and somebody else's key otherwise.
  */
 async function ensureKey(
   client: Client,
-  line: string,
+  rt: SshRuntime,
+  env: NodeJS.ProcessEnv,
+  src: KeySource,
   print: string,
+  diagnostic: (message: string) => void,
   signal?: AbortSignal,
-): Promise<{ key: SshKey; added: boolean }> {
+): Promise<{ key: SshKey; added: boolean; reason?: string }> {
   const mine = async () =>
     (await client.sshKeys.list({ signal })).find((k) => k.fingerprint === print);
   const existing = await mine();
+  // A key already held is kept as it is, proven or not: adding it again with a
+  // signature would rebind it to this credential, whose revocation then
+  // removes it, so that is left to an explicit ssh-key add.
   if (existing) return { key: existing, added: false };
+  let unsigned: string | undefined;
   try {
-    return { key: await client.sshKeys.add({ publicKey: line }, { signal }), added: true };
+    const got = await registerKey(
+      client,
+      rt,
+      env,
+      src,
+      signal,
+      (reason) => {
+        unsigned = reason;
+      },
+      mine,
+    );
+    return { ...got, added: true };
   } catch (error) {
     if (!(error instanceof ConflictError)) throw error;
     const raced = await mine();
     if (raced) return { key: raced, added: false };
+    if (unsigned !== undefined) diagnostic(unsignedConflictMessage(unsigned));
     throw error;
   }
 }
@@ -955,6 +1228,7 @@ export async function sshSetup(
   target: string,
   key: string | undefined,
   signal?: AbortSignal,
+  noProof = false,
 ): Promise<number> {
   const home = rt.home();
   const file = keyPath(home, key);
@@ -966,7 +1240,19 @@ export async function sshSetup(
   // A computer known not to run SSH gets neither a key upload nor a switch.
   if ((await computer.sshAccess({ signal })).available === false)
     throw new CliError('ssh_unavailable', predates(label));
-  const { key: registered, added } = await ensureKey(client, line, print, signal);
+  const {
+    key: registered,
+    added,
+    reason,
+  } = await ensureKey(
+    client,
+    rt,
+    io.env,
+    { line, file, noProof },
+    print,
+    (message) => output.diagnostic(message, { keepNewlines: false }),
+    signal,
+  );
   // Listed is not accepted: a key bound to another account is refused here, so
   // SSH is not switched on for it and nothing reads as success.
   if (registered.reach === 'another_account')
@@ -1000,6 +1286,8 @@ export async function sshSetup(
     output.diagnostic(
       `mandala: ${label} has not received the setting yet; it is sent again automatically, and connecting sends it first`,
     );
+  if (registered.possession === 'unproven' && !noProof)
+    output.diagnostic(unprovenMessage(registered, reason, true), { keepNewlines: false });
   return 0;
 }
 
@@ -1054,11 +1342,40 @@ export async function sshKeyAdd(
   rt: SshRuntime,
   given: string | undefined,
   name: string | undefined,
+  noProof = false,
+  signal?: AbortSignal,
 ): Promise<number> {
-  const line = readPublicKey(keyPath(rt.home(), given));
-  const key = await client.sshKeys.add({ publicKey: line, name });
-  if (output.json) return output.result(key.raw);
-  io.stdout.write(`${terminalSafe(`added ${key.id}  ${key.fingerprint}  ${key.name}`)}\n`);
+  const file = keyPath(rt.home(), given);
+  const line = readPublicKey(file);
+  // A key you already hold is added again (a conflict) without a signature,
+  // unless it is an unproven one bound to this account, which a signature
+  // upgrades. Signing for any other would replace its registration with one
+  // bound to this account: one reaching every account would lose the others,
+  // and one bound to another account would move.
+  const print = fingerprint(line);
+  const replaceable = async (): Promise<'unsigned' | undefined> => {
+    const held = (await client.sshKeys.list({ signal })).find((k) => k.fingerprint === print);
+    return held && !(held.possession === 'unproven' && held.reach === 'this_account')
+      ? 'unsigned'
+      : undefined;
+  };
+  let skipProof = noProof;
+  // Without ssh-keygen nothing is signed, so there is nothing to look up.
+  if (!noProof && rt.keygen?.(io.env) && rt.capture)
+    skipProof = (await replaceable()) === 'unsigned';
+  const { key, reason } = await registerKey(
+    client,
+    rt,
+    io.env,
+    { line, file, name, noProof: skipProof },
+    signal,
+    (why) => output.diagnostic(unsignedConflictMessage(why), { keepNewlines: false }),
+    replaceable,
+  );
+  if (output.json) output.result(key.raw);
+  else io.stdout.write(`${terminalSafe(`added ${key.id}  ${key.fingerprint}  ${key.name}`)}\n`);
+  if (key.possession === 'unproven' && !noProof)
+    output.diagnostic(unprovenMessage(key, reason, false), { keepNewlines: false });
   return 0;
 }
 

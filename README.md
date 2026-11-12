@@ -5271,8 +5271,22 @@ mandala ssh --setup dev            # uses ~/.ssh/id_ed25519.pub, id_ecdsa.pub or
 mandala ssh --setup dev --key ~/.ssh/work.pub
 ```
 
+The key is registered with proof that it is yours: the CLI asks the platform
+for a challenge and signs it with `ssh-keygen -Y sign`, giving it the `.pub`
+file, so ssh-keygen uses the key from your agent or the private file beside it
+(and may ask for its passphrase). A proven key connects to a computer named by
+its id or its name. When it cannot sign (no `ssh-keygen` on your PATH, or no
+private half it can use) the key is registered from the public line alone, as
+`unproven`, and one line on stderr says why: an unproven key connects to a
+computer named by its id only. `mandala ssh` always connects by id, so it works
+either way, but plain `ssh` to a computer's name is refused. `--no-proof` skips
+the signing and that line.
+
 `--setup` is safe to repeat: a key whose fingerprint is already registered is
-not uploaded again. It stops instead (`ssh_key_elsewhere`, exit 1, SSH left as
+not uploaded again, proven or not. To prove a key you already hold `unproven`,
+run `mandala ssh-key add` for it: adding it again with a signature makes it
+`proven`, and binds it to the API key that command runs with, so revoking that
+key removes it. It stops instead (`ssh_key_elsewhere`, exit 1, SSH left as
 it was) when that key is bound to another of your accounts, because this
 account's computers would refuse it: remove it and add it again from the
 dashboard to use it on every account, or pass `--key` with a separate key. With
@@ -5288,8 +5302,8 @@ mandala ssh dev -L 8080:localhost:8080     # the guest's port 8080 on yours
 mandala ssh dev -i ~/.ssh/work             # the key is offered to the gateway too
 ```
 
-`mandala`'s own options go before the computer; with `--setup`, `--key` and
-`--json` may also follow it. `mandala ssh --json` is refused with exit 2: the
+`mandala`'s own options go before the computer; with `--setup`, `--key`,
+`--no-proof` and `--json` may also follow it. `mandala ssh --json` is refused with exit 2: the
 session is interactive.
 
 The CLI fills in the jump and pins the gateway's host key, in a known_hosts
@@ -5308,7 +5322,7 @@ The pieces, one at a time:
 
 ```sh
 mandala ssh-key list               # --json for the rows
-mandala ssh-key add [PATH] [--name NAME]
+mandala ssh-key add [PATH] [--name NAME] [--no-proof]   # signs a challenge, as --setup does
 mandala ssh-key rm sshk-74025eba1b658b99
 mandala ssh-access dev             # the status; --json for the object
 mandala ssh-access dev on          # or off
