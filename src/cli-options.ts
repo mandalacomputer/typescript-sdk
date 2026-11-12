@@ -966,6 +966,10 @@ export const COMMANDS: readonly Command[] = [
           'key',
           'Public key for --setup (default: ~/.ssh/id_ed25519.pub, id_ecdsa.pub, id_rsa.pub)',
         ),
+        bool(
+          'no-proof',
+          'With --setup: register the key without signing a challenge with ssh-keygen (it then connects by computer id only)',
+        ),
       ],
       'unsupported',
     ),
@@ -974,9 +978,15 @@ export const COMMANDS: readonly Command[] = [
   command('ssh-key list', 'List your registered SSH public keys'),
   command(
     'ssh-key add',
-    'Register an SSH public key (default: ~/.ssh/id_ed25519.pub, id_ecdsa.pub, id_rsa.pub)',
+    'Register an SSH public key, signing a challenge with ssh-keygen to prove it is yours (default: ~/.ssh/id_ed25519.pub, id_ecdsa.pub, id_rsa.pub)',
     ['path?'],
-    [flag('name', 'Label for the key (default: the key comment)')],
+    [
+      flag('name', 'Label for the key (default: the key comment)'),
+      bool(
+        'no-proof',
+        'Register without signing a challenge with ssh-keygen; the key then connects to a computer by its id only',
+      ),
+    ],
   ),
   command('ssh-key rm', 'Remove a registered SSH public key', ['id']),
   {
@@ -1482,5 +1492,5 @@ function usageError(
 export function help(path = ''): string {
   const matches = COMMANDS.filter((c) => !path || c.path === path || c.path.startsWith(`${path} `));
   const exact = matches.length === 1 ? matches[0] : undefined;
-  return `mandala — cloud computers from your terminal\n\n${matches.map((c) => `  ${usage(c)}\n    ${c.description}`).join('\n')}\n\n${[...GLOBAL_FLAGS, ...(exact?.flags ?? [])].map((f) => `  --${f.name}${f.alias ? `, -${f.alias}` : ''}${f.type === 'boolean' ? '' : ` <${f.type}>`}${f.required ? (f.required_unless?.length ? ` (required unless ${f.required_unless.map((name) => `--${name}`).join(' or ')})` : ' (required)') : ''}  ${f.description}`).join('\n')}\n\nMANDALA_API_KEY authenticates requests; MANDALA_BASE_URL optionally selects a server.\nMANDALA_MODEL_KEY is your own model key for agent run, chat and resume; unset, a run spends the account's AI credits. No credentials are needed for help, version, manifest, completion, login or logout.\n${path.startsWith('ssh') ? `\nmandala ssh: our options go before <computer> (with --setup, --key and --json may follow it);\neverything after it goes to ssh unchanged. It never falls back to mandala terminal.\nMANDALA_SSH_GATEWAY=host[:port] (default ssh.mandala.computer:2222) and\nMANDALA_SSH_GATEWAY_KNOWN_HOSTS (a known_hosts line, or file, pinning that gateway's key)\npoint the SSH commands at another gateway.\n` : ''}`;
+  return `mandala — cloud computers from your terminal\n\n${matches.map((c) => `  ${usage(c)}\n    ${c.description}`).join('\n')}\n\n${[...GLOBAL_FLAGS, ...(exact?.flags ?? [])].map((f) => `  --${f.name}${f.alias ? `, -${f.alias}` : ''}${f.type === 'boolean' ? '' : ` <${f.type}>`}${f.required ? (f.required_unless?.length ? ` (required unless ${f.required_unless.map((name) => `--${name}`).join(' or ')})` : ' (required)') : ''}  ${f.description}`).join('\n')}\n\nMANDALA_API_KEY authenticates requests; MANDALA_BASE_URL optionally selects a server.\nMANDALA_MODEL_KEY is your own model key for agent run, chat and resume; unset, a run spends the account's AI credits. No credentials are needed for help, version, manifest, completion, login or logout.\n${path.startsWith('ssh') ? `\nmandala ssh: our options go before <computer> (with --setup, --key, --no-proof and --json may follow it);\neverything after it goes to ssh unchanged. It never falls back to mandala terminal.\nMANDALA_SSH_GATEWAY=host[:port] (default ssh.mandala.computer:2222) and\nMANDALA_SSH_GATEWAY_KNOWN_HOSTS (a known_hosts line, or file, pinning that gateway's key)\npoint the SSH commands at another gateway.\n` : ''}`;
 }
