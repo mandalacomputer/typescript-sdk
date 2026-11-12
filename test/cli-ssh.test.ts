@@ -2633,6 +2633,20 @@ describe('registering a key with proof of possession', () => {
     ]);
     expect(setup.err).toContain('is registered for another of your accounts');
 
+    // One this account accepts is used as a key held from the start would be:
+    // nothing was replaced, and SSH is switched on with it.
+    for (const reach of ['this_account', 'everywhere']) {
+      posted = false;
+      Object.assign(meanwhile, { reach, possession: 'proven' });
+      const used = await cli(['ssh', '--setup', 'demo'], { home, keygen: signs, respond });
+      expect(used.code).toBe(0);
+      expect(writes(used)).toEqual([
+        ['POST', 'ssh-keys/challenge'],
+        ['POST', 'ssh-keys'],
+        ['PUT', 'computers/vm-1/ssh'],
+      ]);
+    }
+
     // Gone again by the time it looks: says so, and the conflict is the error.
     const gone = (call: Call) =>
       call.path === '/ssh-keys' && call.method === 'GET' ? json([]) : respond(call);

@@ -1220,6 +1220,10 @@ async function ensureKey(
   } catch (error) {
     if (!(error instanceof ConflictError)) throw error;
     const raced = await mine();
+    // A key of the caller's found now, whichever conflict it was (a
+    // registration_changed one included: nothing was replaced), is taken as
+    // one held from the start would have been: kept as it is, used when this
+    // account accepts it, and refused by the caller when bound elsewhere.
     if (raced) return { key: raced, added: false };
     if (registrationChanged(error)) diagnostic(registrationChangedMessage(undefined));
     else if (unsigned !== undefined) diagnostic(unsignedConflictMessage(unsigned));

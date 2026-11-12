@@ -33,9 +33,12 @@ This is the summary you read to decide whether to upgrade.
   server asks it to sign is refused (`unexpected_challenge`) and nothing is
   registered. The signed add names the registration the CLI saw (`replaces`),
   so a registration of the same key made meanwhile, say through another of
-  your accounts, is not replaced: the CLI lists your keys again, says what the
-  key is registered as now, and exits non-zero without retrying. Against a
-  platform that does not know `replaces` yet, the add behaves as before.
+  your accounts, is not replaced. `ssh-key add` then lists your keys again,
+  says what the key is registered as now, and exits non-zero without
+  retrying. `--setup` treats the key it now finds as one it already held: kept
+  as it is, used when this account accepts it, refused when it is bound to
+  another account. Against a platform that does not know `replaces` yet, the
+  add behaves as before.
 
 ## [0.23.0] - 2026-11-11
 
