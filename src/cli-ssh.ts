@@ -103,12 +103,25 @@ export const defaultSshRuntime: SshRuntime = {
   capture: ([file, ...args], signal) =>
     new Promise((resolve, reject) => {
       if (signal?.aborted) return reject(signal.reason);
-      // stderr is collected rather than shown: ssh-keygen says "Signing file"
-      // there even when it works. A passphrase prompt goes to the terminal.
-      // Cancelled, the child is ended and the wait rejects with the reason.
+      // A passphrase prompt goes to the terminal itself. stderr is collected,
+      // for the reason a signing failed, and shown line by line as it comes,
+      // because a hardware key's "Confirm user presence" waits on a touch the
+      // person has to be told about; only ssh-keygen's routine lines are kept
+      // back. Cancelled, the child is ended and the wait rejects.
       const child = spawn(file!, args, { stdio: ['inherit', 'ignore', 'pipe'], signal });
       const err: Buffer[] = [];
-      child.stderr.on('data', (b: Buffer) => err.push(b));
+      let pending = '';
+      const show = (line: string) => {
+        if (line.trim() && !ROUTINE.test(line.trim()))
+          process.stderr.write(`${terminalSafe(line.replace(/\r$/, ''))}\n`);
+      };
+      child.stderr.on('data', (b: Buffer) => {
+        err.push(b);
+        const lines = (pending + b.toString('utf8')).split('\n');
+        pending = lines.pop()!;
+        for (const line of lines) show(line);
+      });
+      child.stderr.on('end', () => show(pending));
       child.on('error', (error) => reject(signal?.aborted ? signal.reason : error));
       child.on('close', (code, killed) =>
         resolve({
@@ -872,6 +885,8 @@ export function fingerprint(publicKey: string): string {
 // --- proof of possession --------------------------------------------------
 
 const SIGNATURE_BEGIN = '-----BEGIN SSH SIGNATURE-----';
+/** What ssh-keygen says on every signing, kept off the terminal. */
+const ROUTINE = /^(Signing (data on standard input|file .*)|Write signature to .*)$/;
 /**
  * The only namespace this CLI signs in, and the only challenge shape. Both
  * come from the server, and a signature is valid for whatever its namespace
@@ -889,7 +904,7 @@ function lastLine(text: string): string | undefined {
   const lines = text
     .split(/\r?\n/)
     .map((l) => l.trim())
-    .filter((l) => l && !/^Signing (data on standard input|file .*)$/.test(l));
+    .filter((l) => l && !ROUTINE.test(l));
   const last = lines.at(-1);
   return last === undefined ? undefined : terminalSafe(last);
 }

@@ -2689,6 +2689,30 @@ describe('registering a key with proof of possession', () => {
     expect(rec.routes()).toEqual([['POST', 'ssh-keys/challenge']]);
   });
 
+  it('the real capture shows a prompt as it comes, and keeps routine lines back', async () => {
+    const shown: string[] = [];
+    const write = process.stderr.write;
+    process.stderr.write = ((chunk: unknown) => {
+      shown.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      const running = defaultSshRuntime.capture!([
+        '/bin/sh',
+        '-c',
+        'echo "Signing file /tmp/x" >&2; echo "Confirm user presence for key ED25519-SK" >&2; sleep 1; echo "Write signature to /tmp/x.sig" >&2',
+      ]);
+      await new Promise((r) => setTimeout(r, 500));
+      // Before ssh-keygen is done: the prompt the person has to act on.
+      expect(shown).toEqual(['Confirm user presence for key ED25519-SK\n']);
+      const got = await running;
+      expect(shown).toEqual(['Confirm user presence for key ED25519-SK\n']);
+      expect(got.stderr).toContain('Write signature to');
+    } finally {
+      process.stderr.write = write;
+    }
+  });
+
   it('the real capture ends ssh-keygen when cancelled', async () => {
     const ctl = new AbortController();
     const sleeping = defaultSshRuntime.capture!(['/bin/sh', '-c', 'sleep 30'], ctl.signal);
