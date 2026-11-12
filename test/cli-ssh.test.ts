@@ -27,6 +27,7 @@ import {
   proxyCommand,
   readPublicKey,
   readsAsIPv4,
+  registerKey,
   type SshRuntime,
   shellWord,
   signChallenge,
@@ -2357,6 +2358,7 @@ describe('registering a key with proof of possession', () => {
     const r = await cli(['ssh-key', 'add'], { home, respond: proving(), keygen: signs });
     expect(r.code).toBe(0);
     expect(r.rec.routes()).toEqual([
+      ['GET', 'ssh-keys'],
       ['POST', 'ssh-keys/challenge'],
       ['POST', 'ssh-keys'],
     ]);
@@ -2394,7 +2396,7 @@ describe('registering a key with proof of possession', () => {
     const { home } = await keyHome();
     const r = await cli(['ssh-key', 'add'], {
       home,
-      respond: proving([], { ...SSH_KEY, possession: 'unproven' }),
+      respond: proving([], { ...SSH_KEY, possession: 'unproven', reach: 'this_account' }),
       keygen: () => ({
         status: 255,
         stdout: '',
@@ -2403,6 +2405,7 @@ describe('registering a key with proof of possession', () => {
     });
     expect(r.code).toBe(0);
     expect(r.rec.routes()).toEqual([
+      ['GET', 'ssh-keys'],
       ['POST', 'ssh-keys/challenge'],
       ['POST', 'ssh-keys'],
     ]);
@@ -2502,7 +2505,7 @@ describe('registering a key with proof of possession', () => {
     const upgrade = await cli(['ssh', '--setup', 'demo', '--json'], {
       home,
       keygen: signs,
-      respond: route([{ ...SSH_KEY, possession: 'unproven' }]),
+      respond: route([{ ...SSH_KEY, possession: 'unproven', reach: 'this_account' }]),
     });
     expect(upgrade.code).toBe(0);
     expect(writes(upgrade)).toEqual([
@@ -2533,13 +2536,97 @@ describe('registering a key with proof of possession', () => {
       respond: (call) =>
         call.path === '/computers/vm-1/ssh'
           ? json(call.method === 'PUT' ? { ...SSH_ACCESS, enabled: true } : SSH_ACCESS)
-          : proving([{ ...SSH_KEY, possession: 'unproven' }])(call),
+          : proving([{ ...SSH_KEY, possession: 'unproven', reach: 'this_account' }])(call),
     });
     expect(r.code).toBe(0);
     expect(writes(r)).toEqual([['PUT', 'computers/vm-1/ssh']]);
     expect(r.err).toContain(
       "(no ssh-keygen command found on PATH), so it connects to a computer named by its id only; mandala ssh connects by id, but plain ssh to a computer's name is refused",
     );
+  });
+
+  it('never signs for a held key bound elsewhere, which a signed add would rebind', async () => {
+    const { home } = await keyHome();
+    const route = (keys: unknown[]) => (call: Call) =>
+      call.path === '/computers/vm-1/ssh'
+        ? json(call.method === 'PUT' ? { ...SSH_ACCESS, enabled: true } : SSH_ACCESS)
+        : proving(keys)(call);
+    const everywhere = { ...SSH_KEY, possession: 'unproven', reach: 'everywhere' };
+    const kept = await cli(['ssh', '--setup', 'demo'], {
+      home,
+      keygen: signs,
+      respond: route([everywhere]),
+    });
+    expect(kept.code).toBe(0);
+    expect(kept.signed).toEqual([]);
+    expect(writes(kept)).toEqual([['PUT', 'computers/vm-1/ssh']]);
+    expect(kept.err).toContain('To prove it, remove it and add it again from the dashboard');
+
+    const elsewhere = { ...SSH_KEY, possession: 'unproven', reach: 'another_account' };
+    const refused = await cli(['ssh', '--setup', 'demo'], {
+      home,
+      keygen: signs,
+      respond: route([elsewhere]),
+    });
+    expect(refused.code).toBe(1);
+    expect(refused.signed).toEqual([]);
+    expect(writes(refused)).toEqual([]);
+
+    for (const held of [everywhere, elsewhere, { ...SSH_KEY, possession: 'proven' }]) {
+      const add = await cli(['ssh-key', 'add'], {
+        home,
+        keygen: signs,
+        respond: (call) =>
+          call.path === '/ssh-keys' && call.method === 'POST'
+            ? json({ error: 'That key is already registered.' }, { status: 409 })
+            : proving([held])(call),
+      });
+      expect(add.code).toBe(1);
+      expect(add.signed).toEqual([]);
+      expect(writes(add)).toEqual([['POST', 'ssh-keys']]);
+      expect(add.rec.last().body).toEqual({ public_key: PUBLIC });
+      expect(add.err).not.toContain('could not be signed');
+    }
+  });
+
+  it('a cancelled signing ends there: no retry, no unsigned add', async () => {
+    const { home, pub, priv } = await keyHome();
+    fs.writeFileSync(priv, 'private');
+    const ctl = new AbortController();
+    const calls: string[] = [];
+    const rt: SshRuntime = {
+      home: () => home,
+      windows: false,
+      which: () => '/usr/bin/ssh',
+      run: async () => 0,
+      keygen: () => '/usr/bin/ssh-keygen',
+      capture: async (argv) => {
+        calls.push(argv.at(-1)!);
+        ctl.abort(new Error('cancelled'));
+        return { status: 130, stdout: '', stderr: '' };
+      },
+    };
+    await expect(signChallenge(rt, {}, pub, 'ns', 'c', ctl.signal)).rejects.toThrow('cancelled');
+    expect(calls).toEqual([pub]);
+
+    const rec = recorder(proving());
+    const client = new Client({ apiKey: 'com_cli_test', baseUrl: BASE, fetch: rec.fetch });
+    const again = new AbortController();
+    rt.capture = async () => {
+      again.abort(new Error('cancelled'));
+      return { status: 130, stdout: '', stderr: '' };
+    };
+    await expect(
+      registerKey(client, rt, {}, { line: PUBLIC, file: pub, noProof: false }, again.signal),
+    ).rejects.toThrow('cancelled');
+    expect(rec.routes()).toEqual([['POST', 'ssh-keys/challenge']]);
+  });
+
+  it('the real capture ends ssh-keygen when cancelled', async () => {
+    const ctl = new AbortController();
+    const sleeping = defaultSshRuntime.capture!(['/bin/sh', '-c', 'sleep 30'], '', ctl.signal);
+    setTimeout(() => ctl.abort(new Error('cancelled')), 50);
+    await expect(sleeping).rejects.toThrow('cancelled');
   });
 
   it('--no-proof goes with --setup only', async () => {

@@ -2563,7 +2563,16 @@ export async function runCli(argv: string[], io: CliIO, legacy: LegacyCommands):
       case 'ssh-key list':
         return await sshKeyList(client, io, output);
       case 'ssh-key add':
-        return await sshKeyAdd(client, io, output, ssh, args[0], s('name'), b('no-proof') === true);
+        return await sshKeyAdd(
+          client,
+          io,
+          output,
+          ssh,
+          args[0],
+          s('name'),
+          b('no-proof') === true,
+          signal,
+        );
       case 'ssh-key rm':
         return await sshKeyRemove(client, io, output, target);
       case 'ssh-access':
