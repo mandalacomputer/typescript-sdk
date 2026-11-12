@@ -2360,6 +2360,7 @@ describe('registering a key with proof of possession', () => {
     expect(r.rec.routes()).toEqual([
       ['GET', 'ssh-keys'],
       ['POST', 'ssh-keys/challenge'],
+      ['GET', 'ssh-keys'],
       ['POST', 'ssh-keys'],
     ]);
     expect(r.signed).toEqual([
@@ -2548,6 +2549,39 @@ describe('registering a key with proof of possession', () => {
     expect(r.err).toContain(
       "so it connects to a computer named by its id only; mandala ssh connects by id, but plain ssh to a computer's name is refused",
     );
+  });
+
+  it('looks again after signing, and keeps a key registered meanwhile', async () => {
+    const { home } = await keyHome();
+    let signedYet = false;
+    const meanwhile = { ...SSH_KEY, possession: 'unproven', reach: 'another_account' };
+    const respond = (call: Call) => {
+      if (call.path === '/computers/vm-1/ssh')
+        return json(call.method === 'PUT' ? { ...SSH_ACCESS, enabled: true } : SSH_ACCESS);
+      if (call.path === '/ssh-keys' && call.method === 'GET')
+        return json(signedYet ? [meanwhile] : []);
+      if (call.path === '/ssh-keys' && call.method === 'POST')
+        return json({ error: 'That key is already registered.' }, { status: 409 });
+      return proving()(call);
+    };
+    const keygen = () => {
+      signedYet = true;
+      return signs();
+    };
+    const setup = await cli(['ssh', '--setup', 'demo'], { home, keygen, respond });
+    // Kept, not replaced: and since it is bound elsewhere, refused as before.
+    expect(setup.code).toBe(1);
+    expect(writes(setup)).toEqual([['POST', 'ssh-keys/challenge']]);
+    expect(setup.err).toContain('is registered for another of your accounts');
+
+    signedYet = false;
+    const add = await cli(['ssh-key', 'add'], { home, keygen, respond });
+    expect(add.code).toBe(1);
+    expect(writes(add)).toEqual([
+      ['POST', 'ssh-keys/challenge'],
+      ['POST', 'ssh-keys'],
+    ]);
+    expect(add.rec.last().body).toEqual({ public_key: PUBLIC });
   });
 
   it('never signs for a held key bound elsewhere, which a signed add would rebind', async () => {

@@ -1065,10 +1065,21 @@ export async function registerKey(
   signal?: AbortSignal,
   /** Told why the key went unsigned when the unsigned add is a conflict. */
   onUnsignedConflict?: (reason: string) => void,
+  /**
+   * Asked once the challenge is signed, which can take a passphrase prompt's
+   * time: a signed add replaces whatever registration the key has by then, so
+   * this looks again. A key returned is kept as it is; `'unsigned'` sends the
+   * add without the signature, so a key held elsewhere stays a conflict.
+   */
+  recheck?: () => Promise<SshKey | 'unsigned' | undefined>,
 ): Promise<{ key: SshKey; reason?: string }> {
-  const proof: Proof = src.noProof
-    ? { reason: '' }
-    : await prove(client, rt, env, src.file, signal);
+  let proof: Proof = src.noProof ? { reason: '' } : await prove(client, rt, env, src.file, signal);
+  if ('signature' in proof && recheck) {
+    const now = await recheck();
+    signal?.throwIfAborted();
+    if (now === 'unsigned') proof = { reason: '' };
+    else if (now) return { key: now };
+  }
   if ('signature' in proof) {
     const key = await client.sshKeys.add(
       {
@@ -1122,9 +1133,17 @@ async function ensureKey(
   if (existing) return { key: existing, added: false };
   let unsigned: string | undefined;
   try {
-    const got = await registerKey(client, rt, env, src, signal, (reason) => {
-      unsigned = reason;
-    });
+    const got = await registerKey(
+      client,
+      rt,
+      env,
+      src,
+      signal,
+      (reason) => {
+        unsigned = reason;
+      },
+      mine,
+    );
     return { ...got, added: true };
   } catch (error) {
     if (!(error instanceof ConflictError)) throw error;
@@ -1292,14 +1311,17 @@ export async function sshKeyAdd(
   // upgrades. Signing for any other would replace its registration with one
   // bound to this account: one reaching every account would lose the others,
   // and one bound to another account would move.
+  const print = fingerprint(line);
+  const replaceable = async (): Promise<'unsigned' | undefined> => {
+    const held = (await client.sshKeys.list({ signal })).find((k) => k.fingerprint === print);
+    return held && !(held.possession === 'unproven' && held.reach === 'this_account')
+      ? 'unsigned'
+      : undefined;
+  };
   let skipProof = noProof;
   // Without ssh-keygen nothing is signed, so there is nothing to look up.
-  if (!noProof && rt.keygen?.(io.env) && rt.capture) {
-    const print = fingerprint(line);
-    const held = (await client.sshKeys.list({ signal })).find((k) => k.fingerprint === print);
-    if (held && !(held.possession === 'unproven' && held.reach === 'this_account'))
-      skipProof = true;
-  }
+  if (!noProof && rt.keygen?.(io.env) && rt.capture)
+    skipProof = (await replaceable()) === 'unsigned';
   const { key, reason } = await registerKey(
     client,
     rt,
@@ -1307,6 +1329,7 @@ export async function sshKeyAdd(
     { line, file, name, noProof: skipProof },
     signal,
     (why) => output.diagnostic(unsignedConflictMessage(why), { keepNewlines: false }),
+    replaceable,
   );
   if (output.json) output.result(key.raw);
   else io.stdout.write(`${terminalSafe(`added ${key.id}  ${key.fingerprint}  ${key.name}`)}\n`);
