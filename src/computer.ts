@@ -5809,9 +5809,12 @@ export class Computer {
    * anything is staged, so two uploads to one computer, or several to
    * computers on one host, take turns. This method waits that out: it sleeps
    * as asked (at most 30 seconds a time), reads the upload's status and goes
-   * on from the offset it reports. Twelve such refusals in a row with no chunk
-   * accepted between them end the upload with the {@link RateLimitError},
-   * carrying the uploadId to resume with. `signal` cancels a wait.
+   * on from the offset it reports. A status read refused the same way (a 429,
+   * or a {@link ConflictError} with reason `contention` while the other
+   * upload's chunk is being written) is waited out too. Twelve such refusals
+   * in a row, chunk or status, with no chunk accepted between them end the
+   * upload with that error, carrying the uploadId to resume with. `signal`
+   * cancels a wait.
    */
   async uploadFile(
     path: string,
@@ -5869,7 +5872,30 @@ export class Computer {
           // to read (status is a 404 then), and the refused chunk staged
           // nothing, so offset 0 is still where it starts.
           if (progress === undefined) continue;
-          progress = await this.fileUpload(path, uploadId, opts);
+          // The status read can itself be refused while the other upload's
+          // chunk is being written: a 429, or a 409 whose reason is
+          // `contention` (the computer's guest agent is busy). Wait those out
+          // from the same budget; any other status error ends the upload.
+          for (;;) {
+            try {
+              progress = await this.fileUpload(path, uploadId, opts);
+              break;
+            } catch (statusError) {
+              const transient =
+                statusError instanceof RateLimitError ||
+                (statusError instanceof ConflictError && statusError.reason === 'contention');
+              if (!transient || busy >= UPLOAD_BUSY_WAITS) throw statusError;
+              busy++;
+              await sleep(
+                Math.min(
+                  (statusError as RateLimitError | ConflictError).retryAfterMs ??
+                    UPLOAD_BUSY_DEFAULT_MS,
+                  UPLOAD_BUSY_MAX_MS,
+                ),
+                opts.signal,
+              );
+            }
+          }
           if (progress.size !== source.size)
             throw new ValidationError(
               'Source size differs from the staged upload. Use the unchanged source or a new upload ID.',

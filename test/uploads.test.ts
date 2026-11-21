@@ -246,6 +246,78 @@ describe('chunks refused while another is in flight', () => {
     expect(rec.calls.map((c) => c.method)).toEqual(['GET', 'PUT']);
   });
 
+  const contention = (reason: string | null = 'contention') =>
+    json(
+      { error: 'guest agent is busy', ...(reason ? { reason } : {}) },
+      { status: 409, headers: { 'content-type': 'application/json', 'Retry-After': '0' } },
+    );
+
+  it('waits out a busy status read, then resumes at the reported offset', async () => {
+    const size = 6 * 1024 * 1024;
+    const chunk = 4 * 1024 * 1024;
+    let staged = 0;
+    let gets = 0;
+    let refused = false;
+    const { computer, rec } = await setup((call) => {
+      if (call.method === 'GET') {
+        gets++;
+        // First GET is the resume read; the next one, after the 429, is busy.
+        return gets === 2 ? contention() : json(receipt(staged, size));
+      }
+      if (Number(call.query.offset) === chunk && !refused) {
+        refused = true;
+        return busy();
+      }
+      staged = Number(call.query.offset) + call.raw!.length;
+      return json(receipt(staged, size));
+    });
+    const result = await computer.uploadFile(
+      path,
+      { size, read: async (_, length) => new Uint8Array(length) },
+      { uploadId },
+    );
+    expect(result.complete).toBe(true);
+    expect(rec.calls.map((c) => [c.method, c.query.offset])).toEqual([
+      ['GET', undefined],
+      ['PUT', '0'],
+      ['PUT', String(chunk)],
+      ['GET', undefined],
+      ['GET', undefined],
+      ['PUT', String(chunk)],
+    ]);
+  });
+
+  it('ends with the status error once a busy status read spends the shared budget', async () => {
+    const { computer, rec } = await setup((call) => {
+      if (call.method === 'GET')
+        return rec.calls.length === 1 ? json(receipt(0, 3, false)) : contention();
+      return busy();
+    });
+    const error = await computer
+      .uploadFile(path, { size: 3, read: async () => new Uint8Array(3) }, { uploadId })
+      .catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ConflictError);
+    expect(error).toMatchObject({ reason: 'contention', uploadId });
+    // Twelve waits in all (the refused PUT and eleven busy reads), then the
+    // twelfth busy read ends it.
+    expect(rec.calls.filter((c) => c.method === 'PUT')).toHaveLength(1);
+    expect(rec.calls.filter((c) => c.method === 'GET')).toHaveLength(13);
+  });
+
+  it('does not wait out a reasonless 409 on the status read', async () => {
+    const { computer, rec } = await setup((call) => {
+      if (call.method === 'GET')
+        return rec.calls.length === 1 ? json(receipt(0, 3, false)) : contention(null);
+      return busy();
+    });
+    const error = await computer
+      .uploadFile(path, { size: 3, read: async () => new Uint8Array(3) }, { uploadId })
+      .catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ConflictError);
+    expect(error).toMatchObject({ uploadId });
+    expect(rec.calls.map((c) => c.method)).toEqual(['GET', 'PUT', 'GET']);
+  });
+
   it('does not wait out a 429 on a single writeFileChunk', async () => {
     const { computer, rec } = await setup(() => busy());
     await expect(

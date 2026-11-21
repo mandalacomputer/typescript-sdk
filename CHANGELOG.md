@@ -26,8 +26,11 @@ This is the summary you read to decide whether to upgrade.
   for the same computer, or this account's share of the host's upload buffers,
   is still in flight. Nothing was staged, so it sleeps for the `Retry-After`
   (at most 30 seconds a time), reads the upload's status and goes on from the
-  offset it reports. Twelve refusals in a row with no chunk accepted end the
-  upload with the `RateLimitError`, carrying the `uploadId`; `signal` cancels a
+  offset it reports. A status read refused the same way (a 429, or a
+  `ConflictError` with reason `contention` while the other upload's chunk is
+  being written) is waited out too; any other status error still ends the
+  upload. Twelve refusals in a row, chunk or status, with no chunk accepted end
+  the upload with that error, carrying the `uploadId`; `signal` cancels a
   wait. Concurrent uploads used to fail on the first such refusal.
   `writeFileChunk()` still does not wait, and now documents the limit.
 
