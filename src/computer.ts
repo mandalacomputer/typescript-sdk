@@ -40,13 +40,14 @@ import {
 } from './browser-connection.js';
 import {
   // `GatewayTimeoutError`, `InsufficientCreditsError`, `isTransient`,
-  // `ModelProviderError`, `PlanLimitError` and `RateLimitError` are TYPE-ONLY,
+  // `ModelProviderError` and `PlanLimitError` are TYPE-ONLY,
   // and kept rather than dropped: every reference to them in this file is a
   // `{@link}` in a doc comment, so as values they are dead, and
   // `verbatimModuleSyntax` would emit a runtime import for bindings nothing
   // calls. Deleting them instead would cost the links: `{@link}` resolves
   // through a type import and not through nothing. `APIError` is a value: the
-  // agent loop tests an error against it. The inline modifier rather than a
+  // agent loop tests an error against it. So is `RateLimitError`: uploadFile
+  // waits out a chunk refused with one. The inline modifier rather than a
   // second import statement, matching the `./agent.js` line above.
   APIError,
   agentRouteError,
@@ -66,7 +67,7 @@ import {
   NotFoundError,
   type PlanLimitError,
   RangeNotSatisfiableError,
-  type RateLimitError,
+  RateLimitError,
   TimeoutError,
   TooLargeError,
   ValidationError,
@@ -208,6 +209,7 @@ import {
   isTransientForPoll,
   rampDelay,
   retryDelay,
+  sleep,
   sleepUntilNextPoll,
   type WaitOptions,
 } from './wait.js';
@@ -794,6 +796,18 @@ const captureTimeoutText = (w: {
  */
 const SNAPSHOT_WAIT_MS = 1_800_000;
 const SNAPSHOT_POLL_MS = 5_000;
+
+/**
+ * How {@link Computer.uploadFile} waits out a chunk refused with a 429. The
+ * platform admits one chunk per computer and two per account per host in
+ * flight, refuses the rest before staging anything, and names a Retry-After
+ * (5 seconds). Each wait is that, or the default when none is sent, capped; a
+ * run of refusals with no chunk accepted in between ends after the count, so a
+ * held slot that never frees is an error rather than a hang.
+ */
+const UPLOAD_BUSY_WAITS = 12;
+const UPLOAD_BUSY_DEFAULT_MS = 5_000;
+const UPLOAD_BUSY_MAX_MS = 30_000;
 
 /**
  * How long a `type()` of text that is not all ASCII may take: the platform
@@ -3992,8 +4006,8 @@ export class Computer {
   }
 
   /**
-   * What is on the desktop's clipboard (platform OPL-3743, OPL-3768). Linux
-   * only.
+   * What is on the desktop's clipboard (platform OPL-3743, OPL-3768), on Linux
+   * and Windows guests.
    *
    * The `CLIPBOARD` selection — what Ctrl-C writes and Ctrl-V pastes — not the
    * X `PRIMARY` selection that middle-click uses.
@@ -4004,16 +4018,27 @@ export class Computer {
    * channel a computer only acquires on a cold boot; see the note on
    * {@link VncConnect}.
    *
-   * It does want one thing of the IMAGE, and unlike the socket's conditions it
-   * is stated in the answer rather than left to be inferred: the desktop's
-   * clipboard tool in the guest — `xclip` on an X11 image, `wl-clipboard`
-   * (`wl-paste`/`wl-copy`) on a Wayland one such as Omarchy; {@link desktop}
-   * says which. Every current image carries the tool its desktop needs, so in
-   * practice a computer without it was created from an older or custom image —
+   * On a Linux guest it does want one thing of the IMAGE, and unlike the
+   * socket's conditions it is stated in the answer rather than left to be
+   * inferred: the desktop's clipboard tool in the guest — `xclip` on an X11
+   * image, `wl-clipboard` (`wl-paste`/`wl-copy`) on a Wayland one such as
+   * Omarchy; {@link desktop} says which. Every current image carries the
+   * tool its desktop needs, so in practice a computer without it was created
+   * from an older or custom image —
    * and a computer keeps the image it was created from. The refusal is a 400
    * that names the tool, and it is PERMANENT: install that tool in the guest,
    * which you can do since you have root there, or create a new computer from
    * an image that includes it. Do not retry it.
+   *
+   * A WINDOWS guest needs no such tool: the platform reads and writes the
+   * clipboard of the signed-in user's desktop session through a short task it
+   * runs in that session. When that session does not answer in time — too busy,
+   * or signed in too recently, to start the task — the answer is a
+   * {@link ConflictError} with NO {@link APIError.reason} ("the desktop session
+   * did not answer in time"). Nothing in it says whether it clears, and
+   * {@link isTransient} calls it final, as it does every 409 without a word it
+   * knows. It may clear on a retry: retry it yourself if you choose, and bound
+   * the loop.
    *
    * A READ, not a subscription. Nothing notices a Ctrl-C in the guest on its
    * own, and this call does NOT resume a suspended computer — what somebody
@@ -4041,8 +4066,8 @@ export class Computer {
   }
 
   /**
-   * Put text on the desktop's clipboard, ready to paste (platform OPL-3768).
-   * Linux only.
+   * Put text on the desktop's clipboard, ready to paste (platform OPL-3768), on
+   * Linux and Windows guests.
    *
    * This leaves the text on the clipboard and touches nothing on screen. Pair
    * it with `key(['ctrl', 'v'])` to get the text into whatever has focus.
@@ -4081,11 +4106,13 @@ export class Computer {
    * on until somebody's deadline. An unclassified refusal still falls back to
    * the type answer, so bound a loop that meets one.
    *
-   * And two 400s here never clear at all, which matters more on this method
-   * than on the read for exactly that reason: the guest needs its desktop's
+   * A Windows guest's desktop session that does not answer in time is the same
+   * reasonless 409 described on {@link clipboard}.
+   *
+   * And one 400 here never clears at all, which matters more on this method
+   * than on the read for exactly that reason: a Linux guest needs its desktop's
    * clipboard tool in its image (`xclip` on X11, `wl-clipboard` on Wayland;
-   * see {@link clipboard}), and Windows is refused outright. Both say which
-   * they are.
+   * see {@link clipboard}), and the refusal names it.
    */
   async setClipboard(text: string, opts: CallOptions = {}): Promise<void> {
     await this.#t.json('PUT', P.computerAction(this.id, 'clipboard'), {
@@ -4502,9 +4529,11 @@ export class Computer {
    * It REPLACES the clipboard and leaves it replaced. A successful answer means
    * the clipboard write and the shortcut were delivered, not that the
    * application inserted the text: check the target, and wait for it to consume
-   * the paste before changing the clipboard again. Linux guests with working
-   * clipboard support only. An interrupted paste can have side effects —
-   * inspect before retrying, and do not fall back to typing automatically.
+   * the paste before changing the clipboard again. Needs what
+   * {@link setClipboard} needs: on Linux, the desktop's clipboard tool in the
+   * image; on Windows, a signed-in desktop session. An interrupted paste can
+   * have side effects — inspect before retrying, and do not fall back to
+   * typing automatically.
    * Takes `context` as {@link click} does.
    */
   paste(text: string, opts?: PasteOptions & { context?: false }): Promise<void>;
@@ -5652,6 +5681,14 @@ export class Computer {
   /** Linux resumable upload, one raw chunk (at most 8 MiB) of a file up to 2 GiB.
    * Keep path, uploadId, size, overwrite and source contents unchanged. Read status
    * after an error; the server may have accepted part or all of the chunk.
+   *
+   * Send one chunk at a time per computer. While another chunk for the same
+   * computer is in flight, or this account already has two in flight on the
+   * computer's host (or one, while only the host's last upload buffer, kept for
+   * other accounts, is free), the chunk is a {@link RateLimitError} (429,
+   * `retryAfterMs` 5000) and nothing was staged: wait, read
+   * {@link fileUpload} status and resend from its offset. This method does not
+   * wait itself; {@link uploadFile} does.
    */
   async writeFileChunk(
     path: string,
@@ -5764,6 +5801,20 @@ export class Computer {
    * must arrive within two minutes, with no 60-second idle gap, so on a link
    * slower than about 34 KiB/s call {@link writeFileChunk} yourself with smaller
    * chunks under the same uploadId.
+   *
+   * Uploads running side by side are throttled: at most one chunk per computer,
+   * and two per account on one host (one while only the host's last upload
+   * buffer is free, which is kept for other accounts), may be in flight. A
+   * chunk past that is refused with a 429 (Retry-After 5 seconds) before
+   * anything is staged, so two uploads to one computer, or several to
+   * computers on one host, take turns. This method waits that out: it sleeps
+   * as asked (at most 30 seconds a time), reads the upload's status and goes
+   * on from the offset it reports. A status read refused the same way (a 429,
+   * or a {@link ConflictError} with reason `contention` while the other
+   * upload's chunk is being written) is waited out too. Twelve such refusals
+   * in a row, chunk or status, with no chunk accepted between them end the
+   * upload with that error, carrying the uploadId to resume with. `signal`
+   * cancels a wait.
    */
   async uploadFile(
     path: string,
@@ -5789,22 +5840,74 @@ export class Computer {
         );
       if (progress?.complete) return progress;
       let offset = progress?.offset ?? 0;
-      do {
+      // Refusals in a row with no chunk accepted between them; see
+      // UPLOAD_BUSY_WAITS.
+      let busy = 0;
+      for (;;) {
         const length = Math.min(4 * 1024 * 1024, source.size - offset);
         const data = length === 0 ? new Uint8Array() : await source.read(offset, length);
         if (!(data instanceof Uint8Array) || data.byteLength !== length)
           throw new ValidationError(
             'Source returned a short or oversized chunk; keep the source unchanged.',
           );
-        progress = await this.writeFileChunk(path, data, {
-          ...opts,
-          uploadId,
-          offset,
-          size: source.size,
-        });
+        try {
+          progress = await this.writeFileChunk(path, data, {
+            ...opts,
+            uploadId,
+            offset,
+            size: source.size,
+          });
+        } catch (error) {
+          // A 429 on a chunk is refused before anything is staged: another
+          // chunk for this computer, or this account's share of the host's
+          // upload buffers, is still in flight. Wait as asked, then resume from
+          // the offset the platform reports, which is what it says to do.
+          if (!(error instanceof RateLimitError) || busy >= UPLOAD_BUSY_WAITS) throw error;
+          busy++;
+          await sleep(
+            Math.min(error.retryAfterMs ?? UPLOAD_BUSY_DEFAULT_MS, UPLOAD_BUSY_MAX_MS),
+            opts.signal,
+          );
+          // Before any chunk of this upload has been staged there is nothing
+          // to read (status is a 404 then), and the refused chunk staged
+          // nothing, so offset 0 is still where it starts.
+          if (progress === undefined) continue;
+          // The status read can itself be refused while the other upload's
+          // chunk is being written: a 429, or a 409 whose reason is
+          // `contention` (the computer's guest agent is busy). Wait those out
+          // from the same budget; any other status error ends the upload.
+          for (;;) {
+            try {
+              progress = await this.fileUpload(path, uploadId, opts);
+              break;
+            } catch (statusError) {
+              const transient =
+                statusError instanceof RateLimitError ||
+                (statusError instanceof ConflictError && statusError.reason === 'contention');
+              if (!transient || busy >= UPLOAD_BUSY_WAITS) throw statusError;
+              busy++;
+              await sleep(
+                Math.min(
+                  (statusError as RateLimitError | ConflictError).retryAfterMs ??
+                    UPLOAD_BUSY_DEFAULT_MS,
+                  UPLOAD_BUSY_MAX_MS,
+                ),
+                opts.signal,
+              );
+            }
+          }
+          if (progress.size !== source.size)
+            throw new ValidationError(
+              'Source size differs from the staged upload. Use the unchanged source or a new upload ID.',
+            );
+          if (progress.complete) return progress;
+          offset = progress.offset;
+          continue;
+        }
+        busy = 0;
         offset = progress.offset;
-      } while (!progress.complete);
-      return progress;
+        if (progress.complete) return progress;
+      }
     } catch (error) {
       // Preserve cancellation identity, validation types and the SDK's typed
       // API/transport refusals. Retain the ID for cleanup/reconciliation.

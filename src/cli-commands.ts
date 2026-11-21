@@ -717,6 +717,14 @@ function accountText(q: AccountQuota): string {
       q.limits.diskPoolGb,
       q.remaining.configuredDiskGb,
     ),
+    // Kept builds share the disk pool but are left out of the line above, and
+    // a create or disk resize is checked against both.
+    `Kept template builds (GiB): ${q.usage.keptBuildGb === null ? 'unknown; build history could not be read, so a create or disk growth may be refused until it is' : q.usage.keptBuildGb}`,
+    `Disk room for a create or resize (GiB): ${
+      q.usage.keptBuildGb === null || q.remaining.configuredDiskGb === null
+        ? 'unknown'
+        : Math.max(0, q.remaining.configuredDiskGb - q.usage.keptBuildGb)
+    }`,
     `Running/reserved computers: ${amount(q.usage.runningOrReservedComputers)}`,
     `Running/reserved vCPU: ${amount(q.usage.runningOrReservedVcpu)}`,
     pool(

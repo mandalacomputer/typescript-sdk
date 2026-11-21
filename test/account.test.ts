@@ -36,6 +36,7 @@ const report = () => ({
     running_or_reserved_vcpu: 6,
     running_or_reserved_ram_mb: 8192,
     snapshot_storage_bytes: 1073741825,
+    kept_build_gb: 40,
   },
   remaining: {
     kept_computers: 2,
@@ -52,6 +53,8 @@ const partial = (computers: boolean, snapshots: boolean): Wire => {
   data.complete = { computers, snapshots };
   for (const section of ['usage', 'remaining']) {
     for (const key of Object.keys(data[section] as Wire)) {
+      // Kept builds have their own completeness and stay numeric here.
+      if (key === 'kept_build_gb') continue;
       if (!(key === 'snapshot_storage_bytes' ? snapshots : computers))
         (data[section] as Wire)[key] = null;
     }
@@ -193,9 +196,39 @@ const fields: [string, string | undefined][] = Object.entries(report()).flatMap<
     ? Object.keys(value).map((nested): [string, string] => [key, nested])
     : [[key, undefined]],
 );
-const numericFields = fields.filter(([section]) =>
-  ['limits', 'per_computer', 'usage', 'remaining'].includes(section),
+const numericFields = fields.filter(
+  ([section, key]) =>
+    ['limits', 'per_computer', 'usage', 'remaining'].includes(section) && key !== 'kept_build_gb',
 );
+
+describe('kept template builds', () => {
+  it('decodes usage.kept_build_gb, independent of complete.computers', () => {
+    expect(toAccountQuota(report()).usage.keptBuildGb).toBe(40);
+    const incomplete = partial(false, true);
+    expect(toAccountQuota(incomplete).usage.configuredDiskGb).toBeNull();
+    expect(toAccountQuota(incomplete).usage.keptBuildGb).toBe(40);
+    const unread: Wire = report();
+    (unread.usage as Wire).kept_build_gb = null;
+    expect(toAccountQuota(unread).usage.keptBuildGb).toBeNull();
+    expect(toAccountQuota(unread).usage.configuredDiskGb).toBe(120);
+  });
+
+  it('reads an absent kept_build_gb as null, never as zero', () => {
+    const older: Wire = report();
+    delete (older.usage as Wire).kept_build_gb;
+    expect(toAccountQuota(older).usage.keptBuildGb).toBeNull();
+  });
+
+  it('refuses a malformed kept_build_gb rather than coercing it', () => {
+    for (const bad of [true, -1, 1.5, '40', Number.NaN, Number.POSITIVE_INFINITY, 2 ** 53]) {
+      const data: Wire = report();
+      (data.usage as Wire).kept_build_gb = bad;
+      expect(() => toAccountQuota(data)).toThrow(
+        /usage\.kept_build_gb must be a nonnegative safe integer/,
+      );
+    }
+  });
+});
 
 describe('malformed reports', () => {
   it.each([null, [], 7, 'private response text', {}])(
@@ -205,16 +238,19 @@ describe('malformed reports', () => {
     },
   );
 
-  // `capabilities.macos` is the one optional field: older platforms omit it.
-  it.each(fields.filter(([s, k]) => !(s === 'capabilities' && k === 'macos')))(
-    'requires %s.%s',
-    (section, key) => {
-      const data: Wire = report();
-      if (key) delete (data[section] as Wire)[key];
-      else delete data[section];
-      expect(() => toAccountQuota(data)).toThrow(/expected an account quota report/);
-    },
-  );
+  // `capabilities.macos` and `usage.kept_build_gb` are optional: older
+  // platforms omit them.
+  it.each(
+    fields.filter(
+      ([s, k]) =>
+        !(s === 'capabilities' && k === 'macos') && !(s === 'usage' && k === 'kept_build_gb'),
+    ),
+  )('requires %s.%s', (section, key) => {
+    const data: Wire = report();
+    if (key) delete (data[section] as Wire)[key];
+    else delete data[section];
+    expect(() => toAccountQuota(data)).toThrow(/expected an account quota report/);
+  });
 
   it.each(numericFields)('checks the numeric domain of %s.%s', (section, key) => {
     for (const bad of [
@@ -240,6 +276,7 @@ describe('malformed reports', () => {
   it('refuses missing, numeric and malformed values in incomplete groups', () => {
     for (const section of ['usage', 'remaining']) {
       for (const key of Object.keys(report()[section as 'usage' | 'remaining'])) {
+        if (key === 'kept_build_gb') continue;
         for (const bad of [undefined, 0, 'unknown', false]) {
           const data = partial(false, false);
           (data[section] as Wire)[key] = bad;

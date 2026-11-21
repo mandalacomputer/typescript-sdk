@@ -432,10 +432,10 @@ const stamp = (v: unknown): string | undefined => {
  *   `Computer.clipboard()` and `Computer.setClipboard()` are the route to build
  *   on — the reliable one, not merely the fallback — because they need nothing
  *   of the HARDWARE: no cold boot, and no permission from a browser. What they
- *   do want is a Linux guest with a display and its desktop's clipboard tool
- *   in the image (`xclip` on X11, `wl-clipboard` on Wayland), since they
- *   drive the guest's own desktop session; Windows is refused outright, and a
- *   computer whose image lacks that tool gets a permanent 400 that names it.
+ *   do want is a guest with a signed-in desktop session, since they drive it:
+ *   on Linux, a display and its desktop's clipboard tool in the image (`xclip`
+ *   on X11, `wl-clipboard` on Wayland), and a computer whose image lacks that
+ *   tool gets a permanent 400 that names it; on Windows, nothing more.
  *   That is a much smaller set than the socket's two
  *   conditions, and unlike them it is stated in the answer rather than left to
  *   be inferred. Where the socket does carry the clipboard the two do not fight
@@ -1222,12 +1222,28 @@ export type AccountUsage = {
   runningOrReservedRamMb: number | null;
   /** Indexed stored bytes, excluding in-flight capture reservations. */
   snapshotStorageBytes: number | null;
+  /**
+   * Nominal GB of the template builds the account keeps (each at its
+   * template's disk size), including builds still running. They share the disk
+   * pool with {@link configuredDiskGb}, which leaves them out: a create or a
+   * disk resize is checked against `configuredDiskGb + keptBuildGb`, so the
+   * room either has is `remaining.configuredDiskGb - keptBuildGb` (clamped at
+   * zero). Independent of `complete`. `null` while the account's build history
+   * could not be read, when a create or disk growth can be refused with a 503
+   * until it is, and on a platform that does not send it.
+   */
+  keptBuildGb: number | null;
 };
 
 /** Headroom clamped at zero; usage remains visible even above plan ceilings. */
 export type AccountRemaining = {
   keptComputers: number | null;
   configuredVcpu: number | null;
+  /**
+   * Disk ceiling minus configured disk. Kept template builds share the pool
+   * and are NOT subtracted here: subtract `usage.keptBuildGb` too for the room
+   * a create or disk resize has.
+   */
   configuredDiskGb: number | null;
   runningOrReservedRamMb: number | null;
   /** Indexed-byte headroom does not predict snapshot capture admission. */
@@ -1341,6 +1357,12 @@ export function toAccountQuota(value: unknown): AccountQuota {
         'usage.snapshot_storage_bytes',
         snapshots,
       ),
+      // Its own completeness, not `complete.computers`: null while build
+      // history is unread, and an older platform leaves the key out.
+      keptBuildGb:
+        usage.kept_build_gb === undefined || usage.kept_build_gb === null
+          ? null
+          : quantity(usage.kept_build_gb, 'usage.kept_build_gb'),
     },
     remaining: {
       keptComputers: observed(remaining.kept_computers, 'remaining.kept_computers', computers),
@@ -3316,7 +3338,7 @@ export type Webhook = {
   /**
    * Whether deliveries are made. Set `false` by the platform when the endpoint
    * has failed for a day, when the account moves to a plan without webhooks,
-   * or when the person or key in {@link createdBy} loses access — see
+   * or when the person, key or dashboard session behind it loses access — see
    * {@link disabledReason}. Back to `true` by you with an update, which starts
    * fresh, or, for `plan`, by the platform when you choose a plan that includes
    * webhooks.
@@ -3329,9 +3351,11 @@ export type Webhook = {
    * oldest first, as many as the plan allows, when the account chooses a plan
    * that includes webhooks; until then `enabled: true` is refused (402).
    * `creator_removed` when the person in {@link createdBy} was removed from the
-   * account, left it, or was made a viewer, and `key_revoked` when the API key
-   * in {@link createdBy} was revoked as leaked from the dashboard: neither comes
-   * back on its own, and an owner or member enables it again with an update. A
+   * account, left it, or was made a viewer, `key_revoked` when the API key
+   * in {@link createdBy} was revoked as leaked from the dashboard, and
+   * `session_revoked` when the dashboard session it was made, retargeted or
+   * turned back on from was signed out as leaked: none of the three comes back
+   * on its own, and an owner or member enables it again with an update. A
    * plain string, not a closed set: the platform may add reasons. Absent while
    * enabled.
    */
@@ -3355,7 +3379,9 @@ export type Webhook = {
    * Who created it, or last changed its `url`: the email of the person signed
    * in to the dashboard, or `apikey:` and the `key-` id of the API key used.
    * Theirs is the removal, demotion or leaked key that disables it with
-   * {@link disabledReason} `creator_removed` or `key_revoked`. `null` to a
+   * {@link disabledReason} `creator_removed` or `key_revoked`; a leaked
+   * dashboard session it was made, retargeted or turned back on from disables
+   * it with `session_revoked`. `null` to a
    * workspace-scoped key when it was a person, whose address such a key is not
    * told. Absent on a platform that does not send it.
    */
@@ -3534,7 +3560,9 @@ export type WebhookDelivery = {
   /**
    * `pending` (an attempt is scheduled), `in_flight` (one is running),
    * `delivered` (a 2xx came back), `exhausted` (eight attempts failed) or
-   * `dropped` (the subscription was disabled or deleted first).
+   * `dropped` (the subscription was disabled or deleted first, or its queue
+   * was full: 10,000 deliveries not yet finished, with {@link lastError}
+   * `queue full`). A dropped delivery is never sent.
    */
   state: string;
   /** How many times it has been sent. Eight is the last. */

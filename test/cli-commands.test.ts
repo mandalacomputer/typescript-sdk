@@ -245,6 +245,23 @@ describe('account and historical usage commands', () => {
     },
   );
 
+  it.each([
+    ['unread', null, 'unknown; build history could not be read'],
+    ['larger than the room', 500, '0'],
+  ] as const)('reports kept builds and the disk room when they are %s', async (_, kept, room) => {
+    const report = accountReport();
+    (report.usage as Record<string, number | null>).kept_build_gb = kept;
+    const result = await harness(() => json(report)).run(['account'], false);
+    expect(result.code).toBe(0);
+    if (kept === null) {
+      expect(result.out).toContain(`Kept template builds (GiB): ${room}`);
+      expect(result.out).toContain('Disk room for a create or resize (GiB): unknown');
+    } else {
+      expect(result.out).toContain(`Kept template builds (GiB): ${kept}`);
+      expect(result.out).toContain(`Disk room for a create or resize (GiB): ${room}`);
+    }
+  });
+
   it('labels quota units, distinct accounting and advisory limits in plain output', async () => {
     const h = harness(() => json(accountReport()), undefined, {
       NO_COLOR: '1',
@@ -257,6 +274,8 @@ describe('account and historical usage commands', () => {
     expect(result.out).toContain('Plan: Standard (standard)');
     expect(result.out).toContain('not a reservation or host-capacity guarantee');
     expect(result.out).toContain('Configured disk (GiB): used 120');
+    expect(result.out).toContain('Kept template builds (GiB): 40');
+    expect(result.out).toContain('Disk room for a create or resize (GiB): 240');
     expect(result.out).toContain('Running/reserved vCPU: 6');
     expect(result.out).toContain('Running/reserved RAM (MiB): used 8192');
     expect(result.out).toContain('excludes in-flight capture reservations');
@@ -810,6 +829,7 @@ function accountReport() {
       running_or_reserved_vcpu: 6,
       running_or_reserved_ram_mb: 8192,
       snapshot_storage_bytes: 1073741825,
+      kept_build_gb: 40,
     },
     remaining: {
       kept_computers: 2,
