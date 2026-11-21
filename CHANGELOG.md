@@ -9,6 +9,44 @@ This is the summary you read to decide whether to upgrade.
 
 ## [Unreleased]
 
+### Added
+
+- `AccountUsage.keptBuildGb`: the nominal GB of the template builds the account
+  keeps, which share the disk pool with `configuredDiskGb`. A create or disk
+  resize is checked against configured disk plus kept builds, so the room
+  either has is `remaining.configuredDiskGb - usage.keptBuildGb`. `null` while
+  the account's build history could not be read (a create or disk growth can
+  then be refused with a 503) and against a platform that does not send it;
+  it does not follow `complete`. `mandala account` prints the kept builds and
+  that disk room.
+
+### Changed
+
+- `uploadFile()` waits out a chunk refused with a 429 because another chunk
+  for the same computer, or this account's share of the host's upload buffers,
+  is still in flight. Nothing was staged, so it sleeps for the `Retry-After`
+  (at most 30 seconds a time), reads the upload's status and goes on from the
+  offset it reports. Twelve refusals in a row with no chunk accepted end the
+  upload with the `RateLimitError`, carrying the `uploadId`; `signal` cancels a
+  wait. Concurrent uploads used to fail on the first such refusal.
+  `writeFileChunk()` still does not wait, and now documents the limit.
+
+### Fixed
+
+- The clipboard docs no longer say Windows guests are refused. `clipboard()`,
+  `setClipboard()` and `paste()` work on Windows guests with a signed-in
+  desktop session, and need no clipboard tool there; the docs and README now
+  describe the Windows-only `ConflictError` with no `reason` ("the desktop
+  session did not answer in time").
+- `Webhook.disabledReason` documents `session_revoked`: the dashboard session
+  the subscription was made, retargeted or turned back on from was signed out
+  as leaked. Like `creator_removed` and `key_revoked`, it does not come back on
+  its own; an owner or member enables it with an update.
+- `WebhookDelivery.state` and `webhooks.test()` document the full-queue drop: a
+  subscription holding 10,000 deliveries not yet finished records new ones,
+  tests included, as `dropped` with `lastError` `queue full`, and never sends
+  them.
+
 ## [0.24.0] - 2026-11-17
 
 ### Added

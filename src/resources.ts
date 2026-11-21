@@ -2437,6 +2437,11 @@ export class Webhooks {
    * The answer is the delivery ACCEPTED, not finished: read what the endpoint
    * said back from {@link deliveries}, by the id returned here. A disabled
    * subscription is a `ConflictError`; enable it first.
+   *
+   * A test sent while the subscription's queue is full (10,000 deliveries not
+   * yet finished) is still answered, but with a delivery already in state
+   * `dropped` and `lastError` `queue full`: it is never sent, so check `state`
+   * before waiting on it.
    */
   async test(webhookId: string, opts: CallOptions = {}): Promise<WebhookDelivery> {
     const path = P.webhookAction(webhookId, 'test');

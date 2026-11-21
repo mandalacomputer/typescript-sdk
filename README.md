@@ -786,15 +786,25 @@ rather than an X window id. Both are `0x` and hex and both are what
 ### Clipboard
 
 The desktop's `CLIPBOARD` selection — what Ctrl-C writes and Ctrl-V pastes — read
-and written from outside the guest. Linux only, and it needs nothing of the
-*hardware*: no cold boot, no permission from a browser. What it does need is
-the desktop's clipboard tool in the guest — `xclip` on an X11 image, or
+and written from outside the guest, on Linux and Windows guests. It needs
+nothing of the *hardware*: no cold boot, no permission from a browser. What a
+Linux guest does need is the desktop's clipboard tool — `xclip` on an X11 image, or
 `wl-clipboard` (`wl-paste`/`wl-copy`) on a Wayland one such as Omarchy, and
 `c.desktop` says which — and every current image carries the tool its desktop
 needs. So in practice this is the road that works on every computer, and where
 it is not, the refusal says so. (The other road is RFB extended cut text over
 the desktop socket, which is live and conditional; see
 [Showing somebody the desktop](#showing-somebody-the-desktop).)
+
+A Windows guest needs no tool: the platform reads and writes the clipboard of
+the signed-in user's desktop session through a short task it runs in that
+session. When the session does not answer in time — too busy, or signed in too
+recently, to start the task — the answer is a `ConflictError` with **no**
+`reason` (*the desktop session did not answer in time*). Nothing in it says
+whether it clears, and `isTransient()` calls it final like any 409 without a
+word; it may clear on a retry, so retry it yourself if you choose, and bound
+the loop. `paste()` goes through
+the same clipboard write, so it works, and fails, the same way.
 
 ```ts
 await c.setClipboard('https://mandala.computer');
@@ -1540,15 +1550,19 @@ A delivery exhausts about fourteen hours after it was queued, so on a busy
 subscription it is far from the newest hundred: ask for `state: 'exhausted'`, or
 page back with `before`, the `id` of the last delivery of the page before.
 `state` is `pending`, `in_flight`, `delivered`, `exhausted` or `dropped`; `limit`
-is 1 to 100.
+is 1 to 100. A delivery is `dropped`, and never sent, when the subscription was
+disabled or deleted first, or when its queue already held 10,000 deliveries not
+yet finished (`lastError` `queue full`). A `test()` sent to a full queue comes
+back already `dropped` that way.
 
 A subscription's own `lastError` is why its newest attempt failed: `at`,
 `status` (`null` for no answer), `error` and the `deliveryId` it was for.
 `createdBy` is who created it or last changed its `url` (an email, or `apikey:`
 and a key id), whose removal from the account, demotion to viewer, or leaked key
-disables it with `disabledReason` `creator_removed` or `key_revoked`. Neither of
-those comes back on its own: an owner or member enables it with
-`update({ enabled: true })`.
+disables it with `disabledReason` `creator_removed` or `key_revoked`. A
+dashboard session signed out as leaked disables the subscriptions it made,
+retargeted or turned back on with `session_revoked`. None of those comes back on
+its own: an owner or member enables it with `update({ enabled: true })`.
 
 `lastError` is one line for a person — `timeout`, `dns`, `refused`, `reset`,
 `unreachable`, `tls`, `redirect`, `address refused`, `status 503` and so on —
@@ -3548,7 +3562,15 @@ fields remain available in `raw`.
 reads `false` against a platform that does not send it.
 
 Configured vCPU and disk GB include all kept computers, including stopped ones;
-disk is provisioned capacity, not filesystem occupancy. Running/reserved RAM MB
+disk is provisioned capacity, not filesystem occupancy. Kept template builds
+share the disk pool and are reported apart, as `usage.keptBuildGb` (nominal GB,
+each build at its template's disk size, running builds included):
+`remaining.configuredDiskGb` leaves them out, and a create or disk resize is
+checked against configured disk **plus** kept builds, so the room either has is
+`remaining.configuredDiskGb - usage.keptBuildGb`, clamped at zero.
+`keptBuildGb` does not follow `complete`: it is `null` while the account's build
+history could not be read (when a create or disk growth can be refused with a
+503 until it is) and against a platform that does not send it. Running/reserved RAM MB
 includes pending reservations and excludes released stopped RAM. The separate
 running/reserved computer and vCPU totals describe that active subset. Snapshot
 storage is **indexed stored bytes**, including pending/deleting rows and stored
