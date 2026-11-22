@@ -23,6 +23,8 @@ export const ALLOWED: ReadonlySet<string> = new Set(
       ['GET', 'computers/:id/credential-gateway'],
       ['POST', 'computers/:id/credential-gateway'],
       ['DELETE', 'computers/:id/credential-gateway/:binding'],
+      ['GET', 'computers/:id/guest-token'],
+      ['PUT', 'computers/:id/guest-token'],
       ['GET', 'templates'],
       // The template document format (platform OPL-3568): the published JSON
       // Schema, and a check of a document against it that stores nothing.
@@ -229,6 +231,12 @@ export const UNIMPLEMENTED: ReadonlySet<string> = new Set([
   // here, and a second, worse OpenAI client inside this SDK would be a
   // maintenance obligation with no user.
   'POST chat/completions',
+  // Guest identity tokens (OPL-6715): whether programs on a computer may fetch
+  // a short-lived token for it, and the owner's switch. Not wrapped yet: a
+  // release that does will name it, alongside a helper that fetches the token
+  // from inside the computer.
+  'GET computers/:id/guest-token',
+  'PUT computers/:id/guest-token',
 ]);
 
 /**
@@ -256,6 +264,8 @@ export const UNIMPLEMENTED: ReadonlySet<string> = new Set([
 export const PARAMETERS: ReadonlyMap<string, readonly string[]> = new Map([
   ['GET computers/:id/credential-gateway', []],
   ['DELETE computers/:id/credential-gateway/:binding', []],
+  ['GET computers/:id/guest-token', []],
+  ['PUT computers/:id/guest-token', ['body:enabled']],
   [
     'POST computers/:id/credential-gateway',
     ['body:auth_header', 'body:methods', 'body:origin', 'body:path_prefix', 'body:secret_id'],
