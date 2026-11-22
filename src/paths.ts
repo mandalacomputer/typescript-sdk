@@ -121,6 +121,12 @@ export const AGENT_THREADS = 'agent/threads';
  * a computer, at `computers/:id/agent/runs`.
  */
 export const AGENT_RUNS = 'agent/runs';
+/**
+ * Agent schedules: a cron expression that starts a background run on one
+ * computer at each time it names. Made on a computer, at
+ * `computers/:id/agent/schedules`; read, changed and deleted by id here.
+ */
+export const AGENT_SCHEDULES = 'agent/schedules';
 
 /**
  * One id, in a path, refused when it is empty.
@@ -254,7 +260,8 @@ type ComputerAction =
   | 'activities'
   | 'signals'
   | 'agent'
-  | 'agent/runs';
+  | 'agent/runs'
+  | 'agent/schedules';
 
 export const computerAction = (id: string, action: ComputerAction): string =>
   `${computer(id)}/${action}`;
@@ -572,6 +579,9 @@ export const agentThread = (id: string): string => `${AGENT_THREADS}/${pathId(id
 /** One background agent run, by its id (`run_` and twenty-four hex characters). */
 export const agentRun = (id: string): string => `${AGENT_RUNS}/${pathId(id, 'run id')}`;
 export const agentRunCancel = (id: string): string => `${agentRun(id)}/cancel`;
+/** One agent schedule, by its id (`sch_` and twenty-four hex characters). */
+export const agentSchedule = (id: string): string =>
+  `${AGENT_SCHEDULES}/${pathId(id, 'schedule id')}`;
 export const workspace = (id: string): string => `${WORKSPACES}/${pathId(id, 'workspace id')}`;
 export const workspaceMembers = (id: string): string => `${workspace(id)}/members`;
 export const webhookAction = (id: string, action: 'rotate' | 'test' | 'deliveries'): string =>
@@ -4388,6 +4398,14 @@ function agentPageQuery(args: AgentThreadListArgs): Query {
     q.before = b;
   }
   return q;
+}
+
+/** What one page of `GET agent/schedules` asks for. */
+export type AgentScheduleListArgs = AgentThreadListArgs;
+
+/** The query for `GET agent/schedules`. */
+export function agentSchedulesQuery(args: AgentScheduleListArgs = {}): Query {
+  return agentPageQuery(args);
 }
 
 /** The query for `GET agent/threads`. */

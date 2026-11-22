@@ -40,6 +40,7 @@ import {
   Webhooks,
   Workspaces,
 } from './resources.js';
+import { AgentSchedules } from './schedules.js';
 import { DEFAULT_BASE_URL, Transport, type TransportOptions } from './transport.js';
 
 export type ClientOptions = TransportOptions;
@@ -56,6 +57,8 @@ export class Client {
   readonly account: Account;
   /** Background agent runs: start one, read it back, cancel it, wait for its end. */
   readonly agentRuns: AgentRuns;
+  /** Agent schedules: background runs started on a timetable. */
+  readonly agentSchedules: AgentSchedules;
   /** The conversations agent runs keep, continued by passing `threadId`. */
   readonly agentThreads: AgentThreads;
   readonly apiKeys: ApiKeys;
@@ -85,6 +88,7 @@ export class Client {
     this.#t = new Transport(opts, `mandala-computer-ts/${VERSION}`);
     this.account = new Account(this.#t);
     this.agentRuns = new AgentRuns(this.#t);
+    this.agentSchedules = new AgentSchedules(this.#t);
     this.agentThreads = new AgentThreads(this.#t);
     this.apiKeys = new ApiKeys(this.#t);
     this.builds = new Builds(this.#t);
@@ -304,6 +308,7 @@ export type {
 export type {
   ActivitiesArgs,
   AgentRunListArgs,
+  AgentScheduleListArgs,
   AgentThreadListArgs,
   ApiKeyCreateArgs,
   BrowserProxyArgs,
@@ -396,6 +401,16 @@ export {
   Webhooks,
   Workspaces,
 } from './resources.js';
+export type {
+  AgentSchedule,
+  AgentScheduleArgs,
+  AgentScheduleFire,
+  AgentScheduleFireOutcome,
+  AgentSchedulePage,
+  AgentSchedulePausedReason,
+  AgentScheduleUpdate,
+} from './schedules.js';
+export { AgentSchedules } from './schedules.js';
 export type { Bytes, ContentRange, Listing, SSEEvent, TransportOptions } from './transport.js';
 export { DEFAULT_BASE_URL, IDEMPOTENCY_KEY_HEADER, MODEL_KEY_HEADER } from './transport.js';
 export type { VerifyOptions, WebhookBody, WebhookHeaders } from './webhooks.js';

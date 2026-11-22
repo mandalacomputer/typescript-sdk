@@ -587,6 +587,39 @@ async function exerciseEverything(client: Client): Promise<void> {
   await client.agentRuns.cancel(bg.id);
   await client.agentRuns.wait(bg.id);
 
+  // Agent schedules: every field on the create and on a change, then the
+  // listing with each parameter, a read, a pause, a resume and the delete.
+  const sch = await client.agentSchedules.create('vm-1', {
+    cron: '0 9 * * *',
+    timezone: 'UTC',
+    prompt: 'do a thing',
+    model: 'claude-sonnet-5-5',
+    provider: 'anthropic',
+    maxSteps: 5,
+    maxCostUsd: 1,
+    threadId: 'thr_0123456789abcdef01234567',
+    name: 'nightly',
+    paused: false,
+  });
+  await client.agentSchedules.update(sch.id, {
+    cron: '0 10 * * *',
+    timezone: 'Europe/London',
+    prompt: 'do another thing',
+    model: 'claude-opus-5-5',
+    provider: 'anthropic',
+    maxSteps: 6,
+    maxCostUsd: 2,
+    threadId: null,
+    name: null,
+    paused: true,
+  });
+  await client.agentSchedules.list();
+  await client.agentSchedules.list({ computerId: 'vm-1', limit: 5, before: sch.id });
+  await client.agentSchedules.get(sch.id);
+  await client.agentSchedules.pause(sch.id);
+  await client.agentSchedules.resume(sch.id);
+  await client.agentSchedules.delete(sch.id);
+
   await client.account.read();
   // The newest page, and an older one of a chosen size.
   await client.credits.read();
