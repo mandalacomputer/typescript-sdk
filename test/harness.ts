@@ -852,6 +852,28 @@ export const AGENT_THREAD = {
   ],
 };
 
+/** An agent schedule, as `GET agent/schedules/:schedule` answers it. */
+export const AGENT_SCHEDULE = {
+  id: 'sch_fedcba9876543210fedcba98',
+  computer_id: 'vm-1',
+  thread_id: null,
+  name: null,
+  cron: '0 9 * * *',
+  timezone: 'UTC',
+  prompt: 'do a thing',
+  model: 'claude-sonnet-5-5',
+  max_steps: 20,
+  max_cost_usd: 2,
+  paused: false,
+  paused_reason: null,
+  next_fire_at: '2026-11-24T09:00:00.000Z',
+  last_fire_at: null,
+  last_run_id: null,
+  created_at: '2026-11-22T09:00:00.000Z',
+  updated_at: '2026-11-22T09:00:00.000Z',
+  recent_fires: [],
+};
+
 /** A background run that has ended, as `GET agent/runs/:run` answers it (OPL-6083). */
 export const AGENT_RUN = {
   id: 'run_0123456789abcdef01234567',
@@ -1347,6 +1369,12 @@ export const anyRoute: Responder = (call) => {
     return json({ ...AGENT_RUN, status: 'cancelled', result: undefined });
   if (/^\/agent\/runs\/[^/]+$/.test(path)) return json(AGENT_RUN);
   if (path.endsWith('/agent/runs')) return json(AGENT_RUN_STARTED, { status: 202 });
+  // Agent schedules: a listing is a page, a delete an ack, anything else the schedule.
+  if (path === '/agent/schedules')
+    return json({ schedules: [{ ...AGENT_SCHEDULE, recent_fires: [] }], has_more: false });
+  if (/^\/agent\/schedules\/[^/]+$/.test(path))
+    return json(method === 'DELETE' ? { ok: true } : AGENT_SCHEDULE);
+  if (path.endsWith('/agent/schedules')) return json(AGENT_SCHEDULE, { status: 201 });
   if (path === '/operations') return json({ operations: [OPERATION], next_cursor: null });
   if (/^\/operations\/[^/]+$/.test(path)) return json(OPERATION);
   if (path === '/moves') return json({ moves: [MOVE_DONE] });

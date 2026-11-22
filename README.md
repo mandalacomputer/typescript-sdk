@@ -2086,6 +2086,38 @@ restarted (`error.status` 503), or one that stopped without its ending being
 recorded (500); it is not resumed, so look at the desktop before starting
 another.
 
+#### Runs on a schedule
+
+`client.agentSchedules` starts a background run on a timetable: at each time a
+five-field `cron` expression names, in its `timezone`, a run starts on the
+computer with the schedule's `prompt`.
+
+```ts
+const schedule = await client.agentSchedules.create('vm-1', {
+  cron: '0 9 * * MON-FRI',
+  timezone: 'America/New_York',
+  prompt: 'Check the overnight build and file a summary in ~/reports',
+  maxSteps: 60,
+});
+const read = await client.agentSchedules.get(schedule.id);
+console.log(read.nextFireAt, read.recentFires.map((f) => [f.outcome, f.runId]));
+```
+
+- Scheduled runs spend the account's Mandala AI credits: nothing is there to
+  send a model key when one fires, so `modelKey` and `system` are refused.
+- A schedule acts as the API key that created it, or last changed it. A key
+  that expires, or is limited to specific computers, cannot make one. If the
+  key is deleted, or its holder can no longer start runs on the computer, the
+  schedule pauses and `pausedReason` says why.
+- A fire is skipped while the schedule's previous run is still going or the
+  computer is not running. One the platform could not send within five
+  minutes of its time is `missed`, never sent late. Each fire is in
+  `recentFires`, with the `runId` it started: read it with
+  `client.agentRuns.get(runId)`.
+- `update(id, changes)` changes any field; `pause(id)` and `resume(id)` are
+  that with `paused`; `list({ computerId, limit, before })` pages like the
+  runs; `delete(id)` stops it for good.
+
 #### Using an OpenAI client with your own model key
 
 The same computer agent is available at
