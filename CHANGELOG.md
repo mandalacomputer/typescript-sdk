@@ -9,6 +9,8 @@ This is the summary you read to decide whether to upgrade.
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-11-22
+
 ### Added
 
 - `client.agentSchedules`: background agent runs started on a timetable.
@@ -2041,7 +2043,8 @@ No effect on the published surface, listed because it is most of the window.
 - Several parser fixes landed before that scanner was retired, each ported
   to and from the MCP server's byte-identical copy.
 
-[Unreleased]: https://github.com/mandalacomputer/typescript-sdk/compare/v0.25.0...HEAD
+[Unreleased]: https://github.com/mandalacomputer/typescript-sdk/compare/v0.26.0...HEAD
+[0.26.0]: https://github.com/mandalacomputer/typescript-sdk/compare/v0.25.0...v0.26.0
 [0.25.0]: https://github.com/mandalacomputer/typescript-sdk/compare/v0.24.0...v0.25.0
 [0.24.0]: https://github.com/mandalacomputer/typescript-sdk/compare/v0.23.0...v0.24.0
 [0.23.0]: https://github.com/mandalacomputer/typescript-sdk/compare/v0.22.0...v0.23.0
